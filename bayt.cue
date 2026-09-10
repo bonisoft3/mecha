@@ -13,9 +13,9 @@
 package mecha
 
 import (
-	bayt "bonisoft.org/plugins/bayt/core:bayt"
-	mise "bonisoft.org/plugins/bayt/stacks/mise"
-	sayt "bonisoft.org/plugins/bayt/stacks/sayt"
+	bayt "github.com/bonisoft3/bayt/core:bayt"
+	mise "github.com/bonisoft3/bayt/stacks/mise"
+	sayt "github.com/bonisoft3/bayt/stacks/sayt"
 )
 
 _mecha: bayt.#project & {

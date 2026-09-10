@@ -1,4 +1,4 @@
-# Mecha: the architectures behind the invariants
+# Mecha: the architecture behind the invariants
 
 `README.md` states what makes a system a mecha — nine invariants a candidate
 either satisfies or does not. This is how three generations satisfied them,

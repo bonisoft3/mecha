@@ -1,7 +1,7 @@
 # Contributing to mecha
 
 For running the stack and changing what it generates. `README.md` states the
-invariants a mecha satisfies, `DESIGN.md` is how each generation satisfies
+invariants a mecha satisfies, `ARCHITECTURE.md` is how each generation satisfies
 them, and `docs/` holds the arguments behind individual decisions.
 
 Two things are worth knowing before the commands make sense. **Everything is

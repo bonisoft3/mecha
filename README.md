@@ -84,12 +84,12 @@ Event sourcing requires custom projection logic and breaks the "schema generates
 The invariants admit a range of stacks rather than one. Three generations have
 satisfied them — a Kotlin/Micronaut service, a Docker-Compose-and-Cloud-Run
 pipeline, and a set of proposed edge and browser targets — and what each one
-costs is `DESIGN.md`.
+costs is `ARCHITECTURE.md`.
 
 | You want | Read |
 |---|---|
 | Why a system is or is not a mecha | the invariants above |
-| How v1, v2 and v3 satisfy them, and the cloud mappings | [DESIGN.md](DESIGN.md) |
+| How v1, v2 and v3 satisfy them, and the cloud mappings | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Running the stack, generating from schema, fixing a broken pipeline | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Schema evolution, the access layer, the connection ceiling | [`docs/`](docs/) |
 

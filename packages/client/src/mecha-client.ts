@@ -2,6 +2,7 @@ import { createCollection } from "@tanstack/db"
 import type { Collection } from "@tanstack/db"
 import { electricCollectionOptions } from "@tanstack/electric-db-collection"
 import { NonRetriableError, startOfflineExecutor } from "@tanstack/offline-transactions"
+import type { LeaderElection } from "@tanstack/offline-transactions"
 import { localOnlyCollectionOptions, localStorageCollectionOptions } from "@tanstack/db"
 import { unionCollectionOptions } from "./union.js"
 
@@ -195,6 +196,34 @@ function resolveUrl(raw: string): string {
     return window.location.origin + raw
   }
   return raw
+}
+
+/**
+ * Whether this runtime holds the outbox by itself.
+ *
+ * Web Locks is secure-context-only, so its absence alone says nothing: a
+ * browser on plain http has tabs, has no `navigator.locks`, and arbitrates
+ * them over BroadcastChannel perfectly well. It takes the absence of `window`
+ * too before a runtime is one the outbox belongs to alone.
+ */
+export function runsAlone(): boolean {
+  const hasWebLocks = typeof navigator !== "undefined" && "locks" in navigator
+  return typeof window === "undefined" && !hasWebLocks
+}
+
+/**
+ * The election a lone process wins by being the only candidate.
+ *
+ * Leadership is answered once, by `requestLeadership`, and never changes
+ * hands.
+ */
+export function soleLeader(): LeaderElection {
+  return {
+    requestLeadership: () => Promise.resolve(true),
+    releaseLeadership: () => {},
+    isLeader: () => true,
+    onLeadershipChange: () => () => {},
+  }
 }
 
 export function createMechaClient(config: MechaClientConfig): MechaClient {
@@ -493,6 +522,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     collections,
     mutationFns,
     jitter: true,
+    ...(runsAlone() ? { leaderElection: soleLeader() } : {}),
     beforeRetry: (txs: any[]) => {
       const cutoff = Date.now() - maxAge
       return txs.filter((tx) => tx.createdAt.getTime() > cutoff)
@@ -504,20 +534,24 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   // that states ten thousand rows against a synced table sends them as one
   // commit and hopes.
   //
-  // UPGRADE (@tanstack/db 0.6.17 → 0.8.7): `paced-mutations` is where this
-  // belongs. It takes an `onMutate` for the optimistic half, a `mutationFn` for
-  // the durable half, and a pluggable `Strategy` (debounce / queue / throttle),
-  // which is this function's job done properly and by the library. Moving
-  // `run` onto it would also retire the hand-rolled phase bookkeeping below.
+  // Pacing it here is easy and wrong: splitting the set buys a bounded commit
+  // by giving up the all-or-nothing that is the reason to have one. Both at
+  // once takes a single request the server applies in a single transaction, so
+  // what reopens this is a bulk endpoint on the proxy, not a library.
   //
-  // Two more things the upgrade has to answer for, measured on 0.6.17 with
-  // ten thousand rows in a tab collection. A collection keeps its keys in a
-  // sorted array and splices per row, so a batch deleting in key order moves
-  // half the array per row: 40 ms of a clear, and quadratic in the table. And
-  // a local tier's write still builds a transaction, a mutation object and a
-  // UUID per row for a collection with nothing to be optimistic against:
-  // 33 ms of the same clear. `writeBatch` on the sync side is the door out
-  // of the second; the first is the collection's own state.
+  // Two costs measured at ten thousand rows in a tab collection, both live on
+  // @tanstack/db 0.8.7. A batch deleting in key order splices a shared sorted
+  // key array once per row — half the array each time, quadratic in the table,
+  // 40 ms of a clear. And a local tier's write mints a UUID and builds a
+  // transaction per row for a collection with nothing to be optimistic
+  // against: 33 ms of the same clear. The library has the fast path for each —
+  // truncate() drops the sorted keys in one assignment, and the sync writer's
+  // begin/write/commit skips the optimistic machinery entirely — but both sit
+  // inside a SyncConfig.sync belonging to whoever wrote the collection
+  // options, and for these rows that is the library: electric's exposes
+  // awaitTxId and awaitMatch, local-only's exposes acceptMutations. Either one
+  // publishing a truncate or a bulk write reopens this; so would taking over
+  // their sync the way union.ts takes over its own.
   function run(mutationFnName: string, phaseKeys: string[], mutate: () => void): Promise<void> {
     for (const phaseKey of phaseKeys) setPhase(phaseKey, "queued")
     // autoCommit off: mutate() would otherwise self-commit and race the

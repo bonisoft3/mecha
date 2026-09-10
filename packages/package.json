@@ -19,5 +19,8 @@
     "build": "bun run --filter '*' build",
     "test": "bun run --filter '*' test",
     "test:watch": "bun run --filter '*' test:watch"
+  },
+  "overrides": {
+    "@tanstack/db": "0.8.0"
   }
 }

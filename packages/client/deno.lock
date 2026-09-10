@@ -1,7 +1,7 @@
 {
   "version": "5",
   "specifiers": {
-    "npm:@tanstack/db@0.6.17": "0.6.17_typescript@7.0.2"
+    "npm:@tanstack/db@0.8.0": "0.8.0_typescript@7.0.2"
   },
   "npm": {
     "@standard-schema/spec@1.1.0": {
@@ -15,8 +15,8 @@
         "typescript"
       ]
     },
-    "@tanstack/db@0.6.17_typescript@7.0.2": {
-      "integrity": "sha512-/i6+dedEkOCVQbTQtCjQHx3Nqlkqe6zvi+9/JPnSgm47o+akoaPqcSwxTmesDZxc/efHokUtzeD2ocow257RdQ==",
+    "@tanstack/db@0.8.0_typescript@7.0.2": {
+      "integrity": "sha512-8Hsfgp7+LSdHqLrwWWhZZ2Ij+O8XWVx8qDE4a8NDQYaFnpieb5hfNaZN9H1WLZ0RLIs3S1+UQfvSVy5+7Pgkvw==",
       "dependencies": [
         "@standard-schema/spec",
         "@tanstack/db-ivm",
@@ -181,17 +181,17 @@
       },
       "client": {
         "dependencies": [
-          "npm:@electric-sql/client@1.5.24",
-          "npm:@tanstack/db@0.6.17",
-          "npm:@tanstack/electric-db-collection@0.3.15",
-          "npm:@tanstack/offline-transactions@1.0.42"
+          "npm:@electric-sql/client@1.5.27",
+          "npm:@tanstack/db@0.8.0",
+          "npm:@tanstack/electric-db-collection@0.4.0",
+          "npm:@tanstack/offline-transactions@1.0.46"
         ],
         "packageJson": {
           "dependencies": [
-            "npm:@electric-sql/client@^1.5.24",
-            "npm:@tanstack/db@~0.6.17",
-            "npm:@tanstack/electric-db-collection@~0.3.15",
-            "npm:@tanstack/offline-transactions@^1.0.42",
+            "npm:@electric-sql/client@^1.5.27",
+            "npm:@tanstack/db@0.8.0",
+            "npm:@tanstack/electric-db-collection@0.4.0",
+            "npm:@tanstack/offline-transactions@1.0.46",
             "npm:typescript@^5.8.0",
             "npm:vitest@^4.1.4"
           ]
@@ -200,7 +200,7 @@
       "collections": {
         "packageJson": {
           "dependencies": [
-            "npm:@tanstack/db@0.6",
+            "npm:@tanstack/db@0.8.0",
             "npm:typescript@^5.8.0",
             "npm:vitest@^4.1.4"
           ]
@@ -209,7 +209,7 @@
       "conduit-js": {
         "packageJson": {
           "dependencies": [
-            "npm:@electric-sql/pglite@0.4",
+            "npm:@electric-sql/pglite@~0.5.8",
             "npm:typescript@^5.7.0",
             "npm:vitest@3"
           ]
@@ -218,8 +218,8 @@
       "mecha-browser": {
         "packageJson": {
           "dependencies": [
-            "npm:@electric-sql/pglite@0.4",
-            "npm:@tanstack/db@0.6",
+            "npm:@electric-sql/pglite@~0.5.8",
+            "npm:@tanstack/db@0.8.0",
             "npm:@types/bun@^1.2.0",
             "npm:msw@^2.7.0",
             "npm:typescript@^5.7.0",
@@ -230,7 +230,7 @@
       "pipeline": {
         "packageJson": {
           "dependencies": [
-            "npm:@electric-sql/pglite@0.4",
+            "npm:@electric-sql/pglite@~0.5.8",
             "npm:@types/js-yaml@^4.0.9",
             "npm:jq-wasm@1.1.0-jq-1.8.1",
             "npm:js-yaml@^4.1.0",
@@ -242,7 +242,7 @@
       "postgrest-js": {
         "packageJson": {
           "dependencies": [
-            "npm:@electric-sql/pglite@0.4",
+            "npm:@electric-sql/pglite@~0.5.8",
             "npm:typescript@^5.7.0",
             "npm:vitest@3"
           ]
@@ -259,8 +259,8 @@
       "tanstackdb-pglite": {
         "packageJson": {
           "dependencies": [
-            "npm:@electric-sql/pglite@0.4",
-            "npm:@tanstack/db@0.6",
+            "npm:@electric-sql/pglite@~0.5.8",
+            "npm:@tanstack/db@0.8.0",
             "npm:typescript@^5.7.0",
             "npm:vitest@3"
           ]

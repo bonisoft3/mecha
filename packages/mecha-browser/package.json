@@ -17,16 +17,16 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@mecha/collections": "workspace:*",
-    "@mecha/postgrest-js": "workspace:*",
-    "@mecha/tanstackdb-pglite": "workspace:*",
-    "@mecha/pipeline": "workspace:*",
+    "@electric-sql/pglite": "^0.5.8",
     "@mecha/bloblang-js": "workspace:*",
-    "@mecha/conduit-js": "workspace:*",
     "@mecha/caddy-js": "workspace:*",
+    "@mecha/collections": "workspace:*",
+    "@mecha/conduit-js": "workspace:*",
+    "@mecha/pipeline": "workspace:*",
+    "@mecha/postgrest-js": "workspace:*",
     "@mecha/rclone-js": "workspace:*",
-    "@electric-sql/pglite": "^0.4.0",
-    "@tanstack/db": "^0.6.0",
+    "@mecha/tanstackdb-pglite": "workspace:*",
+    "@tanstack/db": "0.8.0",
     "msw": "^2.7.0"
   },
   "devDependencies": {

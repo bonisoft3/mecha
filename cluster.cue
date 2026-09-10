@@ -389,10 +389,14 @@ _devElectricSecret: "dev-electric-secret"
 				command: ["tail", "-f", "/dev/null"]
 			}
 		}
-		// Checks the cluster asserts about its own surface. `verb` is the layer
-		// the check needs, not a label: caddy validate reads a file and so
-		// belongs at lint. The loop routes each into the matching rulemap.
-		checks: [Name=string]: {verb: "setup" | "lint" | "test" | "integrate", cmds: [...string], note: string}
+		// What the cluster declares about its own surface: work under `verbs`,
+		// assertions under `checks`. `verb` is the layer each needs, not a
+		// label — caddy validate reads a file and so belongs at lint. The loop
+		// routes each into the matching rulemap and owns this vocabulary; it is
+		// restated here because mecha is consumed on its own and cannot import
+		// a sibling plugin.
+		verbs: [Name=string]: {verb: "setup" | "generate" | "build" | "launch" | "release", cmds: [...string], note: string}
+		checks: [Name=string]: {verb: "lint" | "test" | "integrate", cmds: [...string], note: string}
 		checks: caddy: {
 			verb: "lint"
 			// `adapt`, not `validate`: validate also PROVISIONS, which loads the
@@ -416,7 +420,7 @@ _devElectricSecret: "dev-electric-secret"
 		// Untrusted, the cert is still served and the battery still drives it
 		// (it ignores certificate errors); only a human browser complains, and
 		// its interstitial blocks WebAuthn outright.
-		checks: certs: {
+		verbs: certs: {
 			verb: "setup"
 			// Two cmds, not one joined with `&&`: sayt runs these through
 			// nushell, which rejects the shell operator outright. nu's mkdir
@@ -427,6 +431,16 @@ _devElectricSecret: "dev-electric-secret"
 				"print 'the browser trusts this certificate only once you run: mise exec -- mkcert -install'",
 			]
 			note: "issues the locally-trusted certificate the https door serves"
+		}
+		// The same issuance, so the stack comes up for someone who has not run
+		// setup. Guarded because mkcert would otherwise mint a fresh pair every
+		// launch, and the browser would meet a new certificate each time.
+		verbs: certsLaunch: {
+			verb: "launch"
+			cmds: [
+				"if not ('.certs/localhost.pem' | path exists) { mkdir .certs; mise exec -- mkcert -cert-file .certs/localhost.pem -key-file .certs/localhost-key.pem localhost 127.0.0.1 ::1 }",
+			]
+			note: "issues the certificate the https door serves, if setup has not"
 		}
 	}
 

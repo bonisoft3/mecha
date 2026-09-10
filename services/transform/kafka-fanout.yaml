@@ -1,0 +1,53 @@
+# Kafka fan-out pipeline: tee CDC events + heartbeats to Redpanda for Arroyo.
+# Only used when ai profile is active (Redpanda available).
+# Reads from the same Redis stream with a separate consumer group.
+
+input:
+  broker:
+    inputs:
+      - redis_streams:
+          url: "redis://redis:6379"
+          body_key: "data"
+          streams:
+            - "cdc-events"
+          consumer_group: "rpk-kafka-fanout"
+          create_streams: true
+          commit_period: "1s"
+          limit: 10
+      - generate:
+          interval: "5s"
+          mapping: |
+            meta is_heartbeat = "true"
+            root = {"message":"","operation":"heartbeat","collection":""}
+
+pipeline:
+  processors:
+    - bloblang: |
+        let hb = meta("is_heartbeat") | ""
+        let entity = if $hb == "true" { {} } else { this.data.parse_json().catch({}) }
+        let traceparent = if $hb == "true" { "" } else { this.traceparent | "" }
+
+        meta is_heartbeat = $hb
+        meta collection = "Hello"
+        meta operation = if $hb == "true" { "heartbeat" } else { "create" }
+        meta traceparent = $traceparent
+
+        root = if $hb == "true" {
+          this
+        } else if $entity.id != null {
+          $entity
+        } else {
+          deleted()
+        }
+
+    - bloblang: |
+        root.operation = meta("operation")
+        root.collection = meta("collection")
+        root.traceparent = meta("traceparent")
+
+output:
+  kafka_franz:
+    seed_brokers:
+      - "redpanda:9092"
+    topic: "flat-${! meta(\"collection\") }"
+    compression: none

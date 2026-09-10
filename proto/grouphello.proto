@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package mecha.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+// GroupHello entity — aggregated hello messages emitted by Arroyo stream
+// analytics. Written by Arroyo's webhook sink to PostgREST.
+message GroupHello {
+  string id = 1 [
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // Concatenated message values from multiple hello messages
+  string messages = 2 [
+    (buf.validate.field).string = {
+      min_len: 1,
+      max_len: 2000
+    }
+  ];
+
+  google.protobuf.Timestamp created_at = 3;
+
+  google.protobuf.Timestamp updated_at = 4;
+}

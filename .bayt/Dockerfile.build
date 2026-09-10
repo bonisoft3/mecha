@@ -1,0 +1,26 @@
+# generated from bayt.cue — do not edit
+FROM libraries_mecha-setup AS build
+WORKDIR /monorepo/libraries/mecha
+COPY --parents proto/** ./
+RUN ["mise", "x", "--", "buf", "lint", "proto"]
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/Taskfile.build.yaml .bayt/bayt.build.json ./.bayt/
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS build_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents proto/** ./
+COPY --from=libraries_mecha-setup_srcs /monorepo /monorepo
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS build_srcs
+COPY --from=build_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS build_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.build.yaml .bayt/Dockerfile.build .bayt/bayt.build.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/Taskfile.build.yaml ./
+COPY --from=libraries_mecha-setup_bayt /monorepo /monorepo
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS build_bayt
+COPY --from=build_bayt_ctxs /monorepo /monorepo

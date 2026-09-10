@@ -1,0 +1,38 @@
+apiVersion: dapr.io/v1alpha1
+kind: Resiliency
+metadata:
+  name: mecha-resiliency
+spec:
+  policies:
+    retries:
+      default:
+        policy: constant
+        duration: 1s
+        maxRetries: 3
+      publish:
+        policy: exponential
+        maxInterval: 15s
+        maxRetries: -1
+    circuitBreakers:
+      crud-breaker:
+        maxRequests: 10
+        trip: consecutiveFailures > 3
+        timeout: 10s
+      default-breaker:
+        maxRequests: 20
+        trip: consecutiveFailures > 5
+        timeout: 30s
+    timeouts:
+      default: 30s
+      crud: 10s
+  targets:
+    components:
+      redis-streams:
+        outbound:
+          retry: publish
+          circuitBreaker: default-breaker
+    apps:
+      crud:
+        retry: default
+        circuitBreaker: crud-breaker
+        timeout: crud

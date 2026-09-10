@@ -1,0 +1,32 @@
+# The clock: a contentless POST on a cadence, and nothing else. Every tier has
+# one and they differ only in who sends it — a CronJob at k8s, Cloud Scheduler
+# at cloud, this container at compose and host.
+#
+# A generate input is a clock, and it belongs in a container of its own: inside
+# transform it would sit in the unit it wakes, which is the failure the ticker
+# exists to answer. Declarative so `redpanda-connect lint` can read it, where a
+# shell loop is a string nothing checks.
+#
+# 60s is the binding floor, set by Cloud Scheduler and CronJob. POKE_INTERVAL
+# can go finer where a tier allows it; production cannot, so the default does
+# not.
+
+input:
+  generate:
+    interval: "${POKE_INTERVAL:60s}"
+    mapping: "root = {}"
+
+output:
+  # A poke that fails is not retried. The next one is a cadence away and
+  # recomputes the same answer, so a lost one costs only resolution — and a
+  # retry here would queue pokes behind an unreachable ticker for no gain.
+  # The error is logged by the output before the fallback takes it.
+  fallback:
+    - http_client:
+        url: "${TICKER_URL:http://ticker:9998}/poke?caller=${POKE_CALLER:compose}"
+        verb: POST
+        headers:
+          Authorization: "Bearer ${SERVICE_JWT}"
+        timeout: 30s
+        successful_on: [200]
+    - drop: {}

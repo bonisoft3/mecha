@@ -1,0 +1,6 @@
+h1:nDbtmaWY5b/bVjRyl+XbdHdDfDxg8edEbf5sId7WfR4=
+000_extensions.sql h1:+5uB0qHWagm5pNOWh7dgeZXBRi1i0H8B12i0WLnbtfE=
+001_roles.sql h1:dYKdqFD/OP2sERUM+KYj9zyNovLj++aEP8Q+89x1nPE=
+002_grants.sql h1:rJBDuIEpX5JMxO3wykeXxJ8hk/Sv2GPME1//y7j+cN0=
+003_publication.sql h1:/URYjaassDh9fFWW4nHiqLOx3x9WO2r9z43zJ0xLrrE=
+004_create_tables.sql h1:uAoK/+37FUfZ+kvR5WE3fM1ZtgMukXr3uFRvD1P8lMc=

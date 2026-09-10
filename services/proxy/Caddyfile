@@ -1,0 +1,47 @@
+{
+	admin off
+}
+
+:8080 {
+	handle /crud/* {
+		uri strip_prefix /crud
+		# Idempotent inserts by default — duplicate POSTs with the same
+		# primary key are silently absorbed by PostgREST instead of returning
+		# 409 Conflict. This makes at-least-once delivery safe at the CRUD
+		# boundary.
+		@post method POST
+		request_header @post Prefer "return=representation,resolution=ignore-duplicates"
+		reverse_proxy crud:3000
+	}
+
+	handle /electric/* {
+		uri strip_prefix /electric
+		reverse_proxy electric:3000 {
+			flush_interval -1
+			transport http {
+				read_timeout 300s
+			}
+		}
+	}
+
+	handle /img/* {
+		uri strip_prefix /img
+		reverse_proxy imgproxy:8081 {
+			flush_interval -1
+		}
+	}
+
+	# Mounted WITH the prefix: the ticker answers POST /poke and 404s
+	# everything else, so stripping would 404 every poke.
+	handle /poke {
+		reverse_proxy ticker:9998
+	}
+
+	handle /health {
+		respond "OK" 200
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

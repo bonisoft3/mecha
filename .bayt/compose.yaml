@@ -1,0 +1,17 @@
+# generated from bayt.cue — do not edit
+include:
+- path: ./compose.bayt.yaml
+  required: false
+services:
+  setup:
+    extends:
+      file: ./compose.setup.yaml
+      service: libraries_mecha-setup
+    profiles:
+    - setup
+  build:
+    extends:
+      file: ./compose.build.yaml
+      service: libraries_mecha-build
+    profiles:
+    - build

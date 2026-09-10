@@ -1,0 +1,178 @@
+version: '3'
+
+vars:
+  PROTO_DIR: proto
+  GEN_DIR: gen
+
+tasks:
+  # ================================================================
+  # Code generation pipeline
+  # ================================================================
+
+  buf:generate:
+    desc: "Generate JSON Schema from protobuf"
+    dir: "{{.PROTO_DIR}}"
+    cmds:
+      - mkdir -p ../{{.GEN_DIR}}/jsonschema
+      - buf generate
+    sources:
+      - "*.proto"
+      - "buf.gen.yaml"
+    generates:
+      - "../{{.GEN_DIR}}/jsonschema/**/*.json"
+
+  cue:generate:
+    desc: "Generate convention-based templates via CUE+gomplate"
+    deps: [buf:generate]
+    cmds:
+      # mise x puts real tool bin dirs on PATH — the .cmd file shims
+      # Windows CI uses are invisible to the bash this tool spawns.
+      - mise x -- cue cmd generate tmpl_tool.cue
+    sources:
+      - "**/*.tmpl"
+      - "**/*.cue"
+    generates:
+      - "**/*.hcl"
+      - "**/*.yaml"
+      - "**/*.conf"
+      - "**/*.sql"
+
+  generate:
+    desc: "Generate all artifacts from protobuf schemas and atlas"
+    deps: [buf:generate, cue:generate, atlas:hash]
+    cmds:
+      - echo "Generated all artifacts"
+
+  # ================================================================
+  # Launch — start the stack with hot reload (--watch)
+  # ================================================================
+  # `task launch` brings up ALL profiles (crud + sync + cdc + stream
+  # + blobs). Use launch:crud/sync/cdc/stream for narrower slices.
+
+  launch:
+    desc: "Start the full stack (all profiles) with hot reload"
+    deps: [generate]
+    cmds:
+      - docker compose --profile sync --profile cdc --profile stream --profile blobs up --build --watch
+
+  launch:crud:
+    desc: "crud profile only (PostgreSQL + PostgREST + Caddy + Dapr)"
+    deps: [generate]
+    cmds:
+      - docker compose up --build --watch
+
+  launch:sync:
+    desc: "+ ElectricSQL"
+    deps: [generate]
+    cmds:
+      - docker compose --profile sync up --build --watch
+
+  launch:cdc:
+    desc: "+ Conduit + Redis Streams + rpk"
+    deps: [generate]
+    cmds:
+      - docker compose --profile sync --profile cdc up --build --watch
+
+  launch:stream:
+    desc: "+ Arroyo + Redpanda + Redis"
+    deps: [generate]
+    cmds:
+      - docker compose --profile sync --profile cdc --profile stream up --build --watch
+
+  # ================================================================
+  # Unit tests — pure, fast, offline (no network, no Docker daemon)
+  # ================================================================
+
+  test:
+    desc: "Run unit tests: cue vet + buf lint + Deno services (pure, cross-platform)"
+    deps: [buf:generate]
+    cmds:
+      # Select packages explicitly: bayt.cue adds a `mecha` package to the
+      # root, so an unqualified `cue vet ./...` errors on the mixed dir.
+      - cue vet ./...:tmpl ./...:database
+      - buf lint proto
+      - task: test:ticker
+
+  test:ticker:
+    desc: "ticker unit tests (pure: no clock, no network)"
+    dir: services/ticker
+    cmds:
+      # mise x puts the real tool bin dir on PATH — see cue:generate.
+      - mise x -- deno test --allow-read --allow-env .
+    sources:
+      - "*.ts"
+      - "deno.json"
+      - "deno.lock"
+
+  # ================================================================
+  # Smoke tests
+  # ================================================================
+
+  integrate:
+    desc: "Run crud smoke tests"
+    cmds:
+      - docker compose --profile test run --build integrate
+
+  integrate:cdc:
+    desc: "Run CDC pipeline smoke tests"
+    cmds:
+      - docker compose --profile sync --profile cdc --profile test-cdc run --build integrate-cdc
+
+  integrate:stream:
+    desc: "Run stream analytics smoke tests (Arroyo E2E)"
+    cmds:
+      - docker compose --profile sync --profile cdc --profile stream --profile test-stream run --build integrate-stream
+
+  integrate:blobs:
+    desc: "Run blobs profile smoke tests (rclone-s3 + imgproxy)"
+    cmds:
+      - docker compose --profile blobs --profile test-blobs run --build integrate-blobs
+
+  # ================================================================
+  # Benchmarks (cdc + stream profiles)
+  # ================================================================
+
+  benchmark:
+    desc: "Run startup + CRUD + CDC benchmarks (cdc profile)"
+    cmds:
+      - nu scripts/benchmark.nu
+
+  benchmark:stream:
+    desc: "Run startup + CRUD + CDC benchmarks (stream profile)"
+    cmds:
+      - nu scripts/benchmark.nu --profile stream
+
+  # ================================================================
+  # Atlas — dev-time migration generation from HCL schema
+  # ================================================================
+
+  atlas:diff:
+    desc: "Generate versioned migration from HCL schema changes"
+    cmds:
+      - |
+        atlas migrate diff {{.CLI_ARGS | default "schema_change"}} \
+          --dir "file://services/database/migrations" \
+          --dev-url "docker://postgres/18/dev" \
+          --to "file://services/database/schemas/"
+        atlas migrate hash --dir file://services/database/migrations
+    sources:
+      - "services/database/schemas/*.hcl"
+
+  atlas:hash:
+    desc: "Regenerate atlas.sum after migration changes"
+    cmds:
+      - atlas migrate hash --dir file://services/database/migrations
+    sources:
+      - "services/database/migrations/*.sql"
+    generates:
+      - "services/database/migrations/atlas.sum"
+
+  # ================================================================
+  # Utility
+  # ================================================================
+
+  clean:
+    desc: "Stop all services and remove generated files"
+    cmds:
+      - docker compose --profile sync --profile cdc --profile stream --profile blobs down -v || true
+      - rm -rf gen/*

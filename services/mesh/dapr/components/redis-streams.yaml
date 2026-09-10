@@ -1,0 +1,24 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: redis-streams
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: "redis:6379"
+    - name: redisPassword
+      value: ""
+    - name: consumerID
+      value: "mecha"
+    - name: enableTLS
+      value: "false"
+    - name: processingTimeout
+      value: "30s"
+    - name: redeliverInterval
+      value: "5s"
+    - name: maxRetries
+      value: "5"
+    - name: concurrency
+      value: "1"

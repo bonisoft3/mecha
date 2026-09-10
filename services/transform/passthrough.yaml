@@ -1,0 +1,53 @@
+# CDC enrichment pipeline: consume Dapr CloudEvents from Redis Streams and PATCH
+# back to PostgREST with processed_at/source. Skips already-enriched rows
+# to break the CDC amplification loop.
+#
+# Dapr CloudEvent format: { "data": "{\"id\":\"...\",\"message\":\"...\", ...}" }
+# (the "data" field is a JSON-encoded string of the row)
+
+input:
+  redis_streams:
+    url: "redis://redis:6379"
+    body_key: "data"
+    streams:
+      - "cdc-events"
+    consumer_group: "rpk-transform"
+    create_streams: true
+    commit_period: "1s"
+    limit: 10
+
+pipeline:
+  processors:
+    - bloblang: |
+        let entity = this.data.parse_json().catch({})
+
+        meta record_id = $entity.id | "unknown"
+        meta collection = "Hello"
+
+        root = if $entity.id != null && $entity.processed_at == null {
+          {
+            "processed_at": now(),
+            "source": "mecha-rpk"
+          }
+        } else {
+          deleted()
+        }
+
+output:
+  retry:
+    max_retries: 3
+    backoff:
+      initial_interval: 2s
+      max_interval: 30s
+      max_elapsed_time: 3m
+    output:
+      http_client:
+        url: http://crud:3000/${! meta("collection") }?id=eq.${! meta("record_id") }
+        verb: PATCH
+        headers:
+          Content-Type: application/json
+          Prefer: return=representation
+        timeout: 30s
+        successful_on:
+          - 200
+          - 204

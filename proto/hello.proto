@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package mecha.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+// Hello entity — the schema drives database tables, API routes, and
+// stream processing queries. No RPC services: PostgREST generates the
+// REST surface from the table DDL.
+message Hello {
+  string id = 1 [
+    (buf.validate.field).string.uuid = true
+  ];
+
+  string message = 2 [
+    (buf.validate.field).string = {
+      min_len: 1,
+      max_len: 500,
+      pattern: "^[\\p{L}\\p{N}\\p{P}\\p{S}\\s]+$"
+    }
+  ];
+
+  google.protobuf.Timestamp created_at = 3;
+
+  google.protobuf.Timestamp updated_at = 4;
+}

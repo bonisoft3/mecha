@@ -1,0 +1,76 @@
+# CDC text generation pipeline: consume generation_request CDC events,
+# call Gemini to generate flashcards, and POST them back via PostgREST.
+#
+# Input: HTTP server (CDC webhook) or stdin (testing).
+# Output: stdout (testing) or HTTP POST to PostgREST /crud/flashcard.
+#
+# Environment: GEMINI_API_KEY must be set.
+
+input:
+  stdin: {}
+
+pipeline:
+  processors:
+    - bloblang: |
+        let req = this
+
+        let topic = $req.topic
+        let category = $req.category
+        let language = $req.language
+        let difficulty = $req.difficulty
+        let card_count = $req.card_count
+        let card_set_id = $req.card_set_id
+        let request_id = $req.id
+
+        let prompt = "Generate " + $card_count.string() + " flashcards for teaching kids about " + $topic + ". Category: " + $category + ". Language: " + $language + ". Difficulty: " + $difficulty + ". Return a JSON array where each element has: front_text (the word in " + $language + "), back_text (English translation), hint (one-line clue), difficulty. Only return the JSON array, no markdown."
+
+        meta card_set_id = $card_set_id
+        meta request_id = $request_id
+
+        root = {
+          "contents": [
+            {
+              "parts": [
+                { "text": $prompt }
+              ]
+            }
+          ]
+        }
+
+    - http:
+        url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}"
+        verb: POST
+        headers:
+          Content-Type: application/json
+
+    - bloblang: |
+        let raw_text = this.candidates.index(0).content.parts.index(0).text
+
+        # Strip markdown code fences if present
+        let cleaned = $raw_text.trim().re_replace_all("^```json\\s*", "").re_replace_all("\\s*```$", "")
+
+        let cards = $cleaned.parse_json()
+        let card_set_id = meta("card_set_id")
+
+        root = $cards.map_each(card -> {
+          "id": uuid_v4(),
+          "card_set_id": $card_set_id,
+          "front_text": card.front_text,
+          "back_text": card.back_text,
+          "hint": card.hint,
+          "difficulty": card.difficulty,
+          "image_url": ""
+        })
+
+    - unarchive:
+        format: json_array
+
+output:
+  retry:
+    max_retries: 3
+    backoff:
+      initial_interval: 2s
+      max_interval: 30s
+      max_elapsed_time: 3m
+    output:
+      stdout: {}

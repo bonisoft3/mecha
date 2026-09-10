@@ -1,0 +1,37 @@
+# Dapr multi-app configuration for native Mac development.
+# Prerequisites: PostgreSQL running on localhost:5432, Redis on localhost:6379
+# Usage: dapr run -f .
+version: 1
+common:
+  resourcesPath: ./services/mesh/dapr/components
+  env:
+    DATABASE_URL: "postgres://postgres:postgres@localhost:5432/mecha"
+    REDIS_URL: "redis://localhost:6379"
+  logLevel: info
+apps:
+  - appID: crud
+    appDirPath: .
+    appPort: 3000
+    daprHTTPPort: 3500
+    command: ["postgrest", "services/crud/postgrest-local.conf"]
+    enableAppHealthCheck: true
+    appHealthCheckPath: /
+    appHealthProbeInterval: 5
+    appHealthProbeTimeout: 3000
+  - appID: caddy
+    appDirPath: .
+    appPort: 8080
+    daprHTTPPort: 3501
+    command: ["caddy", "run", "--config", "services/proxy/Caddyfile"]
+    enableAppHealthCheck: true
+    appHealthCheckPath: /health
+  - appID: rpk-passthrough
+    appDirPath: .
+    daprHTTPPort: 3502
+    command: ["rpk", "connect", "run", "services/transform/passthrough.yaml", "--watcher"]
+  - appID: conduit
+    appDirPath: .
+    daprHTTPPort: 3503
+    command: ["conduit", "--config", "services/cdc/conduit.yaml"]
+    enableAppHealthCheck: true
+    appHealthCheckPath: /healthz

@@ -1,0 +1,13 @@
+[settings]
+lockfile = false
+locked = false
+
+[env]
+# Without this, Go downloads and re-execs the toolchain go.mod names, ignoring
+# the pin below and changing which compiler produced src/blobl.wasm.
+GOTOOLCHAIN = "local"
+
+[tools]
+bun = "1.3.12"
+# Must match the `go` directive in go.mod.
+go = "1.26.1"

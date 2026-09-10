@@ -1,0 +1,13 @@
+{
+  "name": "@mecha/websd",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@huggingface/transformers": "^3"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

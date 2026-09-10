@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+    - FILE_LOWER_SNAKE_CASE
+breaking:
+  use:
+    - FILE
+deps:
+  - buf.build/bufbuild/protovalidate

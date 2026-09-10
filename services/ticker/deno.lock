@@ -1,0 +1,29 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@std/assert@1.0.8": "1.0.8",
+    "jsr:@std/internal@^1.0.5": "1.0.14",
+    "npm:croner@9.0.0": "9.0.0"
+  },
+  "jsr": {
+    "@std/assert@1.0.8": {
+      "integrity": "ebe0bd7eb488ee39686f77003992f389a06c3da1bbd8022184804852b2fa641b",
+      "dependencies": [
+        "jsr:@std/internal"
+      ]
+    },
+    "@std/internal@1.0.14": {
+      "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
+    }
+  },
+  "npm": {
+    "croner@9.0.0": {
+      "integrity": "sha512-onMB0OkDjkXunhdW9htFjEhqrD54+M94i6ackoUkjHKbRnXdyEyKRelp4nJ1kAz32+s27jP1FsebpJCVl0BsvA=="
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:croner@9.0.0"
+    ]
+  }
+}

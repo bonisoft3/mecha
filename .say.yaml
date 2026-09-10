@@ -1,0 +1,47 @@
+say:
+  self: {}
+
+  lint:
+    do: "buf lint proto"
+
+  build:
+    rulemap:
+      browser:
+        platform: browser
+        priority: -1
+        stop: true
+        cmds:
+          - do: "bun run --cwd packages build"
+
+  test:
+    rulemap:
+      browser:
+        platform: browser
+        priority: -1
+        stop: true
+        cmds:
+          - do: "bun run --cwd packages test"
+
+  launch:
+    rulemap:
+      browser:
+        platform: browser
+        priority: -1
+        stop: true
+        cmds:
+          - do: "bun run --cwd packages/mecha-browser dev"
+      dapr:
+        platform: local
+        priority: -1
+        stop: true
+        cmds:
+          - do: "dapr run -f dapr.yaml"
+
+  integrate:
+    rulemap:
+      browser:
+        platform: browser
+        priority: -1
+        stop: true
+        cmds:
+          - do: "bun run --cwd packages/mecha-browser test"

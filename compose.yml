@@ -1,0 +1,502 @@
+# Mecha v2 — Additive profiles: crud → sync → cdc → stream → ai → blobs
+#
+# AI profile adds Bifrost (github.com/maximhq/bifrost) — single Go binary,
+# 11µs overhead, routes to 1000+ LLM providers.
+#
+# Startup strategy: all services start in parallel and self-retry connections.
+# No sequential depends_on chain. Services use internal retry logic:
+#   PostgREST retries DB, Caddy returns 502 until upstream ready,
+#   Dapr retries components, Conduit retries WAL, rpk retries Redis Streams,
+#   Arroyo retries Redpanda.
+#
+# Usage:
+#   docker compose up                                  # crud only
+#   docker compose --profile sync up                   # + ElectricSQL
+#   docker compose --profile sync --profile cdc up     # + CDC pipeline
+#   docker compose --profile stream up                 # + stream processing
+#   docker compose --profile ai up                     # + AI gateway (Bifrost)
+#   docker compose --profile blobs up                  # + storage + imaging
+
+services:
+  # ============================================================
+  # CRUD PROFILE (base) — PostgreSQL + PostgREST + Caddy + Dapr
+  # ============================================================
+
+  database:
+    build:
+      context: services/database
+      dockerfile: Dockerfile
+    ports:
+      - "5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-mecha}
+      POSTGRES_INITDB_ARGS: "--no-sync --no-locale --encoding=UTF8 --auth=trust"
+    tmpfs:
+      - /postgresql-data
+    configs:
+      - source: validation-smoke
+        target: /docker-entrypoint-initdb.d/950_validation_smoke.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "5432", "-d", "${POSTGRES_DB:-mecha}", "-U", "${POSTGRES_USER:-postgres}"]
+      start_interval: 100ms
+      start_period: 5m
+
+  crud:
+    build:
+      context: .
+      dockerfile: services/crud/Dockerfile
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "httpcheck", "http://127.0.0.1:3001/ready"]
+      interval: 5s
+      start_interval: 500ms
+      start_period: 30s
+    environment:
+      PGRST_DB_URI: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_SERVER_HOST: '*'
+      PGRST_SERVER_PORT: 3000
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-pronto-dev-secret-please-override-32ch}
+    ports:
+      - "3000"
+      - "3001"
+
+  caddy:
+    build:
+      context: .
+      dockerfile: services/proxy/Dockerfile
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "/bin/httpcheck", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      start_interval: 500ms
+      start_period: 10s
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/proxy/Caddyfile
+          target: /etc/caddy/Caddyfile
+
+  mesh:
+    build:
+      context: .
+      dockerfile: services/mesh/Dockerfile
+      target: base
+    depends_on:
+      caddy:
+        condition: service_started
+    ports:
+      - "3500"
+    healthcheck:
+      test: ["CMD", "/bin/portcheck", "--port", "3500"]
+      interval: 5s
+      start_interval: 500ms
+      start_period: 30s
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/mesh/dapr/components/httpendpoints.yaml
+          target: /dapr/components/httpendpoints.yaml
+        - action: sync+restart
+          path: services/mesh/dapr/components/resiliency.yaml
+          target: /dapr/components/resiliency.yaml
+
+  ticker:
+    build:
+      context: services/ticker
+      dockerfile: Dockerfile
+    depends_on:
+      crud:
+        condition: service_healthy
+    ports:
+      - "9998"
+    environment:
+      # PostgREST directly, never the gateway: caddy's client-facing Prefer
+      # injection would clobber the resolution the writes ask for.
+      CRUD_URL: http://crud:3000
+      SERVICE_JWT: ${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.eeAs4VbzZYwz32jEudSFT_zMeuL18M4cEFY8Jn1jPwY}
+      # mesh-events, not mesh. The wake has to reach the daprd bundled with the
+      # WAL reader and the pipeline worker — the unit that is asleep at cloud
+      # tier — and that is the one conduit publishes through. `mesh` is the
+      # app's own sidecar and waking it starts nothing that reads a tick.
+      MESH_URL: http://mesh-events:3500
+    profiles:
+      - ticks
+
+  # What pokes the ticker. services/clock/clock.yaml states the pipeline and
+  # why the cadence is what it is.
+  clock:
+    build:
+      context: .
+      dockerfile: services/clock/Dockerfile
+    depends_on:
+      ticker:
+        condition: service_started
+    environment:
+      POKE_INTERVAL: ${POKE_INTERVAL:-60s}
+      SERVICE_JWT: ${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.eeAs4VbzZYwz32jEudSFT_zMeuL18M4cEFY8Jn1jPwY}
+    restart: on-failure
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/clock/clock.yaml
+          target: /clock.yaml
+    profiles:
+      - ticks
+
+  # ============================================================
+  # SYNC PROFILE — + ElectricSQL
+  # ============================================================
+
+  electric:
+    image: electricsql/electric@sha256:f311edc272e227ddaea593c5205a02c3d1e5969c2db0f7655a039a5e24abb176
+    depends_on:
+      database:
+        condition: service_started
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable"
+      ELECTRIC_INSECURE: "true"
+    ports:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+      start_interval: 500ms
+    restart: on-failure
+    profiles:
+      - sync
+      - cdc
+      - stream
+
+  # ============================================================
+  # CDC PROFILE — + Conduit + Redis Streams + rpk
+  # ============================================================
+
+  # Mesh variant with Redis Streams pubsub component.
+  mesh-events:
+    build:
+      context: .
+      dockerfile: services/mesh/Dockerfile
+      target: events
+    depends_on:
+      caddy:
+        condition: service_started
+      redis:
+        condition: service_started
+    ports:
+      - "3500"
+    healthcheck:
+      test: ["CMD", "/bin/portcheck", "--port", "3500"]
+      interval: 5s
+      start_interval: 500ms
+      start_period: 30s
+    restart: on-failure
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/mesh/dapr/components/
+          target: /dapr/components/
+    profiles:
+      - cdc
+
+  redis:
+    image: redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933
+    ports:
+      - "6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+      start_interval: 500ms
+    profiles:
+      - cdc
+      - stream
+
+  conduit:
+    build:
+      context: .
+      dockerfile: services/cdc/Dockerfile
+    depends_on:
+      database:
+        condition: service_started
+      mesh-events:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
+      DAPR_PUBSUB_URL: http://mesh-events:3500/v1.0/publish/redis-streams/cdc-events
+      CDC_TABLES: ${CDC_TABLES:-public.Hello}
+      CONDUIT_PIPELINES_PATH: /conduit/pipelines
+      CONDUIT_DB_TYPE: sqlite
+      CONDUIT_DB_SQLITE_PATH: /conduit/conduit.db
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/cdc/pipelines/
+          target: /conduit/pipelines/
+    healthcheck:
+      test: ["CMD", "httpcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+      start_interval: 500ms
+    restart: on-failure
+    profiles:
+      - cdc
+
+  transform:
+    build:
+      context: .
+      dockerfile: services/transform/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/transform/passthrough.yaml
+          target: /pipelines/passthrough.yaml
+    profiles:
+      - cdc
+
+  # ============================================================
+  # STREAM PROFILE — + Arroyo + Redpanda (Kafka-compatible)
+  # ============================================================
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.7
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda:9092
+      - --mode=dev-container
+      - --smp=1
+      - --memory=100M
+      - --default-log-level=warn
+    ports:
+      - "9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --api-urls=localhost:9644 | grep -q 'is healthy'"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+      start_interval: 500ms
+    profiles:
+      - stream
+
+  # Kafka fan-out: same rpk image as transform, different pipeline (CMD override).
+  kafka-fanout:
+    build:
+      context: .
+      dockerfile: services/transform/Dockerfile
+    command: ["run", "/pipelines/kafka-fanout.yaml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/transform/kafka-fanout.yaml
+          target: /pipelines/kafka-fanout.yaml
+    profiles:
+      - stream
+
+  arroyo:
+    build:
+      context: .
+      dockerfile: services/arroyo/Dockerfile
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      database:
+        condition: service_started
+      redis:
+        condition: service_started
+    ports:
+      - "5115"
+    restart: on-failure
+    develop:
+      watch:
+        - action: sync+restart
+          path: services/arroyo/queries/
+          target: /queries/
+    profiles:
+      - stream
+
+  # ============================================================
+  # AI PROFILE — + Bifrost (AI gateway)
+  # ============================================================
+
+  bifrost:
+    build:
+      context: services/bifrost
+    ports:
+      - "8090:8090"
+    profiles:
+      - ai
+
+  # ============================================================
+  # BLOBS PROFILE — + rclone-s3 + imgproxy
+  # ============================================================
+
+  rclone-s3:
+    build:
+      context: .
+      dockerfile: services/rclone-s3/Dockerfile
+    environment:
+      RCLONE_LOCAL_BUCKET: mecha-objects
+    command:
+      - serve
+      - s3
+      - --addr=0.0.0.0:3900
+      - --auth-key=${RCLONE_ACCESS_KEY:-GK000000000000000000000000},${RCLONE_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      - --vfs-cache-mode=off
+      - /data
+    ports:
+      - "3900"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:3900/ 2>&1 || [ $? -eq 8 ]"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+      start_interval: 500ms
+    profiles:
+      - blobs
+
+  imgproxy:
+    image: ghcr.io/imgproxy/imgproxy:v3.31.1@sha256:2b7a56dbf9c8a8e12e7109a5bdd27d31a8c1aa49f2116c927c6aedc37e18db98
+    depends_on:
+      rclone-s3:
+        condition: service_started
+    environment:
+      IMGPROXY_USE_S3: "true"
+      IMGPROXY_S3_ENDPOINT: http://rclone-s3:3900
+      AWS_ACCESS_KEY_ID: ${RCLONE_ACCESS_KEY:-GK000000000000000000000000}
+      AWS_SECRET_ACCESS_KEY: ${RCLONE_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      AWS_REGION: rclone
+      IMGPROXY_BIND: ":8081"
+      IMGPROXY_MAX_SRC_RESOLUTION: 50
+    ports:
+      - "8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8081/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+      start_interval: 500ms
+    restart: on-failure
+    profiles:
+      - blobs
+
+  # ============================================================
+  # NUBOX — Command & control (interactive nushell debug shell)
+  # ============================================================
+  # All profiles share this as a dev convenience — `docker compose
+  # run --rm nubox` drops you into an interactive shell with the
+  # full stack visible over the compose network.
+
+  nubox:
+    build:
+      context: ../../plugins/lazybox
+      target: nubox
+    depends_on:
+      database:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    entrypoint: ["nu"]
+
+  # ============================================================
+  # SAYT ENTRY POINTS
+  # ============================================================
+
+  launch:
+    image: alpine/curl:latest
+    depends_on:
+      crud:
+        condition: service_healthy
+      caddy:
+        condition: service_healthy
+    restart: "no"
+    command: ["echo", "mecha is healthy"]
+
+  # ============================================================
+  # TEST — Smoke tests
+  # ============================================================
+
+  integrate:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    depends_on:
+      crud:
+        condition: service_healthy
+      caddy:
+        condition: service_healthy
+    restart: "no"
+    profiles:
+      - test
+
+  integrate-cdc:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    depends_on:
+      conduit:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      CRUD_URL: http://crud:3000
+    entrypoint: ["/bin/sh", "/entrypoint-events.sh"]
+    restart: "no"
+    profiles:
+      - test-cdc
+
+  integrate-stream:
+    build:
+      context: .
+      dockerfile: tests/stream-analytics-test/Dockerfile
+    depends_on:
+      arroyo:
+        condition: service_healthy
+    restart: "no"
+    profiles:
+      - test-stream
+
+  integrate-blobs:
+    build:
+      context: .
+      dockerfile: tests/unicorn-test/Dockerfile
+    depends_on:
+      rclone-s3:
+        condition: service_healthy
+      imgproxy:
+        condition: service_healthy
+    restart: "no"
+    profiles:
+      - test-blobs
+
+configs:
+  validation-smoke:
+    file: tests/validation-smoke.sql

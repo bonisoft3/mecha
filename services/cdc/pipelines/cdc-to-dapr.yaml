@@ -1,0 +1,32 @@
+version: "2.2"
+pipelines:
+  - id: cdc-to-dapr
+    status: running
+    description: "PostgreSQL CDC to Dapr pubsub via HTTP"
+    connectors:
+      - id: postgres-source
+        type: source
+        plugin: "builtin:postgres"
+        settings:
+          url: "postgres://postgres:postgres@database:5432/mecha"
+          tables: "Hello,GroupHello"
+          cdcMode: "logrepl"
+          snapshotMode: "never"
+          logrepl.publicationName: "conduit_pub"
+          logrepl.slotName: "conduit_slot"
+          logrepl.withAvroSchema: "false"
+      - id: dapr-destination
+        type: destination
+        plugin: "standalone:http"
+        settings:
+          url: "http://mesh-events:3500/v1.0/publish/redis-streams/cdc-events"
+          validateConnection: "false"
+    processors:
+      - id: stringify-after
+        plugin: "builtin:json.encode"
+        settings:
+          field: ".Payload.After"
+      - id: stringify-before
+        plugin: "builtin:json.encode"
+        settings:
+          field: ".Payload.Before"

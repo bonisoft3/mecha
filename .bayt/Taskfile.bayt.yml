@@ -1,0 +1,15 @@
+# generated from bayt.cue — do not edit
+includes:
+  setup:
+    taskfile: ./Taskfile.setup.yaml
+    dir: ../
+    optional: true
+  doctor:
+    taskfile: ./Taskfile.doctor.yaml
+    dir: ../
+    optional: true
+  build:
+    taskfile: ./Taskfile.build.yaml
+    dir: ../
+    optional: true
+version: "3"

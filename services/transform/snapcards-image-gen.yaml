@@ -1,0 +1,80 @@
+# CDC image generation pipeline: consume flashcard CDC events (where image_url
+# is empty), call Gemini image generation, and PATCH the image_url back via
+# PostgREST.
+#
+# Input: HTTP server (CDC webhook) or stdin (testing).
+# Output: PATCH to PostgREST /crud/flashcard?id=eq.{id} with image_url.
+#
+# Environment: GEMINI_API_KEY must be set.
+
+input:
+  stdin: {}
+
+pipeline:
+  processors:
+    - bloblang: |
+        let card = this
+
+        # Skip cards that already have an image_url
+        root = if $card.image_url == null || $card.image_url == "" {
+          $card
+        } else {
+          deleted()
+        }
+
+    - bloblang: |
+        let front_text = this.front_text
+        let card_id = this.id
+
+        let prompt = "A cute, kid-friendly cartoon illustration of " + $front_text + ". White background, simple, colorful. No text in the image."
+
+        meta card_id = $card_id
+
+        root = {
+          "contents": [
+            {
+              "parts": [
+                { "text": $prompt }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "responseModalities": ["IMAGE"]
+          }
+        }
+
+    - http:
+        url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}"
+        verb: POST
+        headers:
+          Content-Type: application/json
+
+    - bloblang: |
+        let part = this.candidates.index(0).content.parts.index(0)
+        let mime = $part.inline_data.mime_type
+        let b64 = $part.inline_data.data
+
+        let data_uri = "data:" + $mime + ";base64," + $b64
+
+        root = {
+          "image_url": $data_uri
+        }
+
+output:
+  retry:
+    max_retries: 3
+    backoff:
+      initial_interval: 2s
+      max_interval: 30s
+      max_elapsed_time: 3m
+    output:
+      http_client:
+        url: "http://crud:3000/flashcard?id=eq.${! meta(\"card_id\") }"
+        verb: PATCH
+        headers:
+          Content-Type: application/json
+          Prefer: return=representation
+        timeout: 30s
+        successful_on:
+          - 200
+          - 204

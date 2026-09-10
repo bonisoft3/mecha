@@ -1,0 +1,38 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-build:
+    build:
+      additional_contexts:
+        libraries_mecha-setup: service:libraries_mecha-setup
+      context: ..
+      dockerfile: .bayt/Dockerfile.build
+      target: build
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-build:${BAYT_IMAGE_TAG:-latest}
+    scale: 0
+  libraries_mecha-build_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-setup_bayt: service:libraries_mecha-setup_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.build
+      target: build_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-build_bayt:latest
+    scale: 0
+  libraries_mecha-build_srcs:
+    build:
+      additional_contexts:
+        libraries_mecha-setup_srcs: service:libraries_mecha-setup_srcs
+      context: ..
+      dockerfile: .bayt/Dockerfile.build
+      target: build_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-build_srcs:latest
+    scale: 0

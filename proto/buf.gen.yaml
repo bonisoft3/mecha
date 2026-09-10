@@ -1,0 +1,7 @@
+version: v2
+inputs:
+  - directory: .
+plugins:
+  # Generate JSON Schema
+  - remote: buf.build/bufbuild/protoschema-jsonschema:v0.5.2
+    out: ../gen/jsonschema

@@ -1,0 +1,33 @@
+syntax = "proto3";
+package mecha.v1;
+
+message CardSet {
+  string id = 1;
+  string user_id = 2;
+  string name = 3;
+  string category = 4;
+  string description = 5;
+  repeated string tags = 6;
+}
+
+message Flashcard {
+  string id = 1;
+  string card_set_id = 2;
+  string front_text = 3;
+  string back_text = 4;
+  string image_url = 5;
+  string hint = 6;
+  string difficulty = 7;
+}
+
+message GenerationRequest {
+  string id = 1;
+  string user_id = 2;
+  string topic = 3;
+  string category = 4;
+  string language = 5;
+  string difficulty = 6;
+  int32 card_count = 7;
+  string status = 8;
+  string card_set_id = 9;
+}

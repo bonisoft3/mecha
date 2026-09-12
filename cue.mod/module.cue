@@ -24,7 +24,7 @@ source: {
 // this version falls behind.
 deps: {
 	"github.com/bonisoft3/bayt@v0": {
-		v:       "v0.52.0"
+		v:       "v0.52.1"
 		default: true
 	}
 }

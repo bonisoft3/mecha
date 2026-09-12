@@ -403,11 +403,13 @@ _devElectricSecret: "dev-electric-secret"
 			// TLS certificate — and the path in the config is the container's,
 			// so a host-side lint would fail on every machine for a file that is
 			// only ever mounted at runtime. adapt still fails on anything
-			// malformed, which is what a lint is for. Output to /dev/null: in nu,
-			// `| ignore` drops the exit code with it. The secret placeholder has
-			// to hold something for the line to parse; compose sets it at
-			// runtime, and this is not runtime.
-			cmds: ["with-env {ELECTRIC_SECRET: lint} { mise exec -- caddy adapt --config docker/Caddyfile --adapter caddyfile out> /dev/null }"]
+			// malformed, which is what a lint is for. The adapted config is
+			// 6 KB on one line, so it goes to the null device, which nu spells
+			// per host and offers no constant for: `| ignore` would drop the
+			// exit status along with it, and the status is the verdict. The
+			// secret placeholder has to hold something for the line to parse;
+			// compose sets it at runtime, and this is not runtime.
+			cmds: ["with-env {ELECTRIC_SECRET: lint} { mise exec -- caddy adapt --config docker/Caddyfile --adapter caddyfile out> (if $nu.os-info.name == \"windows\" { \"NUL\" } else { \"/dev/null\" }) }"]
 			note: "checks the cluster's own proxy config parses"
 		}
 		// The door is h2, h2 needs TLS, and TLS needs a certificate the

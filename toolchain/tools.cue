@@ -1,0 +1,8 @@
+package toolchain
+
+#Tools: {
+	...
+	"github:redpanda-data/connect": "4.46.0"
+	"github:caddyserver/caddy":     "2.10.0"
+	"github:FiloSottile/mkcert":    "v1.4.4"
+}

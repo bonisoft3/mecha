@@ -479,6 +479,17 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   // looks handlers up by name, so the registry must be derivable from config
   // alone.
   const mutationFns: Record<string, any> = {}
+  // PostgREST rejects generated and trigger-managed columns on write.
+  const cleanRow = (row: any) => {
+    if (!row || typeof row !== "object") return row
+    const out: Record<string, any> = {}
+    for (const [k, v] of Object.entries(row)) {
+      if (!k.startsWith("$") && k !== "txid" && k !== "scope_id") {
+        out[k] = v
+      }
+    }
+    return out
+  }
   for (const t of byId.values()) {
     // Local tiers take no mutation handlers — see `durability`.
     if (isLocal(t)) continue
@@ -487,7 +498,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       const res = await doFetch(`${crudUrl}/${t.table}`, {
         method: "POST",
         headers: headers({ Prefer: "return=representation", "Idempotency-Key": idempotencyKey }),
-        body: JSON.stringify(row),
+        body: JSON.stringify(cleanRow(row)),
       })
       await requireOk(res, `insert ${t.table}`)
       await confirmTxid(t.id, await res.json().catch(() => []))
@@ -499,7 +510,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       const res = await doFetch(`${crudUrl}/${t.table}?${t.key}=eq.${encodeURIComponent(key)}`, {
         method: "PATCH",
         headers: headers({ Prefer: "return=representation" }),
-        body: JSON.stringify(m.changes),
+        body: JSON.stringify(cleanRow(m.changes)),
       })
       await requireOk(res, `update ${t.table}`)
       await confirmTxid(t.id, await res.json().catch(() => []))

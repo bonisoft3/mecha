@@ -4,6 +4,7 @@ import { electricCollectionOptions } from "@tanstack/electric-db-collection"
 import { NonRetriableError, startOfflineExecutor } from "@tanstack/offline-transactions"
 import type { LeaderElection } from "@tanstack/offline-transactions"
 import { localOnlyCollectionOptions, localStorageCollectionOptions } from "@tanstack/db"
+import { idempotentSink } from "./sync-sink.js"
 import { unionCollectionOptions } from "./union.js"
 
 /**
@@ -251,41 +252,47 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   // One Electric shape as a collection. Its `where` and its header are the
   // authority's, resolved together per request from one token.
   function shape(t: Table, key?: RowKey) {
+    const getKey = (item: any) => item[t.key]
+    const options = electricCollectionOptions({
+      id: key ? `mecha:${t.id}@${key.column}=${key.value}` : `mecha:${t.id}`,
+      getKey,
+      shapeOptions: {
+        url: `${electricUrl}/v1/shape`,
+        // Typed as a string upstream, resolved as a supplier at runtime like
+        // any other param.
+        params: { table: t.table, where: shapes.where(t.table, key) as any },
+        headers: { Authorization: shapes.authorization(t.table, key) },
+        // A refused token is re-minted, not retried: the refresh runs ahead
+        // of expiry by a margin, but a machine asleep through it resumes
+        // into a 401, and the retry resolves the header afresh. Anything
+        // else stops the stream, as it would unhandled.
+        onError: (e: any) => {
+          if (e?.status === 401) {
+            shapes.forget(t.table, key)
+            return {}
+          }
+          throw e
+        },
+        // int8 (every mecha table's txid) must land as Number, not the
+        // client default BigInt: synced rows become mutation originals in
+        // the offline outbox, whose JSON serialization has no BigInt path
+        // and would throw on every update/delete of a synced row. txids
+        // stay far below 2^53, so Number is lossless here.
+        parser: { int8: (value: string) => Number(value) },
+      },
+      // No persistence handlers: writes ride the offline executor below —
+      // handlers would tie delivery to the optimistic transaction's
+      // lifetime instead of the durable outbox's.
+    })
+    // The shape writes through the sink sync-sink.ts describes: a row's
+    // return is an update.
+    const inner = options.sync.sync
+    options.sync.sync = (params) => inner(idempotentSink(params, getKey))
     return createCollection({
       // Never startSync: true. Sync begins on the first subscriber, so a
       // screen opens only the shapes its regions actually read.
       gcTime,
-      ...electricCollectionOptions({
-        id: key ? `mecha:${t.id}@${key.column}=${key.value}` : `mecha:${t.id}`,
-        getKey: (item: any) => item[t.key],
-        shapeOptions: {
-          url: `${electricUrl}/v1/shape`,
-          // Typed as a string upstream, resolved as a supplier at runtime like
-          // any other param.
-          params: { table: t.table, where: shapes.where(t.table, key) as any },
-          headers: { Authorization: shapes.authorization(t.table, key) },
-          // A refused token is re-minted, not retried: the refresh runs ahead
-          // of expiry by a margin, but a machine asleep through it resumes
-          // into a 401, and the retry resolves the header afresh. Anything
-          // else stops the stream, as it would unhandled.
-          onError: (e: any) => {
-            if (e?.status === 401) {
-              shapes.forget(t.table, key)
-              return {}
-            }
-            throw e
-          },
-          // int8 (every mecha table's txid) must land as Number, not the
-          // client default BigInt: synced rows become mutation originals in
-          // the offline outbox, whose JSON serialization has no BigInt path
-          // and would throw on every update/delete of a synced row. txids
-          // stay far below 2^53, so Number is lossless here.
-          parser: { int8: (value: string) => Number(value) },
-        },
-        // No persistence handlers: writes ride the offline executor below —
-        // handlers would tie delivery to the optimistic transaction's
-        // lifetime instead of the durable outbox's.
-      }),
+      ...options,
     } as any)
   }
 

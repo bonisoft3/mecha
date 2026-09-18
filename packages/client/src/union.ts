@@ -1,4 +1,5 @@
 import type { Collection } from "@tanstack/db"
+import { idempotentSink } from "./sync-sink.js"
 
 /**
  * One collection over several sources of the same table, each source a shape.
@@ -36,6 +37,7 @@ type Sink = {
   write: (message: { type: "insert" | "update" | "delete"; value: any }) => void
   commit: () => void
   markReady: () => void
+  truncate: () => void
 }
 
 export function unionCollectionOptions(config: UnionConfig) {
@@ -132,13 +134,16 @@ export function unionCollectionOptions(config: UnionConfig) {
     getKey: config.getKey,
     sync: {
       sync: (params: Sink) => {
-        sink = params
+        // A row a source drops and delivers again is written as an update
+        // (sync-sink.ts), as the shapes under this union write their own.
+        const own = idempotentSink(params, config.getKey)
+        sink = own
         for (const s of sources) attach(s)
         if (config.base.isReady()) params.markReady()
         else config.base.onFirstReady(() => params.markReady())
         return () => {
           for (const s of [...attached.keys()]) detach(s, false)
-          if (sink === params) sink = null
+          if (sink === own) sink = null
         }
       },
     },

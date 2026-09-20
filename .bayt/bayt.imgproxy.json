@@ -1,0 +1,179 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": false,
+    "environment": {
+      "IMGPROXY_USE_S3": "true",
+      "IMGPROXY_S3_ENDPOINT": "http://rclone-s3:3900",
+      "AWS_ACCESS_KEY_ID": "${RCLONE_ACCESS_KEY:-GK000000000000000000000000}",
+      "AWS_SECRET_ACCESS_KEY": "${RCLONE_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000000}",
+      "AWS_REGION": "rclone",
+      "IMGPROXY_BIND": ":8081",
+      "IMGPROXY_MAX_SRC_RESOLUTION": "50",
+      "IMGPROXY_SET_CANONICAL_HEADER": "false",
+      "IMGPROXY_CACHE_CONTROL_PASSTHROUGH": "true"
+    },
+    "ports": [],
+    "volumes": [],
+    "depends_on": {
+      "libraries_mecha-rclone-s3": {
+        "condition": "service_started"
+      }
+    },
+    "networks": {
+      "default": {
+        "aliases": [
+          "imgproxy"
+        ]
+      }
+    },
+    "restart": "on-failure",
+    "healthcheck": {
+      "test": [
+        "CMD-SHELL",
+        "bash -c 'echo -e \"GET /health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" > /dev/tcp/127.0.0.1/8081'"
+      ],
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 6,
+      "start_period": "10s",
+      "start_interval": "500ms"
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "ghcr.io/imgproxy/imgproxy:v3.31.1@sha256:2b7a56dbf9c8a8e12e7109a5bdd27d31a8c1aa49f2116c927c6aedc37e18db98"
+    },
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "copy": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "imgproxy",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "imgproxy_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.imgproxy.yaml",
+          ".bayt/Dockerfile.imgproxy",
+          ".bayt/bayt.imgproxy.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.imgproxy.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "imgproxy_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.imgproxy.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": false,
+  "deps": [
+    "rclone-s3_outs"
+  ],
+  "sameProjectDeps": [
+    "rclone-s3_outs"
+  ],
+  "transitiveDeps": [
+    "rclone-s3_outs"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.imgproxy.yaml",
+    "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+    "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "rclone-s3_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

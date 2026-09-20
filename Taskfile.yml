@@ -46,38 +46,14 @@ tasks:
   # ================================================================
   # Launch — start the stack with hot reload (--watch)
   # ================================================================
-  # `task launch` brings up ALL profiles (crud + sync + cdc + stream
-  # + blobs). Use launch:crud/sync/cdc/stream for narrower slices.
+  # A bare `up` is the whole stack: the cluster plus stream processing and
+  # the AI gateway's seat (compose.yml includes what bayt emits for bayt.cue).
 
   launch:
-    desc: "Start the full stack (all profiles) with hot reload"
-    deps: [generate]
-    cmds:
-      - docker compose --profile sync --profile cdc --profile stream --profile blobs up --build --watch
-
-  launch:crud:
-    desc: "crud profile only (PostgreSQL + PostgREST + Caddy + Dapr)"
+    desc: "Start the stack with hot reload"
     deps: [generate]
     cmds:
       - docker compose up --build --watch
-
-  launch:sync:
-    desc: "+ ElectricSQL"
-    deps: [generate]
-    cmds:
-      - docker compose --profile sync up --build --watch
-
-  launch:cdc:
-    desc: "+ Conduit + Redis Streams + rpk"
-    deps: [generate]
-    cmds:
-      - docker compose --profile sync --profile cdc up --build --watch
-
-  launch:stream:
-    desc: "+ Arroyo + Redpanda + Redis"
-    deps: [generate]
-    cmds:
-      - docker compose --profile sync --profile cdc --profile stream up --build --watch
 
   # ================================================================
   # Unit tests — pure, fast, offline (no network, no Docker daemon)
@@ -108,39 +84,39 @@ tasks:
   # Smoke tests
   # ================================================================
 
+  # Each suite waits on the slice it exercises, so running one brings that
+  # slice up. The crud and cdc suites exit with their verdict; the stream
+  # and blobs suites hold while their healthcheck asserts, so `up --wait`
+  # returns on that verdict instead.
+
   integrate:
     desc: "Run crud smoke tests"
     cmds:
-      - docker compose --profile test run --build integrate
+      - docker compose run --build smoke
 
   integrate:cdc:
     desc: "Run CDC pipeline smoke tests"
     cmds:
-      - docker compose --profile sync --profile cdc --profile test-cdc run --build integrate-cdc
+      - docker compose run --build smoke-cdc
 
   integrate:stream:
     desc: "Run stream analytics smoke tests (Arroyo E2E)"
     cmds:
-      - docker compose --profile sync --profile cdc --profile stream --profile test-stream run --build integrate-stream
+      - docker compose up --build --wait smoke-stream
 
   integrate:blobs:
-    desc: "Run blobs profile smoke tests (rclone-s3 + imgproxy)"
+    desc: "Run blobs smoke tests (rclone-s3 + imgproxy)"
     cmds:
-      - docker compose --profile blobs --profile test-blobs run --build integrate-blobs
+      - docker compose up --build --wait smoke-blobs
 
   # ================================================================
-  # Benchmarks (cdc + stream profiles)
+  # Benchmarks
   # ================================================================
 
   benchmark:
-    desc: "Run startup + CRUD + CDC benchmarks (cdc profile)"
+    desc: "Run startup + CRUD + CDC benchmarks"
     cmds:
       - nu scripts/benchmark.nu
-
-  benchmark:stream:
-    desc: "Run startup + CRUD + CDC benchmarks (stream profile)"
-    cmds:
-      - nu scripts/benchmark.nu --profile stream
 
   # ================================================================
   # Atlas — dev-time migration generation from HCL schema
@@ -174,5 +150,5 @@ tasks:
   clean:
     desc: "Stop all services and remove generated files"
     cmds:
-      - docker compose --profile sync --profile cdc --profile stream --profile blobs down -v || true
+      - docker compose --profile '*' down -v || true
       - rm -rf gen/*

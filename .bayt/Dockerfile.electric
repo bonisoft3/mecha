@@ -1,0 +1,14 @@
+# generated from bayt.cue — do not edit
+FROM electricsql/electric@sha256:f311edc272e227ddaea593c5205a02c3d1e5969c2db0f7655a039a5e24abb176 AS electric
+WORKDIR /monorepo/libraries/mecha
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.electric.json ./.bayt/
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS electric_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.electric.yaml .bayt/Dockerfile.electric .bayt/bayt.electric.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+COPY --from=libraries_mecha-database_bayt /monorepo /monorepo
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS electric_bayt
+COPY --from=electric_bayt_ctxs /monorepo /monorepo

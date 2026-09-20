@@ -1,0 +1,13 @@
+# generated from bayt.cue — do not edit
+FROM redpandadata/redpanda:v24.3.7@sha256:f3049dcb004ce1ccc0a8b3dc3c7d6ca1f32cb4d6d1da98a47874457dd8cb9907 AS redpanda
+WORKDIR /monorepo/libraries/mecha
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.redpanda.json ./.bayt/
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS redpanda_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.redpanda.yaml .bayt/Dockerfile.redpanda .bayt/bayt.redpanda.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS redpanda_bayt
+COPY --from=redpanda_bayt_ctxs /monorepo /monorepo

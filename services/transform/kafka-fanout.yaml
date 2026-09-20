@@ -41,6 +41,10 @@ pipeline:
         }
 
     - bloblang: |
+        # A mapping's root starts empty: without this the record on the
+        # topic is the three stamps alone, and Arroyo's query, which groups
+        # on id and message, aggregates nothing.
+        root = this
         root.operation = meta("operation")
         root.collection = meta("collection")
         root.traceparent = meta("traceparent")

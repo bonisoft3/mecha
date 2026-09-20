@@ -1,0 +1,62 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-mesh-events:
+    build:
+      additional_contexts:
+        libraries_mecha-mesh-image: service:libraries_mecha-mesh-image
+        libraries_mecha-caddy: service:libraries_mecha-caddy
+        libraries_mecha-redis: service:libraries_mecha-redis
+      context: ..
+      dockerfile: .bayt/Dockerfile.mesh-events
+      target: mesh-events
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-caddy:
+        condition: service_started
+      libraries_mecha-redis:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD
+      - portcheck
+      - --port
+      - "3500"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+      start_interval: 500ms
+    image: bayt-libraries_mecha-mesh-events:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - mesh-events
+    restart: on-failure
+  libraries_mecha-mesh-events_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-mesh-image_bayt: service:libraries_mecha-mesh-image_bayt
+        libraries_mecha-caddy_bayt: service:libraries_mecha-caddy_bayt
+        libraries_mecha-redis_bayt: service:libraries_mecha-redis_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.mesh-events
+      target: mesh-events_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-mesh-events_bayt:latest
+    scale: 0
+  libraries_mecha-mesh-events_srcs:
+    build:
+      additional_contexts:
+        libraries_mecha-mesh-image_srcs: service:libraries_mecha-mesh-image_srcs
+      context: ..
+      dockerfile: .bayt/Dockerfile.mesh-events
+      target: mesh-events_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-mesh-events_srcs:latest
+    scale: 0

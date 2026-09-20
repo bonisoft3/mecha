@@ -1,0 +1,45 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-redpanda:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.redpanda
+      target: redpanda
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    command:
+    - redpanda
+    - start
+    - --kafka-addr=internal://0.0.0.0:9092
+    - --advertise-kafka-addr=internal://redpanda:9092
+    - --mode=dev-container
+    - --smp=1
+    - --memory=512M
+    - --default-log-level=warn
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - "rpk cluster health --api-urls=localhost:9644 | grep -q 'Healthy: *true'"
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+      start_interval: 500ms
+    image: bayt-libraries_mecha-redpanda:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - redpanda
+    ports:
+    - "9092"
+  libraries_mecha-redpanda_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.redpanda
+      target: redpanda_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-redpanda_bayt:latest
+    scale: 0

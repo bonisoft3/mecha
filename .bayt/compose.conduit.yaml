@@ -1,0 +1,70 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-conduit:
+    build:
+      additional_contexts:
+        libraries_mecha-conduit-image: service:libraries_mecha-conduit-image
+        libraries_mecha-database: service:libraries_mecha-database
+        libraries_mecha-mesh-events: service:libraries_mecha-mesh-events
+      context: ..
+      dockerfile: .bayt/Dockerfile.conduit
+      target: conduit
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-database:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-mesh-events:
+        condition: service_started
+    develop:
+      watch:
+      - action: sync+restart
+        path: ../services/cdc/pipelines/cdc-to-dapr.yaml
+        target: /conduit/cdc-to-bus.yaml.tmpl
+    environment:
+      DATABASE_URL: >-
+        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
+      CONDUIT_PIPELINES_PATH: /conduit/pipelines
+      CONDUIT_DB_TYPE: inmemory
+    healthcheck:
+      test:
+      - CMD
+      - httpcheck
+      - http://127.0.0.1:8080/healthz
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+      start_interval: 500ms
+    image: bayt-libraries_mecha-conduit:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - conduit
+    restart: on-failure
+  libraries_mecha-conduit_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-conduit-image_bayt: service:libraries_mecha-conduit-image_bayt
+        libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
+        libraries_mecha-mesh-events_bayt: service:libraries_mecha-mesh-events_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.conduit
+      target: conduit_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-conduit_bayt:latest
+    scale: 0
+  libraries_mecha-conduit_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.conduit
+      target: conduit_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-conduit_srcs:latest
+    scale: 0

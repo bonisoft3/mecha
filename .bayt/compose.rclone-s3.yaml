@@ -1,0 +1,52 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-rclone-s3:
+    build:
+      additional_contexts:
+        libraries_mecha-rclone-s3-image: service:libraries_mecha-rclone-s3-image
+      context: ..
+      dockerfile: .bayt/Dockerfile.rclone-s3
+      target: rclone-s3
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    environment:
+      RCLONE_LOCAL_BUCKET: mecha-objects
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget -S -O /dev/null http://127.0.0.1:3900/ 2>&1 | grep -q 'HTTP/'
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+      start_interval: 500ms
+    image: bayt-libraries_mecha-rclone-s3:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - rclone-s3
+  libraries_mecha-rclone-s3_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-rclone-s3-image_bayt: service:libraries_mecha-rclone-s3-image_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.rclone-s3
+      target: rclone-s3_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-rclone-s3_bayt:latest
+    scale: 0
+  libraries_mecha-rclone-s3_srcs:
+    build:
+      additional_contexts:
+        libraries_mecha-rclone-s3-image_srcs: service:libraries_mecha-rclone-s3-image_srcs
+      context: ..
+      dockerfile: .bayt/Dockerfile.rclone-s3
+      target: rclone-s3_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-rclone-s3_srcs:latest
+    scale: 0

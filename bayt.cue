@@ -1,27 +1,102 @@
-// libraries/mecha/bayt.cue — source-only bayt project for the mecha
-// TypeScript packages.
+// libraries/mecha/bayt.cue — mecha's bayt project: the images it builds,
+// the packages bun-workspace consumers pull as sources, and its own stack.
 //
-// mecha has no image of its own; it exists so bun-workspace consumers
-// (guis/snapcards, whose bun.lock links ../../libraries/mecha/packages/*)
-// can pull the package sources into their build context via a cross-project
-// srcs dep: `deps: ["libraries_mecha:setup:srcs"]`. Mirrors how omnishell
-// exposes `plugins_omnishell:build:srcs`.
+// Images: every service that carries mecha's own content is an `*-image`
+// target here, public, so the cluster template (cluster.cue) starts each
+// service FROM it and adds only what is the app's. bayt emits them as
+// plain Dockerfiles under .bayt/, which is what a consumer without bayt
+// builds with `docker build`.
 //
-// Bun project (github backend for bun; the core mise plugin picks the musl
-// variant that fails on the glibc nubox base). Only setup is modelled — the
-// package build/test loop lives in mecha's own Taskfile for now.
+// Sources: bun-workspace consumers (guis/snapcards, whose bun.lock links
+// ../../libraries/mecha/packages/*) pull the package sources into their
+// build context via `deps: ["libraries_mecha:setup:srcs"]`, the way
+// omnishell exposes `plugins_omnishell:build:srcs`. The package build/test
+// loop lives in mecha's own Taskfile.
+//
+// The stack: the cluster instantiated for mecha itself, FROM its own images,
+// plus what the cluster does not cover — stream processing, the AI gateway
+// placeholder, a debug shell, and the smoke suites the Taskfile runs. The
+// stack is the worked example of consuming the images, and the smoke suites
+// are the check on both.
+//
 package mecha
 
 import (
 	bayt "github.com/bonisoft3/bayt/core:bayt"
+	apt "github.com/bonisoft3/bayt/distros/apt"
 	mise "github.com/bonisoft3/bayt/stacks/mise"
 	sayt "github.com/bonisoft3/bayt/stacks/sayt"
+	cluster "github.com/bonisoft3/mecha:cluster"
 )
 
-_mecha: bayt.#project & {
-	dir:      "libraries/mecha"
+_deno:    "denoland/deno:alpine-2.3.7@sha256:bec860a253508d9813bb622be2359fd7bb3f72ff9a85ed6f8ccd46ab8522bcf6"
+_connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
+_busybox: "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"
+_curl:    "tarampampam/curl@sha256:617b3306349beaacb7ad82bddda8d6876a40c3bad06d7a28981504d230802d7e"
+
+// An image target: public, no lifecycle command, no toolchain activator —
+// the process is the base image's own entrypoint, or the CMD stated here.
+_image: {
+	visibility: "public"
+	cmd: "builtin": null
+	activate: ""
+}
+
+// A stack target: runs on bare `up`, or by name when `manual`.
+_run: {
+	cmd: "builtin": null
+	activate: ""
+}
+
+_stack: cluster.#Cluster & {
+	meta: {
+		app: "mecha"
+		images: {
+			database:   {ref: ":database-image"}
+			mesh:       {ref: ":mesh-image"}
+			conduit:    {ref: ":conduit-image"}
+			auth:       {ref: ":auth-image"}
+			ticker:     {ref: ":ticker-image"}
+			clock:      {ref: ":clock-image"}
+			"rclone-s3": {ref: ":rclone-s3-image"}
+		}
+		// A plain-HTTP door: mecha's proxy config serves no TLS, and the
+		// smoke suites and the benchmark address localhost:8080.
+		caddyfile:       "services/proxy/Caddyfile"
+		door:            "8080:8080"
+		conduitTemplate: "services/cdc/pipelines/cdc-to-dapr.yaml"
+		statics: []
+	}
+	state: {
+		// mecha's own schema, then the validation-seat fixtures the crud smoke
+		// asserts against; postgres runs the directory in name order.
+		migrations: [
+			"services/database/migrations/000_extensions.sql",
+			"services/database/migrations/001_roles.sql",
+			"services/database/migrations/002_grants.sql",
+			"services/database/migrations/003_publication.sql",
+			"services/database/migrations/004_create_tables.sql",
+			"services/database/migrations/005_electric_publication.sql",
+			"tests/validation-smoke.sql",
+		]
+		pipelines: [{name: "passthrough", file: "services/transform/passthrough.yaml"}]
+		// Any name: the cluster only asks whether a schedule exists, and the
+		// ticker and clock are part of what this stack exercises.
+		schedules: ["tick"]
+	}
+	capabilities: {auth: true, blobs: true}
+}
+
+// Where the project lives. One literal, rewritten by the mirror
+// (copy.bara.sky): at the mirror's root the project is `.`, named `mecha`.
+// bayt's scan reads this file alone, so the value cannot come from another
+// file. Same-project refs below never depend on it.
+_where: {dir: ".", name: "mecha"}
+
+_mecha: bayt.#project & _where & {
 	activate: "mise x --"
 
+	targets: (cluster.#Runtime & {project: _mecha.name, "cluster": _stack}).targets
 	targets: {
 		// Public so bun-workspace consumers COPY the package sources
 		// (`libraries_mecha:setup:srcs`). Sources cover every workspace
@@ -43,6 +118,293 @@ _mecha: bayt.#project & {
 			srcs: globs: ["proto/**"]
 			cmd: "builtin": do: "buf lint proto"
 			dockerfile: from: ref: ":setup"
+		}
+
+		// ---- The images -------------------------------------------------
+
+		"database-image": _image & {
+			srcs: globs: ["services/database/rls/rls.sql"]
+			dockerfile: {
+				from: name: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
+				// wal2json for logical decoding; plv8 hosts a Jessie validation
+				// inside the write's transaction. PGDG apt carries no plv8: the
+				// artifact is Pigsty's, fetched by exact name and checked against
+				// its published sha256 per architecture, inside the same RUN so
+				// the .deb and the fetch tooling leave no layer behind.
+				defaultPreamble: extensions: (apt.#install & {
+					pkgs: ["postgresql-18-wal2json", "ca-certificates", "wget"]
+					then: [
+						"arch=$(dpkg --print-architecture)",
+						"case \"$arch\" in amd64) sum=d46aa5f0e85db736f6a881cdfaab8400c57a4007291c441007f205fe796ebe92;; arm64) sum=e0517a453c1421e3bd3b6bbd28e8446e90a59e00cfe4b27607e5df17e93a2abd;; *) echo \"no plv8 artifact for $arch\" >&2; exit 1;; esac",
+						"wget -qO /tmp/plv8.deb \"https://repo.pigsty.io/apt/pgsql/trixie/pool/main/p/plv8/postgresql-18-plv8_3.2.4-1PIGSTY~trixie_$arch.deb\"",
+						"echo \"$sum  /tmp/plv8.deb\" | sha256sum -c -",
+						"dpkg -i /tmp/plv8.deb",
+						"rm /tmp/plv8.deb",
+					]
+					purge: ["wget", "ca-certificates"]
+				}).out
+				// The data directory lives on the container's writable layer.
+				preamble: ["ENV PGDATA=/postgresql-data"]
+				// The tenancy floor ships with the image, whatever emitted the
+				// tables above it: it sorts after mecha's 002 grants and before
+				// the app's 005 that calls rls_protect.
+				copy: [{srcs: ["services/database/rls/rls.sql"], dst: "/docker-entrypoint-initdb.d/002a_rls.sql"}]
+				cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
+					"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
+			}
+		}
+		"mesh-image": _image & {
+			srcs: globs: ["services/mesh/dapr/components/*.yaml", "services/mesh/entrypoint.sh"]
+			dockerfile: {
+				from: name: "daprio/daprd:1.16.1@sha256:b977660c4503fe9872b0a94a33067df0dfe0a84878dc054acd8caff82a8c4125"
+				// The entrypoint's interpreter: daprd's image ships no shell.
+				copy: [
+					{from: {name: _busybox}, srcs: ["/bin/busybox"], dst: "/busybox"},
+					{srcs: ["services/mesh/dapr/components/httpendpoints.yaml", "services/mesh/dapr/components/resiliency.yaml", "services/mesh/dapr/components/redis-streams.yaml"], dst: "/dapr/components/"},
+					{srcs: ["services/mesh/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"},
+				]
+				entrypoint: ["/entrypoint.sh"]
+			}
+		}
+		"conduit-image": _image & {
+			dockerfile: {
+				from: name: "ghcr.io/conduitio/conduit:v0.14.0@sha256:dffc83f78caddac8fda0bf71b2b34212174e4a8cbe74ee5e1784a97a78b77e60"
+				// conduit's standalone plugin registry searches <cwd>/connectors.
+				workdir: "/app"
+				preamble: [
+					"ARG TARGETARCH",
+					"RUN mkdir -p /app/connectors && ARCH=$(case \"${TARGETARCH}\" in arm64) echo \"arm64\" ;; *) echo \"x86_64\" ;; esac) && wget -qO- \"https://github.com/conduitio-labs/conduit-connector-http/releases/download/v0.4.0/conduit-connector-http_0.4.0_Linux_${ARCH}.tar.gz\" | tar -xzf - -C /app/connectors conduit-connector-http && chmod +x /app/connectors/conduit-connector-http && apk add --no-cache gettext",
+				]
+			}
+		}
+		"auth-image": _image & {
+			srcs: globs: ["services/auth/deno.json", "services/auth/deno.lock", "services/auth/main.ts"]
+			dockerfile: {
+				from: name: _deno
+				// deno runs `main.ts` from the working directory.
+				workdir: "/app"
+				copy: [{srcs: ["services/auth/deno.json", "services/auth/deno.lock", "services/auth/main.ts"], dst: "/app/"}]
+				epilogue: ["RUN deno cache main.ts"]
+				expose: [9999]
+				cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
+			}
+		}
+		"ticker-image": _image & {
+			srcs: globs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts"]
+			dockerfile: {
+				from: name: _deno
+				workdir: "/app"
+				copy: [{srcs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts"], dst: "/app/"}]
+				epilogue: ["RUN deno cache main.ts"]
+				cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
+			}
+		}
+		"clock-image": _image & {
+			srcs: globs: ["services/clock/clock.yaml"]
+			dockerfile: {
+				from: name: _connect
+				copy: [{srcs: ["services/clock/clock.yaml"], dst: "/clock.yaml"}]
+				cmd: ["run", "/clock.yaml"]
+			}
+		}
+		"rclone-s3-image": _image & {
+			srcs: globs: ["services/rclone-s3/entrypoint.sh"]
+			dockerfile: {
+				from: name: "rclone/rclone:1.71.0@sha256:fd635aecd9667ee3c3bf920d14118090d4f2a83a080c1fa77e0bafbd4587ca87"
+				preamble: [
+					"USER root",
+					"RUN mkdir -p /data && chown -R 1000:1000 /data",
+				]
+				copy: [{srcs: ["services/rclone-s3/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"}]
+				entrypoint: ["/entrypoint.sh"]
+				cmd: ["serve", "s3", "--addr=0.0.0.0:3900", "--vfs-cache-mode=off", "/data"]
+				epilogue: ["USER 1000"]
+			}
+		}
+
+		// ---- The stack beyond the cluster ---------------------------------
+		// Up with the cluster on a bare `up`: bayt has harnesses (manual,
+		// reached by name) and the stack, and an optional plane is neither —
+		// a wait on a manual target's service is a wait on nothing.
+
+		// Stream processing: Redpanda and Arroyo, fed by a second rpk
+		// pipeline teeing the CDC stream onto Kafka.
+		"redpanda": _run & {
+			dockerfile: from: name: "redpandadata/redpanda:v24.3.7@sha256:f3049dcb004ce1ccc0a8b3dc3c7d6ca1f32cb4d6d1da98a47874457dd8cb9907"
+			compose: {
+				// 512M: v24.3.7's allocator aborts on its first large
+				// allocation at 100M, before a client connects.
+				command: ["redpanda", "start", "--kafka-addr=internal://0.0.0.0:9092", "--advertise-kafka-addr=internal://redpanda:9092", "--mode=dev-container", "--smp=1", "--memory=512M", "--default-log-level=warn"]
+				ports: ["9092"]
+				networks: default: aliases: ["redpanda"]
+				healthcheck: {
+					// rpk's overview prints `Healthy: true`.
+					test: ["CMD-SHELL", "rpk cluster health --api-urls=localhost:9644 | grep -q 'Healthy: *true'"]
+					interval:     "5s", timeout:         "5s", retries: 6
+					start_period: "15s", start_interval: "500ms"
+				}
+			}
+		}
+		"kafka-fanout": _run & {
+			srcs: globs: ["services/transform/kafka-fanout.yaml"]
+			dockerfile: {
+				from: name: _connect
+				copy: [{srcs: ["services/transform/kafka-fanout.yaml"], dst: "/pipelines/kafka-fanout.yaml"}]
+				cmd: ["run", "/pipelines/kafka-fanout.yaml"]
+			}
+			compose: {
+				depends_on: {
+					"\(_mecha.name)-redis":    {condition: "service_healthy"}
+					"\(_mecha.name)-redpanda": {condition: "service_healthy"}
+				}
+				restart: "on-failure"
+				develop: watch: [{action: "sync+restart", path: "../services/transform/kafka-fanout.yaml", target: "/pipelines/kafka-fanout.yaml"}]
+			}
+		}
+		"arroyo": _run & {
+			srcs: globs: ["services/arroyo/arroyo-init.sh", "services/arroyo/healthcheck.sh", "services/arroyo/queries/*"]
+			dockerfile: {
+				from: name: "ghcr.io/arroyosystems/arroyo:latest@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df"
+				defaultPreamble: tools: (apt.#install & {pkgs: ["curl", "jq", "netcat-openbsd"]}).out
+				copy: [
+					{srcs: ["services/arroyo/arroyo-init.sh"], dst: "/init-scripts/arroyo-init.sh", chmod: "755"},
+					{srcs: ["services/arroyo/healthcheck.sh"], dst: "/usr/local/bin/arroyo-healthcheck.sh", chmod: "755"},
+					{srcs: ["services/arroyo/queries"], dst: "/queries"},
+				]
+				entrypoint: ["/bin/sh", "/init-scripts/arroyo-init.sh"]
+				healthcheck: {
+					test: ["CMD", "/usr/local/bin/arroyo-healthcheck.sh"]
+					interval: "5s", timeout: "5s", retries: 6, start_period: "30s"
+				}
+			}
+			compose: {
+				depends_on: {
+					"\(_mecha.name)-redpanda": {condition: "service_healthy"}
+					"\(_mecha.name)-database": {condition: "service_started"}
+					"\(_mecha.name)-redis":    {condition: "service_started"}
+				}
+				ports: ["5115"]
+				networks: default: aliases: ["arroyo"]
+				restart: "on-failure"
+				develop: watch: [{action: "sync+restart", path: "../services/arroyo/queries/", target: "/queries/"}]
+			}
+		}
+		// The AI gateway's seat (github.com/maximhq/bifrost), a placeholder
+		// that holds the port.
+		"bifrost": _run & {
+			dockerfile: {
+				from: name: bayt.lock.images.busybox
+				cmd: ["sleep", "infinity"]
+			}
+			compose: {
+				ports: ["8090:8090"]
+			}
+		}
+		// A debug shell with the stack visible over the compose network,
+		// reached by name: `docker compose run --rm -it nubox`.
+		"nubox": _run & {
+			dockerfile: bayt.nubox
+			compose: {
+				manual: true
+				entrypoint: ["nu"]
+				depends_on: "\(_mecha.name)-database": {condition: "service_healthy"}
+			}
+		}
+
+		// ---- The smoke suites ---------------------------------------------
+		// Each waits on the slice it exercises, so running one brings that
+		// slice up. `smoke` and `smoke-cdc` exit with their verdict (`run`);
+		// `smoke-stream` and `smoke-blobs` hold while their healthcheck
+		// asserts (`up --wait`). The Taskfile spells both.
+
+		_smokeImage: {
+			dockerfile: {
+				from: name: _busybox
+				copy: [
+					{from: {name: _curl}, srcs: ["/bin/curl"], dst: "/bin/curl"},
+					{srcs: ["tests/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"},
+					{srcs: ["tests/entrypoint-events.sh"], dst: "/entrypoint-events.sh", chmod: "755"},
+				]
+			}
+			srcs: globs: ["tests/entrypoint.sh", "tests/entrypoint-events.sh"]
+		}
+		// CRUD write and proxy read, then the validation seat and the tenancy floor.
+		"smoke": _run & _smokeImage & {
+			dockerfile: entrypoint: ["/bin/sh", "/entrypoint.sh"]
+			compose: {
+				manual: true
+				depends_on: {
+					"\(_mecha.name)-crud":  {condition: "service_healthy"}
+					"\(_mecha.name)-caddy": {condition: "service_healthy"}
+				}
+			}
+		}
+		// The CDC pipeline end to end: insert, WAL, bus, rpk, PATCH back —
+		// so it waits on every hop, transform included.
+		"smoke-cdc": _run & _smokeImage & {
+			dockerfile: entrypoint: ["/bin/sh", "/entrypoint-events.sh"]
+			compose: {
+				manual: true
+				depends_on: {
+					"\(_mecha.name)-conduit":   {condition: "service_healthy"}
+					"\(_mecha.name)-redis":     {condition: "service_healthy"}
+					"\(_mecha.name)-transform": {condition: "service_started"}
+				}
+				environment: CRUD_URL: "http://crud:3000"
+			}
+		}
+		// Stream analytics: emits sample events, then holds while its
+		// healthcheck asserts Arroyo aggregated them — `up --wait` returns on
+		// that verdict. The events reach Arroyo through the CDC path and the
+		// Kafka fan-out, so both are waited on.
+		"smoke-stream": _run & {
+			srcs: globs: ["tests/stream-analytics-test/entrypoint.sh", "tests/stream-analytics-test/healthcheck.sh"]
+			dockerfile: {
+				from: name: _curl
+				copy: [
+					{srcs: ["tests/stream-analytics-test/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"},
+					{srcs: ["tests/stream-analytics-test/healthcheck.sh"], dst: "/healthcheck.sh", chmod: "755"},
+					{from: {name: _busybox}, srcs: ["/bin/busybox"], dst: "/bin/busybox"},
+				]
+				entrypoint: ["/bin/busybox", "sh", "/entrypoint.sh"]
+				healthcheck: {
+					test: ["CMD", "/bin/busybox", "sh", "/healthcheck.sh"]
+					interval: "5s", timeout: "5s", retries: 12, start_period: "30s"
+				}
+			}
+			compose: {
+				manual: true
+				depends_on: {
+					"\(_mecha.name)-arroyo":       {condition: "service_healthy"}
+					"\(_mecha.name)-kafka-fanout": {condition: "service_started"}
+					"\(_mecha.name)-conduit":      {condition: "service_healthy"}
+					"\(_mecha.name)-transform":    {condition: "service_started"}
+				}
+			}
+		}
+		// The blob plane: an S3 PUT through rclone, an image through imgproxy;
+		// holds while its healthcheck asserts both, like the stream suite.
+		"smoke-blobs": _run & {
+			srcs: globs: ["tests/unicorn-test/entrypoint.sh", "tests/unicorn-test/healthcheck.sh"]
+			dockerfile: {
+				from: name: _busybox
+				copy: [
+					{srcs: ["tests/unicorn-test/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"},
+					{srcs: ["tests/unicorn-test/healthcheck.sh"], dst: "/healthcheck.sh", chmod: "755"},
+				]
+				entrypoint: ["/bin/sh", "/entrypoint.sh"]
+				healthcheck: {
+					test: ["CMD", "/bin/sh", "/healthcheck.sh"]
+					interval: "5s", timeout: "5s", retries: 12, start_period: "30s"
+				}
+			}
+			compose: {
+				manual: true
+				depends_on: {
+					"\(_mecha.name)-rclone-s3": {condition: "service_healthy"}
+					"\(_mecha.name)-imgproxy":  {condition: "service_healthy"}
+				}
+			}
 		}
 	}
 }

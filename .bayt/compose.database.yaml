@@ -1,0 +1,88 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-database:
+    build:
+      additional_contexts:
+        libraries_mecha-database-image: service:libraries_mecha-database-image
+      context: ..
+      dockerfile: .bayt/Dockerfile.database
+      target: database
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    develop:
+      watch:
+      - action: rebuild
+        path: ../services/database/migrations/000_extensions.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../services/database/migrations/001_roles.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../services/database/migrations/002_grants.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../services/database/migrations/003_publication.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../services/database/migrations/004_create_tables.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../services/database/migrations/005_electric_publication.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../tests/validation-smoke.sql
+        target: /docker-entrypoint-initdb.d
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-mecha}
+      POSTGRES_INITDB_ARGS: --no-sync --no-locale --encoding=UTF8 --auth=trust
+    healthcheck:
+      test:
+      - CMD
+      - pg_isready
+      - -h
+      - localhost
+      - -p
+      - "5432"
+      - -d
+      - ${POSTGRES_DB:-mecha}
+      - -U
+      - ${POSTGRES_USER:-postgres}
+      interval: 1s
+      timeout: 5s
+      retries: 30
+      start_period: 5m
+      start_interval: 100ms
+    image: bayt-libraries_mecha-database:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - database
+    ports:
+    - "5432"
+  libraries_mecha-database_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-database-image_bayt: service:libraries_mecha-database-image_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.database
+      target: database_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-database_bayt:latest
+    scale: 0
+  libraries_mecha-database_srcs:
+    build:
+      additional_contexts:
+        libraries_mecha-database-image_srcs: service:libraries_mecha-database-image_srcs
+      context: ..
+      dockerfile: .bayt/Dockerfile.database
+      target: database_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-database_srcs:latest
+    scale: 0

@@ -1,20 +1,11 @@
 #!/usr/bin/env nu
-# Benchmark: stack startup time + CRUD + CDC pipeline latency.
+# Benchmark: stack startup time + CRUD + CDC pipeline latency. The stack is
+# one — a bare `up` is the cluster with the stream and ai extras.
 # Usage:
-#   nu scripts/benchmark.nu                    # cdc profile, 3 iterations
-#   nu scripts/benchmark.nu --profile stream
+#   nu scripts/benchmark.nu                    # 5 iterations
 #   nu scripts/benchmark.nu --iterations 10
 #
 # Runs natively on Windows, macOS, and Linux via Nushell.
-
-def profile-args [name: string] {
-    match $name {
-        "crud"   => []
-        "cdc"    => [--profile sync --profile cdc]
-        "stream" => [--profile sync --profile cdc --profile stream]
-        _ => (error make {msg: $"unknown profile: ($name)"})
-    }
-}
 
 def wait-until [--timeout: duration = 3min, block: closure] {
     let deadline = (date now) + $timeout
@@ -35,19 +26,16 @@ def time-block [block: closure] {
 
 # --- Stack startup ---------------------------------------------------
 
-def "main startup" [--profile: string = "cdc"] {
-    let args = profile-args $profile
-    let all = [--profile sync --profile cdc --profile stream --profile blobs]
-
-    print $"=== Startup ((ansi cyan))($profile)(ansi reset) ==="
-    ^docker compose ...$all down -v out+err> (if $nu.os-info.name == "windows" { "nul" } else { "/dev/null" })
+def "main startup" [] {
+    print $"=== Startup ==="
+    ^docker compose --profile '*' down -v out+err> (if $nu.os-info.name == "windows" { "nul" } else { "/dev/null" })
     sleep 1sec
 
     let started = time-block {
-        ^docker compose ...$args up -d --wait
+        ^docker compose up -d --wait
     }
 
-    let services = (^docker compose ...$args ps --format json | lines | each { from json })
+    let services = (^docker compose ps --format json | lines | each { from json })
     let healthy = ($services | where state == "running" | length)
 
     print $"  total:     ($started)"
@@ -110,22 +98,18 @@ def "main cdc" [--iterations: int = 5] {
 # --- Run everything --------------------------------------------------
 
 def main [
-    --profile: string = "cdc"       # crud | cdc | stream
     --iterations: int = 5            # number of iterations for each benchmark
 ] {
     print $"Mecha v2 Benchmark"
-    print $"Profile:    ($profile)"
     print $"Iterations: ($iterations)"
     print $"Date:       (date now | format date '%Y-%m-%dT%H:%M:%S')"
     print ""
 
-    main startup --profile $profile
+    main startup
     print ""
     main crud --iterations $iterations
     print ""
-    if $profile != "crud" {
-        main cdc --iterations $iterations
-    }
+    main cdc --iterations $iterations
     print ""
     print "=== done ==="
 }

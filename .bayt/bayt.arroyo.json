@@ -1,0 +1,236 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": false,
+    "environment": {},
+    "depends_on": {
+      "libraries_mecha-redpanda": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-database": {
+        "condition": "service_started"
+      },
+      "libraries_mecha-redis": {
+        "condition": "service_started"
+      }
+    },
+    "ports": [
+      "5115"
+    ],
+    "volumes": [],
+    "networks": {
+      "default": {
+        "aliases": [
+          "arroyo"
+        ]
+      }
+    },
+    "restart": "on-failure",
+    "develop": {
+      "watch": [
+        {
+          "action": "sync+restart",
+          "path": "../services/arroyo/queries/",
+          "target": "/queries/"
+        }
+      ]
+    }
+  },
+  "dockerfile": {
+    "preamble": [
+      "RUN --mount=type=cache,target=/apt-store,id=/apt-store,sharing=shared --mount=type=cache,target=/var/cache/apt,id=libraries_mecha-arroyo:/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt/lists,id=libraries_mecha-arroyo:/var/lib/apt/lists,sharing=locked s=/apt-store; d=/var/cache/apt/archives; mkdir -p \"$s\" \"$d\"; cp -r \"$s\"/. \"$d\"/ 2>/dev/null || true; rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl jq netcat-openbsd || exit; cd \"$d\" && for f in *.deb; do [ -f \"$f\" ] || continue; o=\"$s/$f\"; [ -e \"$o\" ] && continue; t=\"$(mktemp \"$s/.pXXXXXX\")\" && cp \"$f\" \"$t\" && mv -f \"$t\" \"$o\"; done; :"
+    ],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "ghcr.io/arroyosystems/arroyo:latest@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df"
+    },
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "services/arroyo/arroyo-init.sh"
+        ],
+        "dst": "/init-scripts/arroyo-init.sh",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "services/arroyo/healthcheck.sh"
+        ],
+        "dst": "/usr/local/bin/arroyo-healthcheck.sh",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "services/arroyo/queries"
+        ],
+        "dst": "/queries",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "entrypoint": [
+      "/bin/sh",
+      "/init-scripts/arroyo-init.sh"
+    ],
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "/usr/local/bin/arroyo-healthcheck.sh"
+      ],
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 6,
+      "start_period": "30s"
+    },
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "expose": [],
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "arroyo",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "services/arroyo/arroyo-init.sh",
+      "services/arroyo/healthcheck.sh",
+      "services/arroyo/queries/*"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "arroyo_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.arroyo.yaml",
+          ".bayt/Dockerfile.arroyo",
+          ".bayt/bayt.arroyo.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.arroyo.yaml"
+      ]
+    },
+    "outs": {
+      "name": "arroyo_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.arroyo.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "arroyo_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/arroyo/arroyo-init.sh",
+          "services/arroyo/healthcheck.sh",
+          "services/arroyo/queries/*"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.arroyo.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.arroyo.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

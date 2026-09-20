@@ -1,0 +1,390 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": false,
+    "environment": {},
+    "ports": [],
+    "volumes": [],
+    "depends_on": {
+      "libraries_mecha-caddy": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-database": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-crud": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-electric": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-redis": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-mesh-events": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-conduit": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-transform": {
+        "condition": "service_started"
+      },
+      "libraries_mecha-auth": {
+        "condition": "service_started"
+      },
+      "libraries_mecha-rclone-s3": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-imgproxy": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-clock": {
+        "condition": "service_started"
+      }
+    },
+    "networks": {
+      "default": {
+        "aliases": [
+          "launch"
+        ]
+      }
+    },
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "echo",
+        "mecha is healthy"
+      ],
+      "interval": "5s",
+      "timeout": "2s",
+      "retries": 3
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223"
+    },
+    "cmd": [
+      "tail",
+      "-f",
+      "/dev/null"
+    ],
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "copy": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false
+  },
+  "name": "launch",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "launch_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.launch.yaml",
+          ".bayt/Dockerfile.launch",
+          ".bayt/bayt.launch.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.launch.yaml",
+        "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.electric.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.mesh-events.yaml",
+        "libraries/mecha/.bayt/compose.mesh-image.yaml",
+        "libraries/mecha/.bayt/compose.conduit.yaml",
+        "libraries/mecha/.bayt/compose.conduit-image.yaml",
+        "libraries/mecha/.bayt/compose.transform.yaml",
+        "libraries/mecha/.bayt/compose.auth.yaml",
+        "libraries/mecha/.bayt/compose.auth-image.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml",
+        "libraries/mecha/.bayt/compose.imgproxy.yaml",
+        "libraries/mecha/.bayt/compose.clock.yaml",
+        "libraries/mecha/.bayt/compose.clock-image.yaml",
+        "libraries/mecha/.bayt/compose.ticker.yaml",
+        "libraries/mecha/.bayt/compose.ticker-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "launch_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.launch.yaml",
+        "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.electric.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.mesh-events.yaml",
+        "libraries/mecha/.bayt/compose.mesh-image.yaml",
+        "libraries/mecha/.bayt/compose.conduit.yaml",
+        "libraries/mecha/.bayt/compose.conduit-image.yaml",
+        "libraries/mecha/.bayt/compose.transform.yaml",
+        "libraries/mecha/.bayt/compose.auth.yaml",
+        "libraries/mecha/.bayt/compose.auth-image.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml",
+        "libraries/mecha/.bayt/compose.imgproxy.yaml",
+        "libraries/mecha/.bayt/compose.clock.yaml",
+        "libraries/mecha/.bayt/compose.clock-image.yaml",
+        "libraries/mecha/.bayt/compose.ticker.yaml",
+        "libraries/mecha/.bayt/compose.ticker-image.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": false,
+  "deps": [
+    "caddy_outs",
+    "database_outs",
+    "crud_outs",
+    "electric_outs",
+    "redis_outs",
+    "mesh-events_outs",
+    "conduit_outs",
+    "transform_outs",
+    "auth_outs",
+    "rclone-s3_outs",
+    "imgproxy_outs",
+    "clock_outs"
+  ],
+  "sameProjectDeps": [
+    "caddy_outs",
+    "database_outs",
+    "crud_outs",
+    "electric_outs",
+    "redis_outs",
+    "mesh-events_outs",
+    "conduit_outs",
+    "transform_outs",
+    "auth_outs",
+    "rclone-s3_outs",
+    "imgproxy_outs",
+    "clock_outs"
+  ],
+  "transitiveDeps": [
+    "caddy_outs",
+    "database_outs",
+    "crud_outs",
+    "electric_outs",
+    "redis_outs",
+    "mesh-events_outs",
+    "conduit_outs",
+    "transform_outs",
+    "auth_outs",
+    "rclone-s3_outs",
+    "imgproxy_outs",
+    "clock_outs"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.launch.yaml",
+    "libraries/mecha/.bayt/compose.caddy.yaml",
+    "libraries/mecha/.bayt/compose.database.yaml",
+    "libraries/mecha/.bayt/compose.database-image.yaml",
+    "libraries/mecha/.bayt/compose.crud.yaml",
+    "libraries/mecha/.bayt/compose.electric.yaml",
+    "libraries/mecha/.bayt/compose.redis.yaml",
+    "libraries/mecha/.bayt/compose.mesh-events.yaml",
+    "libraries/mecha/.bayt/compose.mesh-image.yaml",
+    "libraries/mecha/.bayt/compose.conduit.yaml",
+    "libraries/mecha/.bayt/compose.conduit-image.yaml",
+    "libraries/mecha/.bayt/compose.transform.yaml",
+    "libraries/mecha/.bayt/compose.auth.yaml",
+    "libraries/mecha/.bayt/compose.auth-image.yaml",
+    "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+    "libraries/mecha/.bayt/compose.rclone-s3-image.yaml",
+    "libraries/mecha/.bayt/compose.imgproxy.yaml",
+    "libraries/mecha/.bayt/compose.clock.yaml",
+    "libraries/mecha/.bayt/compose.clock-image.yaml",
+    "libraries/mecha/.bayt/compose.ticker.yaml",
+    "libraries/mecha/.bayt/compose.ticker-image.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "caddy_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "database_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "crud_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "electric_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "redis_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "mesh-events_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "conduit_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "transform_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "auth_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "rclone-s3_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "imgproxy_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "clock_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

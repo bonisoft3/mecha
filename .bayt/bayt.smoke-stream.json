@@ -1,0 +1,221 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": true,
+    "environment": {},
+    "ports": [],
+    "volumes": [],
+    "depends_on": {
+      "libraries_mecha-arroyo": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-kafka-fanout": {
+        "condition": "service_started"
+      },
+      "libraries_mecha-conduit": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-transform": {
+        "condition": "service_started"
+      }
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "tarampampam/curl@sha256:617b3306349beaacb7ad82bddda8d6876a40c3bad06d7a28981504d230802d7e"
+    },
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "tests/stream-analytics-test/entrypoint.sh"
+        ],
+        "dst": "/entrypoint.sh",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "tests/stream-analytics-test/healthcheck.sh"
+        ],
+        "dst": "/healthcheck.sh",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": {
+          "name": "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"
+        },
+        "srcs": [
+          "/bin/busybox"
+        ],
+        "dst": "/bin/busybox",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "entrypoint": [
+      "/bin/busybox",
+      "sh",
+      "/entrypoint.sh"
+    ],
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "/bin/busybox",
+        "sh",
+        "/healthcheck.sh"
+      ],
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 12,
+      "start_period": "30s"
+    },
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "expose": [],
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "smoke-stream",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "tests/stream-analytics-test/entrypoint.sh",
+      "tests/stream-analytics-test/healthcheck.sh"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "smoke-stream_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.smoke-stream.yaml",
+          ".bayt/Dockerfile.smoke-stream",
+          ".bayt/bayt.smoke-stream.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.smoke-stream.yaml"
+      ]
+    },
+    "outs": {
+      "name": "smoke-stream_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.smoke-stream.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "smoke-stream_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "tests/stream-analytics-test/entrypoint.sh",
+          "tests/stream-analytics-test/healthcheck.sh"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.smoke-stream.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.smoke-stream.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

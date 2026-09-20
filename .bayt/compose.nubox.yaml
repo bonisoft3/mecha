@@ -1,0 +1,30 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-nubox:
+    build:
+      additional_contexts:
+        libraries_mecha-database: service:libraries_mecha-database
+      context: ..
+      dockerfile: .bayt/Dockerfile.nubox
+      target: nubox
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-database:
+        condition: service_healthy
+        restart: true
+    entrypoint:
+    - nu
+    image: bayt-libraries_mecha-nubox:${BAYT_IMAGE_TAG:-latest}
+    scale: 0
+  libraries_mecha-nubox_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.nubox
+      target: nubox_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-nubox_bayt:latest
+    scale: 0

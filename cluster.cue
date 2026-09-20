@@ -6,11 +6,14 @@
 // it; apps with hatches import it from their bayt.cue.
 //
 // Each target is bayt's vocabulary: the image is the Dockerfile bayt emits
-// from `dockerfile`, the runtime is its `compose` block. Names are bare and
-// so are `depends_on` keys; the builder that lowers the targets into a bayt
-// project qualifies the keys and gives each service its bare name as a
-// network alias (plugins/pronto/builders/bayt.cue), which is what keeps
-// `crud:3000` and `@database:5432` resolving.
+// from `dockerfile`, the runtime is its `compose` block. A service that
+// carries mecha's own content (the database's extensions and tenancy floor,
+// the mesh's components, the conduit connector, the deno services) starts
+// FROM the image mecha builds for it (bayt.cue, the `*-image` targets) and
+// adds only what is the app's: migrations, the Caddyfile, pipelines. Names
+// are bare and so are `depends_on` keys; #Runtime lowers the targets into a
+// bayt project, which is what keeps `crud:3000` and `@database:5432`
+// resolving.
 package cluster
 
 import (
@@ -18,7 +21,6 @@ import (
 	"strings"
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
-	apt "github.com/bonisoft3/bayt/distros/apt"
 )
 
 // A health wait states no `restart`: bayt adds `restart: true` to every one
@@ -34,6 +36,18 @@ _started: {condition: "service_started"}
 	watch:  *false | bool
 }
 
+// Where an image comes from, in bayt's own `from` arms: a target ref
+// (`":database-image"` inside mecha's own project, `"libraries_mecha:database-image"`
+// from another project of the monorepo) or a pinned image name.
+#From: {ref: string} | {name: string}
+
+// A #From handed to bayt as a plain struct: the definition is closed, and
+// bayt's ref arm adds the qualified `name` to it.
+_from: F={
+	in: #From
+	out: {for k, v in F.in {(k): v}}
+}
+
 // Pre-signed against the dev PGRST_JWT_SECRET: HS256, claims
 // {role: "service", sub: all-zeros uuid, exp: 2033-01-01}. Compose default
 // only — prod overrides both SERVICE_JWT and PGRST_JWT_SECRET together.
@@ -43,9 +57,6 @@ _devJwtSecret: "pronto-dev-secret-please-override-32ch"
 // The query parameter caddy adds after the gate and electric checks; one
 // literal, so the two cannot be given different ones by a slip.
 _devElectricSecret: "dev-electric-secret"
-
-_deno:    "denoland/deno:alpine-2.3.7@sha256:bec860a253508d9813bb622be2359fd7bb3f72ff9a85ed6f8ccd46ab8522bcf6"
-_connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
 
 #Cluster: X={
 	state: {
@@ -80,11 +91,6 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 		blobs: *false | bool
 	}
 
-	// mecha's own files reach a target's build through the `mecha` context:
-	// a path from .bayt/, where the emitted compose resolves it, to
-	// libraries/mecha. A target's `copy` names the context; this wires it.
-	_mecha: build: additional_contexts: mecha: "../\(X.meta.mechaPath)"
-
 	// No target runs a lifecycle command: the image is the recipe, the
 	// process is the base image's own entrypoint, and no toolchain
 	// activator wraps it — these images carry none.
@@ -104,43 +110,17 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 						start_interval: "100ms"
 						start_period:   "5m"
 					}
-					srcs: globs: ["services/database/migrations/*.sql"]
+					srcs: globs: X.state.migrations
 					dockerfile: {
-						from: name: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
-						// wal2json for logical decoding; plv8 hosts a Jessie
-						// validation inside the write's transaction. PGDG apt
-						// carries no plv8: the artifact is Pigsty's, fetched by
-						// exact name and checked against its published sha256
-						// per architecture, inside the same RUN so the .deb and
-						// the fetch tooling leave no layer behind.
-						defaultPreamble: extensions: (apt.#install & {
-							pkgs: ["postgresql-18-wal2json", "ca-certificates", "wget"]
-							then: [
-								"arch=$(dpkg --print-architecture)",
-								"case \"$arch\" in amd64) sum=d46aa5f0e85db736f6a881cdfaab8400c57a4007291c441007f205fe796ebe92;; arm64) sum=e0517a453c1421e3bd3b6bbd28e8446e90a59e00cfe4b27607e5df17e93a2abd;; *) echo \"no plv8 artifact for $arch\" >&2; exit 1;; esac",
-								"wget -qO /tmp/plv8.deb \"https://repo.pigsty.io/apt/pgsql/trixie/pool/main/p/plv8/postgresql-18-plv8_3.2.4-1PIGSTY~trixie_$arch.deb\"",
-								"echo \"$sum  /tmp/plv8.deb\" | sha256sum -c -",
-								"dpkg -i /tmp/plv8.deb",
-								"rm /tmp/plv8.deb",
-							]
-							purge: ["wget", "ca-certificates"]
-						}).out
-						// The data directory lives on the container's writable
-						// layer, which `--force-recreate` discards with it.
-						preamble: ["ENV PGDATA=/postgresql-data"]
-						// The tenancy floor ships with the image, whatever emitted
-						// the tables above it: it sorts after mecha's 002 grants
-						// and before the app's 005 that calls rls_protect. The
-						// app's migrations follow; postgres runs the directory in
-						// name order on a fresh data directory.
-						copy: [
-							{from: {name: "mecha"}, srcs: ["services/database/rls/rls.sql"], dst: "/docker-entrypoint-initdb.d/002a_rls.sql"},
-							{srcs: X.state.migrations, dst: "/docker-entrypoint-initdb.d/"},
-						]
-						cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
-							"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
+						from: (_from & {in: X.meta.images.database}).out
+						// The image carries the extensions and the tenancy floor;
+						// the app's migrations follow it in the initdb directory,
+						// which postgres runs in name order on a fresh data
+						// directory. That directory lives on the container's
+						// writable layer, which `--force-recreate` discards with it.
+						copy: [{srcs: X.state.migrations, dst: "/docker-entrypoint-initdb.d/"}]
 					}
-					compose: X._mecha & {
+					compose: {
 						ports: ["5432"]
 						environment: {
 							POSTGRES_USER:        "${POSTGRES_USER:-postgres}"
@@ -148,7 +128,9 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 							POSTGRES_DB:          "${POSTGRES_DB:-\(X.meta.app)}"
 							POSTGRES_INITDB_ARGS: "--no-sync --no-locale --encoding=UTF8 --auth=trust"
 						}
-						develop: watch: [{action: "rebuild", path: "../services/database/migrations", target: "/docker-entrypoint-initdb.d"}]
+						// One rebuild entry per migration: the list is the consumer's, and
+						// mecha's own stack keeps a fixture outside the migrations directory.
+						develop: watch: [for m in X.state.migrations {action: "rebuild", path: "../\(m)", target: "/docker-entrypoint-initdb.d"}]
 					}
 				}
 				crud: bayt.healthcheck.http & X._image & {
@@ -186,15 +168,12 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 			if X.capabilities.auth {
 				"auth": X._image & {
 					dockerfile: {
-						from: name: _deno
-						// deno runs `main.ts` from the working directory.
+						from: (_from & {in: X.meta.images.auth}).out
+						// deno runs `main.ts` from the working directory, and bayt
+						// sets one per stage.
 						workdir: "/app"
-						copy: [{from: {name: "mecha"}, srcs: ["services/auth/deno.json", "services/auth/deno.lock", "services/auth/main.ts"], dst: "/app/"}]
-						epilogue: ["RUN deno cache main.ts"]
-						expose: [9999]
-						cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
 					}
-					compose: X._mecha & {
+					compose: {
 						depends_on: database: _healthy
 						environment: {
 							DATABASE_URL:     "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
@@ -225,13 +204,13 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 				// covers only the app's own files: a srcs glob cannot leave
 				// the project directory.
 				srcs: globs: list.Concat([
-					["docker/Caddyfile"],
+					[X.meta.caddyfile],
 					[for s in X.meta.statics if !strings.HasPrefix(s.file, "../../") {s.file}],
 				])
 				dockerfile: {
 					from: name: "caddy:2.9-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0"
 					copy: list.Concat([
-						[{srcs: ["docker/Caddyfile"], dst: "/etc/caddy/Caddyfile"}],
+						[{srcs: [X.meta.caddyfile], dst: "/etc/caddy/Caddyfile"}],
 						[for s in X.meta.statics {
 							if strings.HasPrefix(s.file, "../../") {
 								from: {name: "root"}
@@ -246,15 +225,13 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 				}
 				compose: {
 					build: additional_contexts: root: "../../.."
-					// One published door, and it is h2 over TLS. The plain listener
-					// still exists inside the container — the healthcheck above uses
-					// it — but it is deliberately NOT published: the browser's
-					// six-connections-per-origin cap only exists on HTTP/1.1, and a
-					// second front door is a path that only ever runs on a laptop
-					// (docs/2026-08-09-connection-ceiling.md).
-					ports: [
-						"${CADDY_TLS_HOST_PORT:-8443}:8443",
-					]
+					// One published door. For an app it is h2 over TLS; the plain
+					// listener still exists inside the container — the healthcheck
+					// above uses it — but is deliberately NOT published: the
+					// browser's six-connections-per-origin cap only exists on
+					// HTTP/1.1, and a second front door is a path that only ever
+					// runs on a laptop (docs/2026-08-09-connection-ceiling.md).
+					ports: [X.meta.door]
 					// The Caddyfile substitutes this into the electric route, which is
 					// the only place the secret is added. Same default as the electric
 					// service reads, and both are overridden together or neither.
@@ -268,7 +245,7 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 					volumes: ["../.certs:/certs:ro"]
 					// Watch paths are from .bayt/ too, hence the ../ on each.
 					develop: watch: list.Concat([
-						[{action: "sync+restart", path: "../docker/Caddyfile", target: "/etc/caddy/Caddyfile"}],
+						[{action: "sync+restart", path: "../\(X.meta.caddyfile)", target: "/etc/caddy/Caddyfile"}],
 						// Honoured, not assumed: a static that says it is not watched is
 						// one whose edit is a rebuild — a generated file, or a vendored
 						// unit whose megabytes would restart the proxy on every launch.
@@ -293,8 +270,9 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 							// gatekeeper and then adds this, so a request that reaches electric
 							// without passing the gate has no secret to present.
 							ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
-							// Validate the publication 007 declares rather than build one; 007
-							// says what building one would require of this role.
+							// Validate the publication the migrations declare rather than
+							// build one; an app's 007 says what building one would require
+							// of this role.
 							ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
 						}
 						healthcheck: {
@@ -322,17 +300,8 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 						start_interval: "500ms"
 						start_period:   "30s"
 					}
-					dockerfile: {
-						from: name: "daprio/daprd:1.16.1@sha256:b977660c4503fe9872b0a94a33067df0dfe0a84878dc054acd8caff82a8c4125"
-						// The entrypoint's interpreter: daprd's image ships no shell.
-						copy: [
-							{from: {name: "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"}, srcs: ["/bin/busybox"], dst: "/busybox"},
-							{from: {name: "mecha"}, srcs: ["services/mesh/dapr/components/httpendpoints.yaml", "services/mesh/dapr/components/resiliency.yaml", "services/mesh/dapr/components/redis-streams.yaml"], dst: "/dapr/components/"},
-							{from: {name: "mecha"}, srcs: ["services/mesh/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"},
-						]
-						entrypoint: ["/entrypoint.sh"]
-					}
-					compose: X._mecha & {
+					dockerfile: from: (_from & {in: X.meta.images.mesh}).out
+					compose: {
 						depends_on: {caddy: _started, redis: _started}
 						restart: "on-failure"
 					}
@@ -345,24 +314,21 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 						start_period:   "120s"
 						start_interval: "500ms"
 					}
-					srcs: globs: ["docker/conduit-pipeline.yaml"]
+					srcs: globs: [X.meta.conduitTemplate]
 					dockerfile: {
-						from: name: "ghcr.io/conduitio/conduit:v0.14.0@sha256:dffc83f78caddac8fda0bf71b2b34212174e4a8cbe74ee5e1784a97a78b77e60"
-						// conduit's standalone plugin registry searches <cwd>/connectors.
+						from: (_from & {in: X.meta.images.conduit}).out
+						// conduit's standalone plugin registry searches <cwd>/connectors,
+						// and bayt sets a working directory per stage.
 						workdir: "/app"
-						preamble: [
-							"ARG TARGETARCH",
-							"RUN mkdir -p /app/connectors && ARCH=$(case \"${TARGETARCH}\" in arm64) echo \"arm64\" ;; *) echo \"x86_64\" ;; esac) && wget -qO- \"https://github.com/conduitio-labs/conduit-connector-http/releases/download/v0.4.0/conduit-connector-http_0.4.0_Linux_${ARCH}.tar.gz\" | tar -xzf - -C /app/connectors conduit-connector-http && chmod +x /app/connectors/conduit-connector-http && apk add --no-cache gettext",
-						]
 						// The template sits beside the pipelines directory, not in it,
 						// so the rendered file is the only pipeline conduit finds and
 						// every start of the container can render it again.
-						copy: [{srcs: ["docker/conduit-pipeline.yaml"], dst: "/conduit/cdc-to-bus.yaml.tmpl"}]
+						copy: [{srcs: [X.meta.conduitTemplate], dst: "/conduit/cdc-to-bus.yaml.tmpl"}]
 						cmd: ["sh", "-c", "mkdir -p /conduit/pipelines && envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml && exec /app/conduit run"]
 					}
 					compose: {
 						depends_on: {database: _healthy, "mesh-events": _started}
-						develop: watch: [{action: "sync+restart", path: "../docker/conduit-pipeline.yaml", target: "/conduit/cdc-to-bus.yaml.tmpl"}]
+						develop: watch: [{action: "sync+restart", path: "../\(X.meta.conduitTemplate)", target: "/conduit/cdc-to-bus.yaml.tmpl"}]
 						environment: {
 							DATABASE_URL:           "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							CONDUIT_PIPELINES_PATH: "/conduit/pipelines"
@@ -374,18 +340,8 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 			}
 			if X.capabilities.blobs {
 				"rclone-s3": X._image & {
-					dockerfile: {
-						from: name: "rclone/rclone:1.71.0@sha256:fd635aecd9667ee3c3bf920d14118090d4f2a83a080c1fa77e0bafbd4587ca87"
-						preamble: [
-							"USER root",
-							"RUN mkdir -p /data && chown -R 1000:1000 /data",
-						]
-						copy: [{from: {name: "mecha"}, srcs: ["services/rclone-s3/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"}]
-						entrypoint: ["/entrypoint.sh"]
-						cmd: ["serve", "s3", "--addr=0.0.0.0:3900", "--vfs-cache-mode=off", "/data"]
-						epilogue: ["USER 1000"]
-					}
-					compose: X._mecha & {
+					dockerfile: from: (_from & {in: X.meta.images."rclone-s3"}).out
+					compose: {
 						environment: RCLONE_LOCAL_BUCKET: "mecha-objects"
 						healthcheck: {
 							test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:3900/ 2>&1 | grep -q 'HTTP/'"]
@@ -424,7 +380,7 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 				transform: X._image & {
 					srcs: globs: [for p in X.state.pipelines {p.file}]
 					dockerfile: {
-						from: name: _connect
+						from: name: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
 						cmd: list.Concat([["streams", "--no-api"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}]])
 					}
@@ -453,13 +409,10 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 			if len(X.state.schedules) > 0 {
 				ticker: X._image & {
 					dockerfile: {
-						from: name: _deno
+						from: (_from & {in: X.meta.images.ticker}).out
 						workdir: "/app"
-						copy: [{from: {name: "mecha"}, srcs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts"], dst: "/app/"}]
-						epilogue: ["RUN deno cache main.ts"]
-						cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
 					}
-					compose: X._mecha & {
+					compose: {
 						depends_on: crud: _healthy
 						environment: {
 							// Straight to PostgREST, like the pipelines above.
@@ -476,12 +429,8 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 				// What pokes the ticker. services/clock/clock.yaml states the
 				// pipeline and why the cadence is what it is.
 				clock: X._image & {
-					dockerfile: {
-						from: name: _connect
-						copy: [{from: {name: "mecha"}, srcs: ["services/clock/clock.yaml"], dst: "/clock.yaml"}]
-						cmd: ["run", "/clock.yaml"]
-					}
-					compose: X._mecha & {
+					dockerfile: from: (_from & {in: X.meta.images.clock}).out
+					compose: {
 						depends_on: ticker: _started
 						environment: {
 							POKE_INTERVAL: "${POKE_INTERVAL:-60s}"
@@ -558,7 +507,7 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 			// exit status along with it, and the status is the verdict. The
 			// secret placeholder has to hold something for the line to parse;
 			// compose sets it at runtime, and this is not runtime.
-			cmds: ["with-env {ELECTRIC_SECRET: lint} { mise exec -- caddy adapt --config docker/Caddyfile --adapter caddyfile out> (if $nu.os-info.name == \"windows\" { \"NUL\" } else { \"/dev/null\" }) }"]
+			cmds: ["with-env {ELECTRIC_SECRET: lint} { mise exec -- caddy adapt --config \(X.meta.caddyfile) --adapter caddyfile out> (if $nu.os-info.name == \"windows\" { \"NUL\" } else { \"/dev/null\" }) }"]
 			note: "checks the cluster's own proxy config parses"
 		}
 		// The door is h2, h2 needs TLS, and TLS needs a certificate the
@@ -597,8 +546,64 @@ _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a3
 
 	meta: {
 		app: string
-		// Path from the app dir to libraries/mecha, for the `mecha` build context.
-		mechaPath: *"../../libraries/mecha" | string
+		// The images mecha builds, one per service that carries mecha's own
+		// content (bayt.cue, the `*-image` targets). Stated by the consumer:
+		// same-project refs in mecha's own stack, cross-project refs from an
+		// app in the monorepo, pinned names where the images are pulled.
+		images: {
+			database:   #From
+			mesh:       #From
+			conduit:    #From
+			auth:       #From
+			ticker:     #From
+			clock:      #From
+			"rclone-s3": #From
+		}
+		// The proxy's config, relative to the app dir.
+		caddyfile: *"docker/Caddyfile" | string
+		// The one published door, in compose's `host:container` form.
+		door: *"${CADDY_TLS_HOST_PORT:-8443}:8443" | string
+		// The conduit pipeline, an envsubst template, relative to the app dir.
+		conduitTemplate: *"docker/conduit-pipeline.yaml" | string
 		statics: [...#Static]
 	}
+}
+
+// The cluster lowered into a bayt project. bayt names a service
+// `<project>-<target>`, so `depends_on` keys take the prefix; the bare name
+// stays as the service's network alias, which is what the Caddyfile, the
+// pipelines and every `@database:5432` URL address. Each wait is also an
+// image-only dep, so the entry closures carry the fragments of what they
+// wait on. Rebuilt field by field rather than unified: unifying a qualified
+// `depends_on` onto the bare one would keep both key sets. A target nulled
+// by a hatch is dropped, and a wait on a name no target answers to fails
+// here rather than at `up`.
+#Runtime: R={
+	project: string
+	cluster: #Cluster
+
+	_live: {for n, t in R.cluster.surface.targets if t != null {(n): t}}
+	// What a target waits on; a target that waits on nothing has no field.
+	_waits: W={
+		t: _
+		out: [if W.t.compose.depends_on != _|_ {W.t.compose.depends_on}, {}][0]
+	}
+	targets: {
+		for n, t in R._live {
+			(n): {
+				for f, v in t if f != "compose" && f != "deps" {(f): v}
+				deps: [for k, _ in (R._waits & {"t": t}).out {":\(k):outs"}]
+				compose: {
+					for f, v in t.compose if f != "depends_on" {(f): v}
+					depends_on: {for k, v in (R._waits & {"t": t}).out {("\(R.project)-\(k)"): v}}
+					networks: default: aliases: [n]
+				}
+			}
+		}
+	}
+	_dangling: [
+		for n, t in R._live for k, _ in (R._waits & {"t": t}).out
+		if !list.Contains([for m, _ in R._live {m}], k) {"\(n) waits on \(k)"},
+	]
+	_dangling: []
 }

@@ -1,0 +1,209 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": false,
+    "environment": {
+      "RCLONE_LOCAL_BUCKET": "mecha-objects"
+    },
+    "ports": [],
+    "volumes": [],
+    "depends_on": {},
+    "networks": {
+      "default": {
+        "aliases": [
+          "rclone-s3"
+        ]
+      }
+    },
+    "healthcheck": {
+      "test": [
+        "CMD-SHELL",
+        "wget -S -O /dev/null http://127.0.0.1:3900/ 2>&1 | grep -q 'HTTP/'"
+      ],
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 6,
+      "start_period": "10s",
+      "start_interval": "500ms"
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "ref": ":rclone-s3-image",
+      "name": "libraries_mecha-rclone-s3-image"
+    },
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "copy": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "rclone-s3",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "rclone-s3_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.rclone-s3.yaml",
+          ".bayt/Dockerfile.rclone-s3",
+          ".bayt/bayt.rclone-s3.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "rclone-s3_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "rclone-s3_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/rclone-s3/entrypoint.sh"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [
+        "rclone-s3-image_srcs"
+      ],
+      "transitiveCrossDeps": [
+        {
+          "project": "libraries_mecha",
+          "name": "rclone-s3-image_srcs",
+          "dir": "libraries/mecha",
+          "outs": {
+            "globs": [
+              "services/rclone-s3/entrypoint.sh"
+            ],
+            "exclude": []
+          }
+        }
+      ],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [
+    "rclone-s3-image"
+  ],
+  "sameProjectDeps": [
+    "rclone-s3-image"
+  ],
+  "transitiveDeps": [
+    "rclone-s3-image"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.rclone-s3.yaml",
+    "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "rclone-s3-image",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

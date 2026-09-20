@@ -1,0 +1,201 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": true,
+    "environment": {},
+    "ports": [],
+    "volumes": [],
+    "depends_on": {
+      "libraries_mecha-rclone-s3": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-imgproxy": {
+        "condition": "service_healthy"
+      }
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"
+    },
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "tests/unicorn-test/entrypoint.sh"
+        ],
+        "dst": "/entrypoint.sh",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "tests/unicorn-test/healthcheck.sh"
+        ],
+        "dst": "/healthcheck.sh",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "entrypoint": [
+      "/bin/sh",
+      "/entrypoint.sh"
+    ],
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "/bin/sh",
+        "/healthcheck.sh"
+      ],
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 12,
+      "start_period": "30s"
+    },
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "expose": [],
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "smoke-blobs",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "tests/unicorn-test/entrypoint.sh",
+      "tests/unicorn-test/healthcheck.sh"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "smoke-blobs_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.smoke-blobs.yaml",
+          ".bayt/Dockerfile.smoke-blobs",
+          ".bayt/bayt.smoke-blobs.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.smoke-blobs.yaml"
+      ]
+    },
+    "outs": {
+      "name": "smoke-blobs_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.smoke-blobs.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "smoke-blobs_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "tests/unicorn-test/entrypoint.sh",
+          "tests/unicorn-test/healthcheck.sh"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.smoke-blobs.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.smoke-blobs.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

@@ -1,7 +1,7 @@
 # Row-level security: the tenancy floor
 
 The row isolation every mecha database has, whatever generated the tables above
-it. Live: `services/database/Dockerfile` bakes this in as
+it. Live: the database image (bayt.cue, `database-image`) bakes this in as
 `/docker-entrypoint-initdb.d/002a_rls.sql`, so it is present before any
 app-emitted migration runs and whether or not a generator ran at all.
 

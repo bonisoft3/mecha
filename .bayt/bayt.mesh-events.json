@@ -1,0 +1,278 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": false,
+    "environment": {},
+    "ports": [],
+    "volumes": [],
+    "depends_on": {
+      "libraries_mecha-caddy": {
+        "condition": "service_started"
+      },
+      "libraries_mecha-redis": {
+        "condition": "service_started"
+      }
+    },
+    "networks": {
+      "default": {
+        "aliases": [
+          "mesh-events"
+        ]
+      }
+    },
+    "restart": "on-failure",
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "portcheck",
+        "--port",
+        "3500"
+      ],
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 30,
+      "start_period": "30s",
+      "start_interval": "500ms"
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "ref": ":mesh-image",
+      "name": "libraries_mecha-mesh-image"
+    },
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "portcheck",
+        "--port",
+        "3500"
+      ],
+      "interval": "5s",
+      "timeout": "5s",
+      "retries": 30,
+      "start_period": "30s"
+    },
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "copy": [
+      {
+        "from": {
+          "name": "tarampampam/microcheck:1@sha256:79c187c05bfa67518078bf4db117771942fa8fe107dc79a905861c75ddf28dfa"
+        },
+        "srcs": [
+          "/bin/portcheck"
+        ],
+        "dst": "/usr/local/bin/portcheck",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "mesh-events",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "mesh-events_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.mesh-events.yaml",
+          ".bayt/Dockerfile.mesh-events",
+          ".bayt/bayt.mesh-events.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.mesh-events.yaml",
+        "libraries/mecha/.bayt/compose.mesh-image.yaml",
+        "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml"
+      ]
+    },
+    "outs": {
+      "name": "mesh-events_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.mesh-events.yaml",
+        "libraries/mecha/.bayt/compose.mesh-image.yaml",
+        "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "mesh-events_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/mesh/dapr/components/*.yaml",
+          "services/mesh/entrypoint.sh"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [
+        "mesh-image_srcs",
+        "caddy_outs_srcs",
+        "redis_outs_srcs"
+      ],
+      "transitiveCrossDeps": [
+        {
+          "project": "libraries_mecha",
+          "name": "mesh-image_srcs",
+          "dir": "libraries/mecha",
+          "outs": {
+            "globs": [
+              "services/mesh/dapr/components/*.yaml",
+              "services/mesh/entrypoint.sh"
+            ],
+            "exclude": []
+          }
+        }
+      ],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.mesh-events.yaml",
+        "libraries/mecha/.bayt/compose.mesh-image.yaml",
+        "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [
+    "mesh-image",
+    "caddy_outs",
+    "redis_outs"
+  ],
+  "sameProjectDeps": [
+    "mesh-image",
+    "caddy_outs",
+    "redis_outs"
+  ],
+  "transitiveDeps": [
+    "mesh-image",
+    "caddy_outs",
+    "redis_outs"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.mesh-events.yaml",
+    "libraries/mecha/.bayt/compose.mesh-image.yaml",
+    "libraries/mecha/.bayt/compose.caddy.yaml",
+    "libraries/mecha/.bayt/compose.redis.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "mesh-image",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "caddy_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "redis_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

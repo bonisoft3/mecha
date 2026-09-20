@@ -1,0 +1,246 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": false,
+    "environment": {
+      "CRUD_URL": "http://crud:3000",
+      "REDIS_URL": "redis://redis:6379",
+      "SERVICE_JWT": "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.eeAs4VbzZYwz32jEudSFT_zMeuL18M4cEFY8Jn1jPwY}"
+    },
+    "ports": [],
+    "volumes": [],
+    "depends_on": {
+      "libraries_mecha-redis": {
+        "condition": "service_healthy"
+      },
+      "libraries_mecha-crud": {
+        "condition": "service_healthy"
+      }
+    },
+    "networks": {
+      "default": {
+        "aliases": [
+          "transform"
+        ]
+      }
+    },
+    "restart": "on-failure",
+    "develop": {
+      "watch": [
+        {
+          "action": "sync+restart",
+          "path": "../services/transform/passthrough.yaml",
+          "target": "/pipelines/passthrough.yaml"
+        }
+      ]
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
+    },
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "services/transform/passthrough.yaml"
+        ],
+        "dst": "/pipelines/passthrough.yaml",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "cmd": [
+      "streams",
+      "--no-api",
+      "/pipelines/passthrough.yaml"
+    ],
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false
+  },
+  "name": "transform",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "services/transform/passthrough.yaml"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "transform_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.transform.yaml",
+          ".bayt/Dockerfile.transform",
+          ".bayt/bayt.transform.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.transform.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "transform_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.transform.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "transform_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/transform/passthrough.yaml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [
+        "redis_outs_srcs",
+        "crud_outs_srcs"
+      ],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.transform.yaml",
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [
+    "redis_outs",
+    "crud_outs"
+  ],
+  "sameProjectDeps": [
+    "redis_outs",
+    "crud_outs"
+  ],
+  "transitiveDeps": [
+    "redis_outs",
+    "crud_outs"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.transform.yaml",
+    "libraries/mecha/.bayt/compose.redis.yaml",
+    "libraries/mecha/.bayt/compose.crud.yaml",
+    "libraries/mecha/.bayt/compose.database.yaml",
+    "libraries/mecha/.bayt/compose.database-image.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "redis_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "crud_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

@@ -1,0 +1,53 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-crud:
+    build:
+      additional_contexts:
+        libraries_mecha-database: service:libraries_mecha-database
+      context: ..
+      dockerfile: .bayt/Dockerfile.crud
+      target: crud
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-database:
+        condition: service_healthy
+        restart: true
+    environment:
+      PGRST_DB_URI: >-
+        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_PRE_REQUEST: public.app_pre_request
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-pronto-dev-secret-please-override-32ch}
+      PGRST_SERVER_HOST: "*"
+      PGRST_SERVER_PORT: "3000"
+      PGRST_ADMIN_SERVER_PORT: "3001"
+    healthcheck:
+      test:
+      - CMD
+      - httpcheck
+      - http://127.0.0.1:3001/ready
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+      start_interval: 500ms
+    image: bayt-libraries_mecha-crud:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - crud
+  libraries_mecha-crud_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.crud
+      target: crud_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-crud_bayt:latest
+    scale: 0

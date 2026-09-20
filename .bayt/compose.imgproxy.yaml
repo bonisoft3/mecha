@@ -1,0 +1,53 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-imgproxy:
+    build:
+      additional_contexts:
+        libraries_mecha-rclone-s3: service:libraries_mecha-rclone-s3
+      context: ..
+      dockerfile: .bayt/Dockerfile.imgproxy
+      target: imgproxy
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-rclone-s3:
+        condition: service_started
+    environment:
+      IMGPROXY_USE_S3: "true"
+      IMGPROXY_S3_ENDPOINT: http://rclone-s3:3900
+      AWS_ACCESS_KEY_ID: ${RCLONE_ACCESS_KEY:-GK000000000000000000000000}
+      AWS_SECRET_ACCESS_KEY: >-
+        ${RCLONE_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      AWS_REGION: rclone
+      IMGPROXY_BIND: ":8081"
+      IMGPROXY_MAX_SRC_RESOLUTION: "50"
+      IMGPROXY_SET_CANONICAL_HEADER: "false"
+      IMGPROXY_CACHE_CONTROL_PASSTHROUGH: "true"
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - "bash -c 'echo -e \"GET /health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" > /dev/tcp/127.0.0.1/8081'"
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+      start_interval: 500ms
+    image: bayt-libraries_mecha-imgproxy:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - imgproxy
+    restart: on-failure
+  libraries_mecha-imgproxy_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-rclone-s3_bayt: service:libraries_mecha-rclone-s3_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.imgproxy
+      target: imgproxy_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-imgproxy_bayt:latest
+    scale: 0

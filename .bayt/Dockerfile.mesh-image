@@ -1,0 +1,27 @@
+# generated from bayt.cue — do not edit
+FROM daprio/daprd:1.16.1@sha256:b977660c4503fe9872b0a94a33067df0dfe0a84878dc054acd8caff82a8c4125 AS mesh-image
+WORKDIR /monorepo/libraries/mecha
+COPY --from=busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb /bin/busybox /busybox
+COPY services/mesh/dapr/components/httpendpoints.yaml services/mesh/dapr/components/resiliency.yaml services/mesh/dapr/components/redis-streams.yaml /dapr/components/
+COPY --chmod=755 services/mesh/entrypoint.sh /entrypoint.sh
+COPY --parents services/mesh/dapr/components/*.yaml services/mesh/entrypoint.sh ./
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.mesh-image.json ./.bayt/
+ENTRYPOINT ["/entrypoint.sh"]
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS mesh-image_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents services/mesh/dapr/components/*.yaml services/mesh/entrypoint.sh ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS mesh-image_srcs
+COPY --from=mesh-image_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS mesh-image_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.mesh-image.yaml .bayt/Dockerfile.mesh-image .bayt/bayt.mesh-image.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS mesh-image_bayt
+COPY --from=mesh-image_bayt_ctxs /monorepo /monorepo

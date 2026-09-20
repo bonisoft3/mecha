@@ -1,0 +1,47 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-smoke-cdc:
+    build:
+      additional_contexts:
+        libraries_mecha-conduit: service:libraries_mecha-conduit
+        libraries_mecha-redis: service:libraries_mecha-redis
+        libraries_mecha-transform: service:libraries_mecha-transform
+      context: ..
+      dockerfile: .bayt/Dockerfile.smoke-cdc
+      target: smoke-cdc
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-conduit:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-redis:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-transform:
+        condition: service_started
+    environment:
+      CRUD_URL: http://crud:3000
+    image: bayt-libraries_mecha-smoke-cdc:${BAYT_IMAGE_TAG:-latest}
+    scale: 0
+  libraries_mecha-smoke-cdc_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.smoke-cdc
+      target: smoke-cdc_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-smoke-cdc_bayt:latest
+    scale: 0
+  libraries_mecha-smoke-cdc_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.smoke-cdc
+      target: smoke-cdc_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-smoke-cdc_srcs:latest
+    scale: 0

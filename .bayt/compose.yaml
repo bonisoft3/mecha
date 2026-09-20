@@ -15,3 +15,206 @@ services:
       service: libraries_mecha-build
     profiles:
     - build
+  database-image:
+    extends:
+      file: ./compose.database-image.yaml
+      service: libraries_mecha-database-image
+    profiles:
+    - database-image
+  mesh-image:
+    extends:
+      file: ./compose.mesh-image.yaml
+      service: libraries_mecha-mesh-image
+    profiles:
+    - mesh-image
+  conduit-image:
+    extends:
+      file: ./compose.conduit-image.yaml
+      service: libraries_mecha-conduit-image
+    profiles:
+    - conduit-image
+  auth-image:
+    extends:
+      file: ./compose.auth-image.yaml
+      service: libraries_mecha-auth-image
+    profiles:
+    - auth-image
+  ticker-image:
+    extends:
+      file: ./compose.ticker-image.yaml
+      service: libraries_mecha-ticker-image
+    profiles:
+    - ticker-image
+  clock-image:
+    extends:
+      file: ./compose.clock-image.yaml
+      service: libraries_mecha-clock-image
+    profiles:
+    - clock-image
+  rclone-s3-image:
+    extends:
+      file: ./compose.rclone-s3-image.yaml
+      service: libraries_mecha-rclone-s3-image
+    profiles:
+    - rclone-s3-image
+  redpanda:
+    extends:
+      file: ./compose.redpanda.yaml
+      service: libraries_mecha-redpanda
+    profiles:
+    - redpanda
+    scale: 1
+  kafka-fanout:
+    extends:
+      file: ./compose.kafka-fanout.yaml
+      service: libraries_mecha-kafka-fanout
+    profiles:
+    - kafka-fanout
+    scale: 1
+  arroyo:
+    extends:
+      file: ./compose.arroyo.yaml
+      service: libraries_mecha-arroyo
+    profiles:
+    - arroyo
+    scale: 1
+  bifrost:
+    extends:
+      file: ./compose.bifrost.yaml
+      service: libraries_mecha-bifrost
+    profiles:
+    - bifrost
+    scale: 1
+  nubox:
+    extends:
+      file: ./compose.nubox.yaml
+      service: libraries_mecha-nubox
+    profiles:
+    - nubox
+    scale: 1
+  smoke:
+    extends:
+      file: ./compose.smoke.yaml
+      service: libraries_mecha-smoke
+    profiles:
+    - smoke
+    scale: 1
+  smoke-cdc:
+    extends:
+      file: ./compose.smoke-cdc.yaml
+      service: libraries_mecha-smoke-cdc
+    profiles:
+    - smoke-cdc
+    scale: 1
+  smoke-stream:
+    extends:
+      file: ./compose.smoke-stream.yaml
+      service: libraries_mecha-smoke-stream
+    profiles:
+    - smoke-stream
+    scale: 1
+  smoke-blobs:
+    extends:
+      file: ./compose.smoke-blobs.yaml
+      service: libraries_mecha-smoke-blobs
+    profiles:
+    - smoke-blobs
+    scale: 1
+  database:
+    extends:
+      file: ./compose.database.yaml
+      service: libraries_mecha-database
+    profiles:
+    - database
+    scale: 1
+  crud:
+    extends:
+      file: ./compose.crud.yaml
+      service: libraries_mecha-crud
+    profiles:
+    - crud
+    scale: 1
+  auth:
+    extends:
+      file: ./compose.auth.yaml
+      service: libraries_mecha-auth
+    profiles:
+    - auth
+    scale: 1
+  caddy:
+    extends:
+      file: ./compose.caddy.yaml
+      service: libraries_mecha-caddy
+    profiles:
+    - caddy
+    scale: 1
+  electric:
+    extends:
+      file: ./compose.electric.yaml
+      service: libraries_mecha-electric
+    profiles:
+    - electric
+    scale: 1
+  redis:
+    extends:
+      file: ./compose.redis.yaml
+      service: libraries_mecha-redis
+    profiles:
+    - redis
+    scale: 1
+  mesh-events:
+    extends:
+      file: ./compose.mesh-events.yaml
+      service: libraries_mecha-mesh-events
+    profiles:
+    - mesh-events
+    scale: 1
+  conduit:
+    extends:
+      file: ./compose.conduit.yaml
+      service: libraries_mecha-conduit
+    profiles:
+    - conduit
+    scale: 1
+  rclone-s3:
+    extends:
+      file: ./compose.rclone-s3.yaml
+      service: libraries_mecha-rclone-s3
+    profiles:
+    - rclone-s3
+    scale: 1
+  imgproxy:
+    extends:
+      file: ./compose.imgproxy.yaml
+      service: libraries_mecha-imgproxy
+    profiles:
+    - imgproxy
+    scale: 1
+  transform:
+    extends:
+      file: ./compose.transform.yaml
+      service: libraries_mecha-transform
+    profiles:
+    - transform
+    scale: 1
+  ticker:
+    extends:
+      file: ./compose.ticker.yaml
+      service: libraries_mecha-ticker
+    profiles:
+    - ticker
+    scale: 1
+  clock:
+    extends:
+      file: ./compose.clock.yaml
+      service: libraries_mecha-clock
+    profiles:
+    - clock
+    scale: 1
+  launch:
+    extends:
+      file: ./compose.launch.yaml
+      service: libraries_mecha-launch
+    profiles:
+    - launch
+    scale: 1

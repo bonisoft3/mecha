@@ -1,0 +1,93 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-launch:
+    build:
+      additional_contexts:
+        libraries_mecha-caddy: service:libraries_mecha-caddy
+        libraries_mecha-database: service:libraries_mecha-database
+        libraries_mecha-crud: service:libraries_mecha-crud
+        libraries_mecha-electric: service:libraries_mecha-electric
+        libraries_mecha-redis: service:libraries_mecha-redis
+        libraries_mecha-mesh-events: service:libraries_mecha-mesh-events
+        libraries_mecha-conduit: service:libraries_mecha-conduit
+        libraries_mecha-transform: service:libraries_mecha-transform
+        libraries_mecha-auth: service:libraries_mecha-auth
+        libraries_mecha-rclone-s3: service:libraries_mecha-rclone-s3
+        libraries_mecha-imgproxy: service:libraries_mecha-imgproxy
+        libraries_mecha-clock: service:libraries_mecha-clock
+      context: ..
+      dockerfile: .bayt/Dockerfile.launch
+      target: launch
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-caddy:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-database:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-crud:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-electric:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-redis:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-mesh-events:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-conduit:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-transform:
+        condition: service_started
+      libraries_mecha-auth:
+        condition: service_started
+      libraries_mecha-rclone-s3:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-imgproxy:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-clock:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD
+      - echo
+      - mecha is healthy
+      interval: 5s
+      timeout: 2s
+      retries: 3
+    image: bayt-libraries_mecha-launch:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - launch
+  libraries_mecha-launch_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-caddy_bayt: service:libraries_mecha-caddy_bayt
+        libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
+        libraries_mecha-crud_bayt: service:libraries_mecha-crud_bayt
+        libraries_mecha-electric_bayt: service:libraries_mecha-electric_bayt
+        libraries_mecha-redis_bayt: service:libraries_mecha-redis_bayt
+        libraries_mecha-mesh-events_bayt: service:libraries_mecha-mesh-events_bayt
+        libraries_mecha-conduit_bayt: service:libraries_mecha-conduit_bayt
+        libraries_mecha-transform_bayt: service:libraries_mecha-transform_bayt
+        libraries_mecha-auth_bayt: service:libraries_mecha-auth_bayt
+        libraries_mecha-rclone-s3_bayt: service:libraries_mecha-rclone-s3_bayt
+        libraries_mecha-imgproxy_bayt: service:libraries_mecha-imgproxy_bayt
+        libraries_mecha-clock_bayt: service:libraries_mecha-clock_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.launch
+      target: launch_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-launch_bayt:latest
+    scale: 0

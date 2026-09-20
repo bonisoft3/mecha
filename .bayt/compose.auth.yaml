@@ -1,0 +1,53 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-auth:
+    build:
+      additional_contexts:
+        libraries_mecha-auth-image: service:libraries_mecha-auth-image
+        libraries_mecha-database: service:libraries_mecha-database
+      context: ..
+      dockerfile: .bayt/Dockerfile.auth
+      target: auth
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-database:
+        condition: service_healthy
+        restart: true
+    environment:
+      DATABASE_URL: >-
+        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-pronto-dev-secret-please-override-32ch}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_ORIGIN: https://localhost:${CADDY_TLS_HOST_PORT:-8443}
+    image: bayt-libraries_mecha-auth:${BAYT_IMAGE_TAG:-latest}
+    networks:
+      default:
+        aliases:
+        - auth
+  libraries_mecha-auth_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha-auth-image_bayt: service:libraries_mecha-auth-image_bayt
+        libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.auth
+      target: auth_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-auth_bayt:latest
+    scale: 0
+  libraries_mecha-auth_srcs:
+    build:
+      additional_contexts:
+        libraries_mecha-auth-image_srcs: service:libraries_mecha-auth-image_srcs
+      context: ..
+      dockerfile: .bayt/Dockerfile.auth
+      target: auth_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-auth_srcs:latest
+    scale: 0

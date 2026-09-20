@@ -1,0 +1,310 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "compose": {
+    "up": false,
+    "manual": false,
+    "environment": {
+      "POSTGRES_USER": "${POSTGRES_USER:-postgres}",
+      "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-postgres}",
+      "POSTGRES_DB": "${POSTGRES_DB:-mecha}",
+      "POSTGRES_INITDB_ARGS": "--no-sync --no-locale --encoding=UTF8 --auth=trust"
+    },
+    "ports": [
+      "5432"
+    ],
+    "volumes": [],
+    "depends_on": {},
+    "networks": {
+      "default": {
+        "aliases": [
+          "database"
+        ]
+      }
+    },
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "pg_isready",
+        "-h",
+        "localhost",
+        "-p",
+        "5432",
+        "-d",
+        "${POSTGRES_DB:-mecha}",
+        "-U",
+        "${POSTGRES_USER:-postgres}"
+      ],
+      "interval": "1s",
+      "timeout": "5s",
+      "retries": 30,
+      "start_period": "5m",
+      "start_interval": "100ms"
+    },
+    "develop": {
+      "watch": [
+        {
+          "action": "rebuild",
+          "path": "../services/database/migrations/000_extensions.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../services/database/migrations/001_roles.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../services/database/migrations/002_grants.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../services/database/migrations/003_publication.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../services/database/migrations/004_create_tables.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../services/database/migrations/005_electric_publication.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../tests/validation-smoke.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        }
+      ]
+    }
+  },
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "ref": ":database-image",
+      "name": "libraries_mecha-database-image"
+    },
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "services/database/migrations/000_extensions.sql",
+          "services/database/migrations/001_roles.sql",
+          "services/database/migrations/002_grants.sql",
+          "services/database/migrations/003_publication.sql",
+          "services/database/migrations/004_create_tables.sql",
+          "services/database/migrations/005_electric_publication.sql",
+          "tests/validation-smoke.sql"
+        ],
+        "dst": "/docker-entrypoint-initdb.d/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "healthcheck": {
+      "test": [
+        "CMD",
+        "pg_isready",
+        "-h",
+        "localhost",
+        "-p",
+        "5432",
+        "-d",
+        "${POSTGRES_DB:-mecha}",
+        "-U",
+        "${POSTGRES_USER:-postgres}"
+      ],
+      "interval": "1s",
+      "timeout": "5s",
+      "retries": 30,
+      "start_period": "5m"
+    },
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "database",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "services/database/migrations/000_extensions.sql",
+      "services/database/migrations/001_roles.sql",
+      "services/database/migrations/002_grants.sql",
+      "services/database/migrations/003_publication.sql",
+      "services/database/migrations/004_create_tables.sql",
+      "services/database/migrations/005_electric_publication.sql",
+      "tests/validation-smoke.sql"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "database_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.database.yaml",
+          ".bayt/Dockerfile.database",
+          ".bayt/bayt.database.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "database_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "database_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/database/migrations/000_extensions.sql",
+          "services/database/migrations/001_roles.sql",
+          "services/database/migrations/002_grants.sql",
+          "services/database/migrations/003_publication.sql",
+          "services/database/migrations/004_create_tables.sql",
+          "services/database/migrations/005_electric_publication.sql",
+          "tests/validation-smoke.sql",
+          "services/database/rls/rls.sql"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [
+        "database-image_srcs"
+      ],
+      "transitiveCrossDeps": [
+        {
+          "project": "libraries_mecha",
+          "name": "database-image_srcs",
+          "dir": "libraries/mecha",
+          "outs": {
+            "globs": [
+              "services/database/rls/rls.sql"
+            ],
+            "exclude": []
+          }
+        }
+      ],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [
+    "database-image"
+  ],
+  "sameProjectDeps": [
+    "database-image"
+  ],
+  "transitiveDeps": [
+    "database-image"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.database.yaml",
+    "libraries/mecha/.bayt/compose.database-image.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "database-image",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

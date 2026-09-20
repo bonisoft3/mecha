@@ -56,15 +56,11 @@ Processing components (reverse proxy, CDC reader, transform pipeline, stream pro
 
 Configuration lives in YAML, CUE, SQL, or Protocol Buffers. Not in application code. DSLs reduce bugs, enable generation, and make the system auditable. When choosing between a custom service and a declarative pipeline definition, choose the pipeline.
 
-### 7. Additive profiles
+### 7. Additive capabilities
 
-Capabilities are layered incrementally. The base profile is always CRUD. Each subsequent profile adds services without modifying existing ones:
+The cluster (`cluster.cue`) is one template with capabilities that layer: the data plane (database, crud, sync, the bus, the pipeline worker), the auth plane, the blob plane. Each adds services without modifying the ones below it, and an app states which it needs. Mecha's own stack adds what the cluster does not cover — stream processing, the AI gateway — beside it.
 
-```
-crud → sync → cdc → stream → ai → blobs
-```
-
-A team that only needs CRUD runs 4 containers. A team that needs real-time AI runs 12+. Same architecture, same schema, different profiles.
+A team that only needs a served terminal runs caddy alone. A team that needs real-time AI runs 12+ containers. Same architecture, same schema, different capabilities.
 
 ### 8. Portable cloud mapping
 
@@ -102,21 +98,17 @@ mise install
 # Generate all artifacts from protobuf
 task generate
 
-# Start crud profile
+# Start the stack (compose.yml includes what bayt emits for bayt.cue)
 docker compose up --build --watch
 
-# Start with profiles (additive)
-docker compose --profile sync up --build --watch
-docker compose --profile sync --profile cdc up --build --watch
-docker compose --profile sync --profile cdc --profile stream up --build --watch
-
-# Run smoke tests
+# Run smoke tests; each brings up the slice it exercises
 task integrate                 # CRUD smoke test
 task integrate:cdc             # CDC pipeline E2E
 task integrate:stream          # Stream analytics E2E
+task integrate:blobs           # rclone-s3 + imgproxy
 
 # Full cleanup
-docker compose --profile sync --profile cdc --profile stream --profile blobs down -v
+docker compose --profile '*' down -v
 ```
 
 ## License

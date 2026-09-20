@@ -1,0 +1,14 @@
+# generated from bayt.cue — do not edit
+FROM redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933 AS redis
+WORKDIR /monorepo/libraries/mecha
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.redis.json ./.bayt/
+HEALTHCHECK --interval=5s --timeout=5s --retries=6 --start-period=10s CMD redis-cli ping | grep PONG
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS redis_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.redis.yaml .bayt/Dockerfile.redis .bayt/bayt.redis.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS redis_bayt
+COPY --from=redis_bayt_ctxs /monorepo /monorepo

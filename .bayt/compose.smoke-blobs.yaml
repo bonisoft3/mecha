@@ -1,0 +1,42 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-smoke-blobs:
+    build:
+      additional_contexts:
+        libraries_mecha-rclone-s3: service:libraries_mecha-rclone-s3
+        libraries_mecha-imgproxy: service:libraries_mecha-imgproxy
+      context: ..
+      dockerfile: .bayt/Dockerfile.smoke-blobs
+      target: smoke-blobs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      libraries_mecha-rclone-s3:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-imgproxy:
+        condition: service_healthy
+        restart: true
+    image: bayt-libraries_mecha-smoke-blobs:${BAYT_IMAGE_TAG:-latest}
+    scale: 0
+  libraries_mecha-smoke-blobs_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.smoke-blobs
+      target: smoke-blobs_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-smoke-blobs_bayt:latest
+    scale: 0
+  libraries_mecha-smoke-blobs_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.smoke-blobs
+      target: smoke-blobs_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha-smoke-blobs_srcs:latest
+    scale: 0

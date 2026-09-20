@@ -11,6 +11,12 @@ import (
 	"strings"
 )
 
+// What a service bound to the database depends on. `restart: true` recreates
+// the dependent inside the `up` that recreates the database, so `--wait`
+// waits on its new health: electric purges its shapes and restarts itself on
+// a different Postgres, and conduit's replication goes quiet on one.
+_onDatabase: {condition: "service_healthy", restart: true}
+
 // A file delivered into the cluster (caddy static, config payload).
 #Static: {
 	source: string // compose config name
@@ -91,7 +97,7 @@ _devElectricSecret: "dev-electric-secret"
 				}
 				crud: {
 					build: {context: X.meta.mechaPath, dockerfile: "services/crud/Dockerfile"}
-					depends_on: database: condition: "service_healthy"
+					depends_on: database: _onDatabase
 					healthcheck: {
 						test: ["CMD", "httpcheck", "http://127.0.0.1:3001/ready"]
 						interval:       "5s"
@@ -120,7 +126,7 @@ _devElectricSecret: "dev-electric-secret"
 				"auth": {
 					build: {context: "\(X.meta.mechaPath)/services/auth", dockerfile: "Dockerfile"}
 					expose: ["9999"]
-					depends_on: database: condition: "service_healthy"
+					depends_on: database: _onDatabase
 					environment: {
 						DATABASE_URL:     "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 						PGRST_JWT_SECRET: "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
@@ -182,7 +188,7 @@ _devElectricSecret: "dev-electric-secret"
 			if X.capabilities.server {
 				electric: {
 					image: "electricsql/electric@sha256:f311edc272e227ddaea593c5205a02c3d1e5969c2db0f7655a039a5e24abb176"
-					depends_on: database: condition: "service_healthy"
+					depends_on: database: _onDatabase
 					environment: {
 						// Its own role, holding BYPASSRLS as a stated attribute: 001_roles
 						// (emit.cue `_bypass`) says what an unstated one costs.
@@ -241,7 +247,7 @@ _devElectricSecret: "dev-electric-secret"
 
 						"""#
 					}
-					depends_on: {database: condition: "service_healthy", "mesh-events": condition: "service_started"}
+					depends_on: {database: _onDatabase, "mesh-events": condition: "service_started"}
 					develop: watch: [{action: "rebuild", path: "docker/conduit-pipeline.yaml"}]
 					environment: {
 						DATABASE_URL:           "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
@@ -354,7 +360,7 @@ _devElectricSecret: "dev-electric-secret"
 				depends_on: {
 					caddy: condition: "service_healthy"
 					if X.capabilities.server {
-						database: condition:      "service_healthy"
+						database: _onDatabase
 						crud: condition:          "service_healthy"
 						electric: condition:      "service_healthy"
 						redis: condition:         "service_healthy"

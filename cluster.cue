@@ -126,7 +126,21 @@ _devElectricSecret: "dev-electric-secret"
 							POSTGRES_USER:        "${POSTGRES_USER:-postgres}"
 							POSTGRES_PASSWORD:    "${POSTGRES_PASSWORD:-postgres}"
 							POSTGRES_DB:          "${POSTGRES_DB:-\(X.meta.app)}"
-							POSTGRES_INITDB_ARGS: "--no-sync --no-locale --encoding=UTF8 --auth=trust"
+							// ORDER BY on text reaches a reader, so it sorts the way a
+							// dictionary does. Under --no-locale it sorted by byte: every
+							// accent past all of ASCII, and case splitting the alphabet so
+							// "ana" followed "Zoe" (measured; the orders are in
+							// plugins/pronto/docs/2026-09-18-localization-has-tiers.md).
+							//
+							// `und` and not a language, because the collation is one per
+							// database and an app serves every locale it declares out of
+							// the same rows.
+							//
+							// ICU and not a libc locale, which is what --no-locale was
+							// avoiding: glibc reorders between versions and silently
+							// invalidates text indexes, where postgres records the ICU
+							// version and warns. --locale=C keeps ctype off libc too.
+							POSTGRES_INITDB_ARGS: "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
 						}
 						// One rebuild entry per migration: the list is the consumer's, and
 						// mecha's own stack keeps a fixture outside the migrations directory.

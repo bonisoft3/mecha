@@ -37,7 +37,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-mecha}
-      POSTGRES_INITDB_ARGS: --no-sync --no-locale --encoding=UTF8 --auth=trust
+      POSTGRES_INITDB_ARGS: >-
+        --no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und
+        --locale=C
     healthcheck:
       test:
       - CMD

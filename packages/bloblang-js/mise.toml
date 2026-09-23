@@ -8,6 +8,5 @@ locked = false
 GOTOOLCHAIN = "local"
 
 [tools]
-bun = "1.3.12"
 # Must match the `go` directive in go.mod.
 go = "1.26.1"

@@ -16,9 +16,9 @@
     "websd"
   ],
   "scripts": {
-    "build": "bun run --filter '*' build",
-    "test": "bun run --filter '*' test",
-    "test:watch": "bun run --filter '*' test:watch"
+    "build": "pnpm --filter \"./*\" run build",
+    "test": "pnpm --filter \"./*\" run test",
+    "test:watch": "pnpm --filter \"./*\" run test:watch"
   },
   "overrides": {
     "@tanstack/db": "0.8.0"

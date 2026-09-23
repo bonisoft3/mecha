@@ -16,12 +16,16 @@ aqua.minisign = false
 "github:bufbuild/buf" = "1.66.1"
 "github:cue-lang/cue" = "0.16.1"
 "github:hairyhenderson/gomplate" = "5.0.0"
-"github:denoland/deno" = "v2.3.7"
+"github:denoland/deno" = "v2.9.7"
 "github:go-task/task" = "v3.49.1"
 "github:dapr/dapr" = "1.17.3"
 "github:dapr/cli" = "1.17.0"
 "github:redpanda-data/connect" = "4.46.0"
-bun = "1.3.12"
+# The JS estate here is node's: vitest over the packages, and a dev server
+# written to the Web fetch shape over node:http. pnpm is the repository's
+# package manager, and pnpm-workspace.yaml lists every member here.
+node = "22.14.0"
+"github:pnpm/pnpm" = "10.32.1"
 
 [tools."http:atlas"]
 version = "0.38.0"

@@ -1,6 +1,0 @@
-[settings]
-lockfile = false
-locked = false
-
-[tools]
-bun = "1.3.12"

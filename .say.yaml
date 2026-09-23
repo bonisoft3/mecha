@@ -11,7 +11,7 @@ say:
         priority: -1
         stop: true
         cmds:
-          - do: "bun run --cwd packages build"
+          - do: "pnpm --dir packages run build"
 
   test:
     rulemap:
@@ -20,7 +20,7 @@ say:
         priority: -1
         stop: true
         cmds:
-          - do: "bun run --cwd packages test"
+          - do: "pnpm --dir packages run test"
 
   launch:
     rulemap:
@@ -29,7 +29,7 @@ say:
         priority: -1
         stop: true
         cmds:
-          - do: "bun run --cwd packages/mecha-browser dev"
+          - do: "pnpm --dir packages/mecha-browser run dev"
       dapr:
         platform: local
         priority: -1
@@ -44,4 +44,4 @@ say:
         priority: -1
         stop: true
         cmds:
-          - do: "bun run --cwd packages/mecha-browser test"
+          - do: "pnpm --dir packages/mecha-browser run test"

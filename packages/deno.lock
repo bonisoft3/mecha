@@ -210,6 +210,11 @@
     }
   },
   "workspace": {
+    "packageJson": {
+      "overrides": {
+        "@tanstack/db": "0.8.0"
+      }
+    },
     "members": {
       "bloblang-js": {
         "packageJson": {
@@ -269,7 +274,6 @@
           "dependencies": [
             "npm:@electric-sql/pglite@~0.5.8",
             "npm:@tanstack/db@0.8.0",
-            "npm:@types/bun@^1.2.0",
             "npm:msw@^2.7.0",
             "npm:typescript@^5.7.0",
             "npm:vitest@3"

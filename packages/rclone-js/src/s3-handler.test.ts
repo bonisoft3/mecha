@@ -125,10 +125,7 @@ describe('createS3Handler', () => {
   })
 
   it('rejects path traversal attempts', async () => {
-    // Use percent-encoded slashes so the '..' survives URL normalization and reaches the handler.
-    // Depending on the runtime (Node.js vs Bun), URL normalisation may resolve the segments
-    // before they reach the handler — resulting in either 400 (traversal caught) or 404 (not found).
-    // Both are safe outcomes.
+    // Percent-encoded slashes preserve the '..' through URL parsing to test handler rejection.
     const req = new Request('http://localhost/my-bucket/..%2F..%2F..%2Fetc%2Fpasswd', {
       method: 'GET',
     })

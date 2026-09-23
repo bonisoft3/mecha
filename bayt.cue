@@ -1,5 +1,5 @@
 // libraries/mecha/bayt.cue — mecha's bayt project: the images it builds,
-// the packages bun-workspace consumers pull as sources, and its own stack.
+// the packages workspace consumers pull as sources, and its own stack.
 //
 // Images: every service that carries mecha's own content is an `*-image`
 // target here, public, so the cluster template (cluster.cue) starts each
@@ -7,7 +7,7 @@
 // plain Dockerfiles under .bayt/, which is what a consumer without bayt
 // builds with `docker build`.
 //
-// Sources: bun-workspace consumers (guis/snapcards, whose bun.lock links
+// Sources: workspace consumers (guis/snapcards, whose lockfile links
 // ../../libraries/mecha/packages/*) pull the package sources into their
 // build context via `deps: ["libraries_mecha:setup:srcs"]`, the way
 // omnishell exposes `plugins_omnishell:build:srcs`. The package build/test
@@ -98,12 +98,12 @@ _mecha: bayt.#project & _where & {
 
 	targets: (cluster.#Runtime & {project: _mecha.name, "cluster": _stack}).targets
 	targets: {
-		// Public so bun-workspace consumers COPY the package sources
+		// Public so workspace consumers COPY the package sources
 		// (`libraries_mecha:setup:srcs`). Sources cover every workspace
-		// member plus the root manifests bun install resolves against.
+		// member plus the root manifests an install resolves against.
 		"setup": sayt.setup & mise.install & {
-			// packages/** covers the workspace members plus packages/{package.json,
-			// bun.lock} — mecha's bun root lives under packages/, not at dir root.
+			// packages/** covers the workspace members plus packages/package.json
+			// — mecha's workspace root lives under packages/, not at dir root.
 			visibility: "public"
 			srcs: globs: ["packages/**"]
 			dockerfile: bayt.nubox

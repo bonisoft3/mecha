@@ -4,15 +4,67 @@ import { createRestHandler } from '@mecha/postgrest-js'
 import { BloblangRuntime } from '@mecha/bloblang-js'
 import { PipelineRegistry, createCDCListener } from '@mecha/conduit-js'
 import type { BrowserConfig } from './types.js'
+import { createServer } from 'node:http'
+import { Readable } from 'node:stream'
 
 /**
  * Minimal dev server entry point.
  *
- * Usage: bun src/dev-server.ts [--profile <name>]
+ * Usage: `pnpm --dir packages/mecha-browser run dev`, which runs this under
+ * deno: these packages are TypeScript sources whose relative imports carry a
+ * `.js` suffix, and resolving that to the `.ts` beside it is what
+ * --unstable-sloppy-imports does. node would need them built first.
  *
  * Initializes PGlite in-memory, wires the factory based on active profiles,
  * and starts an HTTP server on localhost:8080.
  */
+
+/**
+ * The head a Response becomes. Set-Cookie is the one header it may carry more
+ * than once, and the entries iterator yields each separately, so collapsing
+ * them into an object would keep only the last.
+ */
+export function responseHeaders(response: Response): Record<string, string | string[]> {
+  const headers: Record<string, string | string[]> = Object.fromEntries(response.headers)
+  const cookies = response.headers.getSetCookie()
+  if (cookies.length > 0) headers['set-cookie'] = cookies
+  return headers
+}
+
+/**
+ * One Web fetch handler over node's server: a Request in, a Response out. The
+ * handler below is written to that shape and to no runtime's own server API,
+ * so this adapter is the whole of what the runtime contributes.
+ */
+function serve(port: number, handler: (req: Request) => Promise<Response>): { stop: () => void } {
+  const server = createServer((incoming, outgoing) => {
+    const answer = async () => {
+      const host = incoming.headers.host ?? `localhost:${port}`
+      const url = new URL(incoming.url ?? '/', `http://${host}`)
+      const hasBody = incoming.method !== 'GET' && incoming.method !== 'HEAD'
+      const request = new Request(url, {
+        method: incoming.method,
+        headers: incoming.headers as HeadersInit,
+        // node's web stream and the DOM's differ only in their declarations.
+        ...(hasBody ? { body: Readable.toWeb(incoming) as unknown as BodyInit, duplex: 'half' } : {}),
+      } as RequestInit)
+      const response = await handler(request)
+      outgoing.writeHead(response.status, responseHeaders(response))
+      if (response.body && incoming.method !== 'HEAD') {
+        Readable.fromWeb(response.body as unknown as import('node:stream/web').ReadableStream).pipe(outgoing)
+      } else {
+        outgoing.end()
+      }
+    }
+    answer().catch((err) => {
+      if (!outgoing.headersSent) outgoing.writeHead(500)
+      outgoing.destroy(err)
+      process.exit(1)
+    })
+  })
+  server.listen(port)
+  return { stop: () => server.close() }
+}
 
 function parseArgs(args: string[]): { profile: string } {
   let profile = 'crud'
@@ -106,9 +158,7 @@ async function main() {
 
   // 4. Start HTTP server
   const port = 8080
-  const server = Bun.serve({
-    port,
-    async fetch(req: Request): Promise<Response> {
+  const server = serve(port, async (req: Request): Promise<Response> => {
       const url = new URL(req.url)
 
       // Health check
@@ -132,7 +182,6 @@ async function main() {
       }
 
       return new Response('Not Found', { status: 404 })
-    },
   })
 
   console.log(`[mecha-dev] Server listening on http://localhost:${port}`)

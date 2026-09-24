@@ -410,11 +410,13 @@ _devElectricSecret: "dev-electric-secret"
 							}
 						}
 						restart: "on-failure"
-						develop: watch: [for p in X.state.pipelines {
-							action: "sync+restart"
-							path:   "../\(p.file)"
-							target: "/pipelines/\(p.name).yaml"
-						}]
+						if len(X.state.pipelines) > 0 {
+							develop: watch: [for p in X.state.pipelines {
+								action: "sync+restart"
+								path:   "../\(p.file)"
+								target: "/pipelines/\(p.name).yaml"
+							}]
+						}
 					}
 				}
 			}

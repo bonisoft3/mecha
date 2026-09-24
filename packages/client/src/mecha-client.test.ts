@@ -178,10 +178,10 @@ describe("a device tier under a live query", () => {
 describe("a shared table's family", () => {
   const client = createMechaClient({
     tables: [
-      { id: "note", table: "note", access: { mode: "owned", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } },
-      { id: "note_item", table: "note_item", access: { mode: "through", parent: "note", on: "note_id" } },
-      { id: "note_share", table: "note_share", access: { mode: "through", parent: "note", on: "note_id" } },
-      { id: "label", table: "label", access: { mode: "owned", owner: "owner_id" } },
+      { id: "note", table: "note", access: { scope: "private", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } },
+      { id: "note_item", table: "note_item", access: { scope: "folder", parent: "note", on: "note_id" } },
+      { id: "note_share", table: "note_share", access: { scope: "folder", parent: "note", on: "note_id" } },
+      { id: "label", table: "label", access: { scope: "private", owner: "owner_id" } },
     ],
     electricUrl: "http://localhost:0/electric",
     crudUrl: "http://localhost:0/crud",
@@ -204,8 +204,8 @@ describe("a shared table's family", () => {
     const opened: string[] = []
     const late = createMechaClient({
       tables: [
-        { id: "note", table: "note", access: { mode: "owned", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } },
-        { id: "note_share", table: "note_share", access: { mode: "through", parent: "note", on: "note_id" } },
+        { id: "note", table: "note", access: { scope: "private", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } },
+        { id: "note_share", table: "note_share", access: { scope: "folder", parent: "note", on: "note_id" } },
       ],
       electricUrl: "http://localhost:0/electric",
       crudUrl: "http://localhost:0/crud",
@@ -230,8 +230,8 @@ describe("a shared table's family", () => {
     expect(() =>
       createMechaClient({
         tables: [
-          { id: "note", table: "note", access: { mode: "owned", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } },
-          { id: "note_share", table: "note_share", durability: "tab", access: { mode: "through", parent: "note", on: "note_id" } },
+          { id: "note", table: "note", access: { scope: "private", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } },
+          { id: "note_share", table: "note_share", durability: "tab", access: { scope: "folder", parent: "note", on: "note_id" } },
         ],
         electricUrl: "http://localhost:0/electric",
         crudUrl: "http://localhost:0/crud",
@@ -240,7 +240,7 @@ describe("a shared table's family", () => {
     ).toThrow(/cannot be a tab tier/)
     expect(() =>
       createMechaClient({
-        tables: [{ id: "note", table: "note", access: { mode: "owned", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } }],
+        tables: [{ id: "note", table: "note", access: { scope: "private", owner: "owner_id", shared: { via: "note_share", on: "note_id", user: "user_id" } } }],
         electricUrl: "http://localhost:0/electric",
         crudUrl: "http://localhost:0/crud",
         authUrl: "http://localhost:0/auth",

@@ -6,6 +6,7 @@ import type { LeaderElection } from "@tanstack/offline-transactions"
 import { localOnlyCollectionOptions, localStorageCollectionOptions } from "@tanstack/db"
 import { idempotentSink } from "./sync-sink.js"
 import { unionCollectionOptions } from "./union.js"
+import { createStorageAdapter } from "./storage.js"
 
 /**
  * Mecha client v2 — the platform's at-least-once data plane for one app.
@@ -50,10 +51,10 @@ export interface MechaTable {
 }
 
 export type TableAccess =
-  | { mode: "owned"; owner: string; shared?: { via: string; on: string; user: string } }
-  | { mode: "through"; parent: string; on: string }
-  | { mode: "public-read" }
-  | { mode: "service-only" }
+  | { scope: "private"; owner: string; shared?: { via: string; on: string; user: string } }
+  | { scope: "folder"; parent: string; on: string }
+  | { scope: "public" }
+  | { scope: "internal" }
 
 export interface MechaClientConfig {
   tables: MechaTable[]
@@ -305,7 +306,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   const families: Family[] = []
   for (const owner of byId.values()) {
     const a = owner.access
-    if (a?.mode !== "owned" || a.shared === undefined) continue
+    if (a?.scope !== "private" || a.shared === undefined) continue
     const via = byTable.get(a.shared.via)
     if (via === undefined) {
       throw new Error(`${owner.table} is shared via ${a.shared.via}, which is not a table of this client`)
@@ -313,7 +314,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     // A grant opens one shape per row on the shared table and each
     // composition under it, the edges the emit declares; the grant table
     // takes the grant list, and a per-row shape only if it is a composition.
-    const children = [...byId.values()].filter((c) => c.access?.mode === "through" && c.access.parent === owner.table)
+    const children = [...byId.values()].filter((c) => c.access?.scope === "folder" && c.access.parent === owner.table)
     const members = [owner, ...children]
     // A grant reaches a member through a shape, and a local tier has none.
     for (const m of [...members, via]) {
@@ -539,6 +540,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   const executor = startOfflineExecutor({
     collections,
     mutationFns,
+    storage: createStorageAdapter(),
     jitter: true,
     ...(runsAlone() ? { leaderElection: soleLeader() } : {}),
     beforeRetry: (txs: any[]) => {

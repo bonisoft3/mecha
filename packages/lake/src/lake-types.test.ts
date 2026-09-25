@@ -1,0 +1,93 @@
+import { describe, expect, it } from "vitest"
+import * as duckdb from "@duckdb/duckdb-wasm/blocking"
+import { typedSql } from "./lake-types.js"
+
+// What a projection must be is decided by the type a column is, so these
+// fields name types directly and the mapping is the identity. Whether a
+// projected value then canonicalizes correctly is a question about the type
+// table, which this package does not hold: apps/ponto/tests/lake-types.test.ts
+// asks it, against the table its own shell was emitted with.
+const asWritten = (type: string) => type
+
+describe("typed lake portable types", () => {
+  const fields = [
+    { name: "amount", type: "decimal" as const, precision: 8, scale: 2 },
+    { name: "day", type: "date" as const },
+    { name: "elapsed", type: "duration" as const },
+    { name: "stamp", type: "timestamp" as const },
+    { name: "payload", type: "bytes" as const },
+    { name: "meta", type: "json" as const },
+  ]
+
+  it("projects lossy Arrow values before they leave DuckDB", () => {
+    const sql = typedSql(asWritten, "SELECT * FROM readings", fields)
+    expect(sql).toContain('CAST("amount" AS VARCHAR) AS "amount"')
+    expect(sql).toContain("strftime(\"day\", '%Y-%m-%d')")
+    expect(sql).toContain("CASE typeof(\"stamp\") WHEN 'TIMESTAMP_NS' THEN CASE WHEN epoch_ns(\"stamp\") % 1000 <> 0 THEN error('timestamp exceeds microsecond precision') ELSE strftime(\"stamp\", '%Y-%m-%dT%H:%M:%S.%fZ') END WHEN 'TIMESTAMP WITH TIME ZONE' THEN strftime(\"stamp\" AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%S.%fZ') ELSE strftime(\"stamp\", '%Y-%m-%dT%H:%M:%S.%fZ') END")
+    expect(sql).toContain('base64("payload") AS "payload"')
+  })
+
+  it("keeps an all-type fixture at the lake boundary", () => {
+    const allFields = [
+      { name: "text", type: "string" as const },
+      { name: "enabled", type: "bool" as const },
+      { name: "count", type: "int32" as const },
+      { name: "sequence", type: "int64" as const },
+      { name: "ratio", type: "double" as const },
+      { name: "blob", type: "bytes" as const },
+      { name: "id", type: "uuid" as const },
+      { name: "stamp", type: "timestamp" as const },
+      { name: "day", type: "date" as const },
+      { name: "clock", type: "time" as const },
+      { name: "zone", type: "timezone" as const },
+      { name: "elapsed", type: "duration" as const },
+      { name: "amount", type: "decimal" as const, precision: 8, scale: 2 },
+      { name: "meta", type: "json" as const },
+      { name: "shape", type: "geojson" as const },
+    ]
+    const sql = typedSql(asWritten, "SELECT * FROM portable_fixture", allFields)
+    expect(sql).toContain('CAST("sequence" AS VARCHAR) AS "sequence"')
+    expect(sql).toContain('CAST("meta" AS VARCHAR) AS "meta"')
+    expect(sql).toContain('CAST("shape" AS VARCHAR) AS "shape"')
+  })
+
+  it("projects actual Arrow bigint and decimal values before JavaScript loses them", async () => {
+    const wasm = new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url).pathname
+    const db = await duckdb.createDuckDB({ mvp: { mainModule: wasm, mainWorker: "" } }, new duckdb.ConsoleLogger(), duckdb.NODE_RUNTIME)
+    await db.instantiate(() => {})
+    db.open({ path: ":memory:" })
+    const conn = db.connect()
+    try {
+      const source = "SELECT 9007199254740993::BIGINT AS sequence, 123.4500::DECIMAL(10,4) AS amount"
+      const raw = conn.query(source).toArray()[0].toJSON()
+      expect(typeof raw.sequence).toBe("bigint")
+      expect(raw.amount).not.toBe("123.45")
+      const fields = [{ name: "sequence", type: "int64" as const }, { name: "amount", type: "decimal" as const, precision: 10, scale: 4 }]
+      const projected = conn.query(typedSql(asWritten, source, fields)).toArray()[0].toJSON()
+      expect(projected).toEqual({ sequence: "9007199254740993", amount: "123.4500" })
+    } finally {
+      conn.close()
+    }
+  })
+
+  it("converts actual DuckDB intervals from integer microseconds", async () => {
+    const wasm = new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url).pathname
+    const db = await duckdb.createDuckDB({ mvp: { mainModule: wasm, mainWorker: "" } }, new duckdb.ConsoleLogger(), duckdb.NODE_RUNTIME)
+    await db.instantiate(() => {})
+    db.open({ path: ":memory:" })
+    const conn = db.connect()
+    try {
+      const fields = [{ name: "elapsed", type: "duration" as const }]
+      for (const [source, expected] of [
+        ["SELECT INTERVAL '3 days 01:02:03.123456' AS elapsed", "PT262923.123456S"],
+        ["SELECT INTERVAL '3652500 days' AS elapsed", "PT315576000000S"],
+      ]) {
+        const projected = conn.query(typedSql(asWritten, source, fields)).toArray()[0].toJSON()
+        expect(projected).toEqual({ elapsed: expected })
+      }
+      expect(() => conn.query(typedSql(asWritten, "SELECT INTERVAL '1 month' AS elapsed", fields))).toThrow()
+    } finally {
+      conn.close()
+    }
+  })
+})

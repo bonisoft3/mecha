@@ -13,7 +13,7 @@ the emitter writes the policies that call `auth_uid()`.
   session to borrow.
 - **`auth_uid()`** reads `sub` out of `request.jwt.claims`. It is a replaceable
   object, emitted with the policies that call it and never with the tables —
-  the split is `libraries/mecha/docs/2026-08-31-owner-stamping-default-hygiene.md`.
+  the split is `plugins/pronto/docs/2026-08-31-owner-stamping-default-hygiene.md`.
 
 The alternative was server-side sessions. It was refused because the WebAuthn
 challenge is the only state a ceremony needs, and a short-lived `state` JWT

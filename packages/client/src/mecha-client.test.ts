@@ -43,6 +43,77 @@ describe("createMechaClient", () => {
   })
 })
 
+// A table stating only the carriers these rows use. It is an input and not a
+// definition: what canonical IS belongs to the program that emits the table a
+// client is served (pronto's carriers.cue), and what is proved here is that
+// this client applies the one it was handed — its int64 admits three digits
+// and no more, which no program would emit and this client obeys.
+const CARRIERS = {
+  types: {
+    decimal: {
+      base: ["numeric"],
+      json: "string" as const,
+      pattern: "^(0|-?[1-9][0-9]*|-?(0|[1-9][0-9]*)\\.[0-9]*[1-9])$",
+      order: "decimal" as const,
+      beyond: ["decimal-profile" as const],
+    },
+    int64: {
+      sql: "portable_int64",
+      base: ["int8"],
+      json: "string" as const,
+      pattern: "^[0-9]{1,3}$",
+      order: "integer" as const,
+      beyond: ["int64-range" as const],
+    },
+  },
+  aliases: { bigint: "int64" },
+}
+
+describe("carrier rows", () => {
+  it("canonicalizes declared writes before an optimistic local collection stores them", async () => {
+    const client = createMechaClient({
+      carriers: CARRIERS,
+      tables: [{
+        id: "ledger",
+        table: "ledger",
+        durability: "tab",
+        fields: [
+          { name: "amount", type: "decimal", precision: 8, scale: 2 },
+          { name: "sequence", type: "int64" },
+        ],
+      }],
+      authUrl: "http://localhost:0/auth",
+    })
+
+    await client.insert("ledger", [{ id: "entry", amount: "001.20", sequence: "00042" }])
+    expect(client.collections.ledger.toArray[0]).toMatchObject({ id: "entry", amount: "1.2", sequence: "42" })
+  })
+
+  it("refuses a value the served table's spelling refuses", async () => {
+    const client = createMechaClient({
+      carriers: CARRIERS,
+      tables: [{ id: "narrow", table: "narrow", durability: "tab", fields: [{ name: "sequence", type: "int64" }] }],
+      authUrl: "http://localhost:0/auth",
+    })
+
+    await client.insert("narrow", [{ id: "entry", sequence: "42" }])
+    expect(client.collections.narrow.toArray[0]).toMatchObject({ id: "entry", sequence: "42" })
+    // Refused where the row is read, before anything is optimistic about it.
+    expect(() => client.insert("narrow", [{ id: "wide", sequence: "4200" }])).toThrow(/not canonical/)
+  })
+
+  it("does not reinterpret an existing physical bigint field", async () => {
+    const client = createMechaClient({
+      carriers: CARRIERS,
+      tables: [{ id: "legacy", table: "legacy", durability: "tab", fields: [{ name: "counter", type: "bigint" }] }],
+      authUrl: "http://localhost:0/auth",
+    })
+
+    await client.insert("legacy", [{ id: "entry", counter: "00042" }])
+    expect(client.collections.legacy.toArray[0]).toMatchObject({ id: "entry", counter: "00042" })
+  })
+})
+
 // Leader election decides which tab drains the outbox. The library takes Web
 // Locks where it exists and otherwise falls back to a BroadcastChannel
 // implementation that times its election with `window`, so a runtime with
@@ -254,4 +325,3 @@ describe("a shared table's family", () => {
     }
   })
 })
-

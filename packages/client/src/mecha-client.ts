@@ -6,6 +6,8 @@ import type { LeaderElection } from "@tanstack/offline-transactions"
 import { localOnlyCollectionOptions, localStorageCollectionOptions } from "@tanstack/db"
 import { idempotentSink } from "./sync-sink.js"
 import { unionCollectionOptions } from "./union.js"
+import { carriers, types } from "./types.js"
+import type { CarrierField, Carriers, CarrierTable, TypeField, Types, TypeTable } from "./types.js"
 import { createStorageAdapter } from "./storage.js"
 
 /**
@@ -33,6 +35,8 @@ export interface MechaTable {
   table: string
   /** Primary key column. */
   key?: string
+  /** Field types emitted in shell.schema for this table. */
+  fields?: TypeField[]
   /**
    * Where the rows live. "crud" (the default) is an Electric shape over a
    * Postgres table; "tab" is an in-memory collection that survives navigation
@@ -58,6 +62,16 @@ export type TableAccess =
 
 export interface MechaClientConfig {
   tables: MechaTable[]
+  /**
+   * The type table the program emitted (shell.yaml `types`). It decides
+   * what a canonical value is; this client converts transport spellings into
+   * it and holds no definition of its own, so there is nothing to fall back
+   * to when it is missing. Absent only where no table declares a field: with
+   * no type in play there is nothing to be canonical about.
+   */
+  types?: TypeTable
+  /** Backwards compatibility alias for `types`. */
+  carriers?: CarrierTable
   /** Electric endpoint; relative values resolve against the page origin. */
   electricUrl?: string
   /** PostgREST endpoint (mecha's /crud gateway). */
@@ -229,6 +243,17 @@ export function soleLeader(): LeaderElection {
 }
 
 export function createMechaClient(config: MechaClientConfig): MechaClient {
+  let bound: Types | undefined
+  const typeTable = (): Types => {
+    const table = config.types ?? config.carriers
+    if (table === undefined) throw new Error("the shell served no type table, and a table declaring fields needs one (shell.yaml `types`)")
+    return bound ??= (types ?? carriers)(table)
+  }
+  const canonicalType = (type: string) => typeTable().canonicalType(type)
+  // A table declaring no field declares no type, and a row with nothing to
+  // canonicalize asks the type table nothing.
+  const normalizeRow: Types["normalizeRow"] = (fields, row, source) =>
+    fields.length === 0 ? row : typeTable().normalizeRow(fields, row, source)
   const electricUrl = resolveUrl(config.electricUrl ?? "/electric")
   const crudUrl = config.crudUrl ?? "/crud"
   const shapes = shapeAuthority(config.authUrl, config.token, config.fetcher ?? fetch)
@@ -238,7 +263,14 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   type Table = Required<Omit<MechaTable, "access">> & { access?: TableAccess }
   const byId = new Map<string, Table>()
   for (const t of config.tables) {
-    byId.set(t.id, { id: t.id, table: t.table, key: t.key ?? "id", durability: t.durability ?? "crud", access: t.access })
+    byId.set(t.id, {
+      id: t.id,
+      table: t.table,
+      key: t.key ?? "id",
+      fields: t.fields ?? [],
+      durability: t.durability ?? "crud",
+      access: t.access,
+    })
   }
 
   const phases = new Map<string, SyncPhase>()
@@ -254,6 +286,10 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   // authority's, resolved together per request from one token.
   function shape(t: Table, key?: RowKey) {
     const getKey = (item: any) => item[t.key]
+    const hasJsonCarrier = t.fields.some((field) => {
+      const type = canonicalType(field.type)
+      return type === "json" || type === "geojson"
+    })
     const options = electricCollectionOptions({
       id: key ? `mecha:${t.id}@${key.column}=${key.value}` : `mecha:${t.id}`,
       getKey,
@@ -274,12 +310,18 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
           }
           throw e
         },
-        // int8 (every mecha table's txid) must land as Number, not the
-        // client default BigInt: synced rows become mutation originals in
-        // the offline outbox, whose JSON serialization has no BigInt path
-        // and would throw on every update/delete of a synced row. txids
-        // stay far below 2^53, so Number is lossless here.
-        parser: { int8: (value: string) => Number(value) },
+        // Keep transport values lossless until the row-level carrier adapter
+        // sees their field. In particular, an int8 is not necessarily txid.
+        parser: {
+          // Keep every domain transport value intact until the row-level
+          // adapter has its column's carrier metadata. A type parser cannot
+          // distinguish two numeric domains with different decimal bounds.
+          ...Object.fromEntries(t.fields.map((field) => [`portable_${canonicalType(field.type)}`, (value: unknown) => value])),
+          int8: (value: string) => value,
+          numeric: (value: string) => value,
+          decimal: (value: string) => value,
+          ...(hasJsonCarrier ? { json: (value: string) => value, jsonb: (value: string) => value } : {}),
+        },
       },
       // No persistence handlers: writes ride the offline executor below —
       // handlers would tie delivery to the optimistic transaction's
@@ -288,7 +330,22 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     // The shape writes through the sink sync-sink.ts describes: a row's
     // return is an update.
     const inner = options.sync.sync
-    options.sync.sync = (params) => inner(idempotentSink(params, getKey))
+    options.sync.sync = (params) => {
+      const sink = idempotentSink(params, getKey)
+      // Electric's parsers run per SQL type, while a carrier belongs to a
+      // column. Normalize here, where both the message and its field list are
+      // present; this is also before a synced row can become an optimistic
+      // mutation original or reach the durable outbox.
+      return inner({
+        ...sink,
+        write: (message: any) =>
+          sink.write(
+            message.value === undefined
+              ? message
+              : { ...message, value: normalizeRow(t.fields, message.value, "electric") },
+          ),
+      })
+    }
     return createCollection({
       // Never startSync: true. Sync begins on the first subscriber, so a
       // screen opens only the shapes its regions actually read.
@@ -462,10 +519,21 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   }
 
   /** Await the write's txid in the shape stream (inserts and updates). */
+  function platformTxid(value: unknown): number {
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
+      throw new Error(`txid is not an integer: ${String(value)}`)
+    }
+    const parsed = typeof value === "bigint" ? value : BigInt(value)
+    if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`txid is outside JavaScript's safe integer range: ${parsed}`)
+    }
+    return Number(parsed)
+  }
+
   async function confirmTxid(collectionId: string, rows: any[]): Promise<void> {
     const txid = rows?.[0]?.txid
     if (txid === undefined || txid === null) return // ignore-duplicates replay: nothing new to await
-    await (collections[collectionId] as any).utils.awaitTxId(Number(txid))
+    await (collections[collectionId] as any).utils.awaitTxId(platformTxid(txid))
   }
 
   /**
@@ -509,7 +577,9 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         body: JSON.stringify(cleanRow(row)),
       })
       await requireOk(res, `insert ${t.table}`)
-      await confirmTxid(t.id, await res.json().catch(() => []))
+      const returned = await res.json()
+      if (!Array.isArray(returned)) throw new Error(`insert ${t.table} returned a non-array representation`)
+      await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
       setPhase(`${t.id}:${row[t.key]}`, null)
     }
     mutationFns[`update:${t.id}`] = async ({ transaction }: any) => {
@@ -521,7 +591,9 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         body: JSON.stringify(cleanRow(m.changes)),
       })
       await requireOk(res, `update ${t.table}`)
-      await confirmTxid(t.id, await res.json().catch(() => []))
+      const returned = await res.json()
+      if (!Array.isArray(returned)) throw new Error(`update ${t.table} returned a non-array representation`)
+      await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
       setPhase(`${t.id}:${key}`, null)
     }
     mutationFns[`delete:${t.id}`] = async ({ transaction }: any) => {
@@ -587,32 +659,34 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     insert(tableId, rows) {
       const t = byId.get(tableId)
       if (!t) throw new Error(`unknown table id: ${tableId}`)
-      for (const row of rows) {
+      const normalizedRows = rows.map((row) => normalizeRow(t.fields, row))
+      for (const row of normalizedRows) {
         if (row[t.key] === undefined) {
           throw new Error(`insert ${tableId}: caller must mint '${t.key}' — retries depend on it`)
         }
       }
-      if (rows.length === 0) return Promise.resolve()
+      if (normalizedRows.length === 0) return Promise.resolve()
       // One call, whatever the batch's size: the collection recomputes the live
       // queries over this table once for it.
-      if (isLocal(t)) return Promise.resolve(void collections[tableId].insert(rows))
+      if (isLocal(t)) return Promise.resolve(void collections[tableId].insert(normalizedRows))
       return run(
         `insert:${tableId}`,
-        rows.map((row) => `${tableId}:${String(row[t.key])}`),
-        () => collections[tableId].insert(rows),
+        normalizedRows.map((row) => `${tableId}:${String(row[t.key])}`),
+        () => collections[tableId].insert(normalizedRows),
       )
     },
     update(tableId, edits) {
       const t = byId.get(tableId)
       if (!t) throw new Error(`unknown table id: ${tableId}`)
       if (edits.length === 0) return Promise.resolve()
-      const keys = edits.map((e) => e.key)
+      const normalizedEdits = edits.map((edit) => ({ ...edit, changes: normalizeRow(t.fields, edit.changes) }))
+      const keys = normalizedEdits.map((e) => e.key)
       // The collection hands back one draft per key, in the order asked for, so
       // each edit's changes land on its own row.
       const apply = () =>
         collections[tableId].update(keys, (drafts: any) => {
           const list = Array.isArray(drafts) ? drafts : [drafts]
-          list.forEach((draft, i) => Object.assign(draft, edits[i].changes))
+          list.forEach((draft, i) => Object.assign(draft, normalizedEdits[i].changes))
         })
       if (isLocal(t)) return Promise.resolve(void apply())
       return run(`update:${tableId}`, keys.map((k) => `${tableId}:${k}`), apply)

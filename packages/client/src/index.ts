@@ -4,6 +4,11 @@ export { electricCollectionOptions } from "./electric-collection.js"
 export type { ElectricCollectionConfig } from "./electric-collection.js"
 export { createMechaClient } from "./mecha-client.js"
 export type { MechaClient, MechaClientConfig, MechaTable, SyncPhase } from "./mecha-client.js"
+export { types, carriers } from "./types.js"
+export type {
+  CarrierCheck, CarrierEntry, CarrierField, Carriers, CarrierSource, CarrierTable, CarrierType,
+  JsonValue, PortableType, TypeCheck, TypeEntry, TypeField, Types, TypeSource, TypeTable,
+} from "./types.js"
 // The incremental-view-maintenance surface, re-exported so a consumer reaches
 // it through this package rather than reaching around it into @tanstack/db.
 export { createLiveQueryCollection, liveQueryCollectionOptions } from "@tanstack/db"
@@ -13,4 +18,5 @@ export { and, eq, gt, gte, inArray, isNull, lt, lte, not, or } from "@tanstack/d
 // Indexes createIndex will not choose for you: BasicIndex answers the equality
 // lookup a join does, BTreeIndex the ordered scan an orderBy with a limit
 // needs to stop early instead of loading everything.
-export { BasicIndex, BTreeIndex } from "@tanstack/db"
+export { BasicIndex, BTreeIndex, createCollection, localOnlyCollectionOptions, localStorageCollectionOptions } from "@tanstack/db"
+export type { Collection, CollectionOptions } from "@tanstack/db"

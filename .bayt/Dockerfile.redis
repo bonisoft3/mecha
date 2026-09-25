@@ -1,6 +1,6 @@
 # generated from bayt.cue — do not edit
 FROM redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933 AS redis
-WORKDIR /monorepo/libraries/mecha
+WORKDIR /data
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.redis.json ./.bayt/
 HEALTHCHECK --interval=5s --timeout=5s --retries=6 --start-period=10s CMD redis-cli ping | grep PONG
 

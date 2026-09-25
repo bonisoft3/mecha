@@ -148,7 +148,7 @@ _mecha: bayt.#project & _where & {
 				// The tenancy floor ships with the image, whatever emitted the
 				// tables above it: it sorts after mecha's 002 grants and before
 				// the app's 005 that calls rls_protect.
-				copy: [{srcs: ["services/database/rls/rls.sql"], dst: "/docker-entrypoint-initdb.d/002a_rls.sql"}]
+				copy: [{srcs: ["services/database/rls/rls.sql"], dst: "\(cluster.#InitdbDir)/\(cluster.#TenancyMigration)"}]
 				cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
 					"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
 			}

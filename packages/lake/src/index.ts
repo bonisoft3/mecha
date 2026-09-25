@@ -6,6 +6,9 @@
 import * as duckdb from "@duckdb/duckdb-wasm"
 import duckdbWasmUrl from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url"
 import duckdbWorkerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url"
+import { normalizeLakeRows, typedSql } from "./lake-types.js"
+import { types as bindTypes, carriers as bindCarriers } from "@mecha/client/types"
+import type { TypeField, Types, TypeTable, CarrierField, Carriers, CarrierTable } from "@mecha/client/types"
 
 /**
  * The engine generation this package boots. The DuckDB that WRITES a
@@ -20,7 +23,9 @@ export interface LakeEngine {
   db: duckdb.AsyncDuckDB
   conn: duckdb.AsyncDuckDBConnection
   /** Run SQL, rows as plain objects. */
-  q: (sql: string) => Promise<Record<string, unknown>[]>
+  q: (sql: string, fields?: readonly (TypeField | CarrierField)[]) => Promise<Record<string, unknown>[]>
+  /** Explicit name for a type-aware query at a call site. */
+  qTyped: (sql: string, fields: readonly (TypeField | CarrierField)[]) => Promise<Record<string, unknown>[]>
 }
 
 /** Files a published lake ships, emitted by the publish step's manifest. */
@@ -29,7 +34,14 @@ export interface LakeManifest {
   files: string[]
 }
 
-export async function bootLakeEngine(): Promise<LakeEngine> {
+/**
+ * The type table decides what a queried value must come out as, so a query
+ * that names fields needs one. An engine that only hands its `db` to something
+ * else — a terminal, a notebook — names none, and is owed no table.
+ */
+export async function bootLakeEngine(table?: TypeTable | CarrierTable): Promise<LakeEngine> {
+  let bound: Types | undefined
+  const boundTypes = () => (bound ??= bindTypes(table as TypeTable))
   // A worker built from fetched source stays interceptable by the page's
   // service worker; importScripts inside a blob worker is not.
   const workerSrc = await (await fetchOk(duckdbWorkerUrl)).text()
@@ -42,11 +54,16 @@ export async function bootLakeEngine(): Promise<LakeEngine> {
   // root-relative form the bundler emits cannot be parsed inside it.
   await db.instantiate(new URL(duckdbWasmUrl, location.href).href)
   const conn = await db.connect()
-  const q = async (sql: string) =>
-    (await conn.query(sql))
+  const q = async (sql: string, fields: readonly (TypeField | CarrierField)[] = []) => {
+    if (fields.length === 0) {
+      return (await conn.query(sql)).toArray().map((r: { toJSON(): Record<string, unknown> }) => r.toJSON())
+    }
+    const rows = (await conn.query(typedSql(boundTypes().canonicalType, sql, fields)))
       .toArray()
       .map((r: { toJSON(): Record<string, unknown> }) => r.toJSON())
-  return { db, conn, q }
+    return normalizeLakeRows(boundTypes(), fields, rows)
+  }
+  return { db, conn, q, qTyped: q }
 }
 
 /**

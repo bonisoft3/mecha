@@ -23,6 +23,15 @@ import (
 	bayt "github.com/bonisoft3/bayt/core:bayt"
 )
 
+// Where postgres applies what an image carries, in name order, on a fresh data
+// directory.
+#InitdbDir: "/docker-entrypoint-initdb.d"
+
+// The tenancy floor's migration, which ships with the image whatever emitted
+// the tables above it. Its name places it: after mecha's 002 grants and before
+// a caller's 005 that calls rls_protect.
+#TenancyMigration: "002a_rls.sql"
+
 // A health wait states no `restart`: bayt adds `restart: true` to every one
 // (plugins/bayt/core/gen_compose.cue), so a dependency recreated inside an
 // `up` recreates what waits on it.
@@ -99,7 +108,26 @@ _devElectricSecret: "dev-electric-secret"
 		activate: ""
 	}
 
+
 	surface: {
+		// How this cluster's schema reaches its database.
+		//
+		// A cluster delivers its schema by baking it into the database image
+		// and letting postgres apply it at initdb, in name order, on a fresh
+		// data directory — so there is no migration runner to ask, and the
+		// steps that ran are the files the image carries. Anything that applies
+		// that schema elsewhere, inspects what it built, or reproduces it needs
+		// the two facts below, and reading them here is how it avoids keeping a
+		// second copy of this layout that nothing would correct when it moved.
+		if X.capabilities.server {
+			schema: {
+				// The target that runs the database; a compose project names
+				// its service after it.
+				target: "database"
+				// The directory the image applies from.
+				initdb: #InitdbDir
+			}
+		}
 		targets: [string]: _
 		targets: {
 			if X.capabilities.server {
@@ -118,7 +146,7 @@ _devElectricSecret: "dev-electric-secret"
 						// which postgres runs in name order on a fresh data
 						// directory. That directory lives on the container's
 						// writable layer, which `--force-recreate` discards with it.
-						copy: [{srcs: X.state.migrations, dst: "/docker-entrypoint-initdb.d/"}]
+						copy: [{srcs: X.state.migrations, dst: "\(#InitdbDir)/"}]
 					}
 					compose: {
 						ports: ["5432"]
@@ -304,7 +332,10 @@ _devElectricSecret: "dev-electric-secret"
 						start_period:   "10s"
 						start_interval: "500ms"
 					}
-					dockerfile: from: name: "redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933"
+					dockerfile: {
+						from: name: "redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933"
+						workdir: "/data"
+					}
 					compose: {}
 				}
 				"mesh-events": bayt.healthcheck.tcp & X._image & {

@@ -160,7 +160,8 @@
           "packages/**",
           "[m]ise.toml",
           "[.]mise.toml",
-          "[m]ise.lock"
+          "[m]ise.lock",
+          "[.]tool-versions"
         ],
         "exclude": [],
         "defaultGlobs": null,

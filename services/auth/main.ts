@@ -11,6 +11,8 @@ import {
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import postgres from "postgres";
+import { shapeWhere, signJwt as sign, verifyJwt as verify } from "./jwt.ts";
+export { shapeWhere };
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
 if (!DATABASE_URL) throw new Error("DATABASE_URL is required");
@@ -42,66 +44,12 @@ export async function migrate(): Promise<void> {
     ON CONFLICT DO NOTHING`;
 }
 
-// --- HS256 JWT via WebCrypto ---
+// --- HS256 JWT via WebCrypto, under this service's secret ---
 
 const enc = new TextEncoder();
 
-function b64urlEncode(bytes: Uint8Array): string {
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function b64urlDecode(s: string): Uint8Array {
-  const b = s.replaceAll("-", "+").replaceAll("_", "/");
-  const pad = b.length % 4 === 0 ? "" : "=".repeat(4 - (b.length % 4));
-  return Uint8Array.from(atob(b + pad), (c) => c.charCodeAt(0));
-}
-
-let hmacKey: CryptoKey | undefined;
-async function getKey(): Promise<CryptoKey> {
-  hmacKey ??= await crypto.subtle.importKey(
-    "raw",
-    enc.encode(JWT_SECRET),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"],
-  );
-  return hmacKey;
-}
-
-export async function signJwt(
-  claims: Record<string, unknown>,
-): Promise<string> {
-  const head = b64urlEncode(enc.encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
-  const payload = b64urlEncode(enc.encode(JSON.stringify(claims)));
-  const sig = new Uint8Array(
-    await crypto.subtle.sign("HMAC", await getKey(), enc.encode(`${head}.${payload}`)),
-  );
-  return `${head}.${payload}.${b64urlEncode(sig)}`;
-}
-
-export async function verifyJwt(
-  token: string,
-): Promise<Record<string, unknown> | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const ok = await crypto.subtle.verify(
-      "HMAC",
-      await getKey(),
-      b64urlDecode(parts[2]),
-      enc.encode(`${parts[0]}.${parts[1]}`),
-    );
-    if (!ok) return null;
-    const claims = JSON.parse(new TextDecoder().decode(b64urlDecode(parts[1])));
-    if (typeof claims.exp !== "number") return null;
-    if (claims.exp <= Math.floor(Date.now() / 1000)) return null;
-    return claims;
-  } catch {
-    return null;
-  }
-}
+export const signJwt = (claims: Record<string, unknown>) => sign(JWT_SECRET, claims);
+export const verifyJwt = (token: string) => verify(JWT_SECRET, token);
 
 export function issueUserToken(id: string, handle: string): Promise<string> {
   return signJwt({
@@ -116,16 +64,9 @@ export function issueUserToken(id: string, handle: string): Promise<string> {
 //
 // Electric names four parameters the server must own. Deciding them means
 // asking Postgres which scopes a subject holds, so Caddy asks here over
-// `forward_auth` (pronto/assets/Caddyfile) and this service decides.
-//
-// The predicate is built from `subject_scopes`, the same function
-// `app_pre_request` uses for the CRUD path. One derivation, two deliveries: the
-// paths cannot disagree about a subject's reach without disagreeing here first.
+// `forward_auth` (pronto/assets/Caddyfile) and this service decides; the
+// predicate itself is jwt.ts's shapeWhere.
 
-/** The `where` a shape may carry, canonical so the comparison can be equality. */
-export function shapeWhere(scopes: string[]): string {
-  return `scope_id IN (${scopes.map((s) => `'${s.replaceAll("'", "''")}'`).join(",")})`;
-}
 
 /**
  * Whether the floor reaches this table.

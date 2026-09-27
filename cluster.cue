@@ -80,7 +80,7 @@ _devElectricSecret: "dev-electric-secret"
 		// The data plane. Off, nothing server-side is instantiated: no
 		// database, no crud gateway, no sync, no bus, no pipeline worker —
 		// caddy alone, serving the terminal. An app whose every entity is a
-		// browser tier (`tab`, `device`) stores nothing here to keep, and the
+		// browser durability (`tab`, `device`) stores nothing here to keep, and the
 		// services would then be a cluster running for nobody. The terminal
 		// is unchanged: its local collections never address a server, so the
 		// same screens, forms and handlers run against either topology.

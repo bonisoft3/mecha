@@ -36,9 +36,9 @@ One user interaction produces either an **immediately consistent** or **eventual
 
 ### 4. Vertical scalability (down and up)
 
-The same architecture must run at every scale:
+The same architecture must run at every tier:
 
-| Scale | Environment | Consistency model |
+| Tier | Environment | Consistency model |
 |-------|------------|-------------------|
 | **Browser** | PGlite + Service Worker + WASM | Best-effort eventual |
 | **CLI** | Native binaries, no containers | Full consistency |

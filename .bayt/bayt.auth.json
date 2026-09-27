@@ -142,6 +142,7 @@
         "globs": [
           "services/auth/deno.json",
           "services/auth/deno.lock",
+          "services/auth/jwt.ts",
           "services/auth/main.ts"
         ],
         "exclude": []
@@ -162,6 +163,7 @@
             "globs": [
               "services/auth/deno.json",
               "services/auth/deno.lock",
+              "services/auth/jwt.ts",
               "services/auth/main.ts"
             ],
             "exclude": []

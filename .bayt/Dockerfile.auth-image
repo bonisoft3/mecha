@@ -1,8 +1,8 @@
 # generated from bayt.cue — do not edit
 FROM denoland/deno:alpine-2.3.7@sha256:bec860a253508d9813bb622be2359fd7bb3f72ff9a85ed6f8ccd46ab8522bcf6 AS auth-image
 WORKDIR /app
-COPY services/auth/deno.json services/auth/deno.lock services/auth/main.ts /app/
-COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/main.ts ./
+COPY services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts /app/
+COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.auth-image.json ./.bayt/
 EXPOSE 9999
 CMD ["run", "--allow-net", "--allow-env", "main.ts"]
@@ -10,7 +10,7 @@ RUN deno cache main.ts
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS auth-image_ctxs
 WORKDIR /monorepo/libraries/mecha
-COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/main.ts ./
+COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
 RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi

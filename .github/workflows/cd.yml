@@ -1,4 +1,6 @@
-# Publish this component's CUE module to the Central Registry.
+# Publish this component: its CUE module to the Central Registry, and its tree
+# as a release asset a mise `github:` pin installs, which is how an app outside
+# the monorepo bundles the browser cluster this tree carries.
 #
 # GitHub reads workflows only from a repository's root .github/, so this file
 # is inert in the monorepo and active only in the mirror, where copybara moves
@@ -22,7 +24,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -55,3 +57,23 @@ jobs:
       # working tree, so nothing may write to the checkout before this runs.
       - name: Publish CUE module
         run: cue mod publish "${GITHUB_REF_NAME}"
+
+      - name: Stage release content
+        run: |
+          mkdir -p dist mecha-stage
+          # Source only: the cluster, its packages, the services and the SQL
+          # the browser bundle reads, minus what only a repository needs.
+          tar cf - --exclude=.git --exclude=.github --exclude=node_modules --exclude=dist --exclude=mecha-stage . | tar xf - -C mecha-stage
+          # One universal payload under every platform name, since mise's
+          # `github:` backend matches the consumer runner's platform against
+          # the asset name.
+          for triple in linux-x64 linux-arm64 linux-armv7 macos-x64 macos-arm64 windows-x64 windows-arm64; do
+            tar czf "dist/mecha-${triple}.tar.gz" -C mecha-stage .
+          done
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

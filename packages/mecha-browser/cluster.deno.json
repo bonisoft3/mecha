@@ -1,0 +1,9 @@
+{
+  "nodeModulesDir": "none",
+  "imports": {
+    "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
+    "@mecha/postgrest-js": "../postgrest-js/src/index.ts",
+    "../postgrest-js/src/rest-handler.js": "../postgrest-js/src/rest-handler.ts",
+    "../postgrest-js/src/validate.js": "../postgrest-js/src/validate.ts"
+  }
+}

@@ -62,21 +62,12 @@ in the stream.
 
 ## Schema
 
-**mecha carries a live database forward with pgroll.** mecha vendors pgroll's
-migration grammar, pins pgroll and runs it. A caller hands its migrations in
-through a field of the cluster's CUE, and the cluster runs a one-shot migrate
-step between the database turning healthy and its readers starting:
-`pgroll init`, a baseline once on a fresh volume, then the pending migrations
-in order, then PostgREST's schema reload
-([why pgroll](docs/schema.md#carrying-a-live-database-forward)).
-
 **Every list that names an entity is rendered from `Entities`**
 ([what else names an entity](docs/schema.md#what-else-names-an-entity)).
 
 **`task generate` ends in a migration, or fails.** It renders the HCL and
 stops. A check that `atlas migrate diff` would write nothing catches HCL that no
-migration carries: the tracked `schema.hcl` renders five entities while the
-migrations create two.
+migration carries.
 
 **Numbers keep their width and fraction**: reading the `anyOf`'s first arm
 gives `bigint`, `double precision` and enums their own types
@@ -99,6 +90,13 @@ by health, as compose orders the single-machine tier, and would run each daprd
 as a process of its own.
 
 **The k8s tier** ([the tiers](docs/deployment.md#the-tiers)).
+
+**Every server tier runs the migrate step** once per deploy, after the database
+is ready and before new readers roll out, and a failure stops the rollout: a
+Job with `backoffLimit: 0` on k8s, a job executed with `--wait` on Cloud Run
+([carrying a live database forward](docs/schema.md#carrying-a-live-database-forward)).
+`pgroll init` installs event triggers, so the migration role needs that
+privilege on a managed Postgres.
 
 **mecha emits the cloud tier** ([as built](docs/deployment.md#clouds-as-built)).
 Emitting it from `cluster.cue` takes the bus as the tier's choice in mecha's
@@ -139,15 +137,6 @@ and salt would close `/img`.
 
 **The blob smoke round-trips through the door**, its PUT and GET able to fail
 the suite ([the blob plane](docs/capabilities.md#the-blob-plane)).
-
-**The database image creates `schedule` when a cluster declares a schedule.**
-`schedule` is mecha's table, the one the ticker sweeps, and the caller's
-migrations create it
-([the ticker](services/ticker/README.md#one-table-of-mechas-and-the-apps-own)).
-
-**The database image defines `auth_uid()` when the auth plane is on.** Every row
-policy calls it to read the subject, and the caller's migrations define it
-([the token contract](services/auth/README.md)).
 
 **An AI gateway runs in its seat**
 ([beside the cluster](docs/capabilities.md#beside-the-cluster)). Bifrost there

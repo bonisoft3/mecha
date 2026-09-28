@@ -15,7 +15,7 @@
 * [Schema and its changes](schema.md) - concept: How a schema reaches the database as initdb SQL, mecha's own tables from protobuf, what notices a change, and carrying a live database forward.
 * [Tiers and clouds](deployment.md) - concept: mecha's tiers from browser to edge, the unit that holds the WAL reader and the request that wakes it, the managed service each component maps to, and what runs on a cloud as built.
 * [The browser platform](browser.md) - concept: mecha's cluster inside one browser tab — PGlite and a JavaScript stand-in for each service, one user, and the guarantees it drops.
-* [Capabilities](capabilities.md) - concept: The switches in cluster.cue that add planes to a cluster — data, auth, blobs, schedules — and what mecha's own stack runs beside them.
+* [Capabilities](capabilities.md) - concept: The switches in cluster.cue that add planes to a cluster — data, change feed, auth, blobs, schedules — and what mecha's own stack runs beside them.
 
 # Service and package contracts
 

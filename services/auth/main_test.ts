@@ -1,6 +1,7 @@
-// Requires DATABASE_URL pointing at a throwaway postgres. app_user is owned
-// elsewhere (see main.ts); tests create a minimal stand-in before running
-// the service's own migration against it.
+// Requires DATABASE_URL pointing at a throwaway postgres, and the rest of the
+// environment main.ts reads. app_user is owned elsewhere (see main.ts); tests
+// create a minimal stand-in before running the service's own migration
+// against it.
 import {
   assert,
   assertEquals,
@@ -25,8 +26,6 @@ await sql`DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN CREATE ROLE app_user NOLOGIN; END IF;
 END $$`;
 await sql`GRANT USAGE ON SCHEMA public, mecha TO app_user`;
-await sql`CREATE OR REPLACE FUNCTION auth_uid() RETURNS uuid LANGUAGE sql STABLE AS $$
-  SELECT nullif(current_setting('request.jwt.claims', true)::json->>'sub','')::uuid $$`;
 await sql`CREATE TABLE IF NOT EXISTS gk_doc (
   id uuid primary key default gen_random_uuid(),
   owner_id uuid not null

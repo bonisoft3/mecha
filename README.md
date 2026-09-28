@@ -59,7 +59,7 @@ Configuration lives in YAML, CUE, SQL, or Protocol Buffers. Not in application c
 
 ### 7. Additive capabilities
 
-The cluster (`cluster.cue`) is one template with capabilities that layer: the data plane (database, crud, sync, the bus, the pipeline worker), the auth plane, the blob plane. Each adds services without replacing the ones below it — auth, the one plane that reaches down, only sets their configuration — and an app states which it needs. Mecha's own stack adds what the cluster does not cover — stream processing, the AI gateway — beside it.
+The cluster (`cluster.cue`) is one template with capabilities that layer: the data plane (database, crud, sync), the change feed (the bus, the pipeline worker), the auth plane, the blob plane. Each adds services without replacing the ones below it — auth, the one plane that reaches down, only sets their configuration — and an app states which it needs. Mecha's own stack adds what the cluster does not cover — stream processing, the AI gateway — beside it.
 
 A team that only needs a served terminal runs caddy alone. A team that needs real-time AI runs 12+ containers. Same architecture, same schema, different capabilities.
 

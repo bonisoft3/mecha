@@ -5,6 +5,8 @@ services:
       additional_contexts:
         libraries_mecha-crud: service:libraries_mecha-crud
         libraries_mecha-caddy: service:libraries_mecha-caddy
+        libraries_mecha-auth: service:libraries_mecha-auth
+        libraries_mecha-electric: service:libraries_mecha-electric
       context: ..
       dockerfile: .bayt/Dockerfile.smoke
       target: smoke
@@ -16,6 +18,11 @@ services:
         condition: service_healthy
         restart: true
       libraries_mecha-caddy:
+        condition: service_healthy
+        restart: true
+      libraries_mecha-auth:
+        condition: service_started
+      libraries_mecha-electric:
         condition: service_healthy
         restart: true
     image: bayt-libraries_mecha-smoke:${BAYT_IMAGE_TAG:-latest}

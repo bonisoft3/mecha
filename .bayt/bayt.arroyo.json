@@ -43,7 +43,7 @@
     ],
     "preambleCopyContexts": [],
     "from": {
-      "name": "ghcr.io/arroyosystems/arroyo:latest@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df"
+      "name": "ghcr.io/arroyosystems/arroyo:0.15.0@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df"
     },
     "copy": [
       {

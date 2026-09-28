@@ -48,6 +48,9 @@ export interface CDCListenerConfig {
  * Listens to PGlite pg_notify('cdc', ...) events.
  * For each event, looks up the pipeline by table name,
  * runs bloblang, and writes the enrichment back to PGlite.
+ *
+ * PGlite runs a listener in a microtask and drops its promise, so a failed
+ * event surfaces as an unhandled rejection.
  */
 export async function createCDCListener(
   config: CDCListenerConfig
@@ -62,33 +65,18 @@ export async function createCDCListener(
     const pipeline = config.registry.get(event.table)
     if (!pipeline) return
 
-    try {
-      const enrichment = await config.runtime.execute(pipeline.mapping, event.row)
+    const enrichment = await config.runtime.execute(pipeline.mapping, event.row)
+    const keyCol = pipeline.key ?? 'id'
+    const keys = Object.keys(enrichment)
+    if (keys.length === 0) return
 
-      const keyCol = pipeline.key ?? 'id'
-      const allKeys = Object.keys(enrichment)
-      // Validate and filter enrichment keys; skip invalid column names with a warning
-      const keys = allKeys.filter((k) => {
-        try {
-          validateIdentifier(k)
-          return true
-        } catch {
-          console.warn(`[mecha-browser] CDC skipping invalid column name "${k}" for ${event.table}`)
-          return false
-        }
-      })
-      if (keys.length === 0) return
+    const setClauses = keys.map((k, i) => `"${validateIdentifier(k)}" = $${i + 2}`).join(', ')
+    const values = [event.row[keyCol], ...keys.map(k => enrichment[k])]
 
-      const setClauses = keys.map((k, i) => `"${validateIdentifier(k)}" = $${i + 2}`).join(', ')
-      const values = [event.row[keyCol], ...keys.map(k => enrichment[k])]
-
-      await config.pglite.query(
-        `UPDATE "${validateIdentifier(event.table)}" SET ${setClauses} WHERE "${validateIdentifier(keyCol)}" = $1`,
-        values
-      )
-    } catch (err) {
-      console.error(`[mecha-browser] CDC failed for ${event.table}:`, err)
-    }
+    await config.pglite.query(
+      `UPDATE "${validateIdentifier(event.table)}" SET ${setClauses} WHERE "${validateIdentifier(keyCol)}" = $1`,
+      values
+    )
   })
 
   return unsub

@@ -8,7 +8,7 @@
       "PGRST_DB_SCHEMA": "public",
       "PGRST_DB_ANON_ROLE": "anon",
       "PGRST_DB_PRE_REQUEST": "public.app_pre_request",
-      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-pronto-dev-secret-please-override-32ch}",
+      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "PGRST_SERVER_HOST": "*",
       "PGRST_SERVER_PORT": "3000",
       "PGRST_ADMIN_SERVER_PORT": "3001"
@@ -18,6 +18,9 @@
     "depends_on": {
       "libraries_mecha-database": {
         "condition": "service_healthy"
+      },
+      "libraries_mecha-migrate": {
+        "condition": "service_completed_successfully"
       }
     },
     "networks": {
@@ -134,7 +137,9 @@
       "upClosure": [
         "libraries/mecha/.bayt/compose.crud.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     },
     "outs": {
@@ -164,30 +169,46 @@
       "upClosure": [
         "libraries/mecha/.bayt/compose.crud.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     }
   },
   "visibility": "internal",
   "emitsSrcs": false,
   "deps": [
-    "database_outs"
+    "database_outs",
+    "migrate_outs"
   ],
   "sameProjectDeps": [
-    "database_outs"
+    "database_outs",
+    "migrate_outs"
   ],
   "transitiveDeps": [
-    "database_outs"
+    "database_outs",
+    "migrate_outs"
   ],
   "transitiveCrossDeps": [],
   "upClosure": [
     "libraries/mecha/.bayt/compose.crud.yaml",
     "libraries/mecha/.bayt/compose.database.yaml",
-    "libraries/mecha/.bayt/compose.database-image.yaml"
+    "libraries/mecha/.bayt/compose.database-image.yaml",
+    "libraries/mecha/.bayt/compose.migrate.yaml",
+    "libraries/mecha/.bayt/compose.migrate-image.yaml"
   ],
   "chainedDeps": [
     {
       "name": "database_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "migrate_outs",
       "project": "libraries_mecha",
       "dir": "libraries/mecha",
       "outs": {

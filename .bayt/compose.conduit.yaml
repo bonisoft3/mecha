@@ -6,6 +6,7 @@ services:
         libraries_mecha-conduit-image: service:libraries_mecha-conduit-image
         libraries_mecha-database: service:libraries_mecha-database
         libraries_mecha-mesh-events: service:libraries_mecha-mesh-events
+        libraries_mecha-migrate: service:libraries_mecha-migrate
       context: ..
       dockerfile: .bayt/Dockerfile.conduit
       target: conduit
@@ -18,6 +19,8 @@ services:
         restart: true
       libraries_mecha-mesh-events:
         condition: service_started
+      libraries_mecha-migrate:
+        condition: service_completed_successfully
     develop:
       watch:
       - action: sync+restart
@@ -50,6 +53,7 @@ services:
         libraries_mecha-conduit-image_bayt: service:libraries_mecha-conduit-image_bayt
         libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
         libraries_mecha-mesh-events_bayt: service:libraries_mecha-mesh-events_bayt
+        libraries_mecha-migrate_bayt: service:libraries_mecha-migrate_bayt
       context: ..
       dockerfile: .bayt/Dockerfile.conduit
       target: conduit_bayt

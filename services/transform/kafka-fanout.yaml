@@ -1,5 +1,4 @@
 # Kafka fan-out pipeline: tee CDC events + heartbeats to Redpanda for Arroyo.
-# Only used when ai profile is active (Redpanda available).
 # Reads from the same Redis stream with a separate consumer group.
 
 input:

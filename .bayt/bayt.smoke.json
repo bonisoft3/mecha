@@ -12,6 +12,12 @@
       },
       "libraries_mecha-caddy": {
         "condition": "service_healthy"
+      },
+      "libraries_mecha-auth": {
+        "condition": "service_started"
+      },
+      "libraries_mecha-electric": {
+        "condition": "service_healthy"
       }
     }
   },

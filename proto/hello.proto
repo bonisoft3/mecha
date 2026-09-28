@@ -5,9 +5,9 @@ package mecha.v1;
 import "buf/validate/validate.proto";
 import "google/protobuf/timestamp.proto";
 
-// Hello entity — the schema drives database tables, API routes, and
-// stream processing queries. No RPC services: PostgREST generates the
-// REST surface from the table DDL.
+// Hello entity — the schema drives the database table
+// (services/database/schemas/schema.hcl). No RPC services: PostgREST
+// generates the REST surface from the table DDL.
 message Hello {
   string id = 1 [
     (buf.validate.field).string.uuid = true

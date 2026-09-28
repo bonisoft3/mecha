@@ -1,5 +1,6 @@
 import yaml from "js-yaml"
 import type { PipelineConfig, ProcessorStep, PipelineOutputConfig } from "./types.js"
+import { resolveProcessor } from "./processors/registry.js"
 
 /**
  * Load a pipeline config from rpk-format YAML string.
@@ -8,8 +9,7 @@ import type { PipelineConfig, ProcessorStep, PipelineOutputConfig } from "./type
  * The `input` section is ignored — @mecha/pipeline uses its own CDC input
  * (pg_notify in browser). rpk uses the input section directly.
  *
- * The `table` for CDC routing is inferred from the first jq processor's
- * select() filter, or can be overridden via the `table` parameter.
+ * `table` is the one whose CDC events feed the pipeline.
  */
 export function loadPipelineYaml(yamlStr: string, table: string): PipelineConfig {
   const doc = yaml.load(yamlStr) as Record<string, unknown>
@@ -18,6 +18,9 @@ export function loadPipelineYaml(yamlStr: string, table: string): PipelineConfig
   if (!pipelineSection?.processors) {
     throw new Error("Pipeline YAML must have a pipeline.processors section")
   }
+  // Built once here so a processor or a check this runtime cannot run is
+  // refused when the pipeline loads, not when its first message arrives.
+  pipelineSection.processors.forEach(resolveProcessor)
 
   // Extract output config
   const outputSection = doc.output as Record<string, unknown> | undefined

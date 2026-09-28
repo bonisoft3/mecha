@@ -6,7 +6,7 @@
     "environment": {
       "CRUD_URL": "http://crud:3000",
       "REDIS_URL": "redis://redis:6379",
-      "SERVICE_JWT": "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.eeAs4VbzZYwz32jEudSFT_zMeuL18M4cEFY8Jn1jPwY}"
+      "SERVICE_JWT": "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
     },
     "ports": [],
     "volumes": [],
@@ -123,7 +123,9 @@
         "libraries/mecha/.bayt/compose.redis.yaml",
         "libraries/mecha/.bayt/compose.crud.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     },
     "outs": {
@@ -155,7 +157,9 @@
         "libraries/mecha/.bayt/compose.redis.yaml",
         "libraries/mecha/.bayt/compose.crud.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     },
     "srcs": {
@@ -192,7 +196,9 @@
         "libraries/mecha/.bayt/compose.redis.yaml",
         "libraries/mecha/.bayt/compose.crud.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     }
   },
@@ -216,7 +222,9 @@
     "libraries/mecha/.bayt/compose.redis.yaml",
     "libraries/mecha/.bayt/compose.crud.yaml",
     "libraries/mecha/.bayt/compose.database.yaml",
-    "libraries/mecha/.bayt/compose.database-image.yaml"
+    "libraries/mecha/.bayt/compose.database-image.yaml",
+    "libraries/mecha/.bayt/compose.migrate.yaml",
+    "libraries/mecha/.bayt/compose.migrate-image.yaml"
   ],
   "chainedDeps": [
     {

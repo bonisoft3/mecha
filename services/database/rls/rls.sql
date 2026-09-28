@@ -39,6 +39,14 @@ CREATE OR REPLACE FUNCTION public.subject_scopes(uid text) RETURNS text[]
                 ELSE ARRAY['public:', 'user:' || uid] END
   $$;
 
+-- The request's subject: the `sub` PostgREST puts in request.jwt.claims, NULL
+-- outside a request or for a token without one (anon). Every row policy above
+-- the floor calls it and a column default may, so it exists before a caller's
+-- first table, and is restated here rather than migrated with the tables.
+CREATE OR REPLACE FUNCTION public.auth_uid() RETURNS uuid LANGUAGE sql STABLE AS $$
+  SELECT nullif(current_setting('request.jwt.claims', true)::json->>'sub','')::uuid
+$$;
+
 -- The caller supplies `scope_id`: its derivation differs per access mode and
 -- belongs to whoever declared the entity. Prefer a generated column --
 -- `scope_id text GENERATED ALWAYS AS ('user:' || owner) STORED` -- because
@@ -62,7 +70,7 @@ CREATE OR REPLACE FUNCTION public.subject_scopes(uid text) RETURNS text[]
 -- role must bypass RLS, as a superuser or a role holding BYPASSRLS. Where it
 -- does not, FORCE ROW LEVEL SECURITY scopes the definer's read by the CALLER's
 -- app.scopes and the trigger judges what the writer can see rather than what
--- stands -- so the emitted 008_validations.sql opens with a DO block that
+-- stands -- so the emitted validation migration opens with a DO block that
 -- refuses to install under a role holding neither.
 DROP PROCEDURE IF EXISTS public.rls_protect(regclass, text);
 -- Whether a table carries a scope the floor can read: the column, NOT NULL.
@@ -132,7 +140,7 @@ END $$;
 -- reads. Empty then means every table is either floored or knowingly exempt,
 -- and `rls_exempt` is the short list a reviewer actually has to read.
 -- Outside `public` on purpose. An app migration granting DML ON ALL TABLES IN
--- SCHEMA public -- 002_grants and 007_publication both do -- would otherwise
+-- SCHEMA public -- an app's grants and publication do -- would otherwise
 -- hand every signed-in user the ability to exempt any table and silence the
 -- gate, and a REVOKE here would be undone by the next such grant. Being outside
 -- `public` also keeps it off PostgREST, which serves that schema.

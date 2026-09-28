@@ -1,5 +1,5 @@
 # generated from bayt.cue — do not edit
-FROM ghcr.io/arroyosystems/arroyo:latest@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df AS arroyo
+FROM ghcr.io/arroyosystems/arroyo:0.15.0@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df AS arroyo
 WORKDIR /monorepo/libraries/mecha
 RUN --mount=type=cache,target=/apt-store,id=/apt-store,sharing=shared --mount=type=cache,target=/var/cache/apt,id=libraries_mecha-arroyo:/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt/lists,id=libraries_mecha-arroyo:/var/lib/apt/lists,sharing=locked s=/apt-store; d=/var/cache/apt/archives; mkdir -p "$s" "$d"; cp -r "$s"/. "$d"/ 2>/dev/null || true; rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl jq netcat-openbsd || exit; cd "$d" && for f in *.deb; do [ -f "$f" ] || continue; o="$s/$f"; [ -e "$o" ] && continue; t="$(mktemp "$s/.pXXXXXX")" && cp "$f" "$t" && mv -f "$t" "$o"; done; :
 COPY --chmod=755 services/arroyo/arroyo-init.sh /init-scripts/arroyo-init.sh

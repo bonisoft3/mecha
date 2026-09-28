@@ -7,10 +7,9 @@
 // plain Dockerfiles under .bayt/, which is what a consumer without bayt
 // builds with `docker build`.
 //
-// Sources: workspace consumers (guis/snapcards, whose lockfile links
-// ../../libraries/mecha/packages/*) pull the package sources into their
-// build context via `deps: ["libraries_mecha:setup:srcs"]`, the way
-// omnishell exposes `plugins_omnishell:build:srcs`. The package build/test
+// Sources: a workspace consumer whose lockfile links
+// ../../libraries/mecha/packages/* pulls the package sources into its build
+// context via `deps: ["libraries_mecha:setup:srcs"]`. The package build/test
 // loop lives in mecha's own Taskfile.
 //
 // The stack: the cluster instantiated for mecha itself, FROM its own images,
@@ -29,6 +28,10 @@ import (
 	cluster "github.com/bonisoft3/mecha:cluster"
 )
 
+_postgres: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
+// The one pgroll in the repository: every migration a cluster is given runs
+// through it, and pgroll/pgroll_test.ts holds the grammar to its tag.
+_pgroll: "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
 _deno:    "denoland/deno:alpine-2.3.7@sha256:bec860a253508d9813bb622be2359fd7bb3f72ff9a85ed6f8ccd46ab8522bcf6"
 _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
 _busybox: "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"
@@ -53,6 +56,7 @@ _stack: cluster.#Cluster & {
 		app: "mecha"
 		images: {
 			database:   {ref: ":database-image"}
+			migrate:    {ref: ":migrate-image"}
 			mesh:       {ref: ":mesh-image"}
 			conduit:    {ref: ":conduit-image"}
 			auth:       {ref: ":auth-image"}
@@ -68,17 +72,22 @@ _stack: cluster.#Cluster & {
 		statics: []
 	}
 	state: {
-		// mecha's own schema, then the validation-seat fixtures the crud smoke
-		// asserts against; postgres runs the directory in name order.
+		// mecha's own schema, the identity table its auth plane keeps, then the
+		// validation-seat fixtures the crud smoke asserts against.
 		migrations: [
 			"services/database/migrations/000_extensions.sql",
 			"services/database/migrations/001_roles.sql",
 			"services/database/migrations/002_grants.sql",
-			"services/database/migrations/003_publication.sql",
 			"services/database/migrations/004_create_tables.sql",
 			"services/database/migrations/005_electric_publication.sql",
-			"tests/validation-smoke.sql",
+			"services/database/migrations/006_conduit_publication.sql",
+			"services/database/007_identity.sql",
+			"tests/008_validation_smoke.sql",
 		]
+		// A change to a table the migrations above built, so every boot of the
+		// stack runs the migrate target; services/migrate/migrate_test.ts
+		// boots it against volumes of every age.
+		pgroll: "01_hello_mood": operations: [{add_column: {table: "Hello", column: {name: "mood", type: "text", nullable: true}}}]
 		pipelines: [{name: "passthrough", file: "services/transform/passthrough.yaml"}]
 		// Any name: the cluster only asks whether a schedule exists, and the
 		// ticker and clock are part of what this stack exercises.
@@ -123,16 +132,16 @@ _mecha: bayt.#project & _where & {
 		// ---- The images -------------------------------------------------
 
 		"database-image": _image & {
-			srcs: globs: ["services/database/rls/rls.sql"]
+			srcs: globs: ["services/database/rls/rls.sql", "services/ticker/schedule.sql"]
 			dockerfile: {
-				from: name: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
-				// wal2json for logical decoding; plv8 hosts a Jessie validation
-				// inside the write's transaction. PGDG apt carries no plv8: the
-				// artifact is Pigsty's, fetched by exact name and checked against
-				// its published sha256 per architecture, inside the same RUN so
-				// the .deb and the fetch tooling leave no layer behind.
+				from: name: _postgres
+				// plv8 hosts a Jessie validation inside the write's transaction.
+				// PGDG apt carries no plv8: the artifact is Pigsty's, fetched by
+				// exact name and checked against its published sha256 per
+				// architecture, inside the same RUN so the .deb and the fetch
+				// tooling leave no layer behind.
 				defaultPreamble: extensions: (apt.#install & {
-					pkgs: ["postgresql-18-wal2json", "ca-certificates", "wget"]
+					pkgs: ["ca-certificates", "wget"]
 					then: [
 						"arch=$(dpkg --print-architecture)",
 						"case \"$arch\" in amd64) sum=d46aa5f0e85db736f6a881cdfaab8400c57a4007291c441007f205fe796ebe92;; arm64) sum=e0517a453c1421e3bd3b6bbd28e8446e90a59e00cfe4b27607e5df17e93a2abd;; *) echo \"no plv8 artifact for $arch\" >&2; exit 1;; esac",
@@ -146,11 +155,28 @@ _mecha: bayt.#project & _where & {
 				// The data directory lives on the container's writable layer.
 				preamble: ["ENV PGDATA=/postgresql-data"]
 				// The tenancy floor ships with the image, whatever emitted the
-				// tables above it: it sorts after mecha's 002 grants and before
-				// the app's 005 that calls rls_protect.
-				copy: [{srcs: ["services/database/rls/rls.sql"], dst: "\(cluster.#InitdbDir)/\(cluster.#TenancyMigration)"}]
+				// tables above it. The ticker's table is staged outside the
+				// initdb directory, for a cluster that declares a schedule to
+				// place.
+				copy: [
+					{srcs: ["services/database/rls/rls.sql"], dst: "\(cluster.#InitdbDir)/\(cluster.#TenancyMigration)"},
+					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
+				]
 				cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
 					"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
+			}
+		}
+		// The migration runner: pgroll, and the psql its ledger checks and the
+		// schema reload go through, on the database's own base.
+		"migrate-image": _image & {
+			srcs: globs: ["services/migrate/migrate.sh"]
+			dockerfile: {
+				from: name: _postgres
+				copy: [
+					{from: {name: _pgroll}, srcs: ["/usr/bin/pgroll"], dst: "/usr/local/bin/pgroll"},
+					{srcs: ["services/migrate/migrate.sh"], dst: "/migrate.sh", chmod: "755"},
+				]
+				entrypoint: ["/migrate.sh"]
 			}
 		}
 		"mesh-image": _image & {
@@ -160,7 +186,7 @@ _mecha: bayt.#project & _where & {
 				// The entrypoint's interpreter: daprd's image ships no shell.
 				copy: [
 					{from: {name: _busybox}, srcs: ["/bin/busybox"], dst: "/busybox"},
-					{srcs: ["services/mesh/dapr/components/httpendpoints.yaml", "services/mesh/dapr/components/resiliency.yaml", "services/mesh/dapr/components/redis-streams.yaml"], dst: "/dapr/components/"},
+					{srcs: ["services/mesh/dapr/components/resiliency.yaml", "services/mesh/dapr/components/redis-streams.yaml"], dst: "/dapr/components/"},
 					{srcs: ["services/mesh/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"},
 				]
 				entrypoint: ["/entrypoint.sh"]
@@ -264,7 +290,7 @@ _mecha: bayt.#project & _where & {
 		"arroyo": _run & {
 			srcs: globs: ["services/arroyo/arroyo-init.sh", "services/arroyo/healthcheck.sh", "services/arroyo/queries/*"]
 			dockerfile: {
-				from: name: "ghcr.io/arroyosystems/arroyo:latest@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df"
+				from: name: "ghcr.io/arroyosystems/arroyo:0.15.0@sha256:6562fa23703e2d6c420de887ddf7aae5245f0a934aa65949b9aa117e117a20df"
 				defaultPreamble: tools: (apt.#install & {pkgs: ["curl", "jq", "netcat-openbsd"]}).out
 				copy: [
 					{srcs: ["services/arroyo/arroyo-init.sh"], dst: "/init-scripts/arroyo-init.sh", chmod: "755"},
@@ -328,14 +354,17 @@ _mecha: bayt.#project & _where & {
 			}
 			srcs: globs: ["tests/entrypoint.sh", "tests/entrypoint-events.sh"]
 		}
-		// CRUD write and proxy read, then the validation seat and the tenancy floor.
+		// CRUD write and proxy read, the validation seat and the tenancy floor,
+		// then the sync path: a guest from auth, a shape through the gate.
 		"smoke": _run & _smokeImage & {
 			dockerfile: entrypoint: ["/bin/sh", "/entrypoint.sh"]
 			compose: {
 				manual: true
 				depends_on: {
-					"\(_mecha.name)-crud":  {condition: "service_healthy"}
-					"\(_mecha.name)-caddy": {condition: "service_healthy"}
+					"\(_mecha.name)-crud":     {condition: "service_healthy"}
+					"\(_mecha.name)-caddy":    {condition: "service_healthy"}
+					"\(_mecha.name)-auth":     {condition: "service_started"}
+					"\(_mecha.name)-electric": {condition: "service_healthy"}
 				}
 			}
 		}

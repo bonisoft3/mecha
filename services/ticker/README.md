@@ -63,8 +63,9 @@ into a service that looks healthy and does half its job:
 
 ## One table of mecha's, and the app's own
 
-`schedule` is mecha's mechanism, created as `020_schedule.sql` and seeded from
-the app's declarations. An app never authors its rows by hand.
+`schedule` is mecha's mechanism, created by the database image as
+`020_schedule.sql` where the cluster declares a schedule, and seeded from the
+app's declarations. An app never authors its rows by hand.
 
 ```sql
 create table schedule (

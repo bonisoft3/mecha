@@ -1,0 +1,94 @@
+// What a cluster refuses of the steps its database runs at initdb, and which
+// services its change feed brings.
+//
+//   deno test --no-config --no-lock --allow-read --allow-run=cue cluster_test.ts
+
+import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+
+const MECHA = fileURLToPath(new URL(".", import.meta.url));
+
+type State = { migrations: string[]; pipelines: { name: string; file: string }[]; schedules: string[] };
+
+/** `field` of a cluster given `state` and `capabilities`, as `cue export` answers it. */
+async function exported(state: Partial<State>, field: string, capabilities: Record<string, boolean> = {}) {
+  const given: State = { migrations: [], pipelines: [], schedules: [], ...state };
+  const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
+  const out = await new Deno.Command("cue", {
+    args: ["export", ".:cluster", "-e", `(${cluster}).${field}`],
+    cwd: MECHA,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const text = (b: Uint8Array) => new TextDecoder().decode(b);
+  return { ok: out.success, value: out.success ? JSON.parse(text(out.stdout)) : undefined, stderr: text(out.stderr) };
+}
+
+const copied = (state: Partial<State>) => exported(state, "surface.targets.database.dockerfile.copy[0].srcs");
+
+// The refusals below are only refusals if this passes.
+Deno.test("steps that each hold digits of their own are copied as given", async () => {
+  const migrations = ["m/000_a.sql", "m/004_b.sql", "fixtures/020_c.sql"];
+  const got = await copied({ migrations });
+  assert.equal(got.ok, true, got.stderr);
+  assert.deepEqual(got.value, migrations);
+});
+
+// Postgres globs the initdb directory under en_US.utf8, which skips
+// punctuation, so it ran 002a_rls.sql before 002_grants.sql while the replay,
+// sorting by byte, applied them the other way round. Names that open with
+// three digits no other step holds are ordered by those digits under both.
+Deno.test("a step whose name does not open with three digits and `_` is refused", async () => {
+  for (const name of ["m/002a_x.sql", "m/identity.sql", "m/02_x.sql"]) {
+    const got = await copied({ migrations: [name] });
+    assert.equal(got.ok, false, name);
+    assert.match(got.stderr, /out of bound/, name);
+  }
+});
+
+Deno.test("two steps holding the same digits are refused", async () => {
+  const got = await copied({ migrations: ["m/004_a.sql", "n/004_b.sql"] });
+  assert.equal(got.ok, false);
+  assert.match(got.stderr, /_initdb\."004": conflicting values/);
+});
+
+Deno.test("a step taking the digits of a step mecha places is refused", async () => {
+  const floor = await copied({ migrations: ["m/003_x.sql"] });
+  assert.equal(floor.ok, false);
+  assert.match(floor.stderr, /_initdb\."003": conflicting values/);
+
+  const scheduled = await copied({ migrations: ["m/020_x.sql"], schedules: ["tick"] });
+  assert.equal(scheduled.ok, false);
+  assert.match(scheduled.stderr, /_initdb\."020": conflicting values/);
+});
+
+const FEED = ["conduit", "mesh-events", "redis", "transform"];
+
+/** The change feed's services a cluster runs, and the ones its launch waits on. */
+async function feed(state: Partial<State>, capabilities: Record<string, boolean> = {}) {
+  const targets = await exported(state, "surface.targets", capabilities);
+  assert.equal(targets.ok, true, targets.stderr);
+  const t = targets.value as Record<string, { compose?: { depends_on?: Record<string, unknown> } }>;
+  const waited = Object.keys(t.launch.compose?.depends_on ?? {});
+  return { run: FEED.filter((n) => n in t), waited: FEED.filter((n) => waited.includes(n)) };
+}
+
+// truco's conduit crash-looped: it has a database and no pipeline, so the
+// feed's publication named no table and conduit refused its source.
+Deno.test("a cluster given neither a pipeline nor a schedule runs no change feed", async () => {
+  assert.deepEqual(await feed({}), { run: [], waited: [] });
+});
+
+Deno.test("a pipeline starts its worker, while a schedule only needs the feed", async () => {
+  const all = { run: FEED, waited: FEED };
+  assert.deepEqual(await feed({ pipelines: [{ name: "p", file: "p.yaml" }] }), all);
+  const withoutWorker = { run: FEED.filter((n) => n !== "transform"), waited: FEED.filter((n) => n !== "transform") };
+  assert.deepEqual(await feed({ schedules: ["tick"] }), withoutWorker);
+  assert.deepEqual(await feed({}, { capture: true }), withoutWorker, "stated on, it runs without either");
+});
+
+Deno.test("a cluster given a pipeline refuses the change feed off", async () => {
+  const got = await exported({ pipelines: [{ name: "p", file: "p.yaml" }] }, "capabilities", { capture: false });
+  assert.equal(got.ok, false);
+  assert.match(got.stderr, /capabilities\.capture: conflicting values/);
+});

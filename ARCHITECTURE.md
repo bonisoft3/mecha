@@ -13,6 +13,7 @@ that argues the part and what it was chosen over.
 ```
 browser ─► Caddy ─┬─ /crud ─────► PostgREST ─► PostgreSQL ─ WAL ─► Conduit
                   ├─ /electric ─► ElectricSQL ◄─────┘                 │
+                  ├─ /auth ─────► auth                                │
                   ├─ /poke ─────► ticker ◄── clock           Dapr (mesh-events)
                   └─ /img ──────► imgproxy ─► rclone-s3               │
                                                            Redis Streams cdc-events
@@ -31,6 +32,7 @@ The routes are mecha's own Caddyfile's; a consumer's differs
 |---|---|---|
 | The door | Caddy, one h2 origin | [the proxy](docs/proxy.md) |
 | Database | PostgreSQL 18, with the tenancy floor | [schema](docs/schema.md), [row-level security](services/database/rls/README.md) |
+| Live schema changes | pgroll, run by a one-shot migrate step before the readers start | [schema](docs/schema.md#carrying-a-live-database-forward) |
 | CRUD | PostgREST, its API read from the catalog | [schema](docs/schema.md#what-notices-a-change) |
 | Real-time sync | ElectricSQL | [the proxy](docs/proxy.md#routes) |
 | Change capture | Conduit, reading a publication through a slot | [change capture](docs/change-capture.md) |
@@ -44,8 +46,8 @@ The routes are mecha's own Caddyfile's; a consumer's differs
 | The same cluster in a page | PGlite and a stand-in per service | [the browser platform](docs/browser.md) |
 
 A cluster turns its planes on in `cluster.cue`
-([invariant 7](README.md#7-additive-capabilities)): data, auth, blobs, and a
-schedule ([capabilities](docs/capabilities.md)). The same services run at every
+([invariant 7](README.md#7-additive-capabilities)): data, the change feed,
+auth, blobs, and a schedule ([capabilities](docs/capabilities.md)). The same services run at every
 tier of [invariant 4](README.md#4-vertical-scalability-down-and-up); what each
 tier runs them on is [tiers and clouds](docs/deployment.md), and what is not
 built is [PENDING.md](PENDING.md).

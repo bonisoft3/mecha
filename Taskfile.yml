@@ -29,13 +29,12 @@ tasks:
       # Windows CI uses are invisible to the bash this tool spawns.
       - mise x -- cue cmd generate tmpl_tool.cue
     sources:
-      - "**/*.tmpl"
-      - "**/*.cue"
+      - "tmpl.cue"
+      - "tmpl_tool.cue"
+      - "services/database/schemas/schema.hcl.tmpl"
+      - "{{.GEN_DIR}}/jsonschema/*.json"
     generates:
-      - "**/*.hcl"
-      - "**/*.yaml"
-      - "**/*.conf"
-      - "**/*.sql"
+      - "services/database/schemas/schema.hcl"
 
   generate:
     desc: "Generate all artifacts from protobuf schemas and atlas"
@@ -63,11 +62,25 @@ tasks:
     desc: "Run unit tests: cue vet + buf lint + Deno services (pure, cross-platform)"
     deps: [buf:generate]
     cmds:
-      # Select packages explicitly: bayt.cue adds a `mecha` package to the
+      # Select the package explicitly: bayt.cue adds a `mecha` package to the
       # root, so an unqualified `cue vet ./...` errors on the mixed dir.
-      - cue vet ./...:tmpl ./...:database
+      - cue vet ./...:tmpl
       - buf lint proto
       - task: test:ticker
+      - task: test:pgroll
+      - task: test:cluster
+
+  test:cluster:
+    desc: "what a cluster refuses of its initdb steps, and which services its change feed brings"
+    cmds:
+      # mise x puts the real tool bin dir on PATH — see cue:generate.
+      - mise x -- deno test --no-config --no-lock --allow-read --allow-run=cue cluster_test.ts
+
+  test:pgroll:
+    desc: "pgroll grammar against the pinned image, and what the cluster's field refuses"
+    cmds:
+      # mise x puts the real tool bin dir on PATH — see cue:generate.
+      - mise x -- deno test --no-config --no-lock --allow-read --allow-write --allow-run=cue pgroll/pgroll_test.ts
 
   test:ticker:
     desc: "ticker unit tests (pure: no clock, no network)"

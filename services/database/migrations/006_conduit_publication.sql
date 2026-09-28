@@ -1,5 +1,5 @@
 -- Create publication for Conduit WAL consumer
--- Migration: 003_publication
+-- Migration: 006_conduit_publication
 -- Purpose: Enable at-least-once CDC delivery via Conduit
 
 -- Create a publication for all tables so Conduit can consume WAL changes.

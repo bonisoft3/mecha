@@ -5,8 +5,8 @@ import { typedSql } from "./lake-types.js"
 // What a projection must be is decided by the type a column is, so these
 // fields name types directly and the mapping is the identity. Whether a
 // projected value then canonicalizes correctly is a question about the type
-// table, which this package does not hold: apps/ponto/tests/lake-types.test.ts
-// asks it, against the table its own shell was emitted with.
+// table, which this package does not hold: a consumer asks it, against the
+// table it was emitted with.
 const asWritten = (type: string) => type
 
 describe("typed lake portable types", () => {

@@ -22,7 +22,6 @@
       {
         "from": null,
         "srcs": [
-          "services/mesh/dapr/components/httpendpoints.yaml",
           "services/mesh/dapr/components/resiliency.yaml",
           "services/mesh/dapr/components/redis-streams.yaml"
         ],

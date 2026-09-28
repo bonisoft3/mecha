@@ -142,7 +142,7 @@ docker compose exec libraries_mecha-mesh-events /busybox wget -qO- --post-data='
 ```
 
 - **Conduit cannot connect**: the publication its template names must exist;
-  mecha's `conduit_pub` comes from `003_publication.sql`.
+  mecha's `conduit_pub` comes from `006_conduit_publication.sql`.
 - **A pipeline is not consuming**: an entry that stays in `XPENDING` is one its
   output keeps refusing.
 - **Stale state**: `task clean`, then `sayt launch`.

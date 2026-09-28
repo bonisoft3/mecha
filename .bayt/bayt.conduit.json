@@ -16,6 +16,9 @@
       },
       "libraries_mecha-mesh-events": {
         "condition": "service_started"
+      },
+      "libraries_mecha-migrate": {
+        "condition": "service_completed_successfully"
       }
     },
     "networks": {
@@ -163,7 +166,9 @@
         "libraries/mecha/.bayt/compose.mesh-events.yaml",
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
-        "libraries/mecha/.bayt/compose.redis.yaml"
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     },
     "outs": {
@@ -198,7 +203,9 @@
         "libraries/mecha/.bayt/compose.mesh-events.yaml",
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
-        "libraries/mecha/.bayt/compose.redis.yaml"
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     },
     "srcs": {
@@ -222,7 +229,8 @@
       "transitiveDeps": [
         "conduit-image_srcs",
         "database_outs_srcs",
-        "mesh-events_outs_srcs"
+        "mesh-events_outs_srcs",
+        "migrate_outs_srcs"
       ],
       "transitiveCrossDeps": [],
       "chainedDeps": [],
@@ -239,7 +247,9 @@
         "libraries/mecha/.bayt/compose.mesh-events.yaml",
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
-        "libraries/mecha/.bayt/compose.redis.yaml"
+        "libraries/mecha/.bayt/compose.redis.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     }
   },
@@ -248,17 +258,20 @@
   "deps": [
     "conduit-image",
     "database_outs",
-    "mesh-events_outs"
+    "mesh-events_outs",
+    "migrate_outs"
   ],
   "sameProjectDeps": [
     "conduit-image",
     "database_outs",
-    "mesh-events_outs"
+    "mesh-events_outs",
+    "migrate_outs"
   ],
   "transitiveDeps": [
     "conduit-image",
     "database_outs",
-    "mesh-events_outs"
+    "mesh-events_outs",
+    "migrate_outs"
   ],
   "transitiveCrossDeps": [],
   "upClosure": [
@@ -269,7 +282,9 @@
     "libraries/mecha/.bayt/compose.mesh-events.yaml",
     "libraries/mecha/.bayt/compose.mesh-image.yaml",
     "libraries/mecha/.bayt/compose.caddy.yaml",
-    "libraries/mecha/.bayt/compose.redis.yaml"
+    "libraries/mecha/.bayt/compose.redis.yaml",
+    "libraries/mecha/.bayt/compose.migrate.yaml",
+    "libraries/mecha/.bayt/compose.migrate-image.yaml"
   ],
   "chainedDeps": [
     {
@@ -292,6 +307,15 @@
     },
     {
       "name": "mesh-events_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "migrate_outs",
       "project": "libraries_mecha",
       "dir": "libraries/mecha",
       "outs": {

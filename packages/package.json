@@ -11,9 +11,7 @@
     "mecha-browser",
     "collections",
     "client",
-    "pipeline",
-    "webllm",
-    "websd"
+    "pipeline"
   ],
   "scripts": {
     "build": "pnpm --filter \"./*\" run build",

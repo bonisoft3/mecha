@@ -1,16 +1,17 @@
 # generated from bayt.cue — do not edit
 FROM postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8 AS database-image
 WORKDIR /monorepo/libraries/mecha
-RUN --mount=type=cache,target=/apt-store,id=/apt-store,sharing=shared --mount=type=cache,target=/var/cache/apt,id=libraries_mecha-database-image:/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt/lists,id=libraries_mecha-database-image:/var/lib/apt/lists,sharing=locked p="$PWD"; s=/apt-store; d=/var/cache/apt/archives; mkdir -p "$s" "$d"; cp -r "$s"/. "$d"/ 2>/dev/null || true; rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends postgresql-18-wal2json ca-certificates wget || exit; cd "$d" && for f in *.deb; do [ -f "$f" ] || continue; o="$s/$f"; [ -e "$o" ] && continue; t="$(mktemp "$s/.pXXXXXX")" && cp "$f" "$t" && mv -f "$t" "$o"; done; :; (cd "$p" && arch=$(dpkg --print-architecture) && case "$arch" in amd64) sum=d46aa5f0e85db736f6a881cdfaab8400c57a4007291c441007f205fe796ebe92;; arm64) sum=e0517a453c1421e3bd3b6bbd28e8446e90a59e00cfe4b27607e5df17e93a2abd;; *) echo "no plv8 artifact for $arch" >&2; exit 1;; esac && wget -qO /tmp/plv8.deb "https://repo.pigsty.io/apt/pgsql/trixie/pool/main/p/plv8/postgresql-18-plv8_3.2.4-1PIGSTY~trixie_$arch.deb" && echo "$sum  /tmp/plv8.deb" | sha256sum -c - && dpkg -i /tmp/plv8.deb && rm /tmp/plv8.deb) || exit; DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq --auto-remove wget ca-certificates || exit
+RUN --mount=type=cache,target=/apt-store,id=/apt-store,sharing=shared --mount=type=cache,target=/var/cache/apt,id=libraries_mecha-database-image:/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt/lists,id=libraries_mecha-database-image:/var/lib/apt/lists,sharing=locked p="$PWD"; s=/apt-store; d=/var/cache/apt/archives; mkdir -p "$s" "$d"; cp -r "$s"/. "$d"/ 2>/dev/null || true; rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ca-certificates wget || exit; cd "$d" && for f in *.deb; do [ -f "$f" ] || continue; o="$s/$f"; [ -e "$o" ] && continue; t="$(mktemp "$s/.pXXXXXX")" && cp "$f" "$t" && mv -f "$t" "$o"; done; :; (cd "$p" && arch=$(dpkg --print-architecture) && case "$arch" in amd64) sum=d46aa5f0e85db736f6a881cdfaab8400c57a4007291c441007f205fe796ebe92;; arm64) sum=e0517a453c1421e3bd3b6bbd28e8446e90a59e00cfe4b27607e5df17e93a2abd;; *) echo "no plv8 artifact for $arch" >&2; exit 1;; esac && wget -qO /tmp/plv8.deb "https://repo.pigsty.io/apt/pgsql/trixie/pool/main/p/plv8/postgresql-18-plv8_3.2.4-1PIGSTY~trixie_$arch.deb" && echo "$sum  /tmp/plv8.deb" | sha256sum -c - && dpkg -i /tmp/plv8.deb && rm /tmp/plv8.deb) || exit; DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq --auto-remove wget ca-certificates || exit
 ENV PGDATA=/postgresql-data
-COPY services/database/rls/rls.sql /docker-entrypoint-initdb.d/002a_rls.sql
-COPY --parents services/database/rls/rls.sql ./
+COPY services/database/rls/rls.sql /docker-entrypoint-initdb.d/003_rls.sql
+COPY services/ticker/schedule.sql /usr/share/mecha/initdb/020_schedule.sql
+COPY --parents services/database/rls/rls.sql services/ticker/schedule.sql ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.database-image.json ./.bayt/
 CMD ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS database-image_ctxs
 WORKDIR /monorepo/libraries/mecha
-COPY --parents services/database/rls/rls.sql ./
+COPY --parents services/database/rls/rls.sql services/ticker/schedule.sql ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
 RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi

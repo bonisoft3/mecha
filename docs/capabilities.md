@@ -1,7 +1,7 @@
 ---
 type: concept
 title: Capabilities
-description: The switches in cluster.cue that add planes to a cluster — data, auth, blobs, schedules — and what mecha's own stack runs beside them.
+description: The switches in cluster.cue that add planes to a cluster — data, change feed, auth, blobs, schedules — and what mecha's own stack runs beside them.
 ---
 
 # Capabilities
@@ -16,10 +16,11 @@ exactly what those capabilities instantiate. The planes layer as
 
 | capability | default | instantiates | also |
 |---|---|---|---|
-| `server`, the data plane | on | database, crud, electric, redis, mesh-events, conduit, transform | Off, caddy runs alone and serves statics, for a consumer that stores nothing server-side |
-| `auth`, the auth plane | off | auth: WebAuthn, minting `app_user` JWTs ([its contract](../services/auth/README.md)) | crud verifies tokens (`PGRST_JWT_SECRET`) and transform is handed `SERVICE_JWT` ([routing](change-capture.md#routing)). Turning auth on turns `server` on |
+| `server`, the data plane | on | database, crud, electric | Off, caddy runs alone and serves statics, for a consumer that stores nothing server-side |
+| `capture`, the change feed | on where the cluster is given a pipeline or a schedule, off otherwise | redis, mesh-events, conduit; transform when a pipeline is given ([change capture](change-capture.md)) | Refused off where it is given one: the pipeline would never run, and the ticker's wake is addressed to mesh-events. Stated on, it runs without either. Turning it on turns `server` on |
+| `auth`, the auth plane | off | auth: WebAuthn, minting `app_user` JWTs ([its contract](../services/auth/README.md)) | crud verifies tokens (`PGRST_JWT_SECRET`) and transform is handed `SERVICE_JWT` ([routing](change-capture.md#routing)). Turning auth on turns `server` on. The `auth_uid()` a policy reads the token's subject with is the tenancy floor's, in every database |
 | `blobs`, the blob plane | off | rclone-s3, imgproxy | |
-| a name in `state.schedules` | none | ticker, clock ([its contract](../services/ticker/README.md)) | Set by declaring a schedule, not by a flag |
+| a name in `state.schedules` | none | ticker, clock ([its contract](../services/ticker/README.md)) | The database gets `schedule`, the table they sweep ([its step](schema.md#how-a-schema-reaches-the-database)), and `capture` turns on. Set by declaring a schedule, not by a flag |
 
 ## The blob plane
 
@@ -72,7 +73,8 @@ At browser tier, `rclone-js` answers the same S3 subset over IndexedDB
   ([streaming joins](streaming-joins.md)).
 - **The AI gateway's seat**: `bifrost`, a busybox that holds port 8090. No
   gateway runs there. At browser tier, pipeline calls to a model URL are
-  answered in the page ([the browser platform](browser.md#what-stands-in-for-what)).
+  answered in the page, by the models its embedder supplies
+  ([the browser platform](browser.md#what-stands-in-for-what)).
 
 Both come up on a bare `up`, not as manual targets.
 

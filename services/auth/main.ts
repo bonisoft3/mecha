@@ -14,12 +14,15 @@ import postgres from "postgres";
 import { shapeWhere, signJwt as sign, verifyJwt as verify } from "./jwt.ts";
 export { shapeWhere };
 
-const DATABASE_URL = Deno.env.get("DATABASE_URL");
-if (!DATABASE_URL) throw new Error("DATABASE_URL is required");
-const JWT_SECRET = Deno.env.get("PGRST_JWT_SECRET") ??
-  "pronto-dev-secret-please-override-32ch";
-const RP_ID = Deno.env.get("WEBAUTHN_RP_ID") ?? "localhost";
-const ORIGIN = Deno.env.get("WEBAUTHN_ORIGIN") ?? "http://localhost:8080";
+function required(name: string): string {
+  const value = Deno.env.get(name);
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+const DATABASE_URL = required("DATABASE_URL");
+const JWT_SECRET = required("PGRST_JWT_SECRET");
+const RP_ID = required("WEBAUTHN_RP_ID");
+const ORIGIN = required("WEBAUTHN_ORIGIN");
 
 const USER_TOKEN_TTL_S = 7 * 24 * 3600;
 // A shape token outlives one long-poll cycle and little else: Electric holds a
@@ -63,9 +66,9 @@ export function issueUserToken(id: string, handle: string): Promise<string> {
 // --- The sync path's gatekeeper ---
 //
 // Electric names four parameters the server must own. Deciding them means
-// asking Postgres which scopes a subject holds, so Caddy asks here over
-// `forward_auth` (pronto/assets/Caddyfile) and this service decides; the
-// predicate itself is jwt.ts's shapeWhere.
+// asking Postgres which scopes a subject holds, so the caller's Caddyfile asks
+// here over `forward_auth` and this service decides; the predicate itself is
+// jwt.ts's shapeWhere.
 
 
 /**
@@ -278,7 +281,7 @@ async function registerStart(_req: Request): Promise<Response> {
   const handle = generateHandle();
   const userId = crypto.randomUUID();
   const options = await generateRegistrationOptions({
-    rpName: "pronto",
+    rpName: RP_ID,
     rpID: RP_ID,
     userName: handle,
     userID: enc.encode(userId),

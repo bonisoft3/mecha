@@ -6,6 +6,8 @@ include:
   required: false
 - path: ./compose.database-image.yaml
   required: false
+- path: ./compose.migrate-image.yaml
+  required: false
 - path: ./compose.mesh-image.yaml
   required: false
 - path: ./compose.conduit-image.yaml
@@ -63,4 +65,6 @@ include:
 - path: ./compose.clock.yaml
   required: false
 - path: ./compose.launch.yaml
+  required: false
+- path: ./compose.migrate.yaml
   required: false

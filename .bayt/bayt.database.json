@@ -59,11 +59,6 @@
         },
         {
           "action": "rebuild",
-          "path": "../services/database/migrations/003_publication.sql",
-          "target": "/docker-entrypoint-initdb.d"
-        },
-        {
-          "action": "rebuild",
           "path": "../services/database/migrations/004_create_tables.sql",
           "target": "/docker-entrypoint-initdb.d"
         },
@@ -74,7 +69,17 @@
         },
         {
           "action": "rebuild",
-          "path": "../tests/validation-smoke.sql",
+          "path": "../services/database/migrations/006_conduit_publication.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../services/database/007_identity.sql",
+          "target": "/docker-entrypoint-initdb.d"
+        },
+        {
+          "action": "rebuild",
+          "path": "../tests/008_validation_smoke.sql",
           "target": "/docker-entrypoint-initdb.d"
         }
       ]
@@ -94,12 +99,26 @@
           "services/database/migrations/000_extensions.sql",
           "services/database/migrations/001_roles.sql",
           "services/database/migrations/002_grants.sql",
-          "services/database/migrations/003_publication.sql",
           "services/database/migrations/004_create_tables.sql",
           "services/database/migrations/005_electric_publication.sql",
-          "tests/validation-smoke.sql"
+          "services/database/migrations/006_conduit_publication.sql",
+          "services/database/007_identity.sql",
+          "tests/008_validation_smoke.sql"
         ],
         "dst": "/docker-entrypoint-initdb.d/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": {
+          "ref": ":database-image",
+          "name": "libraries_mecha-database-image"
+        },
+        "srcs": [
+          "/usr/share/mecha/initdb/020_schedule.sql"
+        ],
+        "dst": "/docker-entrypoint-initdb.d/020_schedule.sql",
         "link": true,
         "parents": false,
         "exclude": []
@@ -142,10 +161,11 @@
       "services/database/migrations/000_extensions.sql",
       "services/database/migrations/001_roles.sql",
       "services/database/migrations/002_grants.sql",
-      "services/database/migrations/003_publication.sql",
       "services/database/migrations/004_create_tables.sql",
       "services/database/migrations/005_electric_publication.sql",
-      "tests/validation-smoke.sql"
+      "services/database/migrations/006_conduit_publication.sql",
+      "services/database/007_identity.sql",
+      "tests/008_validation_smoke.sql"
     ],
     "exclude": []
   },
@@ -236,11 +256,13 @@
           "services/database/migrations/000_extensions.sql",
           "services/database/migrations/001_roles.sql",
           "services/database/migrations/002_grants.sql",
-          "services/database/migrations/003_publication.sql",
           "services/database/migrations/004_create_tables.sql",
           "services/database/migrations/005_electric_publication.sql",
-          "tests/validation-smoke.sql",
-          "services/database/rls/rls.sql"
+          "services/database/migrations/006_conduit_publication.sql",
+          "services/database/007_identity.sql",
+          "tests/008_validation_smoke.sql",
+          "services/database/rls/rls.sql",
+          "services/ticker/schedule.sql"
         ],
         "exclude": []
       },
@@ -257,7 +279,8 @@
           "dir": "libraries/mecha",
           "outs": {
             "globs": [
-              "services/database/rls/rls.sql"
+              "services/database/rls/rls.sql",
+              "services/ticker/schedule.sql"
             ],
             "exclude": []
           }

@@ -22,16 +22,19 @@ services:
         path: ../services/database/migrations/002_grants.sql
         target: /docker-entrypoint-initdb.d
       - action: rebuild
-        path: ../services/database/migrations/003_publication.sql
-        target: /docker-entrypoint-initdb.d
-      - action: rebuild
         path: ../services/database/migrations/004_create_tables.sql
         target: /docker-entrypoint-initdb.d
       - action: rebuild
         path: ../services/database/migrations/005_electric_publication.sql
         target: /docker-entrypoint-initdb.d
       - action: rebuild
-        path: ../tests/validation-smoke.sql
+        path: ../services/database/migrations/006_conduit_publication.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../services/database/007_identity.sql
+        target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../tests/008_validation_smoke.sql
         target: /docker-entrypoint-initdb.d
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

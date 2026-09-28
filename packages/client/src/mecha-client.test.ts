@@ -44,10 +44,10 @@ describe("createMechaClient", () => {
 })
 
 // A table stating only the carriers these rows use. It is an input and not a
-// definition: what canonical IS belongs to the program that emits the table a
-// client is served (pronto's carriers.cue), and what is proved here is that
-// this client applies the one it was handed — its int64 admits three digits
-// and no more, which no program would emit and this client obeys.
+// definition: what canonical IS belongs to the generator that emits the table a
+// client is served, and what is proved here is that this client applies the
+// one it was handed — its int64 admits three digits and no more, which no
+// program would emit and this client obeys.
 const CARRIERS = {
   types: {
     decimal: {
@@ -124,8 +124,8 @@ describe("carrier rows", () => {
 // Reaching that fallback takes two things this suite's runtime denies it: an
 // executor only elects anyone once a storage probe finds somewhere to keep the
 // outbox, and Node offers `navigator.locks` in any case. Deno offers storage
-// when asked and no Web Locks ever, which is why omnishell met this and these
-// tests did not. Both halves are staged below.
+// when asked and no Web Locks ever, which is why a Deno consumer met this and
+// these tests did not. Both halves are staged below.
 describe("a runtime with no Web Locks", () => {
   function withStorageAndNoWebLocks() {
     const kv = new Map<string, string>()

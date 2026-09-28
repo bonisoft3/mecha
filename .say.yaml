@@ -45,3 +45,11 @@ say:
         stop: true
         cmds:
           - do: "pnpm --dir packages/mecha-browser run test"
+      # The stack booted as a compose project of its own per run, removed with
+      # the images it tagged: the migrate target against volumes of every age,
+      # and what the database carries per plane.
+      stack:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "mise x -- deno test --no-config --no-lock --allow-run=docker,cue --allow-read --allow-write --allow-env --allow-net services/migrate/migrate_test.ts tests/planes_test.ts"

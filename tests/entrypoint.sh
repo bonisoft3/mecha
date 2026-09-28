@@ -90,4 +90,54 @@ CODE=$(guarded /dev/null '{"owner":"bob","target":"boom"}')
 [ "$CODE" = "500" ] || { echo "FAIL: a bare plv8 throw is an internal error, got $CODE"; exit 1; }
 echo "  a bare plv8 throw is a 500"
 
+echo "=== sync path ==="
+# A string field of a one-line JSON object; the values read here hold no quote.
+field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+
+# `started` is all compose knows of the auth service: it answers once its
+# migration has run against app_user, so the guest door is polled.
+guest() {
+  for _ in $(seq 1 60); do
+    curl -sf -X POST "$PROXY_URL/auth/guest" && return 0
+    sleep 1
+  done
+  return 1
+}
+OTHER=$(guest) || { echo "FAIL: the auth service never issued a guest"; exit 1; }
+GUEST=$(guest) || { echo "FAIL: the auth service issued one guest and not two"; exit 1; }
+TOKEN=$(echo "$GUEST" | field token)
+SUBJECT=$(echo "$GUEST" | field id)
+OTHER_ID=$(echo "$OTHER" | field id)
+[ -n "$TOKEN" ] && [ -n "$SUBJECT" ] || { echo "FAIL: a guest without a token: $GUEST"; exit 1; }
+echo "  auth issues guests"
+
+SHAPE=$(curl -sf -X POST "$PROXY_URL/auth/shape" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"table":"app_user"}') || { echo "FAIL: no shape token for app_user"; exit 1; }
+SHAPE_TOKEN=$(echo "$SHAPE" | field token)
+WHERE=$(echo "$SHAPE" | field where)
+echo "  the gate authorizes a shape over the guest's scopes"
+
+# -f would swallow the status; the gate's answer IS the assertion.
+shape() {
+  curl -s -o /tmp/shape.json -w '%{http_code}' -G "$PROXY_URL/electric/v1/shape" \
+    --data-urlencode "table=app_user" --data-urlencode "where=$WHERE" \
+    --data-urlencode "offset=-1" "$@"
+}
+CODE=$(shape)
+[ "$CODE" = "401" ] || { echo "FAIL: a shape without a token got $CODE"; cat /tmp/shape.json; exit 1; }
+echo "  a shape without a token is refused at the gate"
+
+# electric's health is up before its first shape can be served.
+for _ in $(seq 1 30); do
+  CODE=$(shape -H "Authorization: Bearer $SHAPE_TOKEN")
+  [ "$CODE" = "200" ] && break
+  sleep 1
+done
+[ "$CODE" = "200" ] || { echo "FAIL: electric answered the shape with $CODE"; cat /tmp/shape.json; exit 1; }
+ROWS=$(grep -o '"operation":"insert"' /tmp/shape.json | wc -l | tr -d ' ')
+[ "$ROWS" = "1" ] && grep -q "$SUBJECT" /tmp/shape.json && ! grep -q "$OTHER_ID" /tmp/shape.json \
+  || { echo "FAIL: the guest's shape is not its own row alone"; cat /tmp/shape.json; exit 1; }
+echo "  electric serves the guest its own row, and not another guest's"
+
 echo "=== passed ==="

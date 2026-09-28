@@ -46,7 +46,7 @@ export interface MechaTable {
    */
   durability?: "crud" | "tab" | "device"
   /**
-   * The table's row visibility as the app declared it (shell.yaml `access`).
+   * The table's row visibility as the app declared it.
    * Two arms matter here, and they are what the floor cannot deliver: a
    * per-object share on an owned table, and a composition under one. Such a
    * table is reached by a changing set of shapes rather than one.
@@ -63,10 +63,10 @@ export type TableAccess =
 export interface MechaClientConfig {
   tables: MechaTable[]
   /**
-   * The type table the program emitted (shell.yaml `types`). It decides
-   * what a canonical value is; this client converts transport spellings into
-   * it and holds no definition of its own, so there is nothing to fall back
-   * to when it is missing. Absent only where no table declares a field: with
+   * The type table the caller was handed. It decides what a canonical value
+   * is; this client converts transport spellings into it and holds no
+   * definition of its own, so there is nothing to fall back to when it is
+   * missing. Absent only where no table declares a field: with
    * no type in play there is nothing to be canonical about.
    */
   types?: TypeTable
@@ -246,7 +246,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   let bound: Types | undefined
   const typeTable = (): Types => {
     const table = config.types ?? config.carriers
-    if (table === undefined) throw new Error("the shell served no type table, and a table declaring fields needs one (shell.yaml `types`)")
+    if (table === undefined) throw new Error("no type table was given, and a table declaring fields needs one (`types`)")
     return bound ??= (types ?? carriers)(table)
   }
   const canonicalType = (type: string) => typeTable().canonicalType(type)

@@ -2,41 +2,64 @@
 // bayt targets, instantiated per app. Every service is an addressable field —
 // consumers override by unification and drop by setting null; that is the
 // escape hatch, and pinning or forking this package is the versioning story.
-// Escape-hatch-free apps never see this file: pronto's emitter instantiates
-// it; apps with hatches import it from their bayt.cue.
+// Escape-hatch-free apps never see this file: the generator that writes an
+// app instantiates it; apps with hatches import it from their bayt.cue.
 //
 // Each target is bayt's vocabulary: the image is the Dockerfile bayt emits
 // from `dockerfile`, the runtime is its `compose` block. A service that
 // carries mecha's own content (the database's extensions and tenancy floor,
-// the mesh's components, the conduit connector, the deno services) starts
-// FROM the image mecha builds for it (bayt.cue, the `*-image` targets) and
-// adds only what is the app's: migrations, the Caddyfile, pipelines. Names
-// are bare and so are `depends_on` keys; #Runtime lowers the targets into a
-// bayt project, which is what keeps `crud:3000` and `@database:5432`
-// resolving.
+// the migration runner, the mesh's components, the conduit connector, the
+// deno services) starts FROM the image mecha builds for it (bayt.cue, the
+// `*-image` targets) and adds only what is the app's: migrations, the
+// Caddyfile, pipelines. Names are bare and so are `depends_on` keys; #Runtime
+// lowers the targets into a bayt project, which is what keeps `crud:3000` and
+// `@database:5432` resolving.
 package cluster
 
 import (
+	"encoding/json"
 	"list"
+	"path"
 	"strings"
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
+	grammar "github.com/bonisoft3/mecha/pgroll"
 )
 
 // Where postgres applies what an image carries, in name order, on a fresh data
 // directory.
 #InitdbDir: "/docker-entrypoint-initdb.d"
 
+// Where the migrate image holds the pgroll migrations it applies, as
+// <name>.json.
+#PgRollDir: "/pgroll"
+
 // The tenancy floor's migration, which ships with the image whatever emitted
-// the tables above it. Its name places it: after mecha's 002 grants and before
-// a caller's 005 that calls rls_protect.
-#TenancyMigration: "002a_rls.sql"
+// the tables above it. It need not follow a caller's grants: it grants only to
+// PUBLIC and makes no table in `public`, which is all theirs reach. It must
+// precede the tables whose defaults call auth_uid() and the policies that call
+// rls_protect, so it takes the slot after the extensions, roles and grants a
+// caller opens with.
+#TenancyMigration: "003_rls.sql"
+
+// Where the database image keeps a step that a cluster places in #InitdbDir
+// only when it turns on what the step serves.
+#StagedDir: "/usr/share/mecha/initdb"
+
+// The ticker's table, placed where a schedule is declared. Its name places it
+// after a caller's grants, whose reach it revokes, and before the seed the
+// caller names after it.
+#ScheduleMigration: "020_schedule.sql"
 
 // A health wait states no `restart`: bayt adds `restart: true` to every one
 // (plugins/bayt/core/gen_compose.cue), so a dependency recreated inside an
 // `up` recreates what waits on it.
 _healthy: {condition: "service_healthy"}
 _started: {condition: "service_started"}
+// bayt adds no `restart` to a completion wait, and none is stated: a reader
+// already running when the migrations are applied again is told to reload its
+// schema (services/migrate/migrate.sh), not recreated.
+_completed: {condition: "service_completed_successfully"}
 
 // A file delivered into the cluster (caddy static).
 #Static: {
@@ -60,9 +83,9 @@ _from: F={
 // Pre-signed against the dev PGRST_JWT_SECRET: HS256, claims
 // {role: "service", sub: all-zeros uuid, exp: 2033-01-01}. Compose default
 // only — prod overrides both SERVICE_JWT and PGRST_JWT_SECRET together.
-_devServiceJwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.eeAs4VbzZYwz32jEudSFT_zMeuL18M4cEFY8Jn1jPwY"
+_devServiceJwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4"
 
-_devJwtSecret: "pronto-dev-secret-please-override-32ch"
+_devJwtSecret: "mecha-dev-secret-please-override-32ch"
 // The query parameter caddy adds after the gate and electric checks; one
 // literal, so the two cannot be given different ones by a slip.
 _devElectricSecret: "dev-electric-secret"
@@ -70,9 +93,15 @@ _devElectricSecret: "dev-electric-secret"
 #Cluster: X={
 	state: {
 		migrations: [...string]
+		// Changes to a schema that already exists, in pgroll's own grammar and
+		// keyed by the version each creates. `migrations` build the schema on a
+		// fresh volume; these carry a volume that outlived a change forward, and
+		// a fresh one too, once initdb has run.
+		pgroll: [grammar.#Name]: grammar.#Migration
 		pipelines: [...{name: string, file: string}]
 		// Names only: the cluster needs to know whether any schedule exists,
-		// never what it says. The seed migration carries the rest.
+		// never what it says. One brings the ticker, its clock and the table
+		// they sweep (#ScheduleMigration); the caller's migrations seed it.
 		schedules: [...string]
 	}
 
@@ -94,10 +123,44 @@ _devElectricSecret: "dev-electric-secret"
 			server: true
 		}
 
+		// The change feed: conduit reading the WAL onto the bus (redis, behind
+		// the mesh-events sidecar) and transform running the pipelines off it.
+		// A pipeline or a schedule turns it on, and refuses it off: the
+		// pipeline would never run, and the ticker's wake is addressed to that
+		// sidecar. Off otherwise, since nothing in the cluster reads the feed.
+		// The WAL is the data plane's, so it presupposes `server`.
+		capture: *false | bool
+		if len(X.state.pipelines) > 0 || len(X.state.schedules) > 0 {
+			capture: true
+		}
+		if capture {
+			server: true
+		}
+
 		// The blob plane: rclone-s3 object store (S3 wire protocol, bucket
 		// mecha-objects, no auth keys — dev posture) and imgproxy, behind the
 		// caddy /blobs and /img routes.
 		blobs: *false | bool
+	}
+	// A migration given to a cluster with no database is one nothing applies.
+	if !X.capabilities.server {
+		state: pgroll: [string]: _|_
+	}
+
+	// Every step postgres runs at initdb, keyed by the three digits its name
+	// opens with: the image's floor, the step the cluster places for a
+	// schedule, and the caller's migrations. Postgres globs the directory in
+	// its locale's order and a replay sorts it by byte; digits no other step
+	// holds, then `_`, put both in one order. The database copies the caller's
+	// steps out of this, so a name it refuses fails the cluster where it is
+	// built.
+	_initdb: [K=string]: =~"(^|/)[0-9]{3}_[^/]*$" & =~"(^|/)\(K)_[^/]*$"
+	_initdb: {
+		(strings.SliceRunes(#TenancyMigration, 0, 3)): #TenancyMigration
+		if len(X.state.schedules) > 0 {
+			(strings.SliceRunes(#ScheduleMigration, 0, 3)): #ScheduleMigration
+		}
+		for m in X.state.migrations {(strings.SliceRunes(path.Base(m, path.Unix), 0, 3)): m}
 	}
 
 	// No target runs a lifecycle command: the image is the recipe, the
@@ -109,16 +172,28 @@ _devElectricSecret: "dev-electric-secret"
 	}
 
 
+	// What a service that reads the schema waits on: the database, and the
+	// migrations that carry it forward when there are any. A migration that
+	// fails therefore stops every reader from starting, rather than leaving
+	// them to serve the schema it did not reach.
+	_schemaReady: {
+		database: _healthy
+		if len(X.state.pgroll) > 0 {migrate: _completed}
+	}
+
 	surface: {
 		// How this cluster's schema reaches its database.
 		//
-		// A cluster delivers its schema by baking it into the database image
-		// and letting postgres apply it at initdb, in name order, on a fresh
-		// data directory — so there is no migration runner to ask, and the
-		// steps that ran are the files the image carries. Anything that applies
-		// that schema elsewhere, inspects what it built, or reproduces it needs
-		// the two facts below, and reading them here is how it avoids keeping a
-		// second copy of this layout that nothing would correct when it moved.
+		// A cluster bakes its schema into the database image and lets postgres
+		// apply it at initdb, in name order, on a fresh data directory; the
+		// steps that ran there are the files the image carries. The pgroll
+		// migrations are baked into the migrate image, whose one-shot run
+		// records that schema as pgroll's baseline and applies every migration
+		// the ledger lacks — on a fresh volume and on one that outlived a
+		// change alike. Anything that applies this schema elsewhere, inspects
+		// what it built, or reproduces it needs the facts below, and reading
+		// them here is how it avoids keeping a second copy of this layout that
+		// nothing would correct when it moved.
 		if X.capabilities.server {
 			schema: {
 				// The target that runs the database; a compose project names
@@ -126,6 +201,16 @@ _devElectricSecret: "dev-electric-secret"
 				target: "database"
 				// The directory the image applies from.
 				initdb: #InitdbDir
+				if len(X.state.pgroll) > 0 {
+					pgroll: {
+						// The target that applies them, named the same way.
+						target: "migrate"
+						// Where its image holds them.
+						dir: #PgRollDir
+						// The ledger name initdb's schema is recorded under.
+						baseline: grammar.#Baseline
+					}
+				}
 			}
 		}
 		targets: [string]: _
@@ -141,12 +226,21 @@ _devElectricSecret: "dev-electric-secret"
 					srcs: globs: X.state.migrations
 					dockerfile: {
 						from: (_from & {in: X.meta.images.database}).out
-						// The image carries the extensions and the tenancy floor;
-						// the app's migrations follow it in the initdb directory,
-						// which postgres runs in name order on a fresh data
-						// directory. That directory lives on the container's
-						// writable layer, which `--force-recreate` discards with it.
-						copy: [{srcs: X.state.migrations, dst: "\(#InitdbDir)/"}]
+						// The image carries the extensions and the tenancy floor,
+						// and stages the ticker's table, placed only where a
+						// schedule is declared; the app's migrations join them in
+						// the initdb directory, which postgres runs in name order
+						// on a fresh data directory. That directory lives on the
+						// container's writable layer, which `--force-recreate`
+						// discards with it.
+						copy: list.Concat([
+							[{srcs: [for _, m in X._initdb if m != #TenancyMigration && m != #ScheduleMigration {m}], dst: "\(#InitdbDir)/"}],
+							[if len(X.state.schedules) > 0 {
+								from: (_from & {in: X.meta.images.database}).out
+								srcs: ["\(#StagedDir)/\(#ScheduleMigration)"]
+								dst:  "\(#InitdbDir)/\(#ScheduleMigration)"
+							}],
+						])
 					}
 					compose: {
 						ports: ["5432"]
@@ -155,23 +249,45 @@ _devElectricSecret: "dev-electric-secret"
 							POSTGRES_PASSWORD:    "${POSTGRES_PASSWORD:-postgres}"
 							POSTGRES_DB:          "${POSTGRES_DB:-\(X.meta.app)}"
 							// ORDER BY on text reaches a reader, so it sorts the way a
-							// dictionary does. Under --no-locale it sorted by byte: every
-							// accent past all of ASCII, and case splitting the alphabet so
-							// "ana" followed "Zoe" (measured).
+							// dictionary does, not by byte: bytes put every accent past all
+							// of ASCII and split the alphabet by case, so "ana" follows "Zoe".
 							//
 							// `und` and not a language, because the collation is one per
 							// database and an app serves every locale it declares out of
 							// the same rows.
 							//
-							// ICU and not a libc locale, which is what --no-locale was
-							// avoiding: glibc reorders between versions and silently
-							// invalidates text indexes, where postgres records the ICU
-							// version and warns. --locale=C keeps ctype off libc too.
+							// ICU and not a libc locale: glibc reorders between versions and
+							// silently invalidates text indexes, where postgres records the
+							// ICU version and warns. --locale=C keeps ctype off libc too.
 							POSTGRES_INITDB_ARGS: "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
 						}
 						// One rebuild entry per migration: the list is the consumer's, and
 						// mecha's own stack keeps a fixture outside the migrations directory.
 						develop: watch: [for m in X.state.migrations {action: "rebuild", path: "../\(m)", target: "/docker-entrypoint-initdb.d"}]
+					}
+				}
+				// Only a cluster given pgroll migrations gets a runner: one with
+				// none has nothing to carry forward, and its first migration
+				// baselines whatever volume it meets.
+				if len(X.state.pgroll) > 0 {
+					migrate: X._image & {
+						dockerfile: {
+							from: (_from & {in: X.meta.images.migrate}).out
+							cmd: [#PgRollDir, grammar.#Baseline]
+							// Each migration is written into the image from the
+							// value state.pgroll holds, so what runs is what was
+							// vetted, and no file beside it can say otherwise. A
+							// marshalled migration is one line opening with `{`,
+							// never the delimiter, and the quoted delimiter keeps
+							// the builder from expanding anything in it.
+							epilogue: [for n, m in X.state.pgroll {
+								"COPY <<'PGROLL' \(#PgRollDir)/\(n).json\n\(json.Marshal(m))\nPGROLL"
+							}]
+						}
+						compose: {
+							depends_on: database: _healthy
+							environment: DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
+						}
 					}
 				}
 				crud: bayt.healthcheck.http & X._image & {
@@ -186,7 +302,7 @@ _devElectricSecret: "dev-electric-secret"
 						cmd: ["postgrest"]
 					}
 					compose: {
-						depends_on: database: _healthy
+						depends_on: X._schemaReady
 						environment: {
 							PGRST_DB_URI:       "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							PGRST_DB_SCHEMA:    "public"
@@ -215,7 +331,7 @@ _devElectricSecret: "dev-electric-secret"
 						workdir: "/app"
 					}
 					compose: {
-						depends_on: database: _healthy
+						depends_on: X._schemaReady
 						environment: {
 							DATABASE_URL:     "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							PGRST_JWT_SECRET: "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
@@ -298,11 +414,11 @@ _devElectricSecret: "dev-electric-secret"
 				electric: X._image & {
 					dockerfile: from: name: "electricsql/electric@sha256:f311edc272e227ddaea593c5205a02c3d1e5969c2db0f7655a039a5e24abb176"
 					compose: {
-						depends_on: database: _healthy
+						depends_on: X._schemaReady
 						environment: {
-							// Its own role, holding BYPASSRLS as a stated attribute: 001_roles
-							// (emit.cue `_bypass`) says what an unstated one costs.
-							// The role's password is the migration's literal (001_roles), and the
+							// Its own role, holding BYPASSRLS as a stated attribute: without it
+							// current_scopes() is empty and every shape syncs empty, silently.
+							// The role's password is the roles migration's literal, and the
 							// database trusts every password here (initdb --auth=trust); a
 							// deployment sets the role's password and this URL together,
 							// outside this file.
@@ -312,8 +428,8 @@ _devElectricSecret: "dev-electric-secret"
 							// without passing the gate has no secret to present.
 							ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
 							// Validate the publication the migrations declare rather than
-							// build one; an app's 007 says what building one would require
-							// of this role.
+							// build one, which would need CREATE on the database and
+							// ownership of every table it names.
 							ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
 						}
 						healthcheck: {
@@ -324,6 +440,8 @@ _devElectricSecret: "dev-electric-secret"
 						restart: "on-failure"
 					}
 				}
+			}
+			if X.capabilities.capture {
 				redis: bayt.healthcheck.redis & X._image & {
 					healthcheck: {
 						interval:       "5s"
@@ -371,7 +489,9 @@ _devElectricSecret: "dev-electric-secret"
 						cmd: ["sh", "-c", "mkdir -p /conduit/pipelines && envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml && exec /app/conduit run"]
 					}
 					compose: {
-						depends_on: {database: _healthy, "mesh-events": _started}
+						// The database is named ahead of the embedding because key
+						// order is the order the waits are emitted in.
+						depends_on: {database: _healthy, X._schemaReady, "mesh-events": _started}
 						develop: watch: [{action: "sync+restart", path: "../\(X.meta.conduitTemplate)", target: "/conduit/cdc-to-bus.yaml.tmpl"}]
 						environment: {
 							DATABASE_URL:           "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
@@ -420,7 +540,7 @@ _devElectricSecret: "dev-electric-secret"
 					}
 				}
 			}
-			if X.capabilities.server {
+			if len(X.state.pipelines) > 0 {
 				transform: X._image & {
 					srcs: globs: [for p in X.state.pipelines {p.file}]
 					dockerfile: {
@@ -499,13 +619,17 @@ _devElectricSecret: "dev-electric-secret"
 					depends_on: {
 						caddy: _healthy
 						if X.capabilities.server {
-							database:      _healthy
-							crud:          _healthy
-							electric:      _healthy
+							database: _healthy
+							crud:     _healthy
+							electric: _healthy
+						}
+						if X.capabilities.capture {
 							redis:         _healthy
 							"mesh-events": _healthy
 							conduit:       _healthy
-							transform:     _started
+						}
+						if len(X.state.pipelines) > 0 {
+							transform: _started
 						}
 						if X.capabilities.auth {
 							auth: _started
@@ -598,6 +722,7 @@ _devElectricSecret: "dev-electric-secret"
 		// app in the monorepo, pinned names where the images are pulled.
 		images: {
 			database:   #From
+			migrate:    #From
 			mesh:       #From
 			conduit:    #From
 			auth:       #From

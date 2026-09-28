@@ -40,4 +40,33 @@ describe("executePipeline", () => {
     await executePipeline(createMessage({}), processors, output, ctx)
     expect(output).toHaveBeenCalledTimes(2)
   })
+
+  // A throwing step used to be logged and its message dropped, so the run
+  // resolved as if the message had been filtered out on purpose.
+  it("fails the run when a processor throws", async () => {
+    const processors: ProcessorStep[] = [{ jq: 'error("boom")' }]
+    const output = vi.fn()
+    await expect(executePipeline(createMessage({}), processors, output, ctx)).rejects.toThrow("boom")
+    expect(output).not.toHaveBeenCalled()
+  })
+
+  it("lets a pipeline recover a failed step with try and catch", async () => {
+    const processors: ProcessorStep[] = [
+      { try: [{ jq: 'error("boom")' }, { jq: '{after: "skipped"}' }] },
+      { catch: [{ jq: '{recovered: ._meta._error}' }] },
+    ]
+    const output = vi.fn()
+    await executePipeline(createMessage({}), processors, output, ctx)
+    expect(output).toHaveBeenCalledOnce()
+    const msg = output.mock.calls[0][0]
+    expect(msg.content.recovered).toContain("boom")
+    expect(msg.metadata._error).toBeUndefined()
+  })
+
+  it("fails the run when a try's failure reaches the output uncaught", async () => {
+    const processors: ProcessorStep[] = [{ try: [{ jq: 'error("boom")' }] }]
+    const output = vi.fn()
+    await expect(executePipeline(createMessage({}), processors, output, ctx)).rejects.toThrow(/nothing caught it: .*boom/)
+    expect(output).not.toHaveBeenCalled()
+  })
 })

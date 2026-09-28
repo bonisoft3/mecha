@@ -21,6 +21,12 @@ services:
       service: libraries_mecha-database-image
     profiles:
     - database-image
+  migrate-image:
+    extends:
+      file: ./compose.migrate-image.yaml
+      service: libraries_mecha-migrate-image
+    profiles:
+    - migrate-image
   mesh-image:
     extends:
       file: ./compose.mesh-image.yaml
@@ -217,4 +223,11 @@ services:
       service: libraries_mecha-launch
     profiles:
     - launch
+    scale: 1
+  migrate:
+    extends:
+      file: ./compose.migrate.yaml
+      service: libraries_mecha-migrate
+    profiles:
+    - migrate
     scale: 1

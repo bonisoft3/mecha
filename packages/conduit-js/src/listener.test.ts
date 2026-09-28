@@ -138,4 +138,41 @@ describe('createCDCListener', () => {
 
     await cleanup()
   })
+
+  // An enrichment naming a column no identifier can spell used to be dropped
+  // with a console warning: the row stayed unenriched and nothing failed.
+  it('fails the event when the enrichment names an invalid column', async () => {
+    const registry = new PipelineRegistry()
+    registry.register({ name: 'hello_enrich', table: 'hello', mapping: 'root = this' })
+    const runtime = { execute: async () => ({ 'processed-at': '2026-01-01' }) }
+    const cleanup = await createCDCListener({ pglite: db, registry, runtime })
+
+    const failure = await unhandledRejectionOf(() =>
+      db.query(`INSERT INTO "hello" ("id", "message") VALUES ('cdc-bad', 'test')`))
+
+    expect(String(failure)).toContain('Invalid identifier: processed-at')
+    await cleanup()
+  })
 })
+
+/**
+ * PGlite drops a listener's promise, so its failures land on the process as
+ * unhandled rejections; vitest's own handler is set aside to observe one.
+ */
+async function unhandledRejectionOf(action: () => Promise<unknown>): Promise<unknown> {
+  const held = process.listeners('unhandledRejection')
+  process.removeAllListeners('unhandledRejection')
+  try {
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('no unhandled rejection within 2s')), 2000)
+      process.once('unhandledRejection', (reason) => {
+        clearTimeout(timer)
+        resolve(reason)
+      })
+      action().catch(reject)
+    })
+  } finally {
+    process.removeAllListeners('unhandledRejection')
+    for (const listener of held) process.on('unhandledRejection', listener)
+  }
+}

@@ -4,6 +4,7 @@ services:
     build:
       additional_contexts:
         libraries_mecha-database: service:libraries_mecha-database
+        libraries_mecha-migrate: service:libraries_mecha-migrate
       context: ..
       dockerfile: .bayt/Dockerfile.electric
       target: electric
@@ -14,6 +15,8 @@ services:
       libraries_mecha-database:
         condition: service_healthy
         restart: true
+      libraries_mecha-migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: >-
         postgresql://electric:electric@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable
@@ -40,6 +43,7 @@ services:
     build:
       additional_contexts:
         libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
+        libraries_mecha-migrate_bayt: service:libraries_mecha-migrate_bayt
       context: ..
       dockerfile: .bayt/Dockerfile.electric
       target: electric_bayt

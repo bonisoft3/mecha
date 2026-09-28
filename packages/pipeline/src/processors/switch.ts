@@ -5,29 +5,61 @@ export interface SwitchCase {
   processors: ProcessorStep[]
 }
 
+type Check = (msg: PipelineMessage, ctx: PipelineContext) => boolean
+type Operand = (msg: PipelineMessage, ctx: PipelineContext) => string
+
+const OPERAND = String.raw`(?:meta|env)\(\s*"\w+"\s*\)|"[^"]*"`
+const CHECK = new RegExp(String.raw`^\s*(${OPERAND})\s*(==|!=)\s*(${OPERAND})\s*$`)
+
+function operand(text: string): Operand {
+  const call = text.match(/^(meta|env)\(\s*"(\w+)"\s*\)$/)
+  if (call) {
+    const key = call[2]
+    return call[1] === "meta"
+      ? (msg) => msg.metadata[key] ?? ""
+      : (_msg, ctx) => ctx.env[key] ?? ""
+  }
+  // rpk substitutes `${VAR}` when it loads the config; here the environment
+  // arrives with the context, so the literal is completed per evaluation.
+  const literal = text.slice(1, -1)
+  return (_msg, ctx) => literal.replace(/\$\{(\w+)\}/g, (_, name: string) => ctx.env[name] ?? "")
+}
+
 /**
- * Create a switch processor that evaluates cases in order.
- *
- * Each case has an optional `check` (bloblang expression) and a `processors` array.
- * The first case whose check matches (or has no check — default) is executed.
- *
- * Checks are evaluated by simple string interpolation of meta() values
- * and equality comparison — covers the rpk switch patterns used in practice
- * (e.g. `meta("provider") == "gemini"`).
+ * The bloblang checks this runtime evaluates: two operands, each `meta("k")`,
+ * `env("k")` or a double-quoted string, compared with `==` or `!=`. Anything
+ * else is refused here, when the pipeline is built, rather than read as a
+ * case that never matches.
+ */
+export function compileCheck(check: string): Check {
+  const parts = check.match(CHECK)
+  if (!parts) {
+    throw new Error(
+      `[pipeline] switch: unsupported check ${JSON.stringify(check)}; ` +
+        `a check compares meta("k"), env("k") or a "string" with == or !=`,
+    )
+  }
+  const left = operand(parts[1])
+  const right = operand(parts[3])
+  const equal = parts[2] === "=="
+  return (msg, ctx) => (left(msg, ctx) === right(msg, ctx)) === equal
+}
+
+/**
+ * Create a switch processor that evaluates cases in order: the first case
+ * whose check matches, or that has none, runs its processors. A message no
+ * case matches passes through.
  */
 export function createSwitchProcessor(
   cases: SwitchCase[],
   resolvedCases: ProcessorFn[][],
 ): ProcessorFn {
+  const checks = cases.map((c) => (c.check === undefined ? null : compileCheck(c.check)))
   return async (msg: PipelineMessage, ctx: PipelineContext): Promise<PipelineMessage[]> => {
     for (let i = 0; i < cases.length; i++) {
-      const c = cases[i]
+      const check = checks[i]
+      if (check && !check(msg, ctx)) continue
 
-      if (c.check) {
-        if (!evaluateCheck(c.check, msg, ctx)) continue
-      }
-
-      // Matched — run this case's processors in sequence
       let msgs = [msg]
       for (const proc of resolvedCases[i]) {
         const next: PipelineMessage[] = []
@@ -36,44 +68,6 @@ export function createSwitchProcessor(
       }
       return msgs
     }
-
-    // No case matched — pass through
     return [msg]
   }
-}
-
-/**
- * Evaluate a simple bloblang check expression against message metadata.
- *
- * Supports patterns like:
- *   meta("key") == "value"
- *   meta("key") != "value"
- */
-function evaluateCheck(
-  check: string,
-  msg: PipelineMessage,
-  ctx: PipelineContext,
-): boolean {
-  // meta("key") == "value"
-  const eqMatch = check.match(/meta\(\s*"(\w+)"\s*\)\s*==\s*"([^"]*)"/)
-  if (eqMatch) {
-    const metaVal = resolveMetaValue(eqMatch[1], msg, ctx)
-    return metaVal === eqMatch[2]
-  }
-
-  // meta("key") != "value"
-  const neqMatch = check.match(/meta\(\s*"(\w+)"\s*\)\s*!=\s*"([^"]*)"/)
-  if (neqMatch) {
-    const metaVal = resolveMetaValue(neqMatch[1], msg, ctx)
-    return metaVal !== neqMatch[2]
-  }
-
-  // Unknown check — treat as non-matching
-  console.warn(`[pipeline] switch: unsupported check expression: ${check}`)
-  return false
-}
-
-function resolveMetaValue(key: string, msg: PipelineMessage, ctx: PipelineContext): string {
-  // Check message metadata first, then env vars
-  return msg.metadata[key] ?? ctx.env[key] ?? ""
 }

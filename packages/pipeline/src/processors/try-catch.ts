@@ -1,8 +1,13 @@
 import type { PipelineMessage, ProcessorFn, PipelineContext } from "../types.js"
 
+/** The metadata key a failed step's message carries its error under. */
+export const ERROR_KEY = "_error"
+
 /**
- * `try` processor: run sub-processors sequentially. If any throws,
- * return the original message unchanged (suppress the error).
+ * `try` processor, as rpk runs it: sub-processors in sequence, and a message
+ * whose step throws is flagged with the error under `_error` and skips the
+ * steps after it. The flag is the pipeline's to clear with `catch`; one that
+ * reaches the output fails the run.
  */
 export function createTryProcessor(subProcessors: ProcessorFn[]): ProcessorFn {
   return async (msg: PipelineMessage, ctx: PipelineContext): Promise<PipelineMessage[]> => {
@@ -10,11 +15,15 @@ export function createTryProcessor(subProcessors: ProcessorFn[]): ProcessorFn {
     for (const proc of subProcessors) {
       const nextMsgs: PipelineMessage[] = []
       for (const m of msgs) {
+        if (m.metadata[ERROR_KEY] !== undefined) {
+          nextMsgs.push(m)
+          continue
+        }
         try {
           nextMsgs.push(...await proc(m, ctx))
-        } catch {
-          // Suppress error, pass original message through
-          nextMsgs.push(m)
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          nextMsgs.push({ ...m, metadata: { ...m.metadata, [ERROR_KEY]: error } })
         }
       }
       msgs = nextMsgs
@@ -24,14 +33,13 @@ export function createTryProcessor(subProcessors: ProcessorFn[]): ProcessorFn {
 }
 
 /**
- * `catch` processor: only runs sub-processors on messages that have
- * an error flag. Non-errored messages pass through unchanged.
- * In practice, this runs after `try` or the executor's catch path
- * sets `metadata._error` on failed messages.
+ * `catch` processor: runs sub-processors only on messages a `try` flagged,
+ * with the flag still readable, and clears it from what they return.
+ * Unflagged messages pass through unchanged.
  */
 export function createCatchProcessor(subProcessors: ProcessorFn[]): ProcessorFn {
   return async (msg: PipelineMessage, ctx: PipelineContext): Promise<PipelineMessage[]> => {
-    if (!msg.metadata._error) return [msg]
+    if (msg.metadata[ERROR_KEY] === undefined) return [msg]
     let msgs = [msg]
     for (const proc of subProcessors) {
       const nextMsgs: PipelineMessage[] = []
@@ -40,6 +48,9 @@ export function createCatchProcessor(subProcessors: ProcessorFn[]): ProcessorFn 
       }
       msgs = nextMsgs
     }
-    return msgs
+    return msgs.map((m) => {
+      const { [ERROR_KEY]: _cleared, ...metadata } = m.metadata
+      return { ...m, metadata }
+    })
   }
 }

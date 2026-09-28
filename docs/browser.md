@@ -39,12 +39,12 @@ the change path does is best-effort.
 | PostgREST | `postgrest-js` | A subset: GET, POST, PATCH and DELETE on a table; `eq neq gt gte lt lte like ilike is in`; `select`, `order`, `limit`/`offset`; `Prefer` return, count and resolution. No RPC, no embedding; `ignore-duplicates` is a bare `ON CONFLICT DO NOTHING`, and `merge-duplicates` conflicts on `id` only. A handler given `scopes` does what `db-pre-request` does: it sets `app.scopes` and switches role inside the request's transaction |
 | Electric | `cluster.ts` | Electric's HTTP shape protocol over a per-table log, fed by triggers |
 | auth | `cluster.ts` | One guest per boot, with unsigned tokens |
-| conduit, mesh, bus, transform | `pipeline` | rpk-format YAML: `pipeline.processors` and `output.http_client`. The `input` is ignored, because `pg_notify('cdc')` is the input. It handles `jq` (jq-wasm), `bloblang`, `http`, `branch`, `switch`, `try`/`catch`, `unarchive` and `log`. The row arrives as `{data: "<row json>"}`, the envelope daprd delivers |
+| conduit, mesh, bus, transform | `pipeline` | rpk-format YAML: `pipeline.processors` and `output.http_client`. The `input` is ignored, because `pg_notify('cdc')` is the input. It handles `jq` (jq-wasm), `bloblang`, `http`, `branch`, `switch`, `try`/`catch`, `unarchive` and `log`, and refuses any other processor when the YAML is loaded. A `switch` check is `meta("k")`, `env("k")` or a string, with `${VAR}` filled from the environment, compared with `==` or `!=`; any other check is refused at load. The row arrives as `{data: "<row json>"}`, the envelope daprd delivers |
 | conduit, mesh, bus, transform | `conduit-js` | One bloblang mapping per table, its result `UPDATE`d back by key. `bootPlatform` uses it only when it is given `pipelines` and a `wasmUrl` but no `pipelineConfigs` |
 | bloblang | `bloblang-js` | Benthos's bloblang built for Go WASM. `blobl.wasm` is 38 MB (this tree), so it loads only when a `wasmUrl` is configured. `wasm_exec.js` runs through `new Function`, so the page's CSP must allow `unsafe-eval` |
 | rclone-s3 | `rclone-js` | S3's object PUT, GET, HEAD and DELETE, plus ListObjectsV2 without pagination, over a `BlobStorage`: IndexedDB in a page, the filesystem under node. An app mounts it as one of `bootPlatform`'s `routes` |
 | caddy | `caddy-js` | Parses `caddy adapt` JSON into route descriptors. Nothing imports it outside its tests: both platforms route by hand |
-| an AI model endpoint | `webllm`, `websd` | A `TextModel` and an `ImageModel` that `bootPlatform`'s model handler serves in the page when a pipeline calls `TEXT_MODEL_URL` or `IMAGE_MODEL_URL`. `webllm` runs SmolLM2-135M through transformers.js on WebGPU and templates its word list into one fixed card schema. `websd` draws a canvas placeholder and is not a diffusion model |
+| an AI model endpoint | the embedder's | `bootPlatform`'s model handler answers a pipeline's call to `TEXT_MODEL_URL` or `IMAGE_MODEL_URL` in the page, with the `textModel` and `imageModel` it is given. mecha ships neither |
 | ticker, clock | none | |
 
 Two packages stand in for no service. [`collections`](../packages/collections/src/create-collections.ts)
@@ -87,7 +87,10 @@ and boot fails. `container` is the only tier name the grammar knows.
 
 - **At-least-once.** A notification is an in-process event. One raised while
   no listener is attached is never replayed. A pipeline step or sink write
-  that fails is logged and dropped: there is no bus, no retry and no dead
+  that fails fails the event: PGlite drops the listener's promise, so the
+  failure lands as an unhandled rejection, unless a `catch` recovers it. As in
+  rpk, `try` flags the failed message and skips its remaining steps, and
+  `catch` runs on the flag and clears it. There is no bus, no retry and no dead
   letter. Duplicates are still absorbed
   ([`postgrest-js`](#what-stands-in-for-what)).
 - **A service writer.** A pipeline sink writes on the reader's session,

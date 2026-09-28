@@ -5,6 +5,7 @@ services:
       additional_contexts:
         libraries_mecha-auth-image: service:libraries_mecha-auth-image
         libraries_mecha-database: service:libraries_mecha-database
+        libraries_mecha-migrate: service:libraries_mecha-migrate
       context: ..
       dockerfile: .bayt/Dockerfile.auth
       target: auth
@@ -15,10 +16,12 @@ services:
       libraries_mecha-database:
         condition: service_healthy
         restart: true
+      libraries_mecha-migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: >-
         postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
-      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-pronto-dev-secret-please-override-32ch}
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       WEBAUTHN_ORIGIN: https://localhost:${CADDY_TLS_HOST_PORT:-8443}
     image: bayt-libraries_mecha-auth:${BAYT_IMAGE_TAG:-latest}
@@ -31,6 +34,7 @@ services:
       additional_contexts:
         libraries_mecha-auth-image_bayt: service:libraries_mecha-auth-image_bayt
         libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
+        libraries_mecha-migrate_bayt: service:libraries_mecha-migrate_bayt
       context: ..
       dockerfile: .bayt/Dockerfile.auth
       target: auth_bayt

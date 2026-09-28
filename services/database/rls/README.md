@@ -2,8 +2,8 @@
 
 The row isolation every mecha database has, whatever generated the tables above
 it. Live: the database image (bayt.cue, `database-image`) bakes this in as
-`/docker-entrypoint-initdb.d/002a_rls.sql`, so it is present before any
-app-emitted migration runs and whether or not a generator ran at all.
+`/docker-entrypoint-initdb.d/003_rls.sql`, so it is present before any
+app-emitted table and whether or not a generator ran at all.
 
 **Scope: shared stores only.** It applies to the tables in the cluster's
 database. An app that keeps all its data in the browser has no schema here, so it
@@ -53,8 +53,9 @@ belong to the database.
 
 That gives a clean seam:
 
-- **mecha** owns the mechanism: `current_scopes()`, `rls_protect()`, and the
-  audit (`mecha.rls_unprotected`). The policy text exists in exactly one place.
+- **mecha** owns the mechanism: `current_scopes()`, `auth_uid()`,
+  `rls_protect()`, and the audit (`mecha.rls_unprotected`). The policy text
+  exists in exactly one place.
 - **The generator** that writes an app's migrations owns application: it emits
   `CALL rls_protect('<table>')` and the `scope_id` derivation for the entity's
   access mode. It never emits the policy text, so it cannot emit a subtly wrong

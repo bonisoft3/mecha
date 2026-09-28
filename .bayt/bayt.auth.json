@@ -5,7 +5,7 @@
     "manual": false,
     "environment": {
       "DATABASE_URL": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",
-      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-pronto-dev-secret-please-override-32ch}",
+      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "WEBAUTHN_RP_ID": "${WEBAUTHN_RP_ID:-localhost}",
       "WEBAUTHN_ORIGIN": "https://localhost:${CADDY_TLS_HOST_PORT:-8443}"
     },
@@ -14,6 +14,9 @@
     "depends_on": {
       "libraries_mecha-database": {
         "condition": "service_healthy"
+      },
+      "libraries_mecha-migrate": {
+        "condition": "service_completed_successfully"
       }
     },
     "networks": {
@@ -95,7 +98,9 @@
         "libraries/mecha/.bayt/compose.auth.yaml",
         "libraries/mecha/.bayt/compose.auth-image.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     },
     "outs": {
@@ -126,7 +131,9 @@
         "libraries/mecha/.bayt/compose.auth.yaml",
         "libraries/mecha/.bayt/compose.auth-image.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     },
     "srcs": {
@@ -152,7 +159,8 @@
       "deps": [],
       "transitiveDeps": [
         "auth-image_srcs",
-        "database_outs_srcs"
+        "database_outs_srcs",
+        "migrate_outs_srcs"
       ],
       "transitiveCrossDeps": [
         {
@@ -180,7 +188,9 @@
         "libraries/mecha/.bayt/compose.auth.yaml",
         "libraries/mecha/.bayt/compose.auth-image.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.migrate-image.yaml"
       ]
     }
   },
@@ -188,22 +198,27 @@
   "emitsSrcs": true,
   "deps": [
     "auth-image",
-    "database_outs"
+    "database_outs",
+    "migrate_outs"
   ],
   "sameProjectDeps": [
     "auth-image",
-    "database_outs"
+    "database_outs",
+    "migrate_outs"
   ],
   "transitiveDeps": [
     "auth-image",
-    "database_outs"
+    "database_outs",
+    "migrate_outs"
   ],
   "transitiveCrossDeps": [],
   "upClosure": [
     "libraries/mecha/.bayt/compose.auth.yaml",
     "libraries/mecha/.bayt/compose.auth-image.yaml",
     "libraries/mecha/.bayt/compose.database.yaml",
-    "libraries/mecha/.bayt/compose.database-image.yaml"
+    "libraries/mecha/.bayt/compose.database-image.yaml",
+    "libraries/mecha/.bayt/compose.migrate.yaml",
+    "libraries/mecha/.bayt/compose.migrate-image.yaml"
   ],
   "chainedDeps": [
     {
@@ -217,6 +232,15 @@
     },
     {
       "name": "database_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "migrate_outs",
       "project": "libraries_mecha",
       "dir": "libraries/mecha",
       "outs": {

@@ -28,10 +28,10 @@ export function resolveProcessor(step: ProcessorStep): ProcessorFn {
     const resolvedCases = cases.map((c) => c.processors.map(resolveProcessor))
     return createSwitchProcessor(cases, resolvedCases)
   }
-  // retry: no-op in the browser — rpk's retry is a server-side concept.
-  // We just run the inner processors in sequence; the executor's own
-  // drop-on-error path handles failures. A shared YAML file can therefore
-  // use retry: for the container pipeline without breaking browser loading.
+  // retry: the inner processors once, in sequence — rpk's retry is a
+  // server-side concept, and a failure fails the run like any other step. A
+  // shared YAML file can therefore use retry: for the container pipeline
+  // without breaking browser loading.
   if ("retry" in step) {
     const subs = (step as unknown as { retry: { processors: ProcessorStep[] } })
       .retry.processors.map(resolveProcessor)

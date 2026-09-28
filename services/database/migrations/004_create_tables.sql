@@ -1,4 +1,4 @@
--- Create entity tables (generated from schemas/*.hcl via atlas migrate diff)
+-- The entity tables services/database/schemas/schema.hcl declares.
 COMMENT ON SCHEMA "public" IS 'Standard PostgreSQL public schema';
 
 CREATE TABLE IF NOT EXISTS "public"."Hello" (

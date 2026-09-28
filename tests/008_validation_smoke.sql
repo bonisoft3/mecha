@@ -1,7 +1,7 @@
--- The Postgres seat of a validation, in the shape pronto's emit.cue renders:
--- text-answering plv8 predicates handed their world by a PL/pgSQL trigger that
--- tells a refusal from a program error. Mounted by mecha's own compose only; an
--- app's tree emits its own 008_validations.sql.
+-- The Postgres seat of a validation, in the shape the generator that writes an
+-- app's migrations renders: text-answering plv8 predicates handed their world by
+-- a PL/pgSQL trigger that tells a refusal from a program error. mecha's own
+-- stack carries it; an app's migrations carry their own.
 CREATE EXTENSION plv8;
 
 -- A SECURITY DEFINER read under FORCE ROW LEVEL SECURITY is still scoped by the

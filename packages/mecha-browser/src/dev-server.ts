@@ -1,7 +1,6 @@
 import { PGlite } from '@electric-sql/pglite'
 import { live } from '@electric-sql/pglite/live'
 import { createRestHandler } from '@mecha/postgrest-js'
-import { BloblangRuntime } from '@mecha/bloblang-js'
 import { PipelineRegistry, createCDCListener } from '@mecha/conduit-js'
 import type { BrowserConfig } from './types.js'
 import { createServer } from 'node:http'
@@ -126,34 +125,30 @@ async function main() {
   // 3. Optionally wire CDC (for events profile)
   let cdcCleanup: (() => Promise<void>) | undefined
   if (profile === 'events' || profile === 'full') {
-    try {
-      const registry = new PipelineRegistry()
-      registry.register({
-        name: 'hello_enrich',
-        table: 'hello',
-        mapping: DEMO_MAPPING,
-      })
+    const registry = new PipelineRegistry()
+    registry.register({
+      name: 'hello_enrich',
+      table: 'hello',
+      mapping: DEMO_MAPPING,
+    })
 
-      // Create a stub runtime for dev (bloblang WASM may not be available)
-      const runtime: { execute: (m: string, i: Record<string, unknown>) => Promise<Record<string, unknown>>; destroy: () => void } = {
-        async execute(_mapping: string, input: Record<string, unknown>) {
-          // Simplified enrichment for dev mode
-          if (input.processed_at == null) {
-            return {
-              processed_at: new Date().toISOString(),
-              source: 'mecha-dev-server',
-            }
+    // Create a stub runtime for dev (bloblang WASM may not be available)
+    const runtime: { execute: (m: string, i: Record<string, unknown>) => Promise<Record<string, unknown>>; destroy: () => void } = {
+      async execute(_mapping: string, input: Record<string, unknown>) {
+        // Simplified enrichment for dev mode
+        if (input.processed_at == null) {
+          return {
+            processed_at: new Date().toISOString(),
+            source: 'mecha-dev-server',
           }
-          return {}
-        },
-        destroy() {},
-      }
-
-      cdcCleanup = await createCDCListener({ pglite, registry, runtime })
-      console.log('[mecha-dev] CDC listener started')
-    } catch (err) {
-      console.warn('[mecha-dev] CDC setup failed (WASM may not be available):', err)
+        }
+        return {}
+      },
+      destroy() {},
     }
+
+    cdcCleanup = await createCDCListener({ pglite, registry, runtime })
+    console.log('[mecha-dev] CDC listener started')
   }
 
   // 4. Start HTTP server

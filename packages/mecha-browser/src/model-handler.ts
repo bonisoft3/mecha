@@ -1,6 +1,6 @@
 /**
- * Intercepts HTTP requests to AI model endpoints and routes them to
- * in-browser model runtimes (WebLLM for text, ONNX SD for images).
+ * Intercepts HTTP requests to AI model endpoints and routes them to the
+ * in-browser model runtimes the embedder supplies.
  *
  * Used as a wrapper around the base httpHandler in browser mode.
  * Pipeline YAMLs use ${TEXT_MODEL_URL} / ${IMAGE_MODEL_URL} env vars

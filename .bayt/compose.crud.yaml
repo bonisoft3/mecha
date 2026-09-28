@@ -4,6 +4,7 @@ services:
     build:
       additional_contexts:
         libraries_mecha-database: service:libraries_mecha-database
+        libraries_mecha-migrate: service:libraries_mecha-migrate
       context: ..
       dockerfile: .bayt/Dockerfile.crud
       target: crud
@@ -14,13 +15,15 @@ services:
       libraries_mecha-database:
         condition: service_healthy
         restart: true
+      libraries_mecha-migrate:
+        condition: service_completed_successfully
     environment:
       PGRST_DB_URI: >-
         postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
       PGRST_DB_SCHEMA: public
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_PRE_REQUEST: public.app_pre_request
-      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-pronto-dev-secret-please-override-32ch}
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}
       PGRST_SERVER_HOST: "*"
       PGRST_SERVER_PORT: "3000"
       PGRST_ADMIN_SERVER_PORT: "3001"
@@ -43,6 +46,7 @@ services:
     build:
       additional_contexts:
         libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
+        libraries_mecha-migrate_bayt: service:libraries_mecha-migrate_bayt
       context: ..
       dockerfile: .bayt/Dockerfile.crud
       target: crud_bayt

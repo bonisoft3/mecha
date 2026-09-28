@@ -88,4 +88,42 @@ describe("CDC pipeline listener", () => {
 
     cleanup()
   })
+
+  // A refused write used to be a console line: the pipeline's output was lost
+  // and the listener carried on as if it had landed.
+  it("fails the event when the output refuses the write", async () => {
+    const refusing: PipelineContext = {
+      httpHandler: async () => new Response('column "result" does not exist', { status: 400 }),
+      env: {},
+    }
+    const cleanup = await createCDCPipelineListener(pglite, [pipeline], refusing)
+
+    const failure = await unhandledRejectionOf(() =>
+      pglite.query(`INSERT INTO test_input (id, value, status) VALUES ('t3', 'hello', 'pending')`))
+
+    expect(String(failure)).toContain("HTTP 400")
+    cleanup()
+  })
 })
+
+/**
+ * PGlite drops a listener's promise, so its failures land on the process as
+ * unhandled rejections; vitest's own handler is set aside to observe one.
+ */
+async function unhandledRejectionOf(action: () => Promise<unknown>): Promise<unknown> {
+  const held = process.listeners("unhandledRejection")
+  process.removeAllListeners("unhandledRejection")
+  try {
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no unhandled rejection within 2s")), 2000)
+      process.once("unhandledRejection", (reason) => {
+        clearTimeout(timer)
+        resolve(reason)
+      })
+      action().catch(reject)
+    })
+  } finally {
+    process.removeAllListeners("unhandledRejection")
+    for (const listener of held) process.on("unhandledRejection", listener)
+  }
+}

@@ -21,20 +21,22 @@ which routes these and answers 404 to anything else:
 | route | service | what the route adds |
 |---|---|---|
 | `/crud/*` | PostgREST (`crud:3000`) | `Prefer: return=representation,resolution=ignore-duplicates` on every POST, so a redelivered insert is absorbed rather than answered 409 ([change capture](change-capture.md#duplicates)) |
-| `/electric/*` | ElectricSQL (`electric:3000`) | `flush_interval -1` and a 300 s read timeout for the long-poll |
+| `/electric/*` | ElectricSQL (`electric:3000`) | the gate, then the `secret` query parameter, below; `flush_interval -1` and a 300 s read timeout for the long-poll |
+| `/auth/*` | the auth service (`auth:9999`) | mounted with its prefix: the service's routes carry `/auth` |
 | `/img/*` | imgproxy ([the blob plane](capabilities.md#the-blob-plane)) | `flush_interval -1` |
 | `/poke` | the ticker ([its contract](../services/ticker/README.md)) | mounted with its prefix: the ticker answers `POST /poke` and 404s everything else |
 | `/health` | Caddy itself | the container's healthcheck |
 
-**The gate is the consumer's Caddyfile's.** The cluster gives caddy and
-electric the same `ELECTRIC_SECRET`, and electric refuses a shape request that
-does not carry it as the `secret` query parameter, so the Caddyfile's electric
-route is where it is added. With the auth plane on, a consumer's Caddyfile puts
-`forward_auth` to the auth service (`/auth/shape/verify`) in front of that
-route, adds the secret after the gate, so a request that skips the gate has no
-secret to present, and routes `/auth/*` to the auth service with its prefix
-([its contract](../services/auth/README.md)). mecha's own Caddyfile carries
-none of these, so a shape request through it carries no secret.
+**The gate is in the Caddyfile.** The cluster gives caddy and electric the
+same `ELECTRIC_SECRET`, and electric refuses a shape request that does not
+carry it as the `secret` query parameter, so the Caddyfile's electric route is
+where it is added. With the auth plane on, the route puts `forward_auth` to the
+auth service (`/auth/shape/verify`) first and adds the secret after the gate,
+so a request that skips the gate has no secret to present
+([its contract](../services/auth/README.md)). Both sit inside a `route`:
+outside one, Caddy sorts `uri` ahead of `forward_auth`, and the gate would
+refuse the secret the proxy had just added. mecha's own Caddyfile carries the
+gate, and its smoke drives a shape through it.
 
 A consumer's Caddyfile routes `/blobs/*` to rclone-s3 as well
 ([the blob plane](capabilities.md#the-blob-plane)).

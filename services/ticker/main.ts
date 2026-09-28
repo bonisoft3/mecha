@@ -379,8 +379,8 @@ export function httpCrud(base: string, serviceJwt: string): Crud {
 }
 
 /** dapr's own readiness, which it answers 204 without consulting the app
- * channel — unlike `/v1.0/healthz`, which reports the app's health and answers
- * 500 when that channel is down. */
+ * channel — unlike `/v1.0/healthz`, which answers 500 until daprd's
+ * initialization, blocked on the app channel accepting a connection, is done. */
 export function httpPoke(mesh: string): Poke {
   return async () => {
     const res = await fetch(`${mesh}/v1.0/healthz/outbound`, {

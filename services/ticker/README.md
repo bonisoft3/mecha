@@ -14,19 +14,13 @@ Four words carry the whole design, and nothing else is a concept:
 
 `sweep` is the function that runs when poked. It is not a concept.
 
-The argument and the measurements:
-[`docs/2026-09-08-a-tick-needs-no-durability.md`](../../docs/2026-09-08-a-tick-needs-no-durability.md).
-The design artifact it supersedes still records what was rejected and why —
-dapr Jobs, a durable tick stream, fan-out inside the ticker — and is wrong in
-eight places about what was built, which that doc lists:
-<https://claude.ai/code/artifact/2155e549-4aa8-4712-9ff8-91c3be7fbfaa>
-
 ## The shape
 
 Due-ness is a pure function of `(schedule, now, done)`, and everything a
-caller is allowed to be careless about follows from that — the design doc
-argues why. What it means here: a poke may be lost, duplicated, coarse or
-doubled by a second clock, and none of those changes the answer.
+caller is allowed to be careless about follows from that — **Why a tick needs
+no durability** below argues why. What it means here: a poke may be lost,
+duplicated, coarse or doubled by a second clock, and none of those changes the
+answer.
 
 - `due.ts` — the pure core: what a schedule owes at an instant. No clock of its
   own, no network. Its header lists the hard cases it decides.
@@ -34,7 +28,7 @@ doubled by a second clock, and none of those changes the answer.
   the watermark, wakes the unit that reads the WAL.
 
 ```sh
-just test          # from libraries/mecha; runs these alongside cue vet + buf lint
+task test          # from libraries/mecha; runs these alongside cue vet + buf lint
 deno test --allow-read --allow-env .
 ```
 
@@ -69,8 +63,8 @@ into a service that looks healthy and does half its job:
 
 ## One table of mecha's, and the app's own
 
-`schedule` is mecha's mechanism, emitted as `020_schedule.sql` and seeded from
-the app's declarations. An app never authors it.
+`schedule` is mecha's mechanism, created as `020_schedule.sql` and seeded from
+the app's declarations. An app never authors its rows by hand.
 
 ```sql
 create table schedule (
@@ -94,9 +88,9 @@ create table schedule (
 `suspended` is `not null` because the sweep selects on `suspended=is.false`; a
 null would silently drop the schedule.
 
-**A tick is the app's row**, and there is no ledger beside it. The entity named
-by `emits_entity` carries whatever the schedule declares plus five columns mecha
-writes last, so a declaration can overwrite none of them:
+**A tick is the app's row**, and there is no ledger beside it. The table named
+by `emits_entity` carries whatever the schedule sets plus five columns mecha
+writes last, so a schedule's values can overwrite none of them:
 
 ```sql
 id        uuid primary key,      -- uuid5(schedule, tick_at); see below
@@ -106,19 +100,19 @@ late      boolean not null,      -- asked for nothing; a pipeline skips it
 caller    text
 ```
 
-A separate entity holds the **outcome**, keyed by the same `id` — separate
+A separate table holds the **outcome**, keyed by the same `id` — separate
 necessarily, for the reason in **A fan-out schedule** below. `done_entity` +
 `done_filter` are how `Forbid` asks it whether the previous tick was answered.
 
-Retention is not mecha's business. A tick table that should be trimmed declares
-an ordinary predicate-driven pipeline to trim it, the way `apps/thenote` purges
-notes — level-triggered, idempotent, and the app's own policy.
+Retention is not mecha's business. A tick table that should be trimmed gets an
+ordinary predicate-driven pipeline to trim it — level-triggered, idempotent,
+and the app's own policy.
 
 **Do not add `unique (schedule, tick_at)` to the tick table.** It looks like
 belt and braces and it breaks idempotency: `resolution=ignore-duplicates`
 resolves against the primary key, so a duplicate `id` comes back as `[]` with
-201, while a *secondary* unique violation comes back `23505` with 409. Probed
-against a live cluster. The derived id already is that uniqueness.
+201, while a *secondary* unique violation comes back `23505` with 409. The
+derived id already is that uniqueness.
 
 ## What the mechanism guarantees
 
@@ -140,7 +134,7 @@ arrived. That is what makes redelivery recognisable, clock skew harmless, and a
 coarse clock produce exact instants.
 
 **Three bounds, all deliberate.** `TICKS_PER_SWEEP = 64` in `main.ts` is the most
-work one poke does; the watermark moves by what was resolved, so a backlog
+one poke emits for a schedule; the watermark moves by what was resolved, so a backlog
 drains across pokes instead of running past the caller's deadline and repeating
 forever. `WALK_CAP = 512` in `due.ts` guards a pathological expression.
 `CALL_TIMEOUT_MS = 10_000` means a hung upstream fails the poke rather than
@@ -169,25 +163,26 @@ differ on exactly these cases.
 ## A fan-out schedule, end to end
 
 The shape every keep-alive-like consumer wants: one tick, N rows, one row per
-tenant. `apps/esocial`'s session keep-alive is the worked example, and the
-numbers below are its measurements, not defaults to copy blindly — the portal
-declares `tempoSessaoExpirada = 15` minutes with a warning at 14, and a bare
-GET carrying the exported cookies renews it from outside any browser.
+tenant. The worked example is a session keep-alive for a portal that expires a
+session after 15 idle minutes, warns at 14, and renews it on a bare GET carrying
+the session's cookies from outside any browser. The numbers are that portal's,
+not defaults to copy blindly.
 
-```cue
-schedules: "session-keepalive": {
-    cron:               "*/5 * * * *"   // three touches inside the 15m window
-    maxLatenessSeconds: 300             // never wider than the cadence
-    concurrency:        "Allow"
-    emits: {entity: "SessionTouch", values: {status: "requested"}}
-}
+```sql
+-- the schedule row this example seeds
+name                 = 'session-keepalive'
+cron                 = '*/5 * * * *'    -- three touches inside the 15m window
+max_lateness_seconds = 300              -- never wider than the cadence
+concurrency_policy   = 'Allow'
+emits_entity         = 'session_touch'
+emits_values         = '{"status": "requested"}'
 ```
 
 **Cadence 5 minutes against a 15-minute expiry.** Three touches inside the
 window, so two can be lost before a session is. A cadence equal to the expiry
 has no margin at all, and one at half leaves none for the fan-out's own jitter.
 
-**`maxLatenessSeconds` no wider than the cadence.** A touch that arrives after
+**`max_lateness_seconds` no wider than the cadence.** A touch that arrives after
 the next one was already due has defended nothing. At 300 a late tick is
 recorded and skipped, which is the honest outcome: the session it was
 protecting either survived on a later touch or is already gone, and running it
@@ -208,80 +203,67 @@ reproducible. Keep it under 2 minutes: it is bounded by the lateness budget, and
 a tenant whose offset exceeds it is dropped every single time, silently, and
 always the same tenants.
 
-### What the emits entity carries
+### What the emits table carries
 
-`durability: "server"`, so CDC sees it, and `list.Concat([#tickFields, [...]])`
-so mecha's five columns are there. Beyond them a fan-out tick needs nothing —
-the tick names an instant, not a tenant. **Which tenants are live is a question
-for the pipeline**, asked when it runs, against rows that may have changed since
-the tick was minted. Putting a tenant list on the tick would freeze it at mint
-time and reintroduce the fan-out this design moved out.
+It is in the change feed's publication, so conduit reads its rows, and it
+carries mecha's five columns. Beyond them a fan-out tick needs nothing — the
+tick names an instant, not a tenant. **Which tenants are live is a question for
+the pipeline**, asked when it runs, against rows that may have changed since the
+tick was minted. Putting a tenant list on the tick would freeze it at mint time
+and reintroduce the fan-out this design moved out.
 
 ### What the outcome row looks like when the touch is a GET
 
-The signal is thin on purpose: an eSocial touch succeeds when it is **not**
-redirected to the login door. So the outcome is not "200 OK" — a login page is
-also 200. It is the absence of a redirect, or the presence of a marker only an
-authenticated page carries.
+The signal is thin on purpose: a touch succeeds when it is **not** redirected to
+the login door. So the outcome is not "200 OK" — a login page is also 200. It is
+the absence of a redirect, or the presence of a marker only an authenticated
+page carries.
 
-```cue
-SessionTouchOutcome: {
-    durability: "live"          // the publication excludes it; see below
-    writers:    "pipeline"
-    fields: [
-        {name: "id", type: "uuid", pk: true, default: "uuidv7()"},
-        // The tick answered, and never the key: a fan-out writes one row
-        // per tenant per tick, and a shared key makes one upsert address
-        // the same row twice.
-        {name: "tick_id", type: "uuid", ref: "<the emits entity>"},
-        {name: "employer_id", type: "uuid", ref: "employer"},
-        {name: "renewed", type: "bool"},        // not redirected to the door
-        {name: "checked_at", type: "timestamptz"},
-    ]
-}
+```sql
+create table session_touch_outcome (
+  id          uuid primary key default uuidv7(),
+  tick_id     uuid not null references session_touch (id),  -- the tick answered, never the key
+  employer_id uuid not null references employer (id),
+  renewed     boolean not null,                              -- not redirected to the door
+  checked_at  timestamptz not null,
+  unique (tick_id, employer_id)
+);
 ```
 
-One row per tenant per tick, naming the tick it answers, with
-`uniques: [{cols: ["tick_id", "employer_id"]}]` and the upsert targeting that
-pair (`?on_conflict=tick_id,employer_id`). `renewed: false` is the interesting row: the session lapsed and the next
-operation needs a fresh challenge. Nothing retries a touch — the next tick is
-five minutes away and recomputes the same answer.
+One row per tenant per tick, naming the tick it answers; the upsert targets
+that pair (`?on_conflict=tick_id,employer_id`). A shared key would make one
+upsert address the same row twice. `renewed = false` is the interesting row: the
+session lapsed and the next operation needs a fresh challenge. Nothing retries
+a touch — the next tick is five minutes away and recomputes the same answer.
 
-The outcome must be `durability: "live"` and a **different entity from
-`emits`**. That is not stylistic: the emits table is a CDC source, and pronto's
-publication carries `server` and excludes `live` precisely so a pipeline cannot
-feed itself the answer it just wrote. `#emit` refuses the two being the same.
+The outcome must be **a different table from the emits table, and one outside
+the change feed's publication**. That is not stylistic: the emits table is a
+change-feed source, and a pipeline that wrote its answer back into a table it
+reads would feed itself the answer it just wrote.
 
 ### Reading a restricted table from the pipeline
 
 The keep-alive needs each tenant's session cookies, and those cannot sit in a
-`public-read` table. **This needs nothing from mecha.** The pipeline reads
+table a browser can read. **This needs nothing from mecha.** The pipeline reads
 PostgREST directly at `CRUD_URL` — never the gateway — carrying `SERVICE_JWT`,
-and that token resolves to the `service` role, which holds `BYPASSRLS`. A
-`service-only` entity is therefore readable by the pipeline and by nothing a
-browser can reach: RLS denies `anon` and `app_user`, and the service role
-bypasses it.
+and that token resolves to the `service` role, which holds `BYPASSRLS`. A table
+whose policies admit neither `anon` nor `app_user` is therefore readable by the
+pipeline and by nothing a browser can reach.
 
-So the whole thing is the app's own declaration:
-
-- the cookie store is an ordinary entity with `access: {mode: "service-only"}`
-- the pipeline's `transform.aggregate` selects from it like any other table
-- no grant, no policy and no mecha change is involved
-
-`service-only` settles the query path and only the query path. **A row's
-contents reach the bus whatever its policy says**: every `durability: "server"`
-entity is in the publication, conduit reads it by logical replication, and
-logical decoding answers to no RLS. So a credential in
-a column is a credential in Redis and in every consumer group on `cdc-events`,
-whether that column sits on the emits entity or on the restricted table beside
-it. The emits entity only makes it worse, by putting it there on every tick
-rather than on every write.
+A restricted table settles the query path and only the query path. **A row's
+contents reach the bus whatever its policy says**: every table in the change
+feed's publication is read by logical replication, and logical decoding answers
+to no RLS. So a credential in a column is a credential in Redis and in every
+consumer group on `cdc-events`, whether that column sits on the emits table or
+on the restricted table beside it. The emits table only makes it worse, by
+putting it there on every tick rather than on every write.
 
 The way out is not a policy. Keep the credential out of Postgres: store it
 wherever the app already keeps blobs and let the row carry its key, since a key
-on the bus is not a credential. Where it genuinely must be a column, `live`
-durability keeps it off this publication at the cost of putting it on
-Electric's, which is the browser's sync path — a trade, not an answer.
+on the bus is not a credential. Where it genuinely must be a column, leaving its
+table out of the change feed's publication keeps it off the bus, and if the sync
+service serves that table it is then on the browser's sync path instead — a
+trade, not an answer.
 
 ## The wake
 
@@ -293,17 +275,15 @@ ingress, so a request to daprd is what starts the other two.
 
 Publishing to `/v1.0/publish/…/cdc-events` would do the opposite of what it
 looks like: it puts a message on the bus and wakes neither puller, and every
-emitted CDC pipeline opens by dropping a message whose `.data` is not a
-non-empty string, so it would be discarded on arrival too.
+CDC pipeline opens by dropping a message whose `.data` is not a non-empty
+string, so it would be discarded on arrival too.
 
-The endpoint is `GET /v1.0/healthz/outbound`, dapr's own readiness, and
-deliberately not `/v1.0/healthz`, which is scoped to the app rather than to
-daprd's own outbound path. Verified in mecha's compose stack: a poke to
-`/v1.0/healthz/outbound` answers 204 and is enough to wake the unit.
-
-The two endpoints do not distinguish themselves the way an earlier reading of
-them claimed; the measurement and what it leaves open are in the design doc.
-The choice stands on `outbound` being the narrower one.
+The endpoint is `GET /v1.0/healthz/outbound`, dapr's own readiness, which
+answers 204 and is enough to wake the unit. On daprd 1.16.1 it answers once
+daprd's servers are up, before daprd waits on its app channel. `/v1.0/healthz`
+answers 500 until daprd's initialization completes, and that initialization
+blocks until the app channel accepts a connection, so a wake that asked it
+would fail for as long as daprd waits on an app that is not listening.
 
 It fires only when the sweep emitted something, and no watermark moves until it
 lands: a wake that fails leaves every schedule owing the same ticks, so the
@@ -323,30 +303,13 @@ Because those containers rise together, a tick drains whatever the CDC path had
 backed up, not merely the row it just wrote. An app with a schedule keeps its
 own pipeline alive; an app with none has nothing waking that path at all.
 
-## State
-
-It runs. `#Schedule` declares an app's occurrences, `emit.cue` seeds the
-`schedule` table from them, the app cluster gets a ticker whenever an app
-declares one, and the compose tier has a clock. Verified against a live cluster
-end to end: a poke writes a tick, the row travels the CDC path, a pipeline
-answers it, and `Forbid` gates on that answer.
-
-Its first consumer is `apps/esocial`'s session keep-alive, whose numbers are in
-**A fan-out schedule, end to end** above. The other two cases that motivated
-this — the lease reaper and the stale-claim sweep — that app designed away: a
-conditional PATCH guarded on unheld-or-expired means the next claimer is the
-reclaim, and neither needs a clock. Both were level-triggered, which is the
-distinction worth carrying: a predicate to re-assert wants a guard at the point
-of use, and only an occurrence at a named instant wants a tick.
-
-What is not built: the k8s, host and cloud clocks, and the browser tier. The
-cloud one is the only one esocial needs, and its contract is above.
+## Clocks
 
 One shape at every tier: a contentless `POST /poke` from something outside the
-unit. What varies is only who sends it and how coarse it is. Deliberately not an
-`rpk generate` input inside transform — a clock co-located with the unit it
-wakes cannot wake it, and a dev tier shaped differently from prod in exactly
-that way proves nothing.
+unit. What varies is only who sends it and how coarse it is. Never an
+`rpk generate` input inside transform: a clock inside a unit at zero instances
+cannot start it, and a schedule placed there is dead in the cloud and silent
+about it.
 
 | Tier | Clock | Resolution | State |
 |---|---|---|---|
@@ -356,18 +319,25 @@ that way proves nothing.
 | cloud | Cloud Scheduler | 60s | not written |
 | browser (wasm) | `setInterval` | ms | needs a different shell |
 
+The binding floor is 60s, from Cloud Scheduler and CronJob. Local and compose
+may be told to go finer, which is the dangerous direction: a schedule that
+keeps pace on a laptop and never does in the cloud.
+
+At k8s, deliberately **one** CronJob rather than one per schedule: the moment
+k8s objects hold schedules, the missed and overlap policies are k8s's at that
+tier and mecha's everywhere else.
+
 ### The cloud clock, as a contract
 
 Not written, because it cannot be exercised before the ticker has a URL. What
-follows is the whole of it, so an app's own deployment can carry it without
-deciding anything.
+follows is the whole of it, so a deployment can carry it without deciding
+anything.
 
-Declared beside the app's other Cloud Run resources — the same tree that holds
-`crossplane-mesh.yaml` and `crossplane-pubsub.yaml` for `guis/iris` — as one
-`CloudSchedulerJob`, cluster-wide rather than one per schedule. The moment
-scheduler objects hold schedules, the missed and overlap policies belong to
-Cloud Scheduler at that tier and to mecha everywhere else, which is the
-one-behaviour-per-tier split this design exists to prevent.
+Declared beside the app's other Cloud Run resources as one `CloudSchedulerJob`,
+cluster-wide rather than one per schedule. The moment scheduler objects hold
+schedules, the missed and overlap policies belong to Cloud Scheduler at that
+tier and to mecha everywhere else, which is the one-behaviour-per-tier split
+this design exists to prevent.
 
 ```yaml
 schedule:  "* * * * *"          # the floor; resolution, never cadence
@@ -405,58 +375,92 @@ is the choice to make when this lands.
 an unreachable ticker for no gain: due-ness is recomputed from the expression,
 so the next minute's poke produces the same answer as the retry would.
 
-The job must exist wherever `meta.tiers` names `cloud` and the app declares a
-schedule — and `meta.clocks` is where the program says it does, which `#emit`
-now refuses to compile without.
+The job must exist wherever the app runs in the cloud with a schedule that is
+not suspended.
 
-The binding floor is 60s, from Cloud Scheduler and CronJob. Local and compose
-may be told to go finer, which is the dangerous direction: a schedule that
-keeps pace on a laptop and never does in the cloud. The refusal that would
-catch it is step 2 below and is not written.
+## Why a tick needs no durability
 
-At k8s, deliberately **one** CronJob rather than one per schedule: the moment
-k8s objects hold schedules, the missed and overlap policies are k8s's at that
-tier and mecha's everywhere else.
+Due-ness is a pure function of `(schedule, now, done)`, so losing a tick costs
+nothing: the next poke recomputes the same answer. The clock can be stupid, two
+clocks can run at once without coordinating, a coarse clock produces exact
+instants, and the only durable thing is the row the app already wanted.
 
-## Next steps
+The facts the design rests on:
 
-Ordered, and each independently landable. What is built is in **State** above.
+- **PostgREST 12.2.3.** A conditional PATCH with
+  `or=(last_tick_at.is.null,last_tick_at.lt.X)` is a no-op when the stored value
+  is newer. A `tick_at` written as `…Z` reads back as `…+00:00`, which is why
+  `tickId` normalises through `Date` before hashing.
+- **Cloud Run.** In a two-container service at `minScale 0`, one request to the
+  container holding the ingress starts the portless sibling a second later: it
+  starts because the instance starts.
+- **Postgres grants.** `ALTER DEFAULT PRIVILEGES` in `002_grants` reaches every
+  later table, mecha's own included: without a policy, `app_user` could repoint
+  `schedule.emits_entity` and set `suspended`, which the ticker then acts on as
+  `service`. `ENABLE ROW LEVEL SECURITY` with no policy closes it.
+- **croner.** `n/step` means n to the end of the field (`5/10` in minutes is 5,
+  15 … 55); a parser reading a bare value as `lo = hi = n` matches only n, and
+  the DST gap check then discards the rest silently.
+- **A coarse clock.** Poking every 10 seconds against a minutely schedule
+  produces exactly one tick per minute, on the minute. At cloud tier each poke is
+  a billed wake, which is why `?caller=` is recorded.
 
-**1. The cloud clock**, per the contract above, with esocial's deployment. It
-is the only tier esocial needs, and until it exists the ticker fires nowhere
-that matters.
+**Edge and level.** An edge is an occurrence at a named instant: it can be
+missed, must not double-fire, and wants identity, a watermark and a lateness
+rule. That is a tick. A level is a predicate to re-assert, *make this false,
+repeatedly*; running it twice is free, and it wants a guard at the point of use,
+not a clock. A lease reaper, a stale-claim sweep — a conditional PATCH guarded on
+unheld-or-expired makes the next claimer the reclaim — and a purge of old rows
+are levels; a session keep-alive is an edge, which is what
+`max_lateness_seconds` expresses. Reach for a tick only when lateness changes
+the answer: most periodic work is a level wearing a cron expression.
 
-**2. The remaining compile-time refusals.** These make the original class of
-bug loud instead of silent. `meta.clocks` is done. Still to write: a schedule
-finer than the finest declared tier's resolution, validated against
-`meta.tiers` rather than the tier that happens to be running, or it passes
-locally exactly when it matters least; `Forbid` without a `done`, which the
-CUE conditional already requires but the seeded row does not re-check; a
-schedule under `capabilities.server: false`, which has nothing to wake; and an
-hour-pinning expression with no `timeZone`, because "3am" is not a time until
-you say whose.
+Rejected:
 
-**3. An integration test** against a live cluster, alongside
-`apps/*/tests/contract.test.ts`: a schedule seeded, a poke posted, one row
-emitted, a second poke producing nothing. Everything this branch verified was
-verified by hand, and none of it would catch a regression.
+- **dapr Jobs** deliver to the app's own endpoint, so the app must already be
+  awake.
+- **A durable tick stream** persists something reconstructible.
+- **Fan-out inside the ticker** needs a resumable cursor and an all-or-nothing
+  bulk insert; a tick is the app's row, with mecha's five columns written last.
+- **A `schedule_run` table with a `historyLimit`**: retention is a level the app
+  declares.
+- **`done` as a filter over the emits table**: that table is a change-feed
+  source and the publication is the loop breaker, so `done` names a different
+  table.
 
-**4. The k8s and host clocks**, when a tier needs one. Both run the same
-container as compose; only `?caller=` differs.
+## Not built
 
-**5. Browser tier.** `due.ts` ports unchanged; `main.ts` does not — no Deno, no
-daprd to wake, and crud is the wasm PostgREST-subset. Blocked on the first open
-question below.
+- **The cloud clock**, per the contract above. Until it exists the ticker fires
+  nowhere that scales to zero.
+- **An integration test** against a live cluster: a schedule seeded, a poke
+  posted, one row emitted, a second poke producing nothing. Nothing exercises
+  the ticker end to end.
+- **The k8s and host clocks**, when a tier needs one. Both run the same
+  container as compose; only `?caller=` differs.
+- **The browser tier.** `due.ts` ports unchanged; `main.ts` does not — no Deno,
+  no daprd to wake, and crud is
+  [the wasm PostgREST subset](../../docs/browser.md#what-stands-in-for-what). That subset answers
+  `resolution=ignore-duplicates` with a bare `ON CONFLICT DO NOTHING`, so the
+  derived key holds there too.
+- **A poke-specific credential.** `/poke` is routed on every app's public
+  gateway and guarded only by `SERVICE_JWT` compared byte-for-byte, the token
+  the ticker then writes with as `service`, which holds `BYPASSRLS`: the secret
+  that must reach Cloud Scheduler on a public request is cross-tenant write
+  access. A credential of its own costs one env var and makes a leak survivable.
+- **`Forbid` when a tick row is pruned.** `priorFinished` reads an absent prior
+  row as finished, right for a late tick and wrong for a deleted one, and a tick
+  table is an app table an app may trim.
+- Known and unfixed: `TICKS_PER_SWEEP` bounds one schedule rather than the pass,
+  and a pass killed part-way commits no watermarks; a DST-skipped instant stalls
+  the late-branch drain; a schedule producing only late ticks never wakes its
+  reader; nothing checks that an emits table carries the five columns; a tick on
+  the lateness horizon is neither run nor recorded.
 
 ## Open
 
-- Does the browser's PostgREST-subset implement `resolution=ignore-duplicates`?
-  The whole idempotency claim rests on it. Real PostgREST is confirmed; the
-  browser is a separate implementation, and if it differs, browser tier needs
-  its own branch.
 - Cloud Scheduler → wake → drain, measured end to end. Stand transform up at
   `minInstanceCount: 0`, confirm a `generate` pipeline does not run, then measure
   a POST waking it and the stream draining once.
-- Five-field cron cannot say "last business day", which eSocial deadlines may
+- Five-field cron cannot say "last business day", which some deadlines may
   eventually want. That is the moment to reach for RFC 5545 RRULE, and the
   ceiling is worth knowing before it is hit.

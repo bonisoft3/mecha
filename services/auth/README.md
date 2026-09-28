@@ -12,8 +12,8 @@ the emitter writes the policies that call `auth_uid()`.
   transform can write without a reader, which is the only caller that has no
   session to borrow.
 - **`auth_uid()`** reads `sub` out of `request.jwt.claims`. It is a replaceable
-  object, emitted with the policies that call it and never with the tables —
-  the split is `plugins/pronto/docs/2026-08-31-owner-stamping-default-hygiene.md`.
+  object, restated with the policies that call it and never migrated with the
+  tables, so a correction reaches every database without a migration.
 
 The alternative was server-side sessions. It was refused because the WebAuthn
 challenge is the only state a ceremony needs, and a short-lived `state` JWT

@@ -5,12 +5,12 @@ it. Live: the database image (bayt.cue, `database-image`) bakes this in as
 `/docker-entrypoint-initdb.d/002a_rls.sql`, so it is present before any
 app-emitted migration runs and whether or not a generator ran at all.
 
-**Scope: shared stores only.** It is emitted per entity whose `durability` is a server
-tier. An app whose entities are all `tab`/`device` has no schema at all, so it
-emits no policies — a boundary between one subject and themselves is not one.
+**Scope: shared stores only.** It applies to the tables in the cluster's
+database. An app that keeps all its data in the browser has no schema here, so it
+gets no policies — a boundary between one subject and themselves is not one.
 
-Tier is not the same as where the app runs. A server-tier entity executed in the
-browser against PGlite gets **the same policies**, with the shim setting
+Where the database runs does not change the floor. The same tables in PGlite in
+a browser get **the same policies**, with the shim setting
 `app.scopes` where a server would use `db-pre-request` or the gatekeeper. PGlite connects as a
 superuser and superusers bypass RLS, so this needs `SET ROLE` to a non-superuser
 first — `applyScopeSession()` in `@mecha/postgrest-js`. With it the enforcement
@@ -55,7 +55,7 @@ That gives a clean seam:
 
 - **mecha** owns the mechanism: `current_scopes()`, `rls_protect()`, and the
   audit (`mecha.rls_unprotected`). The policy text exists in exactly one place.
-- **pronto** (or any generator) owns application: it emits
+- **The generator** that writes an app's migrations owns application: it emits
   `CALL rls_protect('<table>')` and the `scope_id` derivation for the entity's
   access mode. It never emits the policy text, so it cannot emit a subtly wrong
   one, and a correction reaches every app by migration rather than by
@@ -91,34 +91,34 @@ It covers four groups:
   against a database that already contains other tables.
 
 **Every term of the audit predicate is held down by one of these**, checked by
-deleting each term in turn and confirming the suite fails. That sweep is worth
-re-running after any change to the predicate: an earlier version dropped
-`polcmd` because the sweep said it survived, when the truth was that no fixture
-distinguished it. Mutation testing shows which mutants your fixtures catch, not
-which terms are redundant.
+deleting each term in turn and confirming the suite fails. Re-run that sweep
+after any change to the predicate, and read a term that survives as a fixture
+missing, not a term redundant: mutation testing shows which mutants the fixtures
+catch, not which terms are needed.
 
 The suite creates and drops its own `_f_app` and `_f_anon` roles, so it needs no
 roles to pre-exist.
 
-## Not done
+## Deriving `scope_id`
 
-**Scope derivation.** Applying the floor per table needs `scope_id`, which is the
-refactor of pronto's `#Access` from *policy modes* into *scope derivation*. The
-table below names the modes `#Access` carries today; the design doc replaces that
-grammar with the folder — `private`/`public`/`group`/`shared`/`inherit` — and the
-derivations survive the rename:
+The caller derives `scope_id` for each table and calls `rls_protect`; a table it
+leaves unfloored goes into `mecha.rls_exempt` with its reason, which is the short
+list a reviewer reads. The derivations in use:
 
-| Mode | Derivation | Status |
+| Table | `scope_id` | Floored |
 |---|---|---|
-| `owned {owner}` | `scope_id text GENERATED ALWAYS AS ('user:' \|\| owner) STORED` | verified |
-| `owned {shared via}` | the share grants the subject that scope — changes `current_scopes()`, not the column | not written |
-| `through {parent, on}` | `scope_id = parent.scope_id`, trigger-maintained; a generated column cannot reach another table | not written |
-| `public-read` | `scope_id = 'public:'`, held by every subject, so anon stops being special-cased | not written |
-| `service-only` | a scope no subject holds; the existing `service` bypass is unchanged | not written |
+| owned by a subject | `GENERATED ALWAYS AS ('user:' \|\| owner) STORED` | yes |
+| a child of a composition | the parent's, copied by a trigger, since a generated column cannot reach another table; a child of no parent gets a foreign-key violation where the column naming its parent is a foreign key, and is dropped without a word (`RETURN NULL`) where it is not | as its parent |
+| public | `GENERATED ALWAYS AS ('public:') STORED`, a scope every subject holds | yes |
+| the identity table | `'user:' \|\| id`, so a person reads their own row | exempt; its self-select policy alone admits a reader |
+| shared per object | the owner's, carried for the shape predicate and for a child's trigger | exempt: the floor is restrictive, so it ANDs, and a sharee holds no scope the owner's row carries; the share policies govern CRUD |
+| service only | none | exempt; no policy admits `app_user` or `anon`, and `service` reads by `BYPASSRLS` |
 
-`shared` deserves its own tests: `current_scopes()` is the single place breadth is
-granted, so it is the one function whose bugs are breaches rather than outages.
+The share policies are the one place a row reaches a subject whose scopes do not
+include it, so their bugs are breaches rather than outages, and they are the
+policies most in need of tests of their own.
 
-**The Electric shape `where`**, emitted from the same declaration that derives
-`scope_id` — which is the point of the scope column, since a shape predicate
-cannot join and `shared`/`through` cannot be expressed without one.
+The sync path reads the same scopes. A shape token's `where` is
+`scope_id IN (<the subject's scopes>)`, built from `subject_scopes` by
+`services/auth/jwt.ts`: the derivation the CRUD path's floor uses, so the two
+paths cannot disagree about a subject's reach.

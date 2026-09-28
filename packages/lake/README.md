@@ -1,8 +1,7 @@
 # @mecha/lake
 
 Browser-side consumer of a published DuckLake: engine boot, HTTP attach, and
-offline preload. Publishing is the app's job — `guis/snapcards` does it from
-its compose stack (`scripts/lake-publish.sql`, wired as a `release` flavor).
+offline preload. Publishing is the app's job, done from its own stack.
 
 ## Contract
 
@@ -34,8 +33,8 @@ This package generalises the browser tier proven by a spike deleted in
 `a0c9f51e9`; `git show a0c9f51e9^:libraries/mecha/spikes/ducklake/README.md`
 carries the full log. Worth reading before changing the CDC or publish side:
 the pg_duckpipe blackbox findings (workers do not auto-resume after a Postgres
-restart — the reason `snapcards/services/database/lake-supervisor.sh` exists),
-the CDC battery (out-of-order commits, restart-mid-flush convergence,
+restart, so a publisher needs a supervisor that restarts them),
+the CDC tests (out-of-order commits, restart-mid-flush convergence,
 exactly-once), and `browser/sw.js`, the only worked example of serving lake
 files from Cache Storage with Range slicing.
 

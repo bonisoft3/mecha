@@ -157,8 +157,7 @@ _devElectricSecret: "dev-electric-secret"
 							// ORDER BY on text reaches a reader, so it sorts the way a
 							// dictionary does. Under --no-locale it sorted by byte: every
 							// accent past all of ASCII, and case splitting the alphabet so
-							// "ana" followed "Zoe" (measured; the orders are in
-							// plugins/pronto/docs/2026-09-18-localization-has-tiers.md).
+							// "ana" followed "Zoe" (measured).
 							//
 							// `und` and not a language, because the collation is one per
 							// database and an app serves every locale it declares out of
@@ -272,14 +271,14 @@ _devElectricSecret: "dev-electric-secret"
 					// above uses it — but is deliberately NOT published: the
 					// browser's six-connections-per-origin cap only exists on
 					// HTTP/1.1, and a second front door is a path that only ever
-					// runs on a laptop (docs/2026-08-09-connection-ceiling.md).
+					// runs on a laptop (docs/proxy.md).
 					ports: [X.meta.door]
 					// The Caddyfile substitutes this into the electric route, which is
 					// the only place the secret is added. Same default as the electric
 					// service reads, and both are overridden together or neither.
 					environment: ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
 
-					// mkcert's pair, issued on the host by `just setup` and trusted
+					// mkcert's pair, issued on the host by `sayt setup` and trusted
 					// there once with `mkcert -install`. A DIRECTORY mount, not two
 					// file mounts: an editor or a re-issue replaces a file's inode and
 					// leaves a file-mount pointing at something deleted, which is the
@@ -536,7 +535,7 @@ _devElectricSecret: "dev-electric-secret"
 		}
 		// What the cluster declares about its own surface: work under `verbs`,
 		// assertions under `checks`. `verb` is the layer each needs, not a
-		// label — caddy validate reads a file and so belongs at lint. The loop
+		// label — caddy adapt reads a file and so belongs at lint. The loop
 		// routes each into the matching rulemap and owns this vocabulary; it is
 		// restated here because mecha is consumed on its own and cannot import
 		// a sibling plugin.
@@ -564,7 +563,7 @@ _devElectricSecret: "dev-electric-secret"
 		// left to a human, because it writes to the system keychain — so setup
 		// ends by printing that command instead of running it.
 		//
-		// Untrusted, the cert is still served and the battery still drives it
+		// Untrusted, the cert is still served and visual lint still drives it
 		// (it ignores certificate errors); only a human browser complains, and
 		// its interstitial blocks WebAuthn outright.
 		verbs: certs: {

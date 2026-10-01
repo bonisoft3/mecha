@@ -57,31 +57,14 @@ and directories instead of copying the layout.
 ```
 proto/*.proto   ── task buf:generate (protoschema-jsonschema v0.5.2) ─► gen/jsonschema/
 tmpl.cue        ── embeds each entity's JSON Schema ─► Entities
-tmpl_tool.cue   ── task cue:generate: cue export | jq | gomplate ─► schemas/schema.hcl
-task atlas:diff ── atlas migrate diff ─► migrations/<version>_<name>.sql, atlas.sum
 bayt.cue        ── state.migrations ─► the database image
 ```
 
-- **`task generate` writes no migration.** It runs the first two steps and
-  `task atlas:hash`. `task atlas:diff -- <name>` writes the file under a
-  timestamp, which the cluster refuses, so it is renamed to the next free three
-  digits before `task atlas:hash`, and it reaches the image once it is listed
-  in `state.migrations`. Until then the HCL and the directory disagree, and
-  nothing notices.
-- **The template** ([`schema.hcl.tmpl`](../services/database/schemas/schema.hcl.tmpl))
-  gives every table `id uuid DEFAULT uuidv7()` as its primary key, `createdAt`,
-  `updatedAt`, and the write-back's nullable `processed_at` and `source`. Every
-  other field is a `NOT NULL` column under its JSON name, so `user_id` becomes
-  `"userId"`: strings `varchar(maxLength)` (255 without one), bools `boolean`,
-  repeated fields `jsonb`, every number and enum `integer`. Message-typed fields
-  are skipped. Of the protovalidate rules only `max_len` reaches the table.
-- **Atlas authors; it does not run.** `atlas migrate diff` replays the
-  migrations directory on a throwaway `postgres:18` in Docker, diffs it against
-  the HCL and writes the next file. `atlas.sum` is its checksum of that
-  directory, and Atlas refuses to diff past a stale one: after editing a
-  migration by hand, `task atlas:hash`. No image carries Atlas, nothing reads
-  `atlas.sum` at runtime, and Atlas's replay never sees the tenancy floor or
-  `tests/008_validation_smoke.sql`.
+- **`task buf:generate`** derives JSON Schemas from protobuf definitions.
+- **The tables** are declared with `id uuid DEFAULT uuidv7()` as primary key, `createdAt`,
+  `updatedAt`, and write-back fields `processed_at` and `source`.
+- **Migrations** are applied in numerical order (`001_...sql`, `002_...sql`, etc.) on fresh volumes
+  at initdb, and live database evolution is handled via `state.pgroll`.
 
 ## What else names an entity
 
@@ -164,8 +147,6 @@ because PGlite cannot run pgroll.
 - **Two casings in one table.** Generated columns are camelCase JSON names, the
   write-back's columns snake_case; a pipeline or query writes each as the table
   spells it.
-- **A migration hash mismatch** is Atlas refusing a hand-edited directory:
-  `task atlas:hash`.
 
 ## Reproducing what a schema built
 

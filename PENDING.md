@@ -65,9 +65,6 @@ in the stream.
 **Every list that names an entity is rendered from `Entities`**
 ([what else names an entity](docs/schema.md#what-else-names-an-entity)).
 
-**`task generate` ends in a migration, or fails.** It renders the HCL and
-stops. A check that `atlas migrate diff` would write nothing catches HCL that no
-migration carries.
 
 **Numbers keep their width and fraction**: reading the `anyOf`'s first arm
 gives `bigint`, `double precision` and enums their own types

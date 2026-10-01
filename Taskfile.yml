@@ -21,24 +21,9 @@ tasks:
     generates:
       - "../{{.GEN_DIR}}/jsonschema/**/*.json"
 
-  cue:generate:
-    desc: "Generate convention-based templates via CUE+gomplate"
-    deps: [buf:generate]
-    cmds:
-      # mise x puts real tool bin dirs on PATH — the .cmd file shims
-      # Windows CI uses are invisible to the bash this tool spawns.
-      - mise x -- cue cmd generate tmpl_tool.cue
-    sources:
-      - "tmpl.cue"
-      - "tmpl_tool.cue"
-      - "services/database/schemas/schema.hcl.tmpl"
-      - "{{.GEN_DIR}}/jsonschema/*.json"
-    generates:
-      - "services/database/schemas/schema.hcl"
-
   generate:
-    desc: "Generate all artifacts from protobuf schemas and atlas"
-    deps: [buf:generate, cue:generate, atlas:hash]
+    desc: "Generate all artifacts from protobuf schemas"
+    deps: [buf:generate]
     cmds:
       - echo "Generated all artifacts"
 
@@ -131,30 +116,7 @@ tasks:
     cmds:
       - nu scripts/benchmark.nu
 
-  # ================================================================
-  # Atlas — dev-time migration generation from HCL schema
-  # ================================================================
 
-  atlas:diff:
-    desc: "Generate versioned migration from HCL schema changes"
-    cmds:
-      - |
-        atlas migrate diff {{.CLI_ARGS | default "schema_change"}} \
-          --dir "file://services/database/migrations" \
-          --dev-url "docker://postgres/18/dev" \
-          --to "file://services/database/schemas/"
-        atlas migrate hash --dir file://services/database/migrations
-    sources:
-      - "services/database/schemas/*.hcl"
-
-  atlas:hash:
-    desc: "Regenerate atlas.sum after migration changes"
-    cmds:
-      - atlas migrate hash --dir file://services/database/migrations
-    sources:
-      - "services/database/migrations/*.sql"
-    generates:
-      - "services/database/migrations/atlas.sum"
 
   # ================================================================
   # Utility

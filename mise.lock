@@ -531,37 +531,6 @@ checksum = "sha256:4ab8a06ac3eeb030857a83a7648220361c4602ec2de19a1b3850d379ac85c
 url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_windows_amd64.tar.gz"
 url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651902"
 
-[[tools."http:atlas"]]
-version = "0.38.0"
-backend = "http:atlas"
-
-[tools."http:atlas"."platforms.linux-arm64"]
-checksum = "blake3:bac70c57ea0fa09a8fea07ac6c7d24b48d214abd7ba45a155b02a63a0a021e54"
-url = "https://release.ariga.io/atlas/atlas-linux-arm64-v0.38.0"
-
-[tools."http:atlas"."platforms.linux-arm64-musl"]
-checksum = "blake3:bac70c57ea0fa09a8fea07ac6c7d24b48d214abd7ba45a155b02a63a0a021e54"
-url = "https://release.ariga.io/atlas/atlas-linux-arm64-v0.38.0"
-
-[tools."http:atlas"."platforms.linux-x64"]
-checksum = "blake3:91223653adf44a5ec963d8ce504e8321de82f688372c6167ec3c0f11b23dc876"
-url = "https://release.ariga.io/atlas/atlas-linux-amd64-v0.38.0"
-
-[tools."http:atlas"."platforms.linux-x64-musl"]
-checksum = "blake3:91223653adf44a5ec963d8ce504e8321de82f688372c6167ec3c0f11b23dc876"
-url = "https://release.ariga.io/atlas/atlas-linux-amd64-v0.38.0"
-
-[tools."http:atlas"."platforms.macos-arm64"]
-checksum = "blake3:3cdd81b3c2d45ade8ac345682d1cb12f2d15d1e4362aedcf380e14da5a2cd230"
-url = "https://release.ariga.io/atlas/atlas-darwin-arm64-v0.38.0"
-
-[tools."http:atlas"."platforms.macos-x64"]
-checksum = "blake3:1e64f2bebe5ded11be528f95788188a87439a07cf29e707dd37f0721e77993f6"
-url = "https://release.ariga.io/atlas/atlas-darwin-amd64-v0.38.0"
-
-[tools."http:atlas"."platforms.windows-x64"]
-checksum = "blake3:559bde61db5485ceabc6f22183c8735580352fe507e5f027c83f93e4a48629a1"
-url = "https://release.ariga.io/atlas/atlas-windows-amd64-v0.38.0.exe"
 
 [[tools.node]]
 version = "22.14.0"

@@ -16,6 +16,7 @@
 * [Tiers and clouds](deployment.md) - concept: mecha's tiers from browser to edge, the unit that holds the WAL reader and the request that wakes it, the managed service each component maps to, and what runs on a cloud as built.
 * [The browser platform](browser.md) - concept: mecha's cluster inside one browser tab — PGlite and a JavaScript stand-in for each service, one user, and the guarantees it drops.
 * [Capabilities](capabilities.md) - concept: The switches in cluster.cue that add planes to a cluster — data, change feed, auth, blobs, schedules — and what mecha's own stack runs beside them.
+* [State machines](machines.md) - concept: Trigger-driven statechart reducers inside PostgreSQL — deterministic transitions, relational effects, timeouts, and ticker sweeps.
 
 # Service and package contracts
 

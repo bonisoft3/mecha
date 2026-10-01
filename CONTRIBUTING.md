@@ -19,8 +19,6 @@ the README's [Local Development](README.md#local-development). Beside them:
 
 ```bash
 task buf:generate              # proto → JSON Schema
-task cue:generate              # JSON Schema → Atlas HCL (CUE + gomplate)
-task atlas:hash                # regenerate atlas.sum after a migration change
 
 task launch                    # generate, then the whole stack with --watch
 sayt launch                    # `compose up launch --wait`: the stack, detached once healthy
@@ -33,8 +31,8 @@ task benchmark                 # startup, CRUD and CDC latency (scripts/benchmar
 
 **Adding an entity**: define it in `proto/`, register it in `tmpl.cue` (embed
 the generated schema and list it in `Entities`), then `task generate` and
-`task atlas:diff -- <name>`, rename the new migration to the next free three
-digits ([schema](docs/schema.md#mechas-own-tables-from-protobuf)) and list it
+author the new migration under the next free three digits
+([schema](docs/schema.md#mechas-own-tables-from-protobuf)) and list it
 in `state.migrations` in `bayt.cue`, and add the entity to each list that
 names it by hand ([schema](docs/schema.md#what-else-names-an-entity)); then
 `sayt launch`.

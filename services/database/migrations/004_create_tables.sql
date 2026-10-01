@@ -1,4 +1,4 @@
--- The entity tables services/database/schemas/schema.hcl declares.
+-- The entity tables declared for mecha.
 COMMENT ON SCHEMA "public" IS 'Standard PostgreSQL public schema';
 
 CREATE TABLE IF NOT EXISTS "public"."Hello" (

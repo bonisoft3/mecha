@@ -1,7 +1,6 @@
 -- The identity table the auth service mints tokens against: one row per
 -- subject, keyed by the token's `sub`. A consumer's migrations create their
--- own; this is mecha's own stack's. It sits outside migrations/ because it
--- calls the tenancy floor, which Atlas's replay of that directory never has.
+-- own; this is mecha's own stack's.
 CREATE TABLE app_user (
   id uuid PRIMARY KEY,
   handle text NOT NULL UNIQUE,

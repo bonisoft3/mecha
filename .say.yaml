@@ -21,6 +21,11 @@ say:
         stop: true
         cmds:
           - do: "pnpm --dir packages run test"
+      # The single-file page's cluster under the pins a bundler takes from it.
+      cluster:
+        priority: -1
+        cmds:
+          - do: "mise x -- deno test --config packages/mecha-browser/cluster.deno.json --lock packages/mecha-browser/deno.lock --frozen --allow-read --allow-env packages/mecha-browser/cluster_test.ts"
 
   launch:
     rulemap:

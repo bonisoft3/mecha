@@ -116,6 +116,9 @@ and boot fails. `container` is the only tier name the grammar knows.
 - **Electric's own sync service in the page.** The BEAM does not run in a
   browser. The cluster answers Electric's shape protocol itself, so the
   client does not change.
+- **Typed values in a shape's rows.** Electric sends each value as Postgres's
+  text for it and the client parses by the column's type, so a JSON `true`
+  parses as false; the cluster sends text as Electric does.
 - **The whole row in the notification.** It fails any row over the notify cap.
   The key is enough to read the row back.
 - **Signed tokens in the one-user cluster.** Nothing would verify them, and

@@ -113,6 +113,13 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
       CREATE TRIGGER shape_notify AFTER INSERT OR UPDATE OR DELETE ON ${ident(table)} FOR EACH ROW EXECUTE FUNCTION shape_notify(${l.pk.map(literal).join(', ')});`)
   }
 
+  // A row as Electric sends it: each value Postgres's text for it, which the
+  // client parses by the column's type.
+  const asText = (table: string) => {
+    const cols = Object.keys(logs.get(table)!.schema)
+    return `json_object(ARRAY[${cols.map(literal).join(', ')}]::text[], ARRAY[${cols.map((c) => `t.${ident(c)}::text`).join(', ')}]::text[])`
+  }
+
   const rowMessage = (table: string, operation: string, row: Row, txid?: number) => {
     const l = logs.get(table)!
     const headers: Record<string, unknown> = { operation, relation: ['public', table] }
@@ -128,10 +135,10 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     const l = logs.get(table)
     if (!l) return
     void serialize(async () => {
-      let row = key
+      let row: Row = Object.fromEntries(Object.entries(key).map(([c, v]) => [c, v === null ? null : String(v)]))
       if (op !== 'DELETE') {
         const where = l.pk.map((c, i) => `${ident(c)} = $${i + 1}`).join(' AND ')
-        const r = await db.query<{ r: Row }>(`SELECT row_to_json(t) AS r FROM ${ident(table)} t WHERE ${where}`, l.pk.map((c) => key[c]))
+        const r = await db.query<{ r: Row }>(`SELECT ${asText(table)} AS r FROM ${ident(table)} t WHERE ${where}`, l.pk.map((c) => key[c]))
         if (r.rows.length === 0) return
         row = r.rows[0].r
       }
@@ -190,7 +197,7 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     const base: Record<string, string> = { 'electric-handle': l.handle, 'cache-control': 'no-store', 'content-type': 'application/json' }
 
     if (offset === '-1') {
-      const rows = await serialize(() => db.query<{ r: Row }>(`SELECT row_to_json(t) AS r FROM ${ident(table)} t WHERE ${shapeWhere(reach)}`))
+      const rows = await serialize(() => db.query<{ r: Row }>(`SELECT ${asText(table)} AS r FROM ${ident(table)} t WHERE ${shapeWhere(reach)}`))
       const msgs: unknown[] = rows.rows.map((x) => rowMessage(table, 'insert', x.r))
       msgs.push({ headers: { control: 'up-to-date', global_last_seen_lsn: String(l.tail) } })
       return new Response(JSON.stringify(msgs), {

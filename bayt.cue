@@ -144,8 +144,8 @@ _mecha: bayt.#project & _where & {
 					pkgs: ["ca-certificates", "wget"]
 					then: [
 						"arch=$(dpkg --print-architecture)",
-						"case \"$arch\" in amd64) sum=d46aa5f0e85db736f6a881cdfaab8400c57a4007291c441007f205fe796ebe92;; arm64) sum=e0517a453c1421e3bd3b6bbd28e8446e90a59e00cfe4b27607e5df17e93a2abd;; *) echo \"no plv8 artifact for $arch\" >&2; exit 1;; esac",
-						"wget -qO /tmp/plv8.deb \"https://repo.pigsty.io/apt/pgsql/trixie/pool/main/p/plv8/postgresql-18-plv8_3.2.4-1PIGSTY~trixie_$arch.deb\"",
+						"case \"$arch\" in amd64) sum=969ca7bbf2341ea747f8ffa99226f0ae7ce2cd74353d12e9d13b09cc2362c47f;; arm64) sum=52bb956d95a3e51262250316cb3124e5cfd38aaeef60379cba615b0c5aedd05a;; *) echo \"no plv8 artifact for $arch\" >&2; exit 1;; esac",
+						"wget -qO /tmp/plv8.deb \"https://repo.pigsty.io/apt/pgsql/trixie/pool/main/p/plv8/postgresql-18-plv8_3.2.5-1PGSTY~trixie_$arch.deb\"",
 						"echo \"$sum  /tmp/plv8.deb\" | sha256sum -c -",
 						"dpkg -i /tmp/plv8.deb",
 						"rm /tmp/plv8.deb",

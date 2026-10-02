@@ -412,7 +412,7 @@ _devElectricSecret: "dev-electric-secret"
 			}
 			if X.capabilities.server {
 				electric: X._image & {
-					dockerfile: from: name: "electricsql/electric@sha256:f311edc272e227ddaea593c5205a02c3d1e5969c2db0f7655a039a5e24abb176"
+					dockerfile: from: name: "1203bbwv79.registry.depot.dev/f5k5087x1b/electric:1.8.0@sha256:7b6aed2d5fd356a5e5edd5290eeec0b19859ab798d3cbdb7d9d223fbb872a5ab"
 					compose: {
 						depends_on: X._schemaReady
 						environment: {

@@ -63,6 +63,8 @@ state transition:
 | `delete` | Cascade/Prune | `DELETE FROM <table> WHERE <predicate>` | Cleaning up transient child records upon terminal state. |
 | `call` | Stored procedure| `PERFORM <function>(...)` | Invoking domain-specific procedural logic. |
 | `notify` | Signaling | `PERFORM pg_notify('<channel>', <payload>)` | Emitting ephemeral Level-4 signals across the cluster. |
+| `saga` | Cortex Saga | `INSERT INTO "saga" (...) ON CONFLICT DO NOTHING; PERFORM pg_notify('cortex_saga_queue', ...)` | Triggering durable DBOS sagas and Level-4 exterior network acts atomically on transition. |
+| `stream` | DuckStream Signal | `PERFORM pg_notify('duckstream_<name>', ...)` | Signaling Feldera incremental circuits or refreshing streaming views. |
 
 ## Timeouts and the ticker
 

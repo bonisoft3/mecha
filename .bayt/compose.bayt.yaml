@@ -16,6 +16,8 @@ include:
   required: false
 - path: ./compose.ticker-image.yaml
   required: false
+- path: ./compose.compute-image.yaml
+  required: false
 - path: ./compose.clock-image.yaml
   required: false
 - path: ./compose.rclone-s3-image.yaml

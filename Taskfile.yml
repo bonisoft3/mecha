@@ -52,6 +52,7 @@ tasks:
       - cue vet ./...:tmpl
       - buf lint proto
       - task: test:ticker
+      - task: test:compute
       - task: test:pgroll
       - task: test:cluster
 
@@ -66,6 +67,19 @@ tasks:
     cmds:
       # mise x puts the real tool bin dir on PATH — see cue:generate.
       - mise x -- deno test --no-config --no-lock --allow-read --allow-write --allow-run=cue pgroll/pgroll_test.ts
+
+  test:compute:
+    desc: "compute service: scheduling, sinks, the cage, the WASI host; the Postgres cases run where initdb is on PATH"
+    dir: services/compute
+    cmds:
+      # The extensions the Postgres cases load, installed once beside main.ts
+      # as the image installs them.
+      - mise x -- deno run --frozen --allow-ffi --allow-read --allow-write --allow-net --allow-env install.ts
+      - mise x -- deno test --frozen --unstable-worker-options --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-run .
+    sources:
+      - "*.ts"
+      - "deno.json"
+      - "deno.lock"
 
   test:ticker:
     desc: "ticker unit tests (pure: no clock, no network)"

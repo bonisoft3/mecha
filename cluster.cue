@@ -99,6 +99,10 @@ _devElectricSecret: "dev-electric-secret"
 		// a fresh one too, once initdb has run.
 		pgroll: [grammar.#Name]: grammar.#Migration
 		pipelines: [...{name: string, file: string}]
+		// Numeric programs over the lake (services/compute/main.ts states the
+		// contract): a module each, the tables it alone writes (`to`),
+		// and the wasm modules its jobs call, shipped by their file names.
+		computations: [...{name: string, file: string, every: int & >0, to: [...string] & [_, ...], wasm: [...string]}]
 		// Names only: the cluster needs to know whether any schedule exists,
 		// never what it says. One brings the ticker, its clock and the table
 		// they sweep (#ScheduleMigration); the caller's migrations seed it.
@@ -336,7 +340,9 @@ _devElectricSecret: "dev-electric-secret"
 							DATABASE_URL:     "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							PGRST_JWT_SECRET: "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
 							WEBAUTHN_RP_ID:   "${WEBAUTHN_RP_ID:-localhost}"
-							WEBAUTHN_ORIGIN:  "https://localhost:${CADDY_TLS_HOST_PORT:-8443}"
+							// The door's port is the host's pick; auth reads this
+							// default as whichever port the request came through.
+							WEBAUTHN_ORIGIN: "${WEBAUTHN_ORIGIN:-https://localhost:*}"
 						}
 					}
 				}
@@ -412,7 +418,7 @@ _devElectricSecret: "dev-electric-secret"
 			}
 			if X.capabilities.server {
 				electric: X._image & {
-					dockerfile: from: name: "1203bbwv79.registry.depot.dev/f5k5087x1b/electric:1.8.0@sha256:7b6aed2d5fd356a5e5edd5290eeec0b19859ab798d3cbdb7d9d223fbb872a5ab"
+					dockerfile: from: name: "docker.io/bonitao/electric:1.8.0@sha256:7b6aed2d5fd356a5e5edd5290eeec0b19859ab798d3cbdb7d9d223fbb872a5ab"
 					compose: {
 						depends_on: X._schemaReady
 						environment: {
@@ -570,6 +576,55 @@ _devElectricSecret: "dev-electric-secret"
 					}
 				}
 			}
+			// The numeric stage: an app's computations, each reading the lake
+			// the service publishes from Postgres, writing back through crud
+			// as the service role, the path every pipeline writes by.
+			if len(X.state.computations) > 0 {
+				// Two computations may share a wasm module; it ships once.
+				let _wasm = [for w, _ in {for c in X.state.computations for w in c.wasm {(w): true}} {file: w, target: "/app/computations/\(path.Base(w, path.Unix))"}]
+				let _target = {for w in _wasm {(w.file): w.target}}
+				compute: X._image & {
+					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}]])
+					dockerfile: {
+						from: (_from & {in: X.meta.images.compute}).out
+						copy: list.Concat([
+							[for c in X.state.computations {srcs: [c.file], dst: "/app/computations/\(c.name).js"}],
+							[for w in _wasm {srcs: [w.file], dst: w.target}],
+						])
+					}
+					compose: {
+						depends_on: {X._schemaReady, crud: _healthy}
+						environment: {
+							CRUD_URL:     "http://crud:3000"
+							DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
+							LAKE_DIR:     "/lake"
+							COMPUTATIONS: json.Marshal([for c in X.state.computations {
+								name:  c.name
+								file:  "/app/computations/\(c.name).js"
+								every: c.every
+								to:    c.to
+								wasm: [for w in c.wasm {_target[w]}]
+							}])
+							if X.capabilities.auth {
+								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
+							}
+						}
+						restart: "on-failure"
+						develop: watch: list.Concat([
+							[for c in X.state.computations {
+								action: "sync+restart"
+								path:   "../\(c.file)"
+								target: "/app/computations/\(c.name).js"
+							}],
+							[for w in _wasm {
+								action: "sync+restart"
+								path:   "../\(w.file)"
+								target: w.target
+							}],
+						])
+					}
+				}
+			}
 			// Only an app that declares a schedule gets a clock. A ticker with
 			// nothing to sweep is a container answering pokes nobody sends.
 			if len(X.state.schedules) > 0 {
@@ -630,6 +685,9 @@ _devElectricSecret: "dev-electric-secret"
 						}
 						if len(X.state.pipelines) > 0 {
 							transform: _started
+						}
+						if len(X.state.computations) > 0 {
+							compute: _started
 						}
 						if X.capabilities.auth {
 							auth: _started
@@ -728,12 +786,13 @@ _devElectricSecret: "dev-electric-secret"
 			auth:       #From
 			ticker:     #From
 			clock:      #From
+			compute:    #From
 			"rclone-s3": #From
 		}
 		// The proxy's config, relative to the app dir.
 		caddyfile: *"docker/Caddyfile" | string
 		// The one published door, in compose's `host:container` form.
-		door: *"${CADDY_TLS_HOST_PORT:-8443}:8443" | string
+		door: *"${CADDY_TLS_HOST_PORT:-0}:8443" | string
 		// The conduit pipeline, an envsubst template, relative to the app dir.
 		conduitTemplate: *"docker/conduit-pipeline.yaml" | string
 		statics: [...#Static]

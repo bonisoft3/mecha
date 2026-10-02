@@ -34,6 +34,9 @@ _postgres: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1b
 _pgroll: "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
 _deno:    "denoland/deno:alpine-2.3.7@sha256:bec860a253508d9813bb622be2359fd7bb3f72ff9a85ed6f8ccd46ab8522bcf6"
 _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
+// The compute service's Deno is the repository's (mise.toml), on glibc for
+// DuckDB's native binding.
+_denoCompute: "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
 _busybox: "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"
 _curl:    "tarampampam/curl@sha256:617b3306349beaacb7ad82bddda8d6876a40c3bad06d7a28981504d230802d7e"
 
@@ -62,6 +65,7 @@ _stack: cluster.#Cluster & {
 			auth:       {ref: ":auth-image"}
 			ticker:     {ref: ":ticker-image"}
 			clock:      {ref: ":clock-image"}
+			compute:    {ref: ":compute-image"}
 			"rclone-s3": {ref: ":rclone-s3-image"}
 		}
 		// A plain-HTTP door: mecha's proxy config serves no TLS, and the
@@ -223,6 +227,23 @@ _mecha: bayt.#project & _where & {
 				copy: [{srcs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts"], dst: "/app/"}]
 				epilogue: ["RUN deno cache main.ts"]
 				cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
+			}
+		}
+		// The extensions a computation's lake needs are installed at build: a
+		// running service reaches no extension host. Workers take no
+		// permissions of their own, an option Deno still calls unstable.
+		"compute-image": _image & {
+			let _files = ["deno.json", "deno.lock", "main.ts", "workers.ts", "cage.ts", "language.ts", "job.ts", "wasi.ts", "install.ts"]
+			srcs: globs: [for f in _files {"services/compute/\(f)"}]
+			dockerfile: {
+				from: name: _denoCompute
+				workdir: "/app"
+				copy: [{srcs: [for f in _files {"services/compute/\(f)"}], dst: "/app/"}]
+				epilogue: [
+					"RUN deno cache main.ts cage.ts job.ts",
+					"RUN deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env install.ts",
+				]
+				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "/app/main.ts"]
 			}
 		}
 		"clock-image": _image & {

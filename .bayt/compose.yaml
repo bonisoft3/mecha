@@ -51,6 +51,12 @@ services:
       service: libraries_mecha-ticker-image
     profiles:
     - ticker-image
+  compute-image:
+    extends:
+      file: ./compose.compute-image.yaml
+      service: libraries_mecha-compute-image
+    profiles:
+    - compute-image
   clock-image:
     extends:
       file: ./compose.clock-image.yaml

@@ -64,7 +64,7 @@ transport the only variable:
 | a write from that screen | 445 ms | 43 ms |
 
 So the cluster publishes one port, `meta.door` (default
-`${CADDY_TLS_HOST_PORT:-8443}:8443`), serving h2 over TLS. The plain `:8080`
+`${CADDY_TLS_HOST_PORT:-0}:8443`), serving h2 over TLS. The plain `:8080`
 listener exists inside the container for the healthcheck and is deliberately
 not published, so there is no second transport to drift onto. mecha's own stack
 is the exception: its proxy serves plain HTTP on `8080:8080`, which its smoke

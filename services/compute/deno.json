@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "@duckdb/node-api": "npm:@duckdb/node-api@1.5.6-r.1",
+    "@endo/module-source": "npm:@endo/module-source@1.4.0",
+    "@std/assert": "jsr:@std/assert@1.0.8",
+    "ses": "npm:ses@1.15.0"
+  },
+  "lock": true
+}

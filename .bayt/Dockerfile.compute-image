@@ -1,0 +1,27 @@
+# generated from bayt.cue — do not edit
+FROM denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432 AS compute-image
+WORKDIR /app
+COPY services/compute/deno.json services/compute/deno.lock services/compute/main.ts services/compute/workers.ts services/compute/cage.ts services/compute/language.ts services/compute/job.ts services/compute/wasi.ts services/compute/install.ts /app/
+COPY --parents services/compute/deno.json services/compute/deno.lock services/compute/main.ts services/compute/workers.ts services/compute/cage.ts services/compute/language.ts services/compute/job.ts services/compute/wasi.ts services/compute/install.ts ./
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.compute-image.json ./.bayt/
+CMD ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "/app/main.ts"]
+RUN deno cache main.ts cage.ts job.ts
+RUN deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env install.ts
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS compute-image_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents services/compute/deno.json services/compute/deno.lock services/compute/main.ts services/compute/workers.ts services/compute/cage.ts services/compute/language.ts services/compute/job.ts services/compute/wasi.ts services/compute/install.ts ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS compute-image_srcs
+COPY --from=compute-image_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS compute-image_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.compute-image.yaml .bayt/Dockerfile.compute-image .bayt/bayt.compute-image.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS compute-image_bayt
+COPY --from=compute-image_bayt_ctxs /monorepo /monorepo

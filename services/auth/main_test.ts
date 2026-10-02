@@ -1,12 +1,15 @@
 // Requires DATABASE_URL pointing at a throwaway postgres, and the rest of the
-// environment main.ts reads. app_user is owned elsewhere (see main.ts); tests
+// environment main.ts reads as the dev cluster sets it (cluster.cue). app_user is owned elsewhere (see main.ts); tests
 // create a minimal stand-in before running the service's own migration
 // against it.
 import {
   assert,
   assertEquals,
+  assertStringIncludes,
+  assertThrows,
 } from "jsr:@std/assert@1.0.13";
-import { handler, issueUserToken, migrate, sql, verifyJwt } from "./main.ts";
+import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from "@simplewebauthn/server/helpers";
+import { admittedOrigin, ceremonyOrigin, handler, issueUserToken, migrate, sql, verifyJwt } from "./main.ts";
 
 await sql`CREATE TABLE IF NOT EXISTS app_user (
   id uuid primary key,
@@ -46,10 +49,10 @@ await migrate();
 await sql`delete from webauthn_credential`;
 await sql`delete from app_user`;
 
-function post(path: string, body: unknown): Request {
+function post(path: string, body: unknown, token?: string): Request {
   return new Request(`http://auth:9999${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(body),
   });
 }
@@ -91,6 +94,52 @@ Deno.test({
     assert(st !== null);
     assertEquals(st.purpose, "login");
     assertEquals(st.challenge, body.challenge);
+  },
+});
+
+Deno.test({
+  name: "register/start from a guest's session keeps the guest's identity",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const res = await handler(post("/auth/register/start", {}, guest.token));
+    assertEquals(res.status, 200);
+    const st = await verifyJwt((await res.json()).state);
+    assertEquals([st?.userId, st?.handle, st?.promote], [guest.user.id, guest.user.handle, true]);
+  },
+});
+
+Deno.test({
+  name: "a guest's token says it is a guest, and an account's does not",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    assertEquals([(await verifyJwt(guest.token))?.guest, guest.user.guest], [true, true]);
+    // Stated either way: a policy that admits only `guest = false` refuses a
+    // token minted before the claim existed rather than taking it for an account.
+    assertEquals((await verifyJwt(await issueUserToken(guest.user.id, guest.user.handle)))?.guest, false);
+  },
+});
+
+Deno.test({
+  name: "register/start refuses to add a passkey to an account's session",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const account = await issueUserToken(guest.user.id, guest.user.handle);
+    const res = await handler(post("/auth/register/start", {}, account));
+    assertEquals(res.status, 409);
+    await res.body?.cancel();
+  },
+});
+
+Deno.test({
+  name: "register/start refuses a token that is not a session",
+  ...opts,
+  async fn() {
+    const res = await handler(post("/auth/register/start", {}, "garbage"));
+    assertEquals(res.status, 401);
+    await res.body?.cancel();
   },
 });
 
@@ -528,6 +577,175 @@ Deno.test({
     // throw and turn the answer into a 500.
     assertEquals((await mint("gk_absent")).res.status, 409);
   },
+});
+
+// A passkey as a browser makes one: an EC2 P-256 key under a "none"
+// attestation, and client data naming the page's origin.
+type Cbor = Parameters<typeof isoCBOR.encode>[0];
+async function passkey() {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const raw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+  const id = crypto.getRandomValues(new Uint8Array(16));
+  const rpIdHash = await toHash(isoUint8Array.fromUTF8String("localhost"));
+  const b64 = (bytes: Uint8Array) => isoBase64URL.fromBuffer(bytes);
+  const clientData = (type: string, challenge: string, origin: string) =>
+    isoUint8Array.fromUTF8String(JSON.stringify({ type, challenge, origin, crossOrigin: false }));
+  // WebCrypto signs r||s; WebAuthn carries ECDSA signatures as DER.
+  const der = (sig: Uint8Array) => {
+    const int = (n: Uint8Array) => {
+      let i = 0;
+      while (i < n.length - 1 && n[i] === 0) i++;
+      const v = n[i] & 0x80 ? [0, ...n.slice(i)] : [...n.slice(i)];
+      return [0x02, v.length, ...v];
+    };
+    const body = [...int(sig.slice(0, 32)), ...int(sig.slice(32))];
+    return new Uint8Array([0x30, body.length, ...body]);
+  };
+  return {
+    register(challenge: string, origin: string) {
+      const key = isoCBOR.encode(
+        new Map<number, Cbor>([[1, 2], [3, -7], [-1, 1], [-2, raw.slice(1, 33)], [-3, raw.slice(33)]]),
+      );
+      const authData = isoUint8Array.concat([
+        rpIdHash,
+        new Uint8Array([0x41, 0, 0, 0, 0]),
+        new Uint8Array(16),
+        new Uint8Array([0, id.length]),
+        id,
+        key,
+      ]);
+      const attestation = isoCBOR.encode(
+        new Map<string, Cbor>([["fmt", "none"], ["attStmt", new Map()], ["authData", authData]]),
+      );
+      return {
+        id: b64(id),
+        rawId: b64(id),
+        type: "public-key",
+        response: { clientDataJSON: b64(clientData("webauthn.create", challenge, origin)), attestationObject: b64(attestation) },
+        clientExtensionResults: {},
+      };
+    },
+    async login(challenge: string, origin: string) {
+      const authData = isoUint8Array.concat([rpIdHash, new Uint8Array([0x01, 0, 0, 0, 1])]);
+      const data = clientData("webauthn.get", challenge, origin);
+      const signed = isoUint8Array.concat([authData, await toHash(data)]);
+      const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new Uint8Array(signed)));
+      return {
+        id: b64(id),
+        rawId: b64(id),
+        type: "public-key",
+        response: { clientDataJSON: b64(data), authenticatorData: b64(authData), signature: b64(der(sig)) },
+        clientExtensionResults: {},
+      };
+    },
+  };
+}
+
+function atDoor(path: string, body: unknown, host: string): Request {
+  return new Request(`http://auth:9999${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", host },
+    body: JSON.stringify(body),
+  });
+}
+
+Deno.test({
+  name: "a passkey made at the dev door registers and signs in, whatever port the host gave the door",
+  ...opts,
+  async fn() {
+    // The door publishes on an ephemeral port while the expected origin named
+    // 8443, so every ceremony on a cluster launched without the port pinned
+    // failed its origin check.
+    const door = "localhost:54321";
+    const key = await passkey();
+    const reg = await (await handler(atDoor("/auth/register/start", {}, door))).json();
+    const made = await handler(
+      atDoor("/auth/register/verify", { state: reg.state, response: key.register(reg.challenge, `https://${door}`) }, door),
+    );
+    assertEquals(made.status, 200, await made.clone().text());
+    const user = (await made.json()).user;
+    const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+    const signed = await handler(
+      atDoor("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, `https://${door}`) }, door),
+    );
+    assertEquals(signed.status, 200, await signed.clone().text());
+    assertEquals((await signed.json()).user, user);
+  },
+});
+
+Deno.test({
+  name: "a ceremony made anywhere but the door it reached is refused",
+  ...opts,
+  async fn() {
+    const key = await passkey();
+    for (const [origin, door] of [["https://evil.example", "localhost:54321"], ["https://localhost:54321", "localhost:1"]]) {
+      const reg = await (await handler(atDoor("/auth/register/start", {}, door))).json();
+      const res = await handler(
+        atDoor("/auth/register/verify", { state: reg.state, response: key.register(reg.challenge, origin) }, door),
+      );
+      assertEquals(res.status, 401, `${origin} at ${door}`);
+    }
+  },
+});
+
+Deno.test("the dev door admits only the localhost relying party, at startup", async () => {
+  // The compose default fills a forgotten WEBAUTHN_ORIGIN with the dev door;
+  // a deployment naming its own relying party then booted and refused every
+  // ceremony with a bare 401.
+  assertEquals(admittedOrigin("localhost", "https://localhost:*"), "https://localhost:*");
+  assertEquals(admittedOrigin("app.example", "https://app.example"), "https://app.example");
+  assertThrows(() => admittedOrigin("app.example", "https://localhost:*"), Error, "WEBAUTHN_ORIGIN");
+  const { success, stderr } = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--frozen", new URL("./main.ts", import.meta.url).pathname],
+    env: { WEBAUTHN_RP_ID: "app.example", WEBAUTHN_ORIGIN: "https://localhost:*" },
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  assert(!success);
+  assertStringIncludes(new TextDecoder().decode(stderr), "serves only WEBAUTHN_RP_ID=localhost");
+});
+
+Deno.test("an origin off the relying party's domain is refused at startup", async () => {
+  // Checked only from the dev door's side, an origin the compose default RP id
+  // (localhost) cannot cover booted and refused every ceremony with a 401.
+  assertEquals(admittedOrigin("example.com", "https://app.example.com"), "https://app.example.com");
+  assertEquals(admittedOrigin("localhost", "https://localhost:8443"), "https://localhost:8443");
+  assertThrows(() => admittedOrigin("localhost", "https://app.example"), Error, "is not on WEBAUTHN_RP_ID");
+  assertThrows(() => admittedOrigin("example.com", "https://badexample.com"), Error, "is not on WEBAUTHN_RP_ID");
+  const { success, stderr } = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--frozen", new URL("./main.ts", import.meta.url).pathname],
+    env: { WEBAUTHN_RP_ID: "localhost", WEBAUTHN_ORIGIN: "https://app.example" },
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  assert(!success);
+  assertStringIncludes(new TextDecoder().decode(stderr), "is not on WEBAUTHN_RP_ID");
+});
+
+Deno.test("an origin no ceremony can have is refused at startup", async () => {
+  // Compared exactly with the ceremony's bare https origin, an origin with a
+  // trailing slash or a path, or http on a real host, booted and refused
+  // every ceremony with a 401.
+  assertEquals(admittedOrigin("localhost", "http://localhost:8080"), "http://localhost:8080");
+  for (const origin of ["https://app.example/", "https://app.example/auth", "https://APP.example"]) {
+    assertThrows(() => admittedOrigin("app.example", origin), Error, "is not an origin", origin);
+  }
+  assertThrows(() => admittedOrigin("app.example", "http://app.example"), Error, "is not https");
+  const { success, stderr } = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--frozen", new URL("./main.ts", import.meta.url).pathname],
+    env: { WEBAUTHN_RP_ID: "app.example", WEBAUTHN_ORIGIN: "https://app.example/" },
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  assert(!success);
+  assertStringIncludes(new TextDecoder().decode(stderr), "set it to https://app.example");
+});
+
+Deno.test("a configured origin is exact, and only localhost stands for the dev door", () => {
+  assertEquals(ceremonyOrigin("https://app.example", "localhost:54321"), "https://app.example");
+  assertEquals(ceremonyOrigin("https://localhost:*", "localhost:54321"), "https://localhost:54321");
+  assert(ceremonyOrigin("https://localhost:*", "evil.example:54321") !== "https://evil.example:54321");
+  assert(ceremonyOrigin("https://localhost:*", null).endsWith("*"));
 });
 
 // Last, and it has to be: Deno runs tests in source order, and this closes the

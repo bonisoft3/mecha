@@ -21,8 +21,55 @@ function required(name: string): string {
 }
 const DATABASE_URL = required("DATABASE_URL");
 const JWT_SECRET = required("PGRST_JWT_SECRET");
+/** The dev cluster's door: localhost, on whatever port the host published. */
+const DEV_DOOR = "https://localhost:*";
+
+/**
+ * The origin ceremonies are checked against, refused at startup where it can
+ * admit none: WebAuthn verifies a ceremony only on the relying party's domain
+ * or under it, and both settings have compose defaults, so a deployment that
+ * names one and forgets the other would otherwise boot and answer every
+ * ceremony with a 401; so is one no ceremony's origin can equal. DEV_DOOR
+ * stands for localhost.
+ */
+export function admittedOrigin(rpId: string, origin: string): string {
+  if (origin === DEV_DOOR) {
+    if (rpId === "localhost") return origin;
+    throw new Error(
+      `WEBAUTHN_ORIGIN is the dev door ${DEV_DOOR}, which serves only WEBAUTHN_RP_ID=localhost; ` +
+        `set WEBAUTHN_ORIGIN to the origin ${rpId}'s pages are served from`,
+    );
+  }
+  // A ceremony's origin is bare, scheme://host[:port], and WebAuthn runs only
+  // in a secure context: https, or http on localhost.
+  const url = new URL(origin);
+  if (url.origin !== origin) {
+    throw new Error(`WEBAUTHN_ORIGIN ${origin} is not an origin, which no ceremony's equals; set it to ${url.origin}`);
+  }
+  if (url.protocol !== "https:" && url.hostname !== "localhost") {
+    throw new Error(`WEBAUTHN_ORIGIN ${origin} is not https, where no browser makes a ceremony`);
+  }
+  if (url.hostname === rpId || url.hostname.endsWith(`.${rpId}`)) return origin;
+  throw new Error(
+    `WEBAUTHN_ORIGIN ${origin} is not on WEBAUTHN_RP_ID ${rpId}, so no ceremony made there verifies; ` +
+      `set WEBAUTHN_RP_ID to the domain its pages are served under`,
+  );
+}
+
 const RP_ID = required("WEBAUTHN_RP_ID");
-const ORIGIN = required("WEBAUTHN_ORIGIN");
+const ORIGIN = admittedOrigin(RP_ID, required("WEBAUTHN_ORIGIN"));
+
+/**
+ * The origin a ceremony must have been made on. A configured origin is exact.
+ * The dev cluster's door is published on a port the host picks, so there
+ * DEV_DOOR stands for the door the request came through, named by the Host
+ * it forwards; a Host other than localhost leaves DEV_DOOR itself, which no
+ * page's origin equals.
+ */
+export function ceremonyOrigin(configured: string, host: string | null): string {
+  if (configured !== DEV_DOOR) return configured;
+  return host !== null && /^localhost(:\d+)?$/.test(host) ? `https://${host}` : configured;
+}
 
 const USER_TOKEN_TTL_S = 7 * 24 * 3600;
 // A shape token outlives one long-poll cycle and little else: Electric holds a
@@ -54,11 +101,14 @@ const enc = new TextEncoder();
 export const signJwt = (claims: Record<string, unknown>) => sign(JWT_SECRET, claims);
 export const verifyJwt = (token: string) => verify(JWT_SECRET, token);
 
-export function issueUserToken(id: string, handle: string): Promise<string> {
+// A guest's token says so, so a policy can keep writes to the people who
+// signed in (`request.jwt.claims ->> 'guest'`).
+export function issueUserToken(id: string, handle: string, guest = false): Promise<string> {
   return signJwt({
     role: "app_user",
     sub: id,
     handle,
+    guest,
     exp: Math.floor(Date.now() / 1000) + USER_TOKEN_TTL_S,
   });
 }
@@ -276,10 +326,18 @@ function generateHandle(): string {
   return `${a}-${n}-${10 + Math.floor(Math.random() * 90)}`;
 }
 
-async function registerStart(_req: Request): Promise<Response> {
-  // Usernameless by doctrine: no identifier is ever collected.
-  const handle = generateHandle();
-  const userId = crypto.randomUUID();
+async function registerStart(req: Request): Promise<Response> {
+  const subject = await subjectOf(req);
+  if (subject === "refused") return jsonError(401, "invalid token");
+  const claims = subject.claims;
+  // Only a guest is promoted, keeping its handle and every row it wrote: a
+  // passkey added to an account on the strength of a bearer token would
+  // outlive the token and its sign-out. With no session, a new identity —
+  // usernameless by doctrine: no identifier is ever collected.
+  if (claims !== null && claims.guest !== true) return jsonError(409, "already an account");
+  const promote = claims !== null;
+  const handle = claims ? claims.handle as string : generateHandle();
+  const userId = claims ? claims.sub as string : crypto.randomUUID();
   const options = await generateRegistrationOptions({
     rpName: RP_ID,
     rpID: RP_ID,
@@ -294,6 +352,7 @@ async function registerStart(_req: Request): Promise<Response> {
     purpose: "register",
     handle,
     userId,
+    promote,
     challenge: options.challenge,
     exp: Math.floor(Date.now() / 1000) + STATE_TTL_S,
   });
@@ -311,7 +370,7 @@ async function registerVerify(req: Request): Promise<Response> {
       // deno-lint-ignore no-explicit-any
       response: body.response as any,
       expectedChallenge: st.challenge as string,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: ceremonyOrigin(ORIGIN, req.headers.get("host")),
       expectedRPID: RP_ID,
       requireUserVerification: false,
     });
@@ -324,6 +383,16 @@ async function registerVerify(req: Request): Promise<Response> {
   const { credentialID, credentialPublicKey, counter } =
     verification.registrationInfo;
   const userId = st.userId as string;
+  if (st.promote === true) {
+    // The guest becomes an account once: a guest token that outlives its
+    // promotion is still a guest's, and adds no second way in.
+    const added = await sql`insert into webauthn_credential (id, user_id, public_key, counter)
+      select ${credentialID}, ${userId}, ${credentialPublicKey}, ${counter}
+      where not exists (select 1 from webauthn_credential where user_id = ${userId})`;
+    if (added.count === 0) return jsonError(409, "already an account");
+    const token = await issueUserToken(userId, st.handle as string);
+    return json(200, { token, user: { id: userId, handle: st.handle } });
+  }
   // Generated handles can collide; regenerate and retry — never a user error.
   let handle = st.handle as string;
   let inserted = false;
@@ -383,7 +452,7 @@ async function loginVerify(req: Request): Promise<Response> {
       // deno-lint-ignore no-explicit-any
       response: body.response as any,
       expectedChallenge: st.challenge as string,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: ceremonyOrigin(ORIGIN, req.headers.get("host")),
       expectedRPID: RP_ID,
       requireUserVerification: false,
       authenticator: {
@@ -423,8 +492,9 @@ async function guest(_req: Request): Promise<Response> {
     }
   }
   if (!inserted) return jsonError(500, "could not allocate identity");
-  const token = await issueUserToken(userId, handle);
-  return json(200, { token, user: { id: userId, handle } });
+  const token = await issueUserToken(userId, handle, true);
+  // A guest is told so: it is the one session a passkey can still promote.
+  return json(200, { token, user: { id: userId, handle, guest: true } });
 }
 
 async function whoami(req: Request): Promise<Response> {

@@ -1,0 +1,196 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
+    },
+    "workdir": "/app",
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "services/compute/deno.json",
+          "services/compute/deno.lock",
+          "services/compute/main.ts",
+          "services/compute/workers.ts",
+          "services/compute/cage.ts",
+          "services/compute/language.ts",
+          "services/compute/job.ts",
+          "services/compute/wasi.ts",
+          "services/compute/install.ts"
+        ],
+        "dst": "/app/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "epilogue": [
+      "RUN deno cache main.ts cage.ts job.ts",
+      "RUN deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env install.ts"
+    ],
+    "cmd": [
+      "run",
+      "--unstable-worker-options",
+      "--allow-ffi",
+      "--allow-read",
+      "--allow-write",
+      "--allow-net",
+      "--allow-env",
+      "/app/main.ts"
+    ],
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false
+  },
+  "name": "compute-image",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "services/compute/deno.json",
+      "services/compute/deno.lock",
+      "services/compute/main.ts",
+      "services/compute/workers.ts",
+      "services/compute/cage.ts",
+      "services/compute/language.ts",
+      "services/compute/job.ts",
+      "services/compute/wasi.ts",
+      "services/compute/install.ts"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "compute-image_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.compute-image.yaml",
+          ".bayt/Dockerfile.compute-image",
+          ".bayt/bayt.compute-image.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.compute-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "compute-image_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.compute-image.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "compute-image_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/compute/deno.json",
+          "services/compute/deno.lock",
+          "services/compute/main.ts",
+          "services/compute/workers.ts",
+          "services/compute/cage.ts",
+          "services/compute/language.ts",
+          "services/compute/job.ts",
+          "services/compute/wasi.ts",
+          "services/compute/install.ts"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.compute-image.yaml"
+      ]
+    }
+  },
+  "visibility": "public",
+  "emitsSrcs": true,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.compute-image.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

@@ -44,7 +44,7 @@
     "preamble": [],
     "preambleCopyContexts": [],
     "from": {
-      "name": "1203bbwv79.registry.depot.dev/f5k5087x1b/electric:1.8.0@sha256:7b6aed2d5fd356a5e5edd5290eeec0b19859ab798d3cbdb7d9d223fbb872a5ab"
+      "name": "docker.io/bonitao/electric:1.8.0@sha256:7b6aed2d5fd356a5e5edd5290eeec0b19859ab798d3cbdb7d9d223fbb872a5ab"
     },
     "add": [],
     "mounts": [],

@@ -67,9 +67,9 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     return p
   }
   const id = crypto.randomUUID()
-  const user = { id, handle: `guest-${id.slice(0, 8)}` }
+  const user = { id, handle: `guest-${id.slice(0, 8)}`, guest: true }
   await db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [user.id, user.handle])
-  await db.query(`SELECT set_config('request.jwt.claims', $1, false)`, [JSON.stringify({ sub: user.id, role: 'app_user' })])
+  await db.query(`SELECT set_config('request.jwt.claims', $1, false)`, [JSON.stringify({ sub: user.id, role: 'app_user', guest: user.guest })])
   const scopes = async () => (await db.query<{ s: string[] }>('SELECT subject_scopes($1) AS s', [user.id])).rows[0].s
 
   const logs = new Map<string, Log>()
@@ -157,7 +157,7 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
 
   // The shell asks for a guest and later for a shape token: the one user
   // answers both, and a shape's predicate is what their scopes reach now.
-  const session = () => json(200, { token: token({ sub: user.id, handle: user.handle }), user })
+  const session = () => json(200, { token: token({ sub: user.id, handle: user.handle, guest: user.guest }), user })
   async function shapeToken(req: Request): Promise<Response> {
     const body = (await req.json()) as { table?: string; key?: unknown }
     if (!body.table || !logs.has(body.table)) return json(400, { error: 'table required' })

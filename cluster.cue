@@ -374,6 +374,11 @@ _devElectricSecret: "dev-electric-secret"
 					from: name: "caddy:2.9-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0"
 					copy: list.Concat([
 						[{srcs: [X.meta.caddyfile], dst: "/etc/caddy/Caddyfile"}],
+						// mkcert's pair, where `sayt setup` issued one on this host;
+						// trusted there once with `mkcert -install`. The wildcard is
+						// what makes it optional: a context without .certs copies
+						// nothing, and the door then serves Caddy's own CA.
+						[{srcs: [".cert[s]"], dst: "/certs/"}],
 						[for s in X.meta.statics {
 							if strings.HasPrefix(s.file, "../../") {
 								from: {name: "root"}
@@ -400,15 +405,16 @@ _devElectricSecret: "dev-electric-secret"
 					// service reads, and both are overridden together or neither.
 					environment: ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
 
-					// mkcert's pair, issued on the host by `sayt setup` and trusted
-					// there once with `mkcert -install`. A DIRECTORY mount, not two
-					// file mounts: an editor or a re-issue replaces a file's inode and
-					// leaves a file-mount pointing at something deleted, which is the
-					// same trap the baked statics avoid. The path is from .bayt/.
-					volumes: ["../.certs:/certs:ro"]
+					// The Caddyfile's door serves CADDY_TLS: the baked pair when the
+					// host issued one, Caddy's own CA otherwise, so the stack comes up
+					// before any mkcert step. The rest is the image's own command.
+					command: ["sh", "-c", "if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
 					// Watch paths are from .bayt/ too, hence the ../ on each.
 					develop: watch: list.Concat([
 						[{action: "sync+restart", path: "../\(X.meta.caddyfile)", target: "/etc/caddy/Caddyfile"}],
+						// A re-issued pair reaches a running door; the restart re-reads
+						// it through the command above.
+						[{action: "sync+restart", path: "../.certs", target: "/certs"}],
 						// Honoured, not assumed: a static that says it is not watched is
 						// one whose edit is a rebuild — a generated file, or a vendored
 						// unit whose megabytes would restart the proxy on every launch.

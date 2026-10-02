@@ -10,11 +10,21 @@ services:
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    command:
+    - sh
+    - -c
+    - >-
+      if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem
+      /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile
+      --adapter caddyfile
     develop:
       watch:
       - action: sync+restart
         path: ../services/proxy/Caddyfile
         target: /etc/caddy/Caddyfile
+      - action: sync+restart
+        path: ../.certs
+        target: /certs
     environment:
       ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}
     healthcheck:
@@ -34,8 +44,6 @@ services:
         - caddy
     ports:
     - 8080:8080
-    volumes:
-    - ../.certs:/certs:ro
   libraries_mecha-caddy_bayt:
     build:
       context: ..

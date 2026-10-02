@@ -10,15 +10,18 @@
       "secrets": [],
       "args": {}
     },
+    "command": [
+      "sh",
+      "-c",
+      "if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
+    ],
     "environment": {
       "ELECTRIC_SECRET": "${ELECTRIC_SECRET:-dev-electric-secret}"
     },
     "ports": [
       "8080:8080"
     ],
-    "volumes": [
-      "../.certs:/certs:ro"
-    ],
+    "volumes": [],
     "depends_on": {},
     "networks": {
       "default": {
@@ -45,6 +48,11 @@
           "action": "sync+restart",
           "path": "../services/proxy/Caddyfile",
           "target": "/etc/caddy/Caddyfile"
+        },
+        {
+          "action": "sync+restart",
+          "path": "../.certs",
+          "target": "/certs"
         }
       ]
     }
@@ -75,6 +83,16 @@
           "services/proxy/Caddyfile"
         ],
         "dst": "/etc/caddy/Caddyfile",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          ".cert[s]"
+        ],
+        "dst": "/certs/",
         "link": true,
         "parents": false,
         "exclude": []

@@ -3,6 +3,7 @@ FROM caddy:2.9-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd
 WORKDIR /monorepo/libraries/mecha
 COPY --chmod=755 --from=tarampampam/microcheck:1@sha256:79c187c05bfa67518078bf4db117771942fa8fe107dc79a905861c75ddf28dfa /bin/httpcheck /usr/local/bin/httpcheck
 COPY services/proxy/Caddyfile /etc/caddy/Caddyfile
+COPY .cert[s] /certs/
 COPY --parents services/proxy/Caddyfile ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.caddy.json ./.bayt/
 HEALTHCHECK --interval=5s --timeout=5s --retries=30 --start-period=10s CMD ["httpcheck","http://127.0.0.1:8080/health"]

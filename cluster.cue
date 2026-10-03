@@ -360,15 +360,15 @@ _devElectricSecret: "dev-electric-secret"
 				// at something deleted — every edit then 404s until the
 				// container is recreated. `develop: watch` below updates them.
 				//
-				// Statics living above the app dir (the terminal's
-				// interpreter) arrive through the `root` additional context,
-				// a path from .bayt/ to the monorepo root, which is why their
-				// COPY lines are rewritten relative to it. The fingerprint
-				// covers only the app's own files: a srcs glob cannot leave
-				// the project directory.
+				// The runtime's statics (the terminal's interpreter) arrive
+				// through the `root` additional context, a path from .bayt/ to
+				// the workspace root, which is why their COPY lines are
+				// rewritten relative to it. The fingerprint covers only the
+				// app's own files: a srcs glob cannot leave the project
+				// directory.
 				srcs: globs: list.Concat([
 					[X.meta.caddyfile],
-					[for s in X.meta.statics if !strings.HasPrefix(s.file, "../../") {s.file}],
+					[for s in X.meta.statics if !strings.HasPrefix(s.file, X.meta.runtime) {s.file}],
 				])
 				dockerfile: {
 					from: name: "caddy:2.9-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0"
@@ -380,11 +380,11 @@ _devElectricSecret: "dev-electric-secret"
 						// nothing, and the door then serves Caddy's own CA.
 						[{srcs: [".cert[s]"], dst: "/certs/"}],
 						[for s in X.meta.statics {
-							if strings.HasPrefix(s.file, "../../") {
+							if strings.HasPrefix(s.file, X.meta.runtime) {
 								from: {name: "root"}
-								srcs: [strings.TrimPrefix(s.file, "../../")]
+								srcs: [strings.TrimPrefix(s.file, X.meta.root)]
 							}
-							if !strings.HasPrefix(s.file, "../../") {
+							if !strings.HasPrefix(s.file, X.meta.runtime) {
 								srcs: [s.file]
 							}
 							dst: s.target
@@ -392,7 +392,7 @@ _devElectricSecret: "dev-electric-secret"
 					])
 				}
 				compose: {
-					build: additional_contexts: root: "../../.."
+					build: additional_contexts: root: strings.TrimSuffix("../\(X.meta.root)", "/")
 					// One published door. For an app it is h2 over TLS; the plain
 					// listener still exists inside the container — the healthcheck
 					// above uses it — but is deliberately NOT published: the
@@ -802,6 +802,10 @@ _devElectricSecret: "dev-electric-secret"
 		// The conduit pipeline, an envsubst template, relative to the app dir.
 		conduitTemplate: *"docker/conduit-pipeline.yaml" | string
 		statics: [...#Static]
+		// The workspace root and the runtime's directory, as paths from the
+		// app dir: the monorepo's unless the app states its own layout.
+		root:    *"../../" | string
+		runtime: *root | string
 	}
 }
 

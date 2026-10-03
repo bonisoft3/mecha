@@ -185,7 +185,17 @@ _devElectricSecret: "dev-electric-secret"
 		if len(X.state.pgroll) > 0 {migrate: _completed}
 	}
 
+	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
+	let jwtSecret = "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
+
 	surface: {
+		// How a client on the cluster's network reaches its database, and the
+		// secret crud and auth verify a session token under.
+		if X.capabilities.server {
+			"databaseUrl": databaseUrl
+			"jwtSecret":   jwtSecret
+		}
+
 		// How this cluster's schema reaches its database.
 		//
 		// A cluster bakes its schema into the database image and lets postgres
@@ -308,7 +318,7 @@ _devElectricSecret: "dev-electric-secret"
 					compose: {
 						depends_on: X._schemaReady
 						environment: {
-							PGRST_DB_URI:       "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
+							PGRST_DB_URI:       databaseUrl
 							PGRST_DB_SCHEMA:    "public"
 							PGRST_DB_ANON_ROLE: "anon"
 							// Called once per request, in the request's transaction, after the
@@ -320,7 +330,7 @@ _devElectricSecret: "dev-electric-secret"
 							PGRST_SERVER_PORT:       "3000"
 							PGRST_ADMIN_SERVER_PORT: "3001"
 							if X.capabilities.auth {
-								PGRST_JWT_SECRET: "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
+								PGRST_JWT_SECRET: jwtSecret
 							}
 						}
 					}
@@ -337,8 +347,8 @@ _devElectricSecret: "dev-electric-secret"
 					compose: {
 						depends_on: X._schemaReady
 						environment: {
-							DATABASE_URL:     "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
-							PGRST_JWT_SECRET: "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
+							DATABASE_URL:     databaseUrl
+							PGRST_JWT_SECRET: jwtSecret
 							WEBAUTHN_RP_ID:   "${WEBAUTHN_RP_ID:-localhost}"
 							// The door's port is the host's pick; auth reads this
 							// default as whichever port the request came through.
@@ -506,7 +516,7 @@ _devElectricSecret: "dev-electric-secret"
 						depends_on: {database: _healthy, X._schemaReady, "mesh-events": _started}
 						develop: watch: [{action: "sync+restart", path: "../\(X.meta.conduitTemplate)", target: "/conduit/cdc-to-bus.yaml.tmpl"}]
 						environment: {
-							DATABASE_URL:           "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
+							DATABASE_URL:           databaseUrl
 							CONDUIT_PIPELINES_PATH: "/conduit/pipelines"
 							CONDUIT_DB_TYPE:        "inmemory"
 						}

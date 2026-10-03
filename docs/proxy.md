@@ -74,14 +74,20 @@ suites and benchmark address.
 
 Browsers speak h2 only over TLS with a certificate they trust, and an untrusted
 certificate is worse than plain HTTP: its interstitial blocks WebAuthn, where
-`http://localhost` is a secure context. So `sayt setup` issues a mkcert pair
-into the consumer's gitignored `.certs/` (`verbs: certs`), `sayt launch` issues
-one if setup has not (`verbs: certsLaunch`), and the directory is mounted, not
-the two files, for the same inode reason as the statics. Trusting the pair,
-`mise exec -- mkcert -install`, is left to a human because it writes the system
-keychain; setup prints the command. Untrusted, the certificate is still served,
-and automated drivers ignore certificate errors; only a person's browser
-complains.
+`http://localhost` is a secure context. The door answers two names:
+
+- `localhost`, a person's browser on the host. `sayt setup` issues a mkcert
+  pair into the consumer's gitignored `.certs/` (`verbs: certs`), `sayt launch`
+  issues one if setup has not (`verbs: certsLaunch`); the image copies it and
+  `develop: watch` syncs a re-issued one. Trusting it, `mise exec -- mkcert
+  -install`, is left to a human because it writes the system keychain; setup
+  prints the command. Without a pair, Caddy serves its own CA.
+- `caddy`, a client on the cluster's network: the integrate checkers. Caddy's
+  own CA signs it, and the checkers ignore certificate errors: deno for that
+  host only, Chromium browser-wide, because a context's `ignoreHTTPSErrors`
+  does not reach a service worker's fetches. Its own site block, so mkcert's
+  pair, which names localhost only, never sends Caddy to a public CA for a name
+  only the cluster resolves.
 
 ## Rejected
 
@@ -94,8 +100,15 @@ complains.
   multiple values"; and shape responses are `public, max-age=604800` with the
   origin echoed, so without `Vary: Origin` one cached entry serves every origin,
   and opening a shape URL in a tab poisons it for the app.
-- **`tls internal`.** Caddy's own root lives in the container, so no browser
-  trusts it, and an untrusted certificate blocks WebAuthn.
+- **Only `tls internal` for `localhost`.** Caddy's own root lives in the container,
+  so no browser trusts it, and an untrusted certificate blocks WebAuthn.
+- **A CA the checkers trust.** A pair issued in the build, its CA copied into
+  the checkers' images: deno takes it through `DENO_CERT`, but Chromium on Linux
+  trusts only its NSS database, and one written by leap's NSS 3.125 records the
+  trust as a PKCS #11 3.2 object that the Playwright image's NSS 3.98 cannot
+  read. Writing it with that image's own certutil means apt, or a per-arch
+  pinned package, in the browser images; for a name nothing outside the
+  cluster resolves, trust buys nothing that ignoring loses.
 - **Publishing the plain listener, or redirecting it to https.** A second front
   door is a path that only ever runs on a laptop.
 - **nginx/OpenResty with Lua handlers** for webhooks and SSE: brittle, hard to

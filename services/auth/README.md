@@ -16,6 +16,11 @@ the emitter writes the policies that call `auth_uid()`.
   migrated with the tables, so a correction reaches every database without a
   migration.
 
+- **A shape token** carries `typ: "shape"`, the `table` and the `where` its
+  scopes reach. `/auth/shape/verify` answers Caddy for every shape request:
+  `table` and `where` must equal the token's, and a subset snapshot narrows it
+  with the `subset__*` parameters the gate names ([proxy](../../docs/proxy.md)).
+
 The alternative was server-side sessions. It was refused because the WebAuthn
 challenge is the only state a ceremony needs, and a short-lived `state` JWT
 carries it without giving the service anything to lose on restart.

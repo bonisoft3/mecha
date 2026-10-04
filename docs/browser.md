@@ -36,7 +36,7 @@ the change path does is best-effort.
 | component | package | what it is |
 |---|---|---|
 | PostgreSQL | `@electric-sql/pglite` 0.5.8 | Postgres in WASM, with one connection, as a superuser |
-| PostgREST | `postgrest-js` | A subset: GET, POST, PATCH and DELETE on a table; `eq neq gt gte lt lte like ilike is in`; `select`, `order`, `limit`/`offset`; `Prefer` return, count and resolution. No RPC, no embedding; `ignore-duplicates` is a bare `ON CONFLICT DO NOTHING`, and `merge-duplicates` conflicts on `id` only. A handler given `scopes` does what `db-pre-request` does: it sets `app.scopes` and switches role inside the request's transaction |
+| PostgREST | `postgrest-js` | A subset: GET, POST, PATCH and DELETE on a table; `eq neq gt gte lt lte like ilike is in`; `select`, `order`, `limit`/`offset`; `Prefer` return, count and resolution. No RPC, no embedding; `ignore-duplicates` is a bare `ON CONFLICT DO NOTHING`, and `merge-duplicates` conflicts on `id` only. A value written to a column whose type has a domain representation (a cast from json by a function) goes through that function, a JSON null as SQL NULL, and one written to a json or jsonb column is the JSON it was sent (a string stays a JSON string, a null is SQL NULL), as PostgREST's does. A handler given `scopes` does what `db-pre-request` does: it sets `app.scopes` and switches role inside the request's transaction |
 | Electric | `cluster.ts` | Electric's HTTP shape protocol over a per-table log, fed by triggers |
 | auth | `cluster.ts` | One guest per boot, with unsigned tokens |
 | conduit, mesh, bus, transform | `pipeline` | rpk-format YAML: `pipeline.processors` and `output.http_client`. The `input` is ignored, because `pg_notify('cdc')` is the input. It handles `jq` (jq-wasm), `bloblang`, `http`, `branch`, `switch`, `try`/`catch`, `unarchive` and `log`, and refuses any other processor when the YAML is loaded. A `switch` check is `meta("k")`, `env("k")` or a string, with `${VAR}` filled from the environment, compared with `==` or `!=`; any other check is refused at load. The row arrives as `{data: "<row json>"}`, the envelope daprd delivers |
@@ -66,12 +66,47 @@ promise chain, because PGlite has one connection. A shape's predicate is
 uses for the server's gate.
 
 A table's trigger notifies the row's key, its scope and the transaction id,
-not the row, because `pg_notify` caps a payload at 8 KB. The listener reads the
-row back by key, in notification order, and appends it to the table's shape
-log, which retains 1,000 entries. A client that falls further behind, or
-presents another boot's handle (`<table>-<boot id>`), gets `409 must-refetch`
-and starts from a snapshot. A live request waits up to 20 s. A table that
-carries a shape must have a primary key, or boot fails.
+not the row, because `pg_notify` caps a payload at 8 KB. The change takes its
+log position when the notification arrives, and the listener reads the row
+back by key, in notification order, to fill it; a client reads the log only as
+far as every entry is filled. A row that cannot be read back leaves a hole no
+read can step over, so the cluster raises it through its `fail` callback, which
+the single-file page answers by replacing itself with the failure, and from then
+on every read of that table, a waiting live request included, is a 410 until
+the page reloads: Electric's client retries a 500 without end, and stops on a
+410. The log retains 1,000 entries. A client that
+falls further behind, or presents another boot's handle (`<table>-<boot id>`),
+gets `409 must-refetch` and starts from a snapshot. A live request waits up to
+20 s. A table that carries a shape must have a primary key, or boot fails.
+
+A shape synced on demand is served as Electric serves it. `offset=now`, or
+`offset=-1` with `log=changes_only`, answers the position and no rows. A
+request carrying `subset__where`, `subset__params`, `subset__order_by` or
+`subset__limit` runs the shape's predicate AND the subset's, and answers
+`{metadata, data}`: Postgres's current snapshot (`xmin`, `xmax`, `xip_list`)
+and, as `database_lsn`, the first log position not in it, against which the
+client skips a change the snapshot already holds (it retires a snapshot at a
+change whose position reaches `database_lsn`). Because a change is numbered on
+arrival, a snapshot taken after a write counts it as seen. The position the
+response answers is the requester's own `offset`, and the log's only for a
+stream that has none yet (`now`, `-1`): the client moves its stream to it, and
+a later one would skip the changes in between to rows outside the subset. Any
+other `subset__*` parameter, a repeated one, and a predicate Postgres refuses (SQLSTATE class
+42 or 22), are refused as Electric refuses a subset, a 400 whose
+`errors.subset` names the parameter, which the store raises as a
+`ProgramError` naming the table where it retries any other 4xx; a `replica`
+other than `full` is a plain 400. Any other failure of the query is a 500,
+which the client retries. The subset is spliced into SQL run as PGlite's superuser, so it is
+held to the grammar the stack's gate holds it to ([proxy](proxy.md)) before it
+gets there: a quoted column compared with a `$n` parameter or a literal, two
+values compared (the compiler's `true = true` for a subset with no filter), a
+bare `TRUE` or `FALSE`, `"col" = ANY($n)` and `"col" IS [NOT] NULL`, under
+`AND`/`OR`/`NOT` and parentheses it closes itself, so a quoted name is never
+called and never meets another column;
+an order is quoted columns with a direction and a nulls placement. Anything else, a subquery, a call, a cast or a parenthesis closing
+the shape's own predicate early, is a 400. `subset__params` binds by position:
+the client leaves a compiled null out of it, so a position it skips binds
+null, and one the predicate does not use is a 400.
 
 ## The fence
 

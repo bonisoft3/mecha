@@ -140,4 +140,77 @@ ROWS=$(grep -o '"operation":"insert"' /tmp/shape.json | wc -l | tr -d ' ')
   || { echo "FAIL: the guest's shape is not its own row alone"; cat /tmp/shape.json; exit 1; }
 echo "  electric serves the guest its own row, and not another guest's"
 
+# A subset snapshot, as an on-demand collection asks for one, through the gate.
+# Each premise services/auth/main.ts states for admitting subset__* is checked
+# here against Electric itself, behind the grammar the gate holds a subset to:
+# a subset only narrows the token.
+subset() {
+  where_sub=$1; shift
+  curl -s -o /tmp/subset.json -w '%{http_code}' -G "$PROXY_URL/electric/v1/shape" \
+    -H "Authorization: Bearer $SHAPE_TOKEN" \
+    --data-urlencode "table=app_user" --data-urlencode "where=$WHERE" \
+    --data-urlencode "offset=now" --data-urlencode "log=changes_only" --data-urlencode "replica=full" \
+    --data-urlencode "subset__where=$where_sub" "$@"
+}
+CODE=$(subset 'true = true')
+[ "$CODE" = "200" ] && grep -q "$SUBJECT" /tmp/subset.json && ! grep -q "$OTHER_ID" /tmp/subset.json \
+  || { echo "FAIL: an unconditional subset is not the guest's own row alone ($CODE)"; cat /tmp/subset.json; exit 1; }
+echo "  a subset is ANDed onto the token's where"
+CODE=$(subset '"id" = $1' --data-urlencode "subset__params={\"1\":\"$OTHER_ID\"}")
+[ "$CODE" = "200" ] && ! grep -q "$OTHER_ID" /tmp/subset.json \
+  || { echo "FAIL: a subset naming another guest's row reached it ($CODE)"; cat /tmp/subset.json; exit 1; }
+echo "  a subset naming a row outside the token reaches nothing"
+# Postgres runs a subset's predicate on rows the token's where excludes as well
+# (its planner orders the two by cost), and Electric answers an error with
+# Postgres's text. Regression: a cast passed the gate, failed on another
+# guest's handle, and the 500 quoted it. The gate holds a subset to the grammar
+# its client compiles to, in which no error depends on a row's value.
+OTHER_HANDLE=$(echo "$OTHER" | field handle)
+# A refusal is Electric's own shape, a 400 naming the subset parameter, which
+# the store raises as the program's error rather than retry; the gate's
+# message tells its refusal from Electric's. Regression: '"id" = "handle"' and
+# a text column against an int4 literal passed with no gate, because Electric
+# answers a comparison it has no operator for with that same 400. Electric
+# 1.8.0 answers each column comparison and typed literal here with a 200.
+for refused in 'true) OR (true' '"id" IN (SELECT "id" FROM app_user)' 'pg_sleep(1) IS NULL' \
+  '"pg_sleep"(1) IS NULL' '"handle"::int4 > 0' '$1 LIKE "handle"' '"handle" = "handle"' '"id" <> "id"' \
+  "\"handle\" = \"text\" 'x'"; do
+  CODE=$(subset "$refused" --data-urlencode 'subset__params={"1":"x"}')
+  [ "$CODE" = "400" ] && grep -q 'is not a predicate a subset may state' /tmp/subset.json && ! grep -q "$OTHER_HANDLE" /tmp/subset.json \
+    || { echo "FAIL: the gate answered the subset $refused with $CODE"; cat /tmp/subset.json; exit 1; }
+done
+echo "  the gate admits a subset only in its client's grammar: no closing parenthesis, no subquery, no call, no cast, no column against a column"
+CODE=$(subset 'true = true' --data-urlencode 'subset__where=false')
+[ "$CODE" = "400" ] && grep -q '"subset"' /tmp/subset.json \
+  || { echo "FAIL: the gate answered a repeated subset__where with $CODE"; cat /tmp/subset.json; exit 1; }
+echo "  a repeated subset parameter is refused as a subset is"
+# Electric hands a LIKE pattern to Postgres as it came, and Postgres raises on
+# one ending in its escape only when a row's value matched the rest: measured
+# against Electric 1.8.0, a prefix some row holds answered 500 and one no row
+# holds 200. The grammar states no pattern, so the gate refuses both alike.
+for prefix in "$(echo "$OTHER_HANDLE" | cut -c1-3)" zzz; do
+  CODE=$(subset '"handle" LIKE $1' --data-urlencode "subset__params={\"1\":\"$prefix\\\\\"}")
+  [ "$CODE" = "400" ] && grep -q '"subset"' /tmp/subset.json \
+    || { echo "FAIL: the gate answered a LIKE pattern ending in its escape ($prefix) with $CODE"; cat /tmp/subset.json; exit 1; }
+done
+echo "  the gate refuses a LIKE pattern, whatever rows hold"
+# A value its column cannot hold is refused by Electric's own parser, before
+# Postgres: a 400 that quotes the client's value and no row's. Caddy keeps a
+# 5xx's text from the client (services/proxy/Caddyfile).
+CODE=$(subset '"id" = $1' --data-urlencode 'subset__params={"1":"not a uuid"}')
+[ "$CODE" = "400" ] || { echo "FAIL: a subset binding a value its column cannot hold got $CODE"; cat /tmp/subset.json; exit 1; }
+echo "  a subset binding a value its column cannot hold is Electric's 400"
+
+# Caddy re-encodes the query it forwards through Go's url.ParseQuery, which
+# drops a pair holding a raw `;` or a `%` that starts no escape; the gate reads
+# the query as URLSearchParams does, which keeps both. A pair the two would
+# read differently is refused before Caddy can drop it.
+for raw in 'offset=-1;x' 'offset=-1%zz'; do
+  CODE=$(curl -s -o /tmp/raw.json -w '%{http_code}' -G "$PROXY_URL/electric/v1/shape?$raw" \
+    -H "Authorization: Bearer $SHAPE_TOKEN" \
+    --data-urlencode "table=app_user" --data-urlencode "where=$WHERE")
+  [ "$CODE" = "403" ] || { echo "FAIL: the gate answered a query holding $raw with $CODE"; cat /tmp/raw.json; exit 1; }
+done
+echo "  a query Caddy and the gate would read differently is refused"
+
 echo "=== passed ==="

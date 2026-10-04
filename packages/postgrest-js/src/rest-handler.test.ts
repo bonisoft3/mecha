@@ -320,3 +320,87 @@ describe('scope session', () => {
     expect(rows.map((r: { id: string }) => r.id)).toEqual(['b'])
   })
 })
+
+// Regression: the handler bound a written value straight to its column, where
+// PostgREST hands it to the column's domain representation (a cast from json
+// by a function). A representation called on null input decides what a JSON
+// null stores, so through the page's cluster a write disagreed with the stack's
+// wherever one does, and an object failed to bind at all.
+describe('a domain representation', () => {
+  let db: PGlite
+  let handler: (req: Request) => Promise<Response>
+  const write = (method: string, path: string, body: unknown) =>
+    handler(new Request(`http://localhost/${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }))
+  const stored = async (id: string) =>
+    (await db.query<Record<string, string | null>>('SELECT req::text AS req, opt::text AS opt, n::text AS n FROM doc WHERE id = $1', [id])).rows[0]
+
+  beforeAll(async () => {
+    db = await PGlite.create()
+    await db.exec(`
+      CREATE DOMAIN public.loose_json AS json;
+      CREATE FUNCTION public.loose_json_from_json(value json) RETURNS public.loose_json
+        LANGUAGE sql IMMUTABLE CALLED ON NULL INPUT RETURN COALESCE(value, 'null'::json)::public.loose_json;
+      CREATE CAST (json AS public.loose_json) WITH FUNCTION public.loose_json_from_json(json) AS IMPLICIT;
+      CREATE DOMAIN public.text_int AS bigint;
+      CREATE FUNCTION public.text_int_from_json(value json) RETURNS public.text_int
+        LANGUAGE sql IMMUTABLE STRICT RETURN (value #>> '{}')::bigint::public.text_int;
+      CREATE CAST (json AS public.text_int) WITH FUNCTION public.text_int_from_json(json) AS IMPLICIT;
+      CREATE TABLE doc (id text PRIMARY KEY, req public.loose_json NOT NULL, opt public.loose_json, n public.text_int);
+    `)
+    handler = createRestHandler(db)
+  })
+
+  afterAll(async () => {
+    await db.close()
+  })
+
+  it('takes a JSON null as its function does, and a value as the JSON it was sent', async () => {
+    expect((await write('POST', 'doc', { id: 'a', req: null, opt: null, n: '12' })).status).toBe(201)
+    expect(await stored('a')).toEqual({ req: 'null', opt: 'null', n: '12' })
+    expect((await write('POST', 'doc', { id: 'b', req: { k: [1] }, n: null })).status).toBe(201)
+    expect(await stored('b')).toEqual({ req: '{"k":[1]}', opt: null, n: null })
+    expect((await write('PATCH', 'doc?id=eq.b', { req: null, opt: 'x' })).status).toBe(204)
+    expect(await stored('b')).toEqual({ req: 'null', opt: '"x"', n: null })
+  })
+})
+
+// Regression: a json column without a representation took the raw JS value,
+// and PGlite's json serializer passes a string through as JSON text, so
+// through the page's cluster {"meta":"x"} failed to parse, {"meta":"42"}
+// stored the number 42 and {"meta":"[1]"} an array, where PostgREST stores
+// each string as the JSON string it was sent.
+describe('a json column', () => {
+  let db: PGlite
+  let handler: (req: Request) => Promise<Response>
+  const write = (method: string, path: string, body: unknown) =>
+    handler(new Request(`http://localhost/${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }))
+  const stored = async (id: string) =>
+    (await db.query<{ j: string | null; same: boolean }>('SELECT j::text AS j, b IS NOT DISTINCT FROM j::jsonb AND d::text IS NOT DISTINCT FROM j::text AS same FROM doc WHERE id = $1', [id])).rows[0]
+  const values: [string, unknown, string | null][] = [
+    ['a string', 'x', '"x"'],
+    ['a number-like string', '42', '"42"'],
+    ['an array-like string', '[1]', '"[1]"'],
+    ['a number', 42, '42'],
+    ['an array', [1, 'a'], '[1,"a"]'],
+    ['an object', { k: [1] }, '{"k":[1]}'],
+    ['a null as SQL NULL', null, null],
+  ]
+
+  beforeAll(async () => {
+    db = await PGlite.create()
+    await db.exec(`CREATE DOMAIN plain_json AS json; CREATE TABLE doc (id text PRIMARY KEY, j json, b jsonb, d plain_json)`)
+    handler = createRestHandler(db)
+  })
+
+  afterAll(async () => {
+    await db.close()
+  })
+
+  it.each(values)('stores %s', async (_, value, text) => {
+    const id = JSON.stringify(value)
+    expect((await write('POST', 'doc', { id, j: value, b: value, d: value })).status).toBe(201)
+    expect(await stored(id)).toEqual({ j: text, same: true })
+    expect((await write('PATCH', `doc?id=eq.${encodeURIComponent(id)}`, { j: value, b: value, d: value })).status).toBe(204)
+    expect(await stored(id)).toEqual({ j: text, same: true })
+  })
+})

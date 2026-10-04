@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import { createCollection, createTransaction, localOnlyCollectionOptions } from "@tanstack/db"
 import { createMechaClient } from "./mecha-client.js"
+import { fakeElectric } from "./fake-electric.js"
 import { unionCollectionOptions } from "./union.js"
 
 // A write persists until the shape confirms it, and the collection holds
@@ -15,76 +16,17 @@ function persisting(collection: any, row: any) {
 }
 
 describe("a shape's sink", () => {
-  afterEach(() => vi.unstubAllGlobals())
-
-  // The shape server, as the stream reads it: a snapshot holding the row,
-  // then two live batches, its delete and its return. Every later poll hangs.
-  function shapeServer(table: string) {
-    const schema = JSON.stringify({ id: { type: "text" }, handle: { type: "text" }, txid: { type: "int8" } })
-    const batches: Record<string, { offset: string; body: unknown[] }> = {
-      "-1": {
-        offset: "0_0",
-        body: [
-          {
-            key: `"public"."${table}"/"k"`,
-            value: { id: "k", handle: "one", txid: "1" },
-            headers: { operation: "insert", txids: [1] },
-          },
-          { headers: { control: "up-to-date", global_last_seen_lsn: "1" } },
-        ],
-      },
-      "0_0": {
-        offset: "1_0",
-        body: [
-          { key: `"public"."${table}"/"k"`, value: { id: "k" }, headers: { operation: "delete", txids: [2] } },
-          { headers: { control: "up-to-date", global_last_seen_lsn: "2" } },
-        ],
-      },
-      "1_0": {
-        offset: "2_0",
-        body: [
-          {
-            key: `"public"."${table}"/"k"`,
-            value: { id: "k", handle: "two", txid: "3" },
-            headers: { operation: "insert", txids: [3] },
-          },
-          { headers: { control: "up-to-date", global_last_seen_lsn: "3" } },
-        ],
-      },
-    }
-    return (input: string | URL, init?: RequestInit) => {
-      const url = new URL(String(input))
-      const batch = batches[url.searchParams.get("offset") ?? ""]
-      if (batch === undefined) {
-        return new Promise<Response>((_, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))
-        })
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify(batch.body), {
-          headers: {
-            "content-type": "application/json",
-            "electric-handle": "h1",
-            "electric-offset": batch.offset,
-            "electric-schema": schema,
-            "electric-cursor": "c1",
-          },
-        }),
-      )
-    }
-  }
-
-  const mint = () =>
-    Promise.resolve(new Response(JSON.stringify({ token: "t", where: "true", expires_in: 3600 }), { status: 200 }))
-
   it("takes a row back that left and returned while a write was in flight", async () => {
-    vi.stubGlobal("fetch", shapeServer("lobby"))
+    const electric = fakeElectric({
+      schema: { lobby: { id: { type: "text" }, handle: { type: "text" }, txid: { type: "int8" } } },
+      rows: { lobby: [{ id: "k", handle: "one", txid: "1" }] },
+    })
     const client = createMechaClient({
       tables: [{ id: "lobby", table: "lobby" }],
       electricUrl: "http://localhost:0/electric",
       crudUrl: "http://localhost:0/crud",
       authUrl: "http://localhost:0/auth",
-      fetcher: mint as any,
+      fetcher: electric.fetcher,
     })
     // The stream rethrows what its subscriber throws on a microtask, which is
     // how a refused write reaches the page as an uncaught exception.
@@ -97,8 +39,10 @@ describe("a shape's sink", () => {
       await lobby.preload()
       expect(lobby.get("k")?.handle).toBe("one")
       const held = persisting(lobby, { id: "j", handle: "me" })
-      // The stream has seen the return; both live batches are committed and
-      // waiting on the write.
+      // The row leaves and returns in two live batches, each a synced
+      // transaction the write holds back.
+      electric.push("lobby", { operation: "delete", value: { id: "k" }, txid: 2 })
+      electric.push("lobby", { operation: "insert", value: { id: "k", handle: "two", txid: "3" }, txid: 3 })
       await lobby.utils.awaitTxId(3)
       expect(lobby.get("k")?.handle).toBe("one")
       held.release()

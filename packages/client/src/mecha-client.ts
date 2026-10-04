@@ -1,7 +1,7 @@
-import { createCollection } from "@tanstack/db"
-import type { Collection } from "@tanstack/db"
+import { createCollection, IR } from "@tanstack/db"
+import type { Collection, LoadSubsetOptions } from "@tanstack/db"
 import { electricCollectionOptions } from "@tanstack/electric-db-collection"
-import { NonRetriableError, startOfflineExecutor } from "@tanstack/offline-transactions"
+import { BroadcastChannelLeader, NonRetriableError, startOfflineExecutor, WebLocksLeader } from "@tanstack/offline-transactions"
 import type { LeaderElection } from "@tanstack/offline-transactions"
 import { localOnlyCollectionOptions, localStorageCollectionOptions } from "@tanstack/db"
 import { idempotentSink } from "./sync-sink.js"
@@ -52,6 +52,15 @@ export interface MechaTable {
    * table is reached by a changing set of shapes rather than one.
    */
   access?: TableAccess
+  /**
+   * How the rows arrive. "eager" (the default) syncs the whole shape before
+   * the collection is ready; "on-demand" syncs only changes from the moment
+   * it opens, and loads the rows each live query asks for as a subset
+   * snapshot of the same shape. Only a "crud" table a grant cannot reach can
+   * be on demand: a local tier has no shape, and a family is a union of
+   * per-row shapes with no single one to take a subset of.
+   */
+  sync?: "eager" | "on-demand"
 }
 
 export type TableAccess =
@@ -242,6 +251,84 @@ export function soleLeader(): LeaderElection {
   }
 }
 
+/**
+ * The outbox's election, chosen as the executor would choose it, but held
+ * here so the page can give it up: a Web Lock held for the page's life keeps
+ * the page out of the back/forward cache.
+ */
+export function electLeader(): LeaderElection {
+  if (runsAlone()) return soleLeader()
+  if (WebLocksLeader.isSupported()) return new WebLocksLeader()
+  if (BroadcastChannelLeader.isSupported()) return new BroadcastChannelLeader()
+  return soleLeader()
+}
+
+/**
+ * An election the page gives up as it is hidden and asks for again when it is
+ * restored from the back/forward cache. A restored page's executor replays its
+ * outbox once this says it leads again; a page discarded instead has released
+ * a lock it would have dropped anyway.
+ *
+ * It keeps its own state rather than the inner election's: WebLocksLeader
+ * marks itself leader before it announces it, so a second acquisition is never
+ * announced, and the executor, told it lost on pagehide, would never hear it
+ * won back.
+ */
+export function pageLeader(page: EventTarget, inner: LeaderElection): LeaderElection {
+  let leading = false
+  const listeners = new Set<(isLeader: boolean) => void>()
+  const set = (isLeader: boolean) => {
+    if (isLeader === leading) return
+    leading = isLeader
+    for (const listener of listeners) listener(isLeader)
+  }
+  inner.onLeadershipChange(set)
+  const election: LeaderElection = {
+    async requestLeadership() {
+      const won = await inner.requestLeadership()
+      set(won)
+      return won
+    },
+    releaseLeadership() {
+      inner.releaseLeadership()
+      set(false)
+    },
+    isLeader: () => leading,
+    onLeadershipChange(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+  }
+  page.addEventListener("pagehide", () => election.releaseLeadership())
+  page.addEventListener("pageshow", (event) => {
+    if ((event as PageTransitionEvent).persisted) void election.requestLeadership()
+  })
+  return election
+}
+
+/**
+ * electric-db-collection 0.4.0 compiles a two-argument `and`/`or` as `lhs OP
+ * rhs` with no parentheses, so an `or` under an `and` binds wrong (`a AND b OR
+ * c`). A NOT is always parenthesized, so NOT (NOT (x)) carries every `or` as
+ * a group. The pinned-bug test in mecha-client.test.ts fails once an upgrade
+ * parenthesizes, which is when this goes.
+ */
+export function parenthesizeOr(e: IR.BasicExpression<any>): IR.BasicExpression<any> {
+  if (e.type !== "func") return e
+  const inner = new IR.Func(e.name, e.args.map(parenthesizeOr))
+  return e.name === "or" ? new IR.Func("not", [new IR.Func("not", [inner])]) : inner
+}
+
+function parenthesizedLoad(opts: LoadSubsetOptions): LoadSubsetOptions {
+  return {
+    ...opts,
+    ...(opts.where ? { where: parenthesizeOr(opts.where) } : {}),
+    ...(opts.cursor
+      ? { cursor: { ...opts.cursor, whereFrom: parenthesizeOr(opts.cursor.whereFrom), whereCurrent: parenthesizeOr(opts.cursor.whereCurrent) } }
+      : {}),
+  }
+}
+
 export function createMechaClient(config: MechaClientConfig): MechaClient {
   let bound: Types | undefined
   const typeTable = (): Types => {
@@ -250,6 +337,32 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     return bound ??= (types ?? carriers)(table)
   }
   const canonicalType = (type: string) => typeTable().canonicalType(type)
+  // The SQL type names Electric may report a field's column under: its type's
+  // base names and domain, and a decimal's per-profile domain. A field still
+  // declared by a physical label is not normalized, so Electric's own parser
+  // keeps it.
+  const transportNames = (fields: readonly TypeField[]): Set<string> => {
+    const table = (config.types ?? config.carriers)!
+    const names = new Set<string>()
+    for (const field of fields) {
+      if (table.aliases[field.type] !== undefined) continue
+      const entry = table.types[canonicalType(field.type)]
+      for (const name of entry.base) names.add(name)
+      if (entry.sql !== undefined) names.add(entry.sql)
+      if (field.type === "decimal") names.add(`portable_decimal_${field.precision}_${field.scale}`)
+    }
+    return names
+  }
+  // One per table, however many shapes a grant opens of it.
+  const parsers = new Map<string, Record<string, (value: string) => string>>()
+  const parserOf = (t: { id: string; fields: readonly TypeField[] }) => {
+    let parser = parsers.get(t.id)
+    if (parser === undefined) {
+      parser = Object.fromEntries([...transportNames(t.fields), "int8"].map((name) => [name, (value: string) => value]))
+      parsers.set(t.id, parser)
+    }
+    return parser
+  }
   // A table declaring no field declares no type, and a row with nothing to
   // canonicalize asks the type table nothing.
   const normalizeRow: Types["normalizeRow"] = (fields, row, source) =>
@@ -263,13 +376,19 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   type Table = Required<Omit<MechaTable, "access">> & { access?: TableAccess }
   const byId = new Map<string, Table>()
   for (const t of config.tables) {
+    const durability = t.durability ?? "crud"
+    const sync = t.sync ?? "eager"
+    if (sync === "on-demand" && durability !== "crud") {
+      throw new Error(`${t.table} is a ${durability} tier, which has no shape to load a subset of; it cannot sync on demand`)
+    }
     byId.set(t.id, {
       id: t.id,
       table: t.table,
       key: t.key ?? "id",
       fields: t.fields ?? [],
-      durability: t.durability ?? "crud",
+      durability,
       access: t.access,
+      sync,
     })
   }
 
@@ -286,19 +405,20 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   // authority's, resolved together per request from one token.
   function shape(t: Table, key?: RowKey) {
     const getKey = (item: any) => item[t.key]
-    const hasJsonCarrier = t.fields.some((field) => {
-      const type = canonicalType(field.type)
-      return type === "json" || type === "geojson"
-    })
+    const onDemand = t.sync === "on-demand"
     const options = electricCollectionOptions({
       id: key ? `mecha:${t.id}@${key.column}=${key.value}` : `mecha:${t.id}`,
       getKey,
+      syncMode: t.sync,
       shapeOptions: {
         url: `${electricUrl}/v1/shape`,
         // Typed as a string upstream, resolved as a supplier at runtime like
-        // any other param.
-        params: { table: t.table, where: shapes.where(t.table, key) as any },
+        // any other param. An on-demand shape asks for whole rows: a change
+        // to a row no subset loaded would otherwise arrive as the columns that
+        // changed, and land in the collection as a row missing the rest.
+        params: { table: t.table, where: shapes.where(t.table, key) as any, ...(onDemand ? { replica: "full" as const } : {}) },
         headers: { Authorization: shapes.authorization(t.table, key) },
+        fetchClient: config.fetcher,
         // A refused token is re-minted, not retried: the refresh runs ahead
         // of expiry by a margin, but a machine asleep through it resumes
         // into a 401, and the retry resolves the header afresh. Anything
@@ -310,18 +430,12 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
           }
           throw e
         },
-        // Keep transport values lossless until the row-level carrier adapter
-        // sees their field. In particular, an int8 is not necessarily txid.
-        parser: {
-          // Keep every domain transport value intact until the row-level
-          // adapter has its column's carrier metadata. A type parser cannot
-          // distinguish two numeric domains with different decimal bounds.
-          ...Object.fromEntries(t.fields.map((field) => [`portable_${canonicalType(field.type)}`, (value: unknown) => value])),
-          int8: (value: string) => value,
-          numeric: (value: string) => value,
-          decimal: (value: string) => value,
-          ...(hasJsonCarrier ? { json: (value: string) => value, jsonb: (value: string) => value } : {}),
-        },
+        // Every column a field declares arrives as Postgres's text and is
+        // converted once, by normalizeRow below, which knows the column. A
+        // parser is keyed on the SQL type alone: it cannot tell two decimal
+        // profiles apart, nor a string from a timezone that are both `text`.
+        // An int8 is not necessarily txid, so it stays text too.
+        parser: parserOf(t),
       },
       // No persistence handlers: writes ride the offline executor below —
       // handlers would tie delivery to the optimistic transaction's
@@ -330,13 +444,24 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     // The shape writes through the sink sync-sink.ts describes: a row's
     // return is an update.
     const inner = options.sync.sync
+    // A subset that failed leaves the live query that asked for it waiting
+    // with nothing to say why, and TanStack drops the rejection. It is told to
+    // whoever listens as it happens and kept nowhere: the failure belongs to
+    // the load, and a collection-wide record would fail every later view of
+    // the table for one load's sake.
+    const failureListeners = new Set<(error: unknown) => void>()
+    const utils = options.utils as typeof options.utils & { onSubsetFailure: (fn: (error: unknown) => void) => () => void }
+    utils.onSubsetFailure = (fn) => {
+      failureListeners.add(fn)
+      return () => void failureListeners.delete(fn)
+    }
     options.sync.sync = (params) => {
       const sink = idempotentSink(params, getKey)
       // Electric's parsers run per SQL type, while a carrier belongs to a
       // column. Normalize here, where both the message and its field list are
       // present; this is also before a synced row can become an optimistic
       // mutation original or reach the durable outbox.
-      return inner({
+      const result = inner({
         ...sink,
         write: (message: any) =>
           sink.write(
@@ -345,6 +470,22 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
               : { ...message, value: normalizeRow(t.fields, message.value, "electric") },
           ),
       })
+      const load = (result as any)?.loadSubset as ((opts: LoadSubsetOptions) => true | Promise<void>) | undefined
+      if (!onDemand || load === undefined) return result
+      return {
+        ...(result as object),
+        loadSubset: (opts: LoadSubsetOptions) => {
+          const loaded = load(parenthesizedLoad(opts))
+          if (loaded === true) return true
+          return loaded.catch((error) => {
+            // A subset's request carries the stream's header but not its
+            // onError, so a refused token is forgotten here as it is there.
+            if ((error as { status?: number })?.status === 401) shapes.forget(t.table, key)
+            for (const fn of failureListeners) fn(error)
+            throw error
+          })
+        },
+      }
     }
     return createCollection({
       // Never startSync: true. Sync begins on the first subscriber, so a
@@ -381,6 +522,10 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   }
   const reachable = new Set<string>()
   for (const f of families) for (const m of [...f.members, f.via]) reachable.add(m.id)
+  for (const id of reachable) {
+    const t = byId.get(id)!
+    if (t.sync === "on-demand") throw new Error(`${t.table} is reached by a grant, a union of per-row shapes; it cannot sync on demand`)
+  }
 
   const collections: Record<string, Collection<any, any, any>> = {}
   const isLocal = (t: Table) => t.durability === "tab" || t.durability === "device"
@@ -609,12 +754,13 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     }
   }
 
+  const leader = typeof window === "undefined" ? electLeader() : pageLeader(window, electLeader())
   const executor = startOfflineExecutor({
     collections,
     mutationFns,
     storage: createStorageAdapter(),
     jitter: true,
-    ...(runsAlone() ? { leaderElection: soleLeader() } : {}),
+    leaderElection: leader,
     beforeRetry: (txs: any[]) => {
       const cutoff = Date.now() - maxAge
       return txs.filter((tx) => tx.createdAt.getTime() > cutoff)

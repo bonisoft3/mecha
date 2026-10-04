@@ -120,6 +120,13 @@ backend before it starts ([what bites](docs/deployment.md#what-bites-on-cloud-ru
 PGlite would follow the server's shapes; offline, it answers reads and keeps
 writes; on reconnect, the outbox replays them.
 
+**A subset the page's cluster serves is its own reading of Electric's
+protocol** ([browser](docs/browser.md#the-one-user-cluster)). A real
+ShapeStream holds it to the client, and nothing holds it to Electric: the
+position a subset answers, and how a stream already past it takes that
+position, follow what @electric-sql/client 1.5.27 does with them rather than a
+statement of Electric's.
+
 **The page routes from the Caddyfile**, through `caddy-js`, so a route the
 Caddyfile gains reaches the page
 ([what stands in for what](docs/browser.md#what-stands-in-for-what)).

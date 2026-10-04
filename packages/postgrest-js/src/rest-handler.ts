@@ -137,6 +137,45 @@ async function tableExists(db: Queryable, table: string): Promise<boolean> {
   return parseInt(result.rows[0]?.count ?? '0', 10) > 0
 }
 
+/**
+ * The columns of `table` PostgREST writes as JSON, each with the SQL that takes
+ * a placeholder bound to the JSON text of the value sent. A domain
+ * representation is a cast from json to the column's type by a function, which
+ * PostgREST hands the value, a JSON null as SQL NULL, so a function called on
+ * null input decides what a null stores and a strict one stores SQL NULL. A
+ * json or jsonb column, or a domain over one, stores the value sent: a string
+ * is a JSON string.
+ */
+async function writtenAsJson(db: Queryable, table: string): Promise<Map<string, (p: string) => string>> {
+  const res = await db.query<{ col: string; fn: string | null; type: string }>(
+    `SELECT a.attname AS col, quote_ident(n.nspname) || '.' || quote_ident(p.proname) AS fn,
+            format_type(a.atttypid, a.atttypmod) AS type
+       FROM pg_attribute a
+       LEFT JOIN pg_cast c ON c.casttarget = a.atttypid AND c.castsource = 'json'::regtype AND c.castmethod = 'f'
+       LEFT JOIN pg_proc p ON p.oid = c.castfunc
+       LEFT JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE a.attrelid = format('public.%I', $1::text)::regclass AND a.attnum > 0 AND NOT a.attisdropped
+        AND (c.oid IS NOT NULL OR EXISTS (
+          WITH RECURSIVE base(oid, under) AS (
+            SELECT t.oid, t.typbasetype FROM pg_type t WHERE t.oid = a.atttypid
+            UNION ALL SELECT t.oid, t.typbasetype FROM pg_type t JOIN base ON t.oid = base.under)
+          SELECT FROM base WHERE oid IN ('json'::regtype, 'jsonb'::regtype)))`,
+    [table],
+  )
+  return new Map(res.rows.map((r) => [r.col, r.fn === null ? (p) => `${p}::${r.type}` : (p) => `${r.fn}(${p}::json)`]))
+}
+
+/** The placeholder a written value takes, as JSON where its column takes it so. */
+function bindWritten(asJson: Map<string, (p: string) => string>, col: string, value: unknown, params: unknown[]): string {
+  const sql = asJson.get(col)
+  if (sql === undefined) {
+    params.push(value)
+    return `$${params.length}`
+  }
+  params.push(value === null || value === undefined ? null : JSON.stringify(value))
+  return sql(`$${params.length}`)
+}
+
 async function handleGet(
   db: Queryable,
   table: string,
@@ -209,12 +248,10 @@ async function handlePost(
   const quotedCols = cols.map((c) => `"${validateIdentifier(c)}"`).join(', ')
 
   // Build multi-row VALUES clause
+  const asJson = await writtenAsJson(db, table)
   const bindParams: unknown[] = []
   const valueClauses = rows.map((row) => {
-    const placeholders = cols.map((c) => {
-      bindParams.push(row[c])
-      return `$${bindParams.length}`
-    })
+    const placeholders = cols.map((c) => bindWritten(asJson, c, row[c], bindParams))
     return `(${placeholders.join(', ')})`
   })
 
@@ -254,13 +291,11 @@ async function handlePatch(
   const prefer = parsePrefer(req.headers.get('Prefer'))
   const body = (await req.json()) as Record<string, unknown>
 
+  const asJson = await writtenAsJson(db, table)
   const bindParams: unknown[] = []
   const setCols = Object.keys(body)
   const setClause = setCols
-    .map((c) => {
-      bindParams.push(body[c])
-      return `"${validateIdentifier(c)}" = $${bindParams.length}`
-    })
+    .map((c) => `"${validateIdentifier(c)}" = ${bindWritten(asJson, c, body[c], bindParams)}`)
     .join(', ')
 
   const filters = parseFilters(url.searchParams)

@@ -9,7 +9,7 @@ import {
   assertThrows,
 } from "jsr:@std/assert@1.0.13";
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from "@simplewebauthn/server/helpers";
-import { admittedOrigin, ceremonyOrigin, handler, issueUserToken, migrate, sql, verifyJwt } from "./main.ts";
+import { admittedOrigin, ceremonyOrigin, handler, issueUserToken, migrate, signJwt, sql, verifyJwt } from "./main.ts";
 
 await sql`CREATE TABLE IF NOT EXISTS app_user (
   id uuid primary key,
@@ -314,13 +314,13 @@ Deno.test({
 });
 
 Deno.test({
-  name: "columns, replica, params and the secret stay server-owned",
+  name: "columns, params and the secret stay server-owned",
   ...opts,
   async fn() {
     const { res } = await mint("article");
     const { token, where } = await res.json();
     const w = encodeURIComponent(where);
-    for (const extra of ["columns=id,body", "replica=full", "params[1]=x", "secret=guessed"]) {
+    for (const extra of ["columns=id,body", "params[1]=x", "secret=guessed"]) {
       const uri = `/v1/shape?table=article&where=${w}&${extra}`;
       assertEquals((await handler(shapeReq(token, uri))).status, 403);
     }
@@ -381,9 +381,146 @@ Deno.test({
     // parameter added after this gate was written, and its reach is unknown.
     const paging = `/v1/shape?table=article&where=${w}&offset=-1&live=true&handle=abc&cursor=1&experimental_live_sse=true`;
     assertEquals((await handler(shapeReq(token, paging))).status, 200);
-    for (const extra of ["subset__where=true", "table[]=app_user", "schema=other"]) {
+    for (const extra of ["table[]=app_user", "schema=other", "columns=secret", "params=x"]) {
       const uri = `/v1/shape?table=article&where=${w}&${extra}`;
       assertEquals((await handler(shapeReq(token, uri))).status, 403, extra);
+    }
+  },
+});
+
+// An on-demand collection asks for its rows as subset snapshots of the one
+// shape its token names, from `offset=now` with only changes logged, and
+// replica=full so an update of a row it never loaded is a whole row. The
+// premises that make a subset only narrow the token are tests/entrypoint.sh's,
+// against Electric itself; this holds the vocabulary and the grammar.
+Deno.test({
+  name: "a subset snapshot passes, and only in the form the client sends it",
+  ...opts,
+  async fn() {
+    const { res } = await mint("article");
+    const { token, where } = await res.json();
+    const w = encodeURIComponent(where);
+    const subset = `/v1/shape?table=article&where=${w}&offset=now&log=changes_only&replica=full` +
+      `&subset__where=${encodeURIComponent('"x" = $1')}&subset__params=${encodeURIComponent('{"1":"a"}')}` +
+      `&subset__limit=1&subset__order_by=${encodeURIComponent('"x" DESC')}`;
+    assertEquals((await handler(shapeReq(token, subset))).status, 200);
+    for (const extra of ["replica=default", "replica=", "replica=full&replica=default"]) {
+      const uri = `/v1/shape?table=article&where=${w}&${extra}`;
+      assertEquals((await handler(shapeReq(token, uri))).status, 403, extra);
+    }
+    // A subset outside the grammar is refused as Electric refuses one, which
+    // the store reads as the program's error and asks no further.
+    for (const [extra, param] of [
+      ["subset__offset=1", "offset"],
+      // Regression: a repeated subset parameter was a 403, which the store
+      // takes for a token to re-mint and asks again seven times.
+      ["subset__where=true&subset__where=false", "where"],
+      [`subset__params=${encodeURIComponent("{}")}&subset__params=${encodeURIComponent("{}")}`, "params"],
+      ["subset__offset=1&subset__offset=2", "offset"],
+      [`subset__where_expr=${encodeURIComponent("{}")}`, "where_expr"],
+      [`subset__order_by_expr=${encodeURIComponent("[]")}`, "order_by_expr"],
+      // Regression: the gate admitted any subset__where Electric parses, and
+      // Electric parses a cast. Postgres ran it on rows outside the token's
+      // where and answered `invalid input syntax for type integer:
+      // "secret_1"`, a value of a row the token does not reach.
+      [`subset__where=${encodeURIComponent('"x"::int4 > 0')}`, "where"],
+      [`subset__where=${encodeURIComponent('"x" + 1 > 0')}`, "where"],
+      [`subset__where=${encodeURIComponent('"pg_sleep"(1) IS NULL')}`, "where"],
+      [`subset__where=${encodeURIComponent('true) OR (true')}`, "where"],
+      [`subset__order_by=${encodeURIComponent('"x"::int4')}`, "order_by"],
+      ["subset__limit=1e3", "limit"],
+    ]) {
+      const res = await handler(shapeReq(token, `/v1/shape?table=article&where=${w}&${extra}`));
+      assertEquals(res.status, 400, extra);
+      assertEquals(Object.keys((await res.json()).errors.subset), [param], extra);
+    }
+    assertEquals((await handler(shapeReq(token, subset, "POST"))).status, 403);
+  },
+});
+
+// Regression: the grammar admitted `"handle" LIKE $1` whatever $1 held, and
+// Postgres raises "LIKE pattern must not end with escape character" only once
+// a row's value has matched the pattern up to that escape. Against Electric,
+// `{"1":"Fla\\"}` on the team table answered 500 and `{"1":"Zzz\\"}` 200: a
+// bit per request about rows the token does not reach. No view the store
+// maintains filters by a pattern, so a pattern is refused whatever it binds.
+Deno.test({
+  name: "a subset states no pattern, and binds its params by position",
+  ...opts,
+  async fn() {
+    const { res } = await mint("article");
+    const { token, where } = await res.json();
+    const uri = (subsetWhere: string, params?: string) =>
+      `/v1/shape?table=article&where=${encodeURIComponent(where)}&offset=now&log=changes_only&replica=full` +
+      `&subset__where=${encodeURIComponent(subsetWhere)}` +
+      (params === undefined ? "" : `&subset__params=${encodeURIComponent(params)}`);
+    const status = async (subsetWhere: string, params?: string) => (await handler(shapeReq(token, uri(subsetWhere, params)))).status;
+    for (const [w, p] of [
+      ['"x" = $1', '{"1":"a"}'],
+      ['"x" = ANY($1)', '{"1":"{a,b}"}'],
+      // A null the client compiled is left out of the params, so $2 is unbound.
+      ['"x" = $1 OR "x" = $2 OR "y" = $3', '{"1":"a","3":"b"}'],
+    ]) assertEquals(await status(w, p), 200, `${w} ${p}`);
+    for (const [w, p] of [
+      ['"x" LIKE $1', '{"1":"adm%"}'],
+      ['"x" ILIKE $1', '{"1":"adm%"}'],
+      ['"x" LIKE $1', String.raw`{"1":"adm\\"}`],
+      [String.raw`"x" LIKE 'adm\'`, undefined],
+      ['LOWER("x") = $1', '{"1":"a"}'],
+      ['"x" = $1', '{"1":1}'],
+      ['"x" = $1', '["a"]'],
+      ['"x" = $1', '{"01":"a"}'],
+      ['"x" = $1', "not json"],
+    ] as const) assertEquals(await status(w, p), 400, `${w} ${p}`);
+  },
+});
+
+// Regression: the grammar admitted a column compared with a column, and
+// Postgres casts one of two numeric types to the other on every row:
+// `"amount" = "ratio"` (numeric, float8) raised `value out of range` on a row
+// holding 1e400, a bit per request about rows the token does not reach. A
+// typed literal picks the column's cast the same way, as two adjacent
+// operands: `"amount" = "float8" '1'` raises on that row where
+// `"amount" = 1.5` reads none. A comparison is a column against a $n or a
+// literal, whose type Postgres infers from the column.
+Deno.test({
+  name: "a subset compares a column with a value only",
+  ...opts,
+  async fn() {
+    const { res } = await mint("article");
+    const { token, where } = await res.json();
+    const answer = async (subsetWhere: string) => {
+      const res = await handler(shapeReq(token,
+        `/v1/shape?table=article&where=${encodeURIComponent(where)}&offset=now&log=changes_only&replica=full` +
+          `&subset__where=${encodeURIComponent(subsetWhere)}&subset__params=${encodeURIComponent('{"1":"a","2":"b","3":"c"}')}`));
+      return res.status === 400 ? Object.keys((await res.json()).errors.subset) : res.status;
+    };
+    // What electric-db-collection 0.4.0's compiler emits.
+    for (const w of [
+      "true = true", "true", "false", '"x" = $1', '$1 = "x"', '"x" >= $1', '"x" <> $1', '"x" = ANY($1)',
+      '"x" IS NULL', '"x" IS NOT NULL', 'NOT ("x" = $1)', '("x" = $1) AND ("y" > $2) AND ("z" < $3)',
+      '"x" > $1 OR ("x" = $1 AND "id" > $2)', `"x" = 8 AND "y" = 'f' AND "z" = 1.5`,
+    ]) assertEquals(await answer(w), 200, w);
+    for (const w of [
+      '"amount" = "ratio"', `"amount" = "float8" '1'`, '"x" < "y"', '"x" = ANY("y")', '$1 = ANY("x")', `"x" = "int4" '1'`, `"x" = "numeric" $1`,
+      '"x" = $1 $2', '"x" = NULL', '$1 IS NULL', '"x"', 'NOT "x"', '"x" = $1 AND', '("x" = $1', '"x" = ($1)', '"x" = $1 "y" = $2',
+    ]) assertEquals(await answer(w), ["where"], w);
+  },
+});
+
+// Regression: URLSearchParams read `where=title%20%3D%20'a;b'` as the
+// token's predicate and passed it, and Caddy's re-encoding through Go's
+// ParseQuery dropped the pair, so Electric served the whole table.
+Deno.test({
+  name: "a query Caddy would read differently from the gate is refused",
+  ...opts,
+  async fn() {
+    const where = `"title" = 'a;b%'`;
+    const token = await signJwt({ typ: "shape", table: "article", where, exp: Math.floor(Date.now() / 1000) + 60 });
+    const encoded = encodeURIComponent(where);
+    assertEquals((await handler(shapeReq(token, `/v1/shape?table=article&where=${encoded}`))).status, 200);
+    for (const raw of [encoded.replace("%3B", ";"), encoded.replace("%25", "%"), `${encoded}&offset=-1%zz`, `${encoded}&offset=%FF`]) {
+      assertEquals((await handler(shapeReq(token, `/v1/shape?table=article&where=${raw}`))).status, 403, raw);
     }
   },
 });

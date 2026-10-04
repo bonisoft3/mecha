@@ -2,6 +2,7 @@
   "version": "5",
   "specifiers": {
     "jsr:@std/encoding@1.0.7": "1.0.7",
+    "npm:@electric-sql/client@1.5.27": "1.5.27",
     "npm:@electric-sql/pglite@0.5.8": "0.5.8"
   },
   "jsr": {
@@ -10,12 +11,31 @@
     }
   },
   "npm": {
+    "@electric-sql/client@1.5.27": {
+      "integrity": "sha512-JXyhdg2CBvTRGK1aEGBkb24HoN4Zk9v5lA9Ibxjmcrgjt1j/NgnXndxmuSxVtAYZsM4no5kHXfTnFplgiI9ztg==",
+      "dependencies": [
+        "@microsoft/fetch-event-source"
+      ],
+      "optionalDependencies": [
+        "@rollup/rollup-darwin-arm64"
+      ],
+      "bin": true
+    },
     "@electric-sql/pglite@0.5.8": {
       "integrity": "sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q=="
+    },
+    "@microsoft/fetch-event-source@2.0.1": {
+      "integrity": "sha512-W6CLUJ2eBMw3Rec70qrsEW0jOm/3twwJv21mrmj2yORiaVmVYGS4sSS5yUwvQc1ZlDLYGPnClVWmUUMagKNsfA=="
+    },
+    "@rollup/rollup-darwin-arm64@4.63.5": {
+      "integrity": "sha512-wlJEERGfeuHeBavCL2qVnNacOK43NDoZM4sjkeRPymd04OAE9T1zBqDJgmZ+CIsPTYKwdzpUC8vmOw84dwY4Tg==",
+      "os": ["darwin"],
+      "cpu": ["arm64"]
     }
   },
   "workspace": {
     "dependencies": [
+      "npm:@electric-sql/client@1.5.27",
       "npm:@electric-sql/pglite@0.5.8"
     ]
   }

@@ -93,6 +93,17 @@ Deno.test("a cluster given a pipeline refuses the change feed off", async () => 
   assert.match(got.stderr, /capabilities\.capture: conflicting values/);
 });
 
+// The shape gate admits subset snapshots on the premise that Electric parses a
+// subset with no subquery (services/auth/main.ts). A feature flag would turn
+// subqueries on, and with them a subset that reads another table as Electric's
+// BYPASSRLS role.
+Deno.test("electric runs with no feature flags", async () => {
+  const got = await exported({}, "surface.targets.electric.compose.environment", { server: true });
+  assert.equal(got.ok, true, got.stderr);
+  assert.equal("ELECTRIC_FEATURE_FLAGS" in got.value, false);
+  assert.equal(typeof got.value.ELECTRIC_SECRET, "string");
+});
+
 // An app that takes mecha's images by name builds on these pins in every
 // checkout, so one that could move under it, without a release version and
 // a digest, is refused.

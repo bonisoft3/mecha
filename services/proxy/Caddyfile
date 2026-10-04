@@ -31,6 +31,21 @@
 				transport http {
 					read_timeout 300s
 				}
+				# Electric answers a query Postgres failed with Postgres's error
+				# text, which can quote a value of a row the token does not reach
+				# (services/auth/main.ts). The status and the headers reach the
+				# client, the text does not: a 503's Retry-After is how Electric
+				# paces the retries of a client that reached it while it was still
+				# starting. A copied header the reply sets itself would be sent
+				# twice.
+				@fault status 5xx
+				handle_response @fault {
+					copy_response_headers {
+						exclude Content-Type Content-Length Content-Encoding Server
+					}
+					header Content-Type application/json
+					respond `{"message":"electric failed"}` {rp.status_code}
+				}
 			}
 		}
 	}

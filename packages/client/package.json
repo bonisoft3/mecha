@@ -27,14 +27,14 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@electric-sql/client": "^1.5.27",
+    "@electric-sql/client": "1.5.27",
     "@mecha/collections": "workspace:*",
     "@tanstack/db": "0.8.0",
     "@tanstack/electric-db-collection": "0.4.0",
     "@tanstack/offline-transactions": "1.0.46"
   },
   "devDependencies": {
-    "typescript": "^5.8.0",
-    "vitest": "^4.1.4"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }

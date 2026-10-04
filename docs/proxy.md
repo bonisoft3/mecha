@@ -38,6 +38,50 @@ outside one, Caddy sorts `uri` ahead of `forward_auth`, and the gate would
 refuse the secret the proxy had just added. mecha's own Caddyfile carries the
 gate, and its smoke drives a shape through it.
 
+The gate compares what decides reach and admits the rest by name: `table` and
+`where` must equal the token's, every parameter must appear once, the method
+must be GET, and `replica` is admitted only as `full`. It compares the query
+Electric will receive, which is Caddy's re-encoding of it through Go's
+`url.ParseQuery`: that drops a pair holding a raw `;` or a `%` that starts no
+escape, where the gate's parser keeps both, so such a query is refused, or a
+`where` the gate approved would never reach Electric. Electric's paging and
+streaming parameters pass, and so do a subset snapshot's `subset__where`,
+`subset__params`, `subset__order_by` and `subset__limit`, which a collection
+synced on demand sends for each view's rows. A subset returns no row the
+token does not reach: Electric ANDs it onto the shape's `where` as a parsed
+expression, the token's `where` binds no `$n`, Electric's parser admits no
+subquery and no function of its own choosing, and a POST body never reaches the
+gate. Returning is not evaluating, though: Postgres orders the two predicates
+by its own costs, so a subset's runs on rows the token excludes, and an error
+it raises there (a cast of another subject's value) quotes that value back.
+So the gate holds a subset to the grammar its client compiles a view's
+predicate to, shared with [the page's cluster](browser.md) in
+`services/auth/jwt.ts`, in which no error depends on a row's value: a quoted
+column compared with a `$n` or a literal, two values compared (the
+compiler's `true = true` for a subset with no filter), a bare `TRUE` or
+`FALSE`, `"col" = ANY($n)`, `"col" IS [NOT] NULL`, under `AND`/`OR`/`NOT`.
+A column meets only a value, whose type Postgres infers from the column, so
+no cast it makes depends on a row. Where the request picks the type instead,
+the column is cast to it on every row and raises on a value beyond its range:
+two columns of different numeric types, and a typed literal
+(`"amount" = "float8" '1'` raises on a numeric beyond float8's range), so
+neither parses, nor does arithmetic, a function or a pattern. A pattern is the one the client could send that
+raises on a row's value (a LIKE pattern ending in its escape character, once
+the value matched the rest), and the store sends none: a filter by pattern is
+read from the collection, never as a view (omnishell's `routeOf`). The gate
+refuses a subset as Electric does, a 400 whose `errors.subset` names the
+parameter (a repeated `subset__*` parameter among them), which the store
+raises as the program's error rather than retry.
+Caddy answers Electric's 5xx with its status, its headers (a 503's
+`Retry-After` among them) and a fixed body, so Postgres's text reaches no
+client either way. Two alternatives were rejected. Binding the
+token's scopes into the subset needs a proxy that rewrites the query, where
+the gate only judges it. Admitting `subset__*` only for tables synced on demand
+needs the token to know a sync mode, which the auth service does not, and
+narrows nothing the grammar does not already. `tests/entrypoint.sh` holds each
+premise against Electric behind Caddy; the premises are stated beside
+`SHAPE_FREE_PARAMS` in [the auth service](../services/auth/main.ts).
+
 A consumer's Caddyfile routes `/blobs/*` to rclone-s3 as well
 ([the blob plane](capabilities.md#the-blob-plane)).
 

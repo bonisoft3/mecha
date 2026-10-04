@@ -11,7 +11,17 @@ import {
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import postgres from "postgres";
-import { shapeWhere, signJwt as sign, verifyJwt as verify } from "./jwt.ts";
+import {
+  isSubsetWhere,
+  SHAPE_FIXED_PARAMS,
+  shapeWhere,
+  signJwt as sign,
+  SUBSET_LIMIT,
+  SUBSET_ORDER,
+  SUBSET_PARAMS,
+  subsetParams,
+  verifyJwt as verify,
+} from "./jwt.ts";
 export { shapeWhere };
 
 function required(name: string): string {
@@ -235,9 +245,34 @@ async function shapeToken(req: Request): Promise<Response> {
 
 // The parameters a shape request may carry besides the two the token names:
 // Electric's paging and streaming, none of which widens what a row predicate
-// admits. Anything else is refused, `columns`, `replica`, `params` and the
-// secret among them: a parameter this list does not know has a reach it does
-// not know either.
+// admits, and a subset snapshot's, which only narrows it. Anything else is
+// refused, `columns`, `params` and the secret among them: a parameter this
+// list does not know has a reach it does not know either.
+//
+// A subset returns no row the token does not reach, on these premises, each
+// held by tests/entrypoint.sh against Electric itself:
+// - Electric ANDs `subset__where` onto the shape's `where` as two parsed
+//   expressions, never as text, so a subset cannot close the shape's
+//   parenthesis and OR around it.
+// - The shape's `where` is the token's, compared by equality below, and the
+//   mint writes it as a literal with no `$n` a subset's `subset__params` could
+//   bind into.
+// - Electric's where parser admits its own operators and functions only, and
+//   no subquery while no ELECTRIC_FEATURE_FLAGS enables one, so a subset
+//   cannot read another table, call pg_sleep or reach a function Postgres
+//   would run as Electric's BYPASSRLS role.
+// - The verify is GET-only, so a subset sent as a POST body never passes.
+// Returning is not evaluating: Postgres orders the two predicates by its own
+// costs, so a subset's runs on rows the token's excludes too, and an error it
+// raises there comes back with the row's value in its text. Electric's parser
+// admits casts, and a LIKE whose pattern raises once a row's value matches it
+// up to a trailing escape, so the gate holds a subset to the grammar its
+// client compiles to (jwt.ts), in which no error depends on a row's value, and
+// refuses the rest as Electric refuses a subset.
+// The `*_expr` and `subset__offset` variants are left out: the client never
+// sends them (electric-db-collection 0.4.0 compiles the string form and pages
+// by cursor), and an admitted parameter nothing exercises is reach nobody
+// tests.
 const SHAPE_FREE_PARAMS = new Set([
   "offset",
   "handle",
@@ -249,6 +284,33 @@ const SHAPE_FREE_PARAMS = new Set([
   "log",
   "cache-buster",
 ]);
+
+/** A raw query's values by name, each pair decoded strictly, or null where a
+ * pair holds a `;` or a `%` that is no escape of UTF-8. */
+function strictQuery(query: string): Map<string, string[]> | null {
+  if (query.includes(";")) return null;
+  const params = new Map<string, string[]>();
+  for (const pair of query.split("&")) {
+    if (pair === "") continue;
+    const eq = pair.indexOf("=");
+    let key: string;
+    let value: string;
+    try {
+      key = decodeURIComponent((eq === -1 ? pair : pair.slice(0, eq)).replaceAll("+", " "));
+      value = eq === -1 ? "" : decodeURIComponent(pair.slice(eq + 1).replaceAll("+", " "));
+    } catch {
+      return null;
+    }
+    params.set(key, [...params.get(key) ?? [], value]);
+  }
+  return params;
+}
+
+/** A subset refused as Electric refuses one, a 400 whose `errors.subset`
+ * names the parameter: the store takes it for a predicate the program stated
+ * wrong, which no retry answers. */
+const subsetError = (param: string, message: string) =>
+  json(400, { message: "Invalid request", errors: { subset: { [param]: [message] } } });
 
 // What Caddy asks before proxying to Electric. It answers about the request
 // Caddy actually received, not about one the client describes: the method and
@@ -269,20 +331,43 @@ async function shapeVerify(req: Request): Promise<Response> {
   // is query text here as it is to Electric.
   if (forwarded.includes("#")) return jsonError(403, "fragment in uri");
   const q = forwarded.indexOf("?");
-  const params = new URLSearchParams(q === -1 ? "" : forwarded.slice(q + 1));
+  // What passes is re-encoded by Caddy (`uri query`) through Go's
+  // url.ParseQuery, which drops a pair holding a `;` or an escape that does
+  // not decode, where URLSearchParams keeps both: a `where` compared here
+  // would never reach Electric, and Electric would serve the whole table. A
+  // query the two could read differently is refused.
+  const params = strictQuery(q === -1 ? "" : forwarded.slice(q + 1));
+  if (params === null) return jsonError(403, "query Caddy would read differently");
 
   // Electric keeps the last copy of a repeated parameter, so a parameter is
-  // compared only once it is known to have one value.
-  for (const key of new Set(params.keys())) {
-    if (params.getAll(key).length !== 1) return jsonError(403, `${key} repeated`);
-    if (key !== "table" && key !== "where" && !SHAPE_FREE_PARAMS.has(key)) {
+  // compared only once it is known to have one value. Every refusal of a
+  // subset parameter is Electric's 400 for one, which the store raises as
+  // the program's error, where it asks again after a 403.
+  for (const [key, values] of params) {
+    if (values.length !== 1) {
+      return key.startsWith("subset__") ? subsetError(key.slice("subset__".length), `${key} repeated`) : jsonError(403, `${key} repeated`);
+    }
+    if (key in SHAPE_FIXED_PARAMS) {
+      if (values[0] !== SHAPE_FIXED_PARAMS[key]) return jsonError(403, `${key} must be ${SHAPE_FIXED_PARAMS[key]}`);
+      continue;
+    }
+    if (key.startsWith("subset__") && !SUBSET_PARAMS.has(key)) return subsetError(key.slice("subset__".length), `${key} is not served`);
+    if (key !== "table" && key !== "where" && !SHAPE_FREE_PARAMS.has(key) && !SUBSET_PARAMS.has(key)) {
       return jsonError(403, `${key} is not a shape parameter`);
     }
   }
+  const get = (key: string) => params.get(key)?.[0] ?? null;
   // A missing parameter is not a matching one. `??` would let an absent `where`
   // read as authorized against a claim that named a predicate.
-  if (params.get("table") !== claims.table) return jsonError(403, "table not authorized");
-  if (params.get("where") !== claims.where) return jsonError(403, "where not authorized");
+  if (get("table") !== claims.table) return jsonError(403, "table not authorized");
+  if (get("where") !== claims.where) return jsonError(403, "where not authorized");
+  if (subsetParams(get("subset__params")) === undefined) return subsetError("params", "subset__params is not an object of positions to strings");
+  const subsetWhere = get("subset__where");
+  if (subsetWhere !== null && !isSubsetWhere(subsetWhere)) return subsetError("where", "subset__where is not a predicate a subset may state");
+  const subsetOrder = get("subset__order_by");
+  if (subsetOrder !== null && !SUBSET_ORDER.test(subsetOrder)) return subsetError("order_by", "subset__order_by is not a list of columns");
+  const subsetLimit = get("subset__limit");
+  if (subsetLimit !== null && !SUBSET_LIMIT.test(subsetLimit)) return subsetError("limit", "subset__limit is not a count");
   return json(200, { ok: true });
 }
 

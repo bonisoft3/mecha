@@ -2,6 +2,7 @@
 // environment main.ts reads as the dev cluster sets it (cluster.cue). app_user is owned elsewhere (see main.ts); tests
 // create a minimal stand-in before running the service's own migration
 // against it.
+import { fileURLToPath } from "node:url";
 import {
   assert,
   assertEquals,
@@ -833,7 +834,7 @@ Deno.test("the dev door admits only the localhost relying party, at startup", as
   assertEquals(admittedOrigin("app.example", "https://app.example"), "https://app.example");
   assertThrows(() => admittedOrigin("app.example", "https://localhost:*"), Error, "WEBAUTHN_ORIGIN");
   const { success, stderr } = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", "--frozen", new URL("./main.ts", import.meta.url).pathname],
+    args: ["run", "-A", "--frozen", fileURLToPath(new URL("./main.ts", import.meta.url))],
     env: { WEBAUTHN_RP_ID: "app.example", WEBAUTHN_ORIGIN: "https://localhost:*" },
     stdout: "null",
     stderr: "piped",
@@ -850,7 +851,7 @@ Deno.test("an origin off the relying party's domain is refused at startup", asyn
   assertThrows(() => admittedOrigin("localhost", "https://app.example"), Error, "is not on WEBAUTHN_RP_ID");
   assertThrows(() => admittedOrigin("example.com", "https://badexample.com"), Error, "is not on WEBAUTHN_RP_ID");
   const { success, stderr } = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", "--frozen", new URL("./main.ts", import.meta.url).pathname],
+    args: ["run", "-A", "--frozen", fileURLToPath(new URL("./main.ts", import.meta.url))],
     env: { WEBAUTHN_RP_ID: "localhost", WEBAUTHN_ORIGIN: "https://app.example" },
     stdout: "null",
     stderr: "piped",
@@ -869,7 +870,7 @@ Deno.test("an origin no ceremony can have is refused at startup", async () => {
   }
   assertThrows(() => admittedOrigin("app.example", "http://app.example"), Error, "is not https");
   const { success, stderr } = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", "--frozen", new URL("./main.ts", import.meta.url).pathname],
+    args: ["run", "-A", "--frozen", fileURLToPath(new URL("./main.ts", import.meta.url))],
     env: { WEBAUTHN_RP_ID: "app.example", WEBAUTHN_ORIGIN: "https://app.example/" },
     stdout: "null",
     stderr: "piped",

@@ -63,6 +63,7 @@
 // {name, file, every, to, wasm}, wasm being the module files it ships);
 // SERVICE_JWT where the cluster has auth.
 
+import { fileURLToPath } from "node:url";
 import {
   arrayFromArrayValue,
   arrayFromListValue,
@@ -88,7 +89,7 @@ const DELETES = 200;
 
 /** Where the image installed the lake's extensions (install.ts); a running
  * service reaches no extension host. */
-export const EXTENSIONS = new URL("./extensions", import.meta.url).pathname;
+export const EXTENSIONS = fileURLToPath(new URL("./extensions", import.meta.url));
 
 export type Row = Record<string, unknown>;
 export type Out = Record<string, Row[]>;

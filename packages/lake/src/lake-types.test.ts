@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import * as duckdb from "@duckdb/duckdb-wasm/blocking"
 import { typedSql } from "./lake-types.js"
@@ -52,7 +53,7 @@ describe("typed lake portable types", () => {
   })
 
   it("projects actual Arrow bigint and decimal values before JavaScript loses them", async () => {
-    const wasm = new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url).pathname
+    const wasm = fileURLToPath(new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url))
     const db = await duckdb.createDuckDB({ mvp: { mainModule: wasm, mainWorker: "" } }, new duckdb.ConsoleLogger(), duckdb.NODE_RUNTIME)
     await db.instantiate(() => {})
     db.open({ path: ":memory:" })
@@ -71,7 +72,7 @@ describe("typed lake portable types", () => {
   })
 
   it("converts actual DuckDB intervals from integer microseconds", async () => {
-    const wasm = new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url).pathname
+    const wasm = fileURLToPath(new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url))
     const db = await duckdb.createDuckDB({ mvp: { mainModule: wasm, mainWorker: "" } }, new duckdb.ConsoleLogger(), duckdb.NODE_RUNTIME)
     await db.instantiate(() => {})
     db.open({ path: ":memory:" })
@@ -96,7 +97,7 @@ describe("typed lake portable types", () => {
   // native type instead of VARCHAR. Arrow carries each of those without loss,
   // and a date is projected to its day.
   it("reads native base-typed columns in their canonical JSON kind", async () => {
-    const wasm = new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url).pathname
+    const wasm = fileURLToPath(new URL("../../../../../node_modules/@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm", import.meta.url))
     const db = await duckdb.createDuckDB({ mvp: { mainModule: wasm, mainWorker: "" } }, new duckdb.ConsoleLogger(), duckdb.NODE_RUNTIME)
     await db.instantiate(() => {})
     db.open({ path: ":memory:" })

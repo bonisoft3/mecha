@@ -1,5 +1,6 @@
 // pronto's lint of a computation, as it runs admit.ts.
 
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 
 const CONTRACT = `export const reads = ["game"]; export const queries = { games: "SELECT 1" };
@@ -13,8 +14,8 @@ async function lint(...modules: string[]) {
       return `${dir}/m${i}.js`;
     }));
     const { code, stderr } = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "--config", new URL("deno.json", import.meta.url).pathname, "--frozen", "--unstable-worker-options",
-        "--allow-read", "--allow-env", new URL("admit.ts", import.meta.url).pathname, ...files],
+      args: ["run", "--config", fileURLToPath(new URL("deno.json", import.meta.url)), "--frozen", "--unstable-worker-options",
+        "--allow-read", "--allow-env", fileURLToPath(new URL("admit.ts", import.meta.url)), ...files],
       env: { NO_COLOR: "1" },
       stdout: "null",
     }).output();

@@ -19,7 +19,7 @@
 package pgroll
 
 // The pgroll this grammar was taken from. pgroll_test.ts holds it against the
-// pinned image (bayt.cue, `migrate-image`): a bump without a regrab would leave
+// pinned image (bayt.cue, `_pgroll`): a bump without a regrab would leave
 // clusters given migrations against operations the tool no longer has, and the
 // first sign of it would be a migration that vets here and is refused at the
 // database.

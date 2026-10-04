@@ -6,8 +6,6 @@ include:
   required: false
 - path: ./compose.database-image.yaml
   required: false
-- path: ./compose.migrate-image.yaml
-  required: false
 - path: ./compose.mesh-image.yaml
   required: false
 - path: ./compose.conduit-image.yaml
@@ -19,8 +17,6 @@ include:
 - path: ./compose.compute-image.yaml
   required: false
 - path: ./compose.clock-image.yaml
-  required: false
-- path: ./compose.rclone-s3-image.yaml
   required: false
 - path: ./compose.redpanda.yaml
   required: false

@@ -4,7 +4,7 @@
     "preamble": [],
     "preambleCopyContexts": [],
     "from": {
-      "name": "denoland/deno:alpine-2.3.7@sha256:bec860a253508d9813bb622be2359fd7bb3f72ff9a85ed6f8ccd46ab8522bcf6"
+      "name": "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
     },
     "workdir": "/app",
     "copy": [

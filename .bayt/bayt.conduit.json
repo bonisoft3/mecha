@@ -167,8 +167,7 @@
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
         "libraries/mecha/.bayt/compose.redis.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml",
-        "libraries/mecha/.bayt/compose.migrate-image.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml"
       ]
     },
     "outs": {
@@ -204,8 +203,7 @@
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
         "libraries/mecha/.bayt/compose.redis.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml",
-        "libraries/mecha/.bayt/compose.migrate-image.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml"
       ]
     },
     "srcs": {
@@ -248,8 +246,7 @@
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
         "libraries/mecha/.bayt/compose.redis.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml",
-        "libraries/mecha/.bayt/compose.migrate-image.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml"
       ]
     }
   },
@@ -283,8 +280,7 @@
     "libraries/mecha/.bayt/compose.mesh-image.yaml",
     "libraries/mecha/.bayt/compose.caddy.yaml",
     "libraries/mecha/.bayt/compose.redis.yaml",
-    "libraries/mecha/.bayt/compose.migrate.yaml",
-    "libraries/mecha/.bayt/compose.migrate-image.yaml"
+    "libraries/mecha/.bayt/compose.migrate.yaml"
   ],
   "chainedDeps": [
     {

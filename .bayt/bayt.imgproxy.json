@@ -108,8 +108,7 @@
       },
       "upClosure": [
         "libraries/mecha/.bayt/compose.imgproxy.yaml",
-        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
-        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml"
       ]
     },
     "outs": {
@@ -138,8 +137,7 @@
       },
       "upClosure": [
         "libraries/mecha/.bayt/compose.imgproxy.yaml",
-        "libraries/mecha/.bayt/compose.rclone-s3.yaml",
-        "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+        "libraries/mecha/.bayt/compose.rclone-s3.yaml"
       ]
     }
   },
@@ -157,8 +155,7 @@
   "transitiveCrossDeps": [],
   "upClosure": [
     "libraries/mecha/.bayt/compose.imgproxy.yaml",
-    "libraries/mecha/.bayt/compose.rclone-s3.yaml",
-    "libraries/mecha/.bayt/compose.rclone-s3-image.yaml"
+    "libraries/mecha/.bayt/compose.rclone-s3.yaml"
   ],
   "chainedDeps": [
     {

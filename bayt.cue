@@ -32,11 +32,10 @@ _postgres: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1b
 // The one pgroll in the repository: every migration a cluster is given runs
 // through it, and pgroll/pgroll_test.ts holds the grammar to its tag.
 _pgroll: "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
-_deno:    "denoland/deno:alpine-2.3.7@sha256:bec860a253508d9813bb622be2359fd7bb3f72ff9a85ed6f8ccd46ab8522bcf6"
 _connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
-// The compute service's Deno is the repository's (mise.toml), on glibc for
-// DuckDB's native binding.
-_denoCompute: "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
+// The services' Deno is the repository's (mise.toml), on glibc, which the
+// compute service's DuckDB binding needs; one base for all three.
+_deno: "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
 _busybox: "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"
 _curl:    "tarampampam/curl@sha256:617b3306349beaacb7ad82bddda8d6876a40c3bad06d7a28981504d230802d7e"
 
@@ -59,14 +58,12 @@ _stack: cluster.#Cluster & {
 		app: "mecha"
 		images: {
 			database:   {ref: ":database-image"}
-			migrate:    {ref: ":migrate-image"}
 			mesh:       {ref: ":mesh-image"}
 			conduit:    {ref: ":conduit-image"}
 			auth:       {ref: ":auth-image"}
 			ticker:     {ref: ":ticker-image"}
 			clock:      {ref: ":clock-image"}
 			compute:    {ref: ":compute-image"}
-			"rclone-s3": {ref: ":rclone-s3-image"}
 		}
 		// A plain-HTTP door: mecha's proxy config serves no TLS, and the
 		// smoke suites and the benchmark address localhost:8080.
@@ -136,7 +133,7 @@ _mecha: bayt.#project & _where & {
 		// ---- The images -------------------------------------------------
 
 		"database-image": _image & {
-			srcs: globs: ["services/database/rls/rls.sql", "services/ticker/schedule.sql"]
+			srcs: globs: ["services/database/rls/rls.sql", "services/ticker/schedule.sql", "services/migrate/migrate.sh"]
 			dockerfile: {
 				from: name: _postgres
 				// plv8 hosts a Jessie validation inside the write's transaction.
@@ -162,25 +159,17 @@ _mecha: bayt.#project & _where & {
 				// tables above it. The ticker's table is staged outside the
 				// initdb directory, for a cluster that declares a schedule to
 				// place.
+				// The migration runner runs this image too, with its own
+				// entrypoint: pgroll, and the psql its ledger checks and the
+				// schema reload go through.
 				copy: [
 					{srcs: ["services/database/rls/rls.sql"], dst: "\(cluster.#InitdbDir)/\(cluster.#TenancyMigration)"},
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
-				]
-				cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
-					"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
-			}
-		}
-		// The migration runner: pgroll, and the psql its ledger checks and the
-		// schema reload go through, on the database's own base.
-		"migrate-image": _image & {
-			srcs: globs: ["services/migrate/migrate.sh"]
-			dockerfile: {
-				from: name: _postgres
-				copy: [
 					{from: {name: _pgroll}, srcs: ["/usr/bin/pgroll"], dst: "/usr/local/bin/pgroll"},
 					{srcs: ["services/migrate/migrate.sh"], dst: "/migrate.sh", chmod: "755"},
 				]
-				entrypoint: ["/migrate.sh"]
+				cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
+					"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
 			}
 		}
 		"mesh-image": _image & {
@@ -236,7 +225,7 @@ _mecha: bayt.#project & _where & {
 			let _files = ["deno.json", "deno.lock", "main.ts", "workers.ts", "cage.ts", "language.ts", "job.ts", "wasi.ts", "install.ts"]
 			srcs: globs: [for f in _files {"services/compute/\(f)"}]
 			dockerfile: {
-				from: name: _denoCompute
+				from: name: _deno
 				workdir: "/app"
 				copy: [{srcs: [for f in _files {"services/compute/\(f)"}], dst: "/app/"}]
 				epilogue: [
@@ -252,20 +241,6 @@ _mecha: bayt.#project & _where & {
 				from: name: _connect
 				copy: [{srcs: ["services/clock/clock.yaml"], dst: "/clock.yaml"}]
 				cmd: ["run", "/clock.yaml"]
-			}
-		}
-		"rclone-s3-image": _image & {
-			srcs: globs: ["services/rclone-s3/entrypoint.sh"]
-			dockerfile: {
-				from: name: "rclone/rclone:1.71.0@sha256:fd635aecd9667ee3c3bf920d14118090d4f2a83a080c1fa77e0bafbd4587ca87"
-				preamble: [
-					"USER root",
-					"RUN mkdir -p /data && chown -R 1000:1000 /data",
-				]
-				copy: [{srcs: ["services/rclone-s3/entrypoint.sh"], dst: "/entrypoint.sh", chmod: "755"}]
-				entrypoint: ["/entrypoint.sh"]
-				cmd: ["serve", "s3", "--addr=0.0.0.0:3900", "--vfs-cache-mode=off", "/data"]
-				epilogue: ["USER 1000"]
 			}
 		}
 

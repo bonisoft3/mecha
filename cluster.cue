@@ -286,7 +286,9 @@ _devElectricSecret: "dev-electric-secret"
 				if len(X.state.pgroll) > 0 {
 					migrate: X._image & {
 						dockerfile: {
-							from: (_from & {in: X.meta.images.migrate}).out
+							// The database's own image, run as the runner.
+							from: (_from & {in: X.meta.images.database}).out
+							entrypoint: ["/migrate.sh"]
 							cmd: [#PgRollDir, grammar.#Baseline]
 							// Each migration is written into the image from the
 							// value state.pgroll holds, so what runs is what was
@@ -525,8 +527,12 @@ _devElectricSecret: "dev-electric-secret"
 				}
 			}
 			if X.capabilities.blobs {
+				// rclone's own image: its entrypoint makes the bucket and serves it.
 				"rclone-s3": X._image & {
-					dockerfile: from: (_from & {in: X.meta.images."rclone-s3"}).out
+					dockerfile: {
+						from: name: "rclone/rclone:1.71.0@sha256:fd635aecd9667ee3c3bf920d14118090d4f2a83a080c1fa77e0bafbd4587ca87"
+						entrypoint: ["sh", "-c", "mkdir -p \"/data/$RCLONE_LOCAL_BUCKET\" && exec rclone serve s3 --addr=0.0.0.0:3900 --vfs-cache-mode=off /data"]
+					}
 					compose: {
 						environment: RCLONE_LOCAL_BUCKET: "mecha-objects"
 						healthcheck: {
@@ -795,15 +801,13 @@ _devElectricSecret: "dev-electric-secret"
 		// same-project refs in mecha's own stack, cross-project refs from an
 		// app in the monorepo, pinned names where the images are pulled.
 		images: {
-			database:   #From
-			migrate:    #From
-			mesh:       #From
-			conduit:    #From
-			auth:       #From
-			ticker:     #From
-			clock:      #From
-			compute:    #From
-			"rclone-s3": #From
+			database: #From
+			mesh:     #From
+			conduit:  #From
+			auth:     #From
+			ticker:   #From
+			clock:    #From
+			compute:  #From
 		}
 		// The proxy's config, relative to the app dir.
 		caddyfile: *"docker/Caddyfile" | string

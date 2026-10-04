@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        service: [database, migrate, mesh, conduit, auth, ticker, clock, compute, rclone-s3]
+        service: [database, mesh, conduit, auth, ticker, clock, compute]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

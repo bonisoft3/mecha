@@ -155,3 +155,35 @@ Deno.test("the release builds exactly the published images", async () => {
   assert.ok(matrix, "cd.yml lists its services as one inline matrix");
   assert.deepEqual(matrix[1].slice(1, -1).split(",").map((s) => s.trim()), images);
 });
+
+// The migration runner is the database image run as a runner: pgroll and the
+// script ship there, so one image serves both and one pin names it.
+Deno.test("the migrate runner takes the database image", async () => {
+  const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: {migrations: [], pipelines: [], schedules: [], pgroll: {"01_a": {operations: []}}}}`;
+  const out = await new Deno.Command("cue", {
+    args: ["export", ".:cluster", "-e", `{from: (${cluster}).surface.targets.migrate.dockerfile.from, entrypoint: (${cluster}).surface.targets.migrate.dockerfile.entrypoint}`],
+    cwd: MECHA, stdout: "piped", stderr: "piped",
+  }).output();
+  assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(out.stdout)), { from: { name: "img" }, entrypoint: ["/migrate.sh"] });
+});
+
+// The blob store is rclone's own image: the bucket made and the server
+// started by its entrypoint, no image of mecha's.
+Deno.test("the blob store runs rclone's own image", async () => {
+  const got = await exported({}, "surface.targets[\"rclone-s3\"].dockerfile", { blobs: true });
+  assert.equal(got.ok, true, got.stderr);
+  assert.match(got.value.from.name, /^rclone\/rclone:[0-9.]+@sha256:[0-9a-f]{64}$/);
+  assert.match(got.value.entrypoint.join(" "), /mkdir -p .*RCLONE_LOCAL_BUCKET.* && exec rclone serve s3/);
+});
+
+Deno.test("a cluster takes the published images and no others", async () => {
+  const out = await new Deno.Command("cue", {
+    args: ["export", ".:cluster", "-e", "{images: [for k, _ in #Cluster.meta.images {k}], published: #Images}"],
+    cwd: MECHA, stdout: "piped", stderr: "piped",
+  }).output();
+  assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
+  const { images, published } = JSON.parse(new TextDecoder().decode(out.stdout));
+  assert.deepEqual([...images].sort(), [...published].sort());
+  assert.deepEqual([...published].sort(), ["auth", "clock", "compute", "conduit", "database", "mesh", "ticker"]);
+});

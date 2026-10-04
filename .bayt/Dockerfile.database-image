@@ -5,13 +5,15 @@ RUN --mount=type=cache,target=/apt-store,id=/apt-store,sharing=shared --mount=ty
 ENV PGDATA=/postgresql-data
 COPY services/database/rls/rls.sql /docker-entrypoint-initdb.d/003_rls.sql
 COPY services/ticker/schedule.sql /usr/share/mecha/initdb/020_schedule.sql
-COPY --parents services/database/rls/rls.sql services/ticker/schedule.sql ./
+COPY --from=ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830 /usr/bin/pgroll /usr/local/bin/pgroll
+COPY --chmod=755 services/migrate/migrate.sh /migrate.sh
+COPY --parents services/database/rls/rls.sql services/ticker/schedule.sql services/migrate/migrate.sh ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.database-image.json ./.bayt/
 CMD ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS database-image_ctxs
 WORKDIR /monorepo/libraries/mecha
-COPY --parents services/database/rls/rls.sql services/ticker/schedule.sql ./
+COPY --parents services/database/rls/rls.sql services/ticker/schedule.sql services/migrate/migrate.sh ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
 RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi

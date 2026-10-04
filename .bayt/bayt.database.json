@@ -262,7 +262,8 @@
           "services/database/007_identity.sql",
           "tests/008_validation_smoke.sql",
           "services/database/rls/rls.sql",
-          "services/ticker/schedule.sql"
+          "services/ticker/schedule.sql",
+          "services/migrate/migrate.sh"
         ],
         "exclude": []
       },
@@ -280,7 +281,8 @@
           "outs": {
             "globs": [
               "services/database/rls/rls.sql",
-              "services/ticker/schedule.sql"
+              "services/ticker/schedule.sql",
+              "services/migrate/migrate.sh"
             ],
             "exclude": []
           }

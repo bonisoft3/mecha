@@ -25,9 +25,12 @@
     "preamble": [],
     "preambleCopyContexts": [],
     "from": {
-      "ref": ":migrate-image",
-      "name": "libraries_mecha-migrate-image"
+      "ref": ":database-image",
+      "name": "libraries_mecha-database-image"
     },
+    "entrypoint": [
+      "/migrate.sh"
+    ],
     "cmd": [
       "/pgroll",
       "00_initdb"
@@ -42,7 +45,6 @@
     "copy": [],
     "healthcheck": null,
     "expose": [],
-    "entrypoint": null,
     "incremental": false
   },
   "name": "migrate",
@@ -94,9 +96,8 @@
       },
       "upClosure": [
         "libraries/mecha/.bayt/compose.migrate.yaml",
-        "libraries/mecha/.bayt/compose.migrate-image.yaml",
-        "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml"
       ]
     },
     "outs": {
@@ -125,9 +126,8 @@
       },
       "upClosure": [
         "libraries/mecha/.bayt/compose.migrate.yaml",
-        "libraries/mecha/.bayt/compose.migrate-image.yaml",
-        "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml"
       ]
     },
     "srcs": {
@@ -141,6 +141,8 @@
       },
       "outs": {
         "globs": [
+          "services/database/rls/rls.sql",
+          "services/ticker/schedule.sql",
           "services/migrate/migrate.sh"
         ],
         "exclude": []
@@ -149,16 +151,18 @@
       "visibility": "internal",
       "deps": [],
       "transitiveDeps": [
-        "migrate-image_srcs",
+        "database-image_srcs",
         "database_outs_srcs"
       ],
       "transitiveCrossDeps": [
         {
           "project": "libraries_mecha",
-          "name": "migrate-image_srcs",
+          "name": "database-image_srcs",
           "dir": "libraries/mecha",
           "outs": {
             "globs": [
+              "services/database/rls/rls.sql",
+              "services/ticker/schedule.sql",
               "services/migrate/migrate.sh"
             ],
             "exclude": []
@@ -173,36 +177,34 @@
       },
       "upClosure": [
         "libraries/mecha/.bayt/compose.migrate.yaml",
-        "libraries/mecha/.bayt/compose.migrate-image.yaml",
-        "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml"
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml"
       ]
     }
   },
   "visibility": "internal",
   "emitsSrcs": true,
   "deps": [
-    "migrate-image",
+    "database-image",
     "database_outs"
   ],
   "sameProjectDeps": [
-    "migrate-image",
+    "database-image",
     "database_outs"
   ],
   "transitiveDeps": [
-    "migrate-image",
+    "database-image",
     "database_outs"
   ],
   "transitiveCrossDeps": [],
   "upClosure": [
     "libraries/mecha/.bayt/compose.migrate.yaml",
-    "libraries/mecha/.bayt/compose.migrate-image.yaml",
-    "libraries/mecha/.bayt/compose.database.yaml",
-    "libraries/mecha/.bayt/compose.database-image.yaml"
+    "libraries/mecha/.bayt/compose.database-image.yaml",
+    "libraries/mecha/.bayt/compose.database.yaml"
   ],
   "chainedDeps": [
     {
-      "name": "migrate-image",
+      "name": "database-image",
       "project": "libraries_mecha",
       "dir": "libraries/mecha",
       "outs": {

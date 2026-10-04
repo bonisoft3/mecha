@@ -29,6 +29,29 @@
         "link": true,
         "parents": false,
         "exclude": []
+      },
+      {
+        "from": {
+          "name": "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
+        },
+        "srcs": [
+          "/usr/bin/pgroll"
+        ],
+        "dst": "/usr/local/bin/pgroll",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "services/migrate/migrate.sh"
+        ],
+        "dst": "/migrate.sh",
+        "chmod": "755",
+        "link": true,
+        "parents": false,
+        "exclude": []
       }
     ],
     "cmd": [
@@ -63,7 +86,8 @@
   "srcs": {
     "globs": [
       "services/database/rls/rls.sql",
-      "services/ticker/schedule.sql"
+      "services/ticker/schedule.sql",
+      "services/migrate/migrate.sh"
     ],
     "exclude": []
   },
@@ -150,7 +174,8 @@
       "outs": {
         "globs": [
           "services/database/rls/rls.sql",
-          "services/ticker/schedule.sql"
+          "services/ticker/schedule.sql",
+          "services/migrate/migrate.sh"
         ],
         "exclude": []
       },

@@ -21,12 +21,6 @@ services:
       service: libraries_mecha-database-image
     profiles:
     - database-image
-  migrate-image:
-    extends:
-      file: ./compose.migrate-image.yaml
-      service: libraries_mecha-migrate-image
-    profiles:
-    - migrate-image
   mesh-image:
     extends:
       file: ./compose.mesh-image.yaml
@@ -63,12 +57,6 @@ services:
       service: libraries_mecha-clock-image
     profiles:
     - clock-image
-  rclone-s3-image:
-    extends:
-      file: ./compose.rclone-s3-image.yaml
-      service: libraries_mecha-rclone-s3-image
-    profiles:
-    - rclone-s3-image
   redpanda:
     extends:
       file: ./compose.redpanda.yaml

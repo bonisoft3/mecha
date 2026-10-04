@@ -3,7 +3,7 @@ services:
   libraries_mecha-migrate:
     build:
       additional_contexts:
-        libraries_mecha-migrate-image: service:libraries_mecha-migrate-image
+        libraries_mecha-database-image: service:libraries_mecha-database-image
         libraries_mecha-database: service:libraries_mecha-database
       context: ..
       dockerfile: .bayt/Dockerfile.migrate
@@ -26,7 +26,7 @@ services:
   libraries_mecha-migrate_bayt:
     build:
       additional_contexts:
-        libraries_mecha-migrate-image_bayt: service:libraries_mecha-migrate-image_bayt
+        libraries_mecha-database-image_bayt: service:libraries_mecha-database-image_bayt
         libraries_mecha-database_bayt: service:libraries_mecha-database_bayt
       context: ..
       dockerfile: .bayt/Dockerfile.migrate
@@ -39,7 +39,7 @@ services:
   libraries_mecha-migrate_srcs:
     build:
       additional_contexts:
-        libraries_mecha-migrate-image_srcs: service:libraries_mecha-migrate-image_srcs
+        libraries_mecha-database-image_srcs: service:libraries_mecha-database-image_srcs
       context: ..
       dockerfile: .bayt/Dockerfile.migrate
       target: migrate_srcs

@@ -1,6 +1,7 @@
-# Publish this component: its CUE module to the Central Registry, and its tree
-# as a release asset a mise `github:` pin installs, which is how an app outside
-# the monorepo bundles the browser cluster this tree carries.
+# Publish this component: its CUE module to the Central Registry, its service
+# images to Docker Hub (bonitao/mecha-<svc>), and its tree as a release asset a
+# mise `github:` pin installs, which is how an app outside the monorepo bundles
+# the browser cluster this tree carries. As bayt's and sayt's mirrors do.
 #
 # GitHub reads workflows only from a repository's root .github/, so this file
 # is inert in the monorepo and active only in the mirror, where copybara moves
@@ -11,9 +12,10 @@
 # after locating the mirror commit by its GitOrigin-RevId trailer. Tagging the
 # monorepo is what releases this module; nothing publishes from a branch.
 #
-# Prerequisite, configured once per module and not by this file: a trust entry
-# on cue.dev binding this workflow to publish under the module path that
-# cue.mod/module.cue declares. Without it the OIDC login below is refused.
+# Prerequisites, configured once and not by this file: a trust entry on cue.dev
+# binding this workflow to publish under the module path that
+# cue.mod/module.cue declares, without which the OIDC login below is refused;
+# and a DOCKERHUB_TOKEN secret for bonitao, as bayt's mirror has.
 
 name: cd
 
@@ -28,7 +30,82 @@ permissions:
   id-token: write
 
 jobs:
+  # The service images an app takes by name rather than building them: one leg
+  # per image target of the generated .bayt/ Dockerfiles, with this root as the
+  # context, pushed with the version on a tag. Each prints its pin line for
+  # published.cue, committed after the release. The list is #Images there.
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        service: [database, migrate, mesh, conduit, auth, ticker, clock, compute, rclone-s3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The images run commands while they build (apt, deno cache, wget,
+      # chown), so the arm64 half runs under emulation on this amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # mirror.gcr.io: dodge Docker Hub's anonymous pull cap on buildkit pulls.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+          # Mirrored too: the runner's daemon pulls this before buildkitd exists,
+          # so the registry mirror cannot cover it.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f
+
+      - name: Login to Docker Hub
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/login-action@v3
+        with:
+          username: bonitao
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: bonitao/mecha-${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}}
+
+      # As bayt's runtime image: no provenance, SBOM or labels, and clamped
+      # timestamps, so build metadata never moves the digest a pin names.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        with:
+          context: .
+          file: .bayt/Dockerfile.${{ matrix.service }}-image
+          target: ${{ matrix.service }}-image
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          provenance: false
+          sbom: false
+          outputs: ${{ startsWith(github.ref, 'refs/tags/') && 'type=registry,rewrite-timestamp=true' || 'type=cacheonly' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Pin
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          SERVICE: ${{ matrix.service }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "\"${SERVICE}\": \"bonitao/mecha-${SERVICE}:${VERSION}@${DIGEST}\"" >> "$GITHUB_STEP_SUMMARY"
+
   publish:
+    needs: images
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

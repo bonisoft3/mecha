@@ -60,7 +60,7 @@ class FakeSinks {
   }
 }
 
-type Fake = Runnable & { runs: number };
+type Fake = Runnable & { runs: number; onComplete?: string };
 
 function computation(name: string, every: number, reads = ["game"], to = ["sink"]): Fake {
   const c: Fake = {
@@ -120,6 +120,9 @@ type Request = [string, string, unknown];
 /** A PostgREST stand-in recording what is sent to it. */
 class Crud {
   requests: Request[] = [];
+  authorizations: (string | null)[] = [];
+  preferences: (string | null)[] = [];
+  failures = new Set<string>();
   tables = new Map<string, Set<string>>();
   server: Deno.HttpServer<Deno.NetAddr>;
   url: string;
@@ -131,6 +134,14 @@ class Crud {
       const text = await req.text();
       const body = text === "" ? null : JSON.parse(text);
       this.requests.push([req.method, path, body]);
+      this.authorizations.push(req.headers.get("authorization"));
+      this.preferences.push(req.headers.get("prefer"));
+      if (this.failures.has(path)) {
+        return new Response("injected failure", { status: 500 });
+      }
+      if (url.pathname.startsWith("/rpc/")) {
+        return new Response(null, { status: 204 });
+      }
       const name = url.pathname.slice(1);
       if (!this.tables.has(name)) this.tables.set(name, new Set());
       const table = this.tables.get(name)!;
@@ -222,6 +233,108 @@ for (
     assertEquals(database.checked, []);
   });
 }
+
+Deno.test("completion RPC waits for successful sink writes and a failed hook remains retryable", async () => {
+  await using crud = new Crud();
+  const lake = new FakeLake();
+  const c = computation("history", 30, ["game"], ["sink", "other"]);
+  c.onComplete = "capture_team_odds_history";
+  c.run = async () => ({
+    sink: [{ id: "today", value: 7 }],
+    other: [{ id: "today", value: 8 }],
+  });
+  const service = new Service(
+    [c],
+    lake,
+    new Sinks(new FakeDatabase(crud), crud.url, "service-jwt"),
+  );
+
+  const calculate = c.run;
+  c.run = async () => {
+    throw new Error("calculation failed");
+  };
+  await assertRejects(() => service.step(c), Error, "calculation failed");
+  assertEquals(c.ran, null);
+  assertEquals(
+    crud.take(),
+    [],
+    "a failed calculation never reaches the completion RPC",
+  );
+  c.run = calculate;
+
+  crud.failures.add("/other?on_conflict=id");
+  await assertRejects(() => service.step(c), Error, "injected failure");
+  assertEquals(c.ran, null, "failed sink write does not mark the input as run");
+  assertEquals(crud.take().map(([method, path]) => [method, path]), [
+    ["POST", "/sink?on_conflict=id"],
+    ["POST", "/other?on_conflict=id"],
+  ]);
+
+  crud.failures.delete("/other?on_conflict=id");
+  crud.failures.add("/rpc/capture_team_odds_history");
+  await assertRejects(() => service.step(c), Error, "injected failure");
+  assertEquals(c.ran, null, "failed completion RPC leaves the run retryable");
+  assertEquals(crud.take().map(([method, path]) => [method, path]), [
+    ["POST", "/sink?on_conflict=id"],
+    ["POST", "/other?on_conflict=id"],
+    ["POST", "/rpc/capture_team_odds_history"],
+  ]);
+  assertEquals(crud.authorizations, Array(5).fill("Bearer service-jwt"));
+  assertEquals(crud.preferences, [
+    "resolution=merge-duplicates,return=minimal",
+    "resolution=merge-duplicates,return=minimal",
+    "resolution=merge-duplicates,return=minimal",
+    "resolution=merge-duplicates,return=minimal",
+    "return=minimal",
+  ]);
+
+  crud.failures.delete("/rpc/capture_team_odds_history");
+  await service.step(c);
+  assertEquals(
+    crud.take(),
+    [["POST", "/rpc/capture_team_odds_history", {}]],
+    "retry repeats the idempotent hook without rewriting committed sink rows",
+  );
+  assertEquals(c.ran, JSON.stringify([0]));
+  await service.step(c);
+  assertEquals(
+    crud.take(),
+    [],
+    "unchanged inputs do not invoke the completion hook",
+  );
+});
+
+Deno.test("onComplete accepts only one lowercase SQL/PostgREST identifier", async () => {
+  await assertRejects(
+    () =>
+      Computation.load({
+        name: "bad",
+        file: "unused.js",
+        every: 1,
+        to: ["sink"],
+        wasm: [],
+        onComplete: "rpc/capture",
+      }, undefined as unknown as Runner),
+    Error,
+    "no SQL/PostgREST RPC identifier",
+  );
+});
+
+Deno.test("onComplete does not exceed PostgreSQL's identifier limit", async () => {
+  await assertRejects(
+    () =>
+      Computation.load({
+        name: "bad",
+        file: "unused.js",
+        every: 1,
+        to: ["sink"],
+        wasm: [],
+        onComplete: `capture_${"x".repeat(57)}`,
+      }, undefined as unknown as Runner),
+    Error,
+    "no SQL/PostgREST RPC identifier",
+  );
+});
 
 // Postgres.
 

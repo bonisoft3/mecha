@@ -86,6 +86,7 @@ import { admit, Cage, IDENTIFIER, type Job, Runner, strictJson } from "./workers
 const BATCH = 1000;
 // Ids per DELETE: quoted uuids keep its URL near 8 KiB.
 const DELETES = 200;
+const RPC_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
 
 /** Where the image installed the lake's extensions (install.ts); a running
  * service reaches no extension host. */
@@ -145,7 +146,7 @@ const BY_TYPE: Partial<Record<DuckDBTypeId, DuckDBValueConverter<unknown>>> = {
 };
 const PLAIN = createDuckDBValueConverter(BY_TYPE as Record<DuckDBTypeId, DuckDBValueConverter<unknown> | undefined>);
 
-export type Spec = { name: string; file: string; every: number; to: string[]; wasm: string[] };
+export type Spec = { name: string; file: string; every: number; to: string[]; wasm: string[]; onComplete?: string };
 
 /** What the service needs of a computation; tests stand in their own. */
 export interface Runnable {
@@ -189,9 +190,15 @@ export class Computation implements Runnable {
     private wasm: Set<string>,
     private seed: number,
     private runner: Runner,
+    readonly onComplete: string | undefined,
   ) {}
 
   static async load(spec: Spec, runner: Runner): Promise<Computation> {
+    if (spec.onComplete !== undefined && !RPC_IDENTIFIER.test(spec.onComplete)) {
+      throw new Error(
+        `computation ${spec.name}: onComplete is no SQL/PostgREST RPC identifier: ${spec.onComplete}`,
+      );
+    }
     const { compiled, reads, queries } = await admit(spec.file);
     if (!spec.to.every((t) => IDENTIFIER.test(t))) {
       throw new Error(`computation ${spec.name}: a sink's table name is no identifier: ${spec.to}`);
@@ -207,6 +214,7 @@ export class Computation implements Runnable {
       new Set(spec.wasm.map(stem)),
       await seedOf(spec.name),
       runner,
+      spec.onComplete,
     );
   }
 
@@ -494,7 +502,10 @@ export class Sinks {
     return plan;
   }
 
-  async apply(c: { name: string; to: string[] }, out: unknown) {
+  async apply(c: { name: string; to: string[]; onComplete?: string }, out: unknown) {
+    if (c.onComplete !== undefined && !RPC_IDENTIFIER.test(c.onComplete)) {
+      throw new Error(`computation ${c.name}: onComplete is no SQL/PostgREST RPC identifier: ${c.onComplete}`);
+    }
     const plan = await this.plan(c, out);
     await this.database.check(Object.fromEntries(Object.entries(plan).map(([t, [rows, deletes]]) => [t, [rows, deletes]])));
     for (const [table, [rows]] of Object.entries(plan)) {
@@ -507,13 +518,16 @@ export class Sinks {
       }
     }
     for (const [table, [, , now]] of Object.entries(plan)) this.held.set(table, now);
+    if (c.onComplete !== undefined) {
+      await this.send("POST", `rpc/${c.onComplete}`, {}, "return=minimal");
+    }
     return Object.fromEntries(
       Object.entries(plan).map(([t, [rows, deletes, now]]) => [t, { rows: now.size, upserted: rows.length, deleted: deletes.length }]),
     );
   }
 
-  async send(method: string, path: string, body?: unknown) {
-    const headers: Record<string, string> = { ...this.headers, Prefer: "resolution=merge-duplicates,return=minimal" };
+  async send(method: string, path: string, body?: unknown, prefer = "resolution=merge-duplicates,return=minimal") {
+    const headers: Record<string, string> = { ...this.headers, Prefer: prefer };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const res = await fetch(`${this.crudUrl}/${path}`, {
       method,

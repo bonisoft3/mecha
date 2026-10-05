@@ -187,8 +187,16 @@ _devElectricSecret: "dev-electric-secret"
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 	let jwtSecret = "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
+	// The scheme and host a reader reaches the door at, stated by the
+	// deployment and never read off a request: the door answers any Host. Its
+	// default is the door's own name for a person's browser (the Caddyfile's).
+	let origin = "${ORIGIN:-https://localhost:8443}"
 
 	surface: {
+		// What the app's absolute addresses are spelled against
+		// (docs/proxy.md, "The origin").
+		"origin": origin
+
 		// How a client on the cluster's network reaches its database, and the
 		// secret crud and auth verify a session token under.
 		if X.capabilities.server {
@@ -415,12 +423,26 @@ _devElectricSecret: "dev-electric-secret"
 					// The Caddyfile substitutes this into the electric route, which is
 					// the only place the secret is added. Same default as the electric
 					// service reads, and both are overridden together or neither.
-					environment: ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
+					environment: {
+						ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
+						ORIGIN:          origin
+					}
 
+					// Each served file's validator, `<file>.etag`, written as the door
+					// starts (docs/proxy.md) under every root the Caddyfile names, read
+					// off the config caddy adapts it to: whoever put a file in the
+					// image, the door that serves it reads its sidecar. Every name
+					// reaches sh as an argument, never as script, and the digest is
+					// read off stdin, which sha256sum spells the same whatever the
+					// name; `$$` is how compose is told a `$` is the shell's.
+					let validators = #"set -e -o pipefail; roots=$$(caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\n' | sed -n 's/^.*"root":"\([^"]*\)".*$$/\1/p' | sort -u); if [ -n "$$roots" ]; then find $$roots -type f ! -name '*.etag' -exec sh -c 'set -e; for f do h=$$(sha256sum < "$$f"); printf \"%s\" "$${h%% *}" > "$$f.etag"; done' sh {} +; fi; "#
+					// An ORIGIN that is no origin stops the door as it starts: a
+					// template writes it into markup as it stands.
+					let admitted = #"case "$${ORIGIN#http://}" in "$$ORIGIN") h=$${ORIGIN#https://};; *) h=$${ORIGIN#http://};; esac; case "$$h" in "$$ORIGIN"|""|*[!A-Za-z0-9.:-]*) echo "ORIGIN '$$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example" >&2; exit 1;; esac; "#
 					// The Caddyfile's door serves CADDY_TLS: the baked pair when the
 					// host issued one, Caddy's own CA otherwise, so the stack comes up
 					// before any mkcert step. The rest is the image's own command.
-					command: ["sh", "-c", "if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+					command: ["sh", "-c", "\(admitted)\(validators)if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
 					// Watch paths are from .bayt/ too, hence the ../ on each.
 					develop: watch: list.Concat([
 						[{action: "sync+restart", path: "../\(X.meta.caddyfile)", target: "/etc/caddy/Caddyfile"}],
@@ -755,9 +777,10 @@ _devElectricSecret: "dev-electric-secret"
 			// 6 KB on one line, so it goes to the null device, which nu spells
 			// per host and offers no constant for: `| ignore` would drop the
 			// exit status along with it, and the status is the verdict. The
-			// secret placeholder has to hold something for the line to parse;
-			// compose sets it at runtime, and this is not runtime.
-			cmds: ["with-env {ELECTRIC_SECRET: lint} { mise exec -- caddy adapt --config \(X.meta.caddyfile) --adapter caddyfile out> (if $nu.os-info.name == \"windows\" { \"NUL\" } else { \"/dev/null\" }) }"]
+			// secret and origin placeholders have to hold something for their
+			// lines to parse; compose sets them at runtime, and this is not
+			// runtime.
+			cmds: ["with-env {ELECTRIC_SECRET: lint, ORIGIN: lint} { mise exec -- caddy adapt --config \(X.meta.caddyfile) --adapter caddyfile out> (if $nu.os-info.name == \"windows\" { \"NUL\" } else { \"/dev/null\" }) }"]
 			note: "checks the cluster's own proxy config parses"
 		}
 		// The door is h2, h2 needs TLS, and TLS needs a certificate the

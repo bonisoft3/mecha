@@ -11,7 +11,7 @@
 
 * [Change capture and delivery](change-capture.md) - concept: How a committed row reaches the pipelines through Conduit, Dapr, the bus and rpk, what each hop retries, and what absorbs a duplicate.
 * [Streaming joins](streaming-joins.md) - concept: The stream tier — Arroyo over the change feed, writing a derived table back through CRUD — what runs, and what a join across entities needs.
-* [The proxy](proxy.md) - concept: Caddy as the cluster's one door — its routes, HTTP/2 over a locally trusted certificate, and the plain listener that serves only the healthcheck.
+* [The proxy](proxy.md) - concept: Caddy as the cluster's one door — its routes, HTTP/2 over a locally trusted certificate, the plain listener that serves only the healthcheck, and the deployment's origin it spells.
 * [Schema and its changes](schema.md) - concept: How a schema reaches the database as initdb SQL, mecha's own tables from protobuf, what notices a change, and carrying a live database forward.
 * [Tiers and clouds](deployment.md) - concept: mecha's tiers from browser to edge, the unit that holds the WAL reader and the request that wakes it, the managed service each component maps to, and what runs on a cloud as built.
 * [The browser platform](browser.md) - concept: mecha's cluster inside one browser tab — PGlite and a JavaScript stand-in for each service, one user, and the guarantees it drops.

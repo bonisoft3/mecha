@@ -1,7 +1,7 @@
 ---
 type: concept
 title: The proxy
-description: Caddy as the cluster's one door — its routes, HTTP/2 over a locally trusted certificate, and the plain listener that serves only the healthcheck.
+description: Caddy as the cluster's one door — its routes, HTTP/2 over a locally trusted certificate, the plain listener that serves only the healthcheck, and the deployment's origin it spells.
 ---
 
 # The proxy
@@ -55,7 +55,8 @@ gate. Returning is not evaluating, though: Postgres orders the two predicates
 by its own costs, so a subset's runs on rows the token excludes, and an error
 it raises there (a cast of another subject's value) quotes that value back.
 So the gate holds a subset to the grammar its client compiles a view's
-predicate to, shared with [the page's cluster](browser.md) in
+predicate to — a guard over SQL a machine wrote from the PostgREST filters an
+author writes in markup, not a language anyone writes — shared with [the page's cluster](browser.md) in
 `services/auth/jwt.ts`, in which no error depends on a row's value: a quoted
 column compared with a `$n` or a literal, two values compared (the
 compiler's `true = true` for a subset with no filter), a bare `TRUE` or
@@ -91,6 +92,26 @@ inode, so every edit would 404 until the container is recreated. `develop:
 watch` syncs and restarts instead. `caddy adapt`, not `caddy validate`, is the
 lint (`checks: caddy`): validate provisions the certificate, whose path is the
 container's.
+
+Each file is answered with its content hash as its ETag. As the door starts,
+caddy's command writes `<file>.etag` beside every file under each root the
+Caddyfile names, the file's quoted SHA-256, and a consumer's `file_server`
+reads it with `etag_file_extensions .etag` and hides it with `hide *.etag`
+(pronto's Caddyfile). The roots are read off the config caddy adapts, not the
+cluster's statics: a build can put files in the image another way, as an
+installed pronto app's does with omnishell's, and the door serves those too. A
+root the image lacks stops the door as it starts. Caddy's own ETag is the file's mtime and size, and the images clamp
+every mtime to one value, so two contents of one size shared a validator and a
+revalidation of the older answered 304. Hashing as the image builds would keep
+the image's bytes a function of its sources too, but `develop: watch` replaces a
+static in a running door and restarts it: its sidecar would be the old file's,
+and the edit would 304 behind it. Emitting sidecars where each static is
+generated leaves the hand-written ones, the terminal's interpreter among them,
+with none. Each start hashes every file again, about a fifth of a second for
+golaberto's hundred or so: skipping a file whose sidecar is newer would trust
+an mtime a sync can carry over from the host, which is how an edit goes stale.
+A name reaches the shell as an argument, never as script, so no file's name is
+a command.
 
 ## One door, and it is h2
 
@@ -133,6 +154,27 @@ certificate is worse than plain HTTP: its interstitial blocks WebAuthn, where
   pair, which names localhost only, never sends Caddy to a public CA for a name
   only the cluster resolves.
 
+## The origin
+
+The door answers any Host, so no address it writes may come from one: an
+answer anyone may keep would spell whatever a client asked under. The
+deployment states the origin instead, once, as `ORIGIN` (the scheme and host
+readers reach the door at, `https://app.example`), beside the auth service's
+`WEBAUTHN_ORIGIN`. The cluster hands it to caddy (`surface.origin` in
+[`cluster.cue`](../cluster.cue)), whose Caddyfile reads it as `{$ORIGIN}`, and
+to anything else that spells an absolute address of the app; the image never
+holds it, so one image serves every deployment. Caddy's command refuses to
+start on a value that is not exactly an origin, since a template writes it into
+markup as it stands.
+
+Its default is `https://localhost:8443`, the door's name for a person's
+browser. The host port is the host's pick (`meta.door`), so where it is not
+8443 — `CADDY_TLS_HOST_PORT=0`, a random one — the canonical links a
+development stack writes name a port the browser is not on. Nothing else reads
+them in development, and reading the Host back would be the hole this closes.
+`WEBAUTHN_ORIGIN`'s default, `https://localhost:*`, admits any port of that
+door for the same reason.
+
 ## Rejected
 
 - **A second origin for sync.** The cap is per origin, and serving `/electric/*`
@@ -153,6 +195,10 @@ certificate is worse than plain HTTP: its interstitial blocks WebAuthn, where
   read. Writing it with that image's own certutil means apt, or a per-arch
   pinned package, in the browser images; for a name nothing outside the
   cluster resolves, trust buys nothing that ignoring loses.
+- **The request's Host as the origin.** Correct wherever the Host is the
+  door's, and the door answers whatever Host arrives; a hostile one went into
+  the canonical, the alternates, og:url, robots.txt and the sitemap of answers
+  marked public.
 - **Publishing the plain listener, or redirecting it to https.** A second front
   door is a path that only ever runs on a laptop.
 - **nginx/OpenResty with Lua handlers** for webhooks and SSE: brittle, hard to

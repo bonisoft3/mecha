@@ -13,10 +13,7 @@ services:
     command:
     - sh
     - -c
-    - >-
-      if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem
-      /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile
-      --adapter caddyfile
+    - "case \"$${ORIGIN#http://}\" in \"$$ORIGIN\") h=$${ORIGIN#https://};; *) h=$${ORIGIN#http://};; esac; case \"$$h\" in \"$$ORIGIN\"|\"\"|*[!A-Za-z0-9.:-]*) echo \"ORIGIN '$$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example\" >&2; exit 1;; esac; set -e -o pipefail; roots=$$(caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\\n' | sed -n 's/^.*\"root\":\"\\([^\"]*\\)\".*$$/\\1/p' | sort -u); if [ -n \"$$roots\" ]; then find $$roots -type f ! -name '*.etag' -exec sh -c 'set -e; for f do h=$$(sha256sum < \"$$f\"); printf \\\"%s\\\" \"$${h%% *}\" > \"$$f.etag\"; done' sh {} +; fi; if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
     develop:
       watch:
       - action: sync+restart
@@ -27,6 +24,7 @@ services:
         target: /certs
     environment:
       ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}
+      ORIGIN: ${ORIGIN:-https://localhost:8443}
     healthcheck:
       test:
       - CMD

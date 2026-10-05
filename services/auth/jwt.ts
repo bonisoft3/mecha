@@ -50,8 +50,10 @@ export function shapeWhere(scopes: string[]): string {
   return `scope_id IN (${scopes.map((s) => `'${s.replaceAll("'", "''")}'`).join(",")})`;
 }
 
-// A subset's `where` is the grammar its client compiles a view's predicate
-// to (electric-db-collection 0.4.0's sql-compiler, fed by data-sync.js's
+// A guard over SQL a machine wrote, not a language anyone writes: an author
+// writes PostgREST's filters in markup, and a subset's `where` is what its
+// client compiles a view's predicate to from them (electric-db-collection
+// 0.4.0's sql-compiler, fed by data-sync.js's
 // `clause`, a join's key and a capped view's cursor) and nothing else:
 // comparisons of a quoted column with a $n parameter or a literal (a number,
 // a string, TRUE or FALSE) and of two such values (the compiler's

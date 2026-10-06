@@ -8,11 +8,16 @@ import { fileURLToPath } from "node:url";
 
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
-type State = { migrations: string[]; pipelines: { name: string; file: string }[]; schedules: string[] };
+type State = {
+  migrations: string[];
+  pipelines: { name: string; file: string }[];
+  schedules: string[];
+  computations: { name: string; file: string; every: number; to: string[]; wasm: string[]; onComplete?: string }[];
+};
 
 /** `field` of a cluster given `state` and `capabilities`, as `cue export` answers it. */
 async function exported(state: Partial<State>, field: string, capabilities: Record<string, boolean> = {}) {
-  const given: State = { migrations: [], pipelines: [], schedules: [], ...state };
+  const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...state };
   const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
   const out = await new Deno.Command("cue", {
     args: ["export", ".:cluster", "-e", `(${cluster}).${field}`],
@@ -25,6 +30,24 @@ async function exported(state: Partial<State>, field: string, capabilities: Reco
 }
 
 const copied = (state: Partial<State>) => exported(state, "surface.targets.database.dockerfile.copy[0].srcs");
+
+Deno.test("compute configuration carries only declared completion RPCs and refuses invalid identifiers", async () => {
+  const computation = { name: "chances", file: "chances.js", every: 30, to: ["chance"], wasm: [] };
+  const field = "surface.targets.compute.compose.environment.COMPUTATIONS";
+  const plain = await exported({ computations: [computation] }, field);
+  assert.equal(plain.ok, true, plain.stderr);
+  assert.equal("onComplete" in JSON.parse(plain.value)[0], false);
+  for (const onComplete of ["capture_team_odds_history", "_" + "a".repeat(62)]) {
+    const declared = await exported({ computations: [{ ...computation, onComplete }] }, field);
+    assert.equal(declared.ok, true, declared.stderr);
+    assert.equal(JSON.parse(declared.value)[0].onComplete, onComplete);
+  }
+  for (const onComplete of ["", "Capture", "rpc/capture", "capture-name", "a".repeat(64)]) {
+    const refused = await exported({ computations: [{ ...computation, onComplete }] }, field);
+    assert.equal(refused.ok, false, onComplete);
+    assert.match(refused.stderr, /onComplete: invalid value/);
+  }
+});
 
 // The refusals below are only refusals if this passes.
 Deno.test("steps that each hold digits of their own are copied as given", async () => {

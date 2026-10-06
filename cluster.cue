@@ -105,7 +105,7 @@ _devElectricSecret: "dev-electric-secret"
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
-		computations: [...{name: string, file: string, every: int & >0, to: [...string] & [_, ...], wasm: [...string]}]
+		computations: [...{name: string, file: string, every: int & >0, to: [...string] & [_, ...], wasm: [...string], onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$"}]
 		// Names only: the cluster needs to know whether any schedule exists,
 		// never what it says. One brings the ticker, its clock and the table
 		// they sweep (#ScheduleMigration); the caller's migrations seed it.
@@ -656,6 +656,7 @@ _devElectricSecret: "dev-electric-secret"
 								every: c.every
 								to:    c.to
 								wasm: [for w in c.wasm {_target[w]}]
+								if c.onComplete != _|_ {onComplete: c.onComplete}
 							}])
 							if X.capabilities.auth {
 								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"

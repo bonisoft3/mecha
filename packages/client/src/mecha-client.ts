@@ -1,4 +1,5 @@
 import { createCollection, IR } from "@tanstack/db"
+import { ShapeStream } from "@electric-sql/client"
 import type { Collection, LoadSubsetOptions } from "@tanstack/db"
 import { electricCollectionOptions } from "@tanstack/electric-db-collection"
 import { BroadcastChannelLeader, NonRetriableError, startOfflineExecutor, WebLocksLeader } from "@tanstack/offline-transactions"
@@ -127,8 +128,7 @@ function shapeAuthority(authUrl: string, token: (() => string | null) | undefine
   const inflight = new Map<string, Promise<Held>>()
   const nameOf = (table: string, key?: RowKey) => (key ? `${table}|${key.column}=${key.value}` : table)
 
-  async function mint(table: string, key?: RowKey): Promise<Held> {
-    const session = token?.()
+  async function mint(table: string, key: RowKey | undefined, session: string | null | undefined, name: string): Promise<Held> {
     const res = await fetcher(`${authUrl}/shape`, {
       method: "POST",
       headers: {
@@ -146,19 +146,20 @@ function shapeAuthority(authUrl: string, token: (() => string | null) | undefine
       where: body.where,
       expiresAt: Date.now() + body.expires_in * 1000,
     }
-    held.set(nameOf(table, key), rec)
+    held.set(name, rec)
     return rec
   }
 
   // One mint per shape in flight. Without this the `where` and the header --
   // two lazy values resolved for the same request -- each start their own.
   function current(table: string, key?: RowKey): Promise<Held> {
-    const name = nameOf(table, key)
+    const session = token?.()
+    const name = JSON.stringify([session, nameOf(table, key)])
     const rec = held.get(name)
     if (rec && rec.expiresAt - Date.now() > SHAPE_TOKEN_SKEW_MS) return Promise.resolve(rec)
     let p = inflight.get(name)
     if (!p) {
-      p = mint(table, key).finally(() => inflight.delete(name))
+      p = mint(table, key, session, name).finally(() => inflight.delete(name))
       inflight.set(name, p)
     }
     return p
@@ -168,7 +169,7 @@ function shapeAuthority(authUrl: string, token: (() => string | null) | undefine
     authorization: (table: string, key?: RowKey) => async () => `Bearer ${(await current(table, key)).token}`,
     where: (table: string, key?: RowKey) => async () => (await current(table, key)).where,
     /** Drops a held token, so the next request mints. */
-    forget: (table: string, key?: RowKey) => void held.delete(nameOf(table, key)),
+    forget: (table: string, key?: RowKey) => void held.delete(JSON.stringify([token?.(), nameOf(table, key)])),
   }
 }
 
@@ -203,6 +204,14 @@ export interface MechaClient {
   /** `${tableId}:${key}` → phase while a write is in flight; cleared on delivery. */
   syncPhase(tableId: string, key: string): SyncPhase | undefined
   subscribeSyncPhases(listener: () => void): () => void
+  /**
+   * Authorized dependency changes, without retaining a table snapshot. The
+   * first caught-up position and every shape reset also invalidate reads.
+   * Grant families retain their existing authorized union; local tables watch
+   * their local collection. Dispose subscriptions before changing accounts;
+   * once a grant family has been used, an account change needs a new client.
+   */
+  subscribeInvalidation(tableId: string, listener: () => void): () => void
 }
 
 const DELETE_CONFIRM_TIMEOUT_MS = 30_000
@@ -401,6 +410,17 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   }
 
   const gcTime = config.shapeIdleMs ?? SHAPE_IDLE_MS
+  const identity = () => config.subject ? config.subject() : config.token?.()
+  // Unions and their nested shapes outlive readers; their account cannot be
+  // rebound safely while retained rows or optimistic writes still use them.
+  let familyAccount: { subject: ReturnType<typeof identity> } | undefined
+  function checkFamilyAccount(bind = false) {
+    const subject = identity()
+    if (familyAccount !== undefined && familyAccount.subject !== subject) {
+      throw new Error("grant family outlived its account; create a new client after changing accounts")
+    }
+    if (bind && familyAccount === undefined) familyAccount = { subject }
+  }
   // One Electric shape as a collection. Its `where` and its header are the
   // authority's, resolved together per request from one token.
   function shape(t: Table, key?: RowKey) {
@@ -587,6 +607,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     }
     // Opened by the first reader that has a subject.
     const acquire = () => {
+      checkFamilyAccount(config.subject?.() != null)
       readers++
       if (grants !== null) return
       const me = config.subject?.()
@@ -799,8 +820,111 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     return tx.commit().then(() => undefined)
   }
 
+  type Invalidation = { listeners: Set<() => void>; stop: () => void; ready: boolean; checkScope: () => void }
+  const invalidations = new Map<string, Invalidation>()
+  function subscribeInvalidation(tableId: string, listener: () => void): () => void {
+    const t = byId.get(tableId)
+    if (t === undefined) throw new Error(`unknown table id: ${tableId}`)
+    if (reachable.has(tableId)) checkFamilyAccount(true)
+    let state = invalidations.get(tableId)
+    if (state === undefined) {
+      const subject = identity()
+      const checkScope = () => {
+        if (identity() !== subject) throw new Error(`invalidation subscription for ${t.table} outlived its account`)
+      }
+      state = { listeners: new Set(), stop: () => {}, ready: false, checkScope }
+      invalidations.set(tableId, state)
+      const active = state
+      const publish = () => {
+        checkScope()
+        for (const fn of active.listeners) fn()
+      }
+      if (isLocal(t) || reachable.has(tableId)) {
+        // Grant families need their authorized per-row shape union. They
+        // remain eager independently of server-read invalidation.
+        const subscription = collections[tableId].subscribeChanges(publish, { includeInitialState: false })
+        let stopped = false
+        collections[tableId].onFirstReady(() => {
+          if (stopped) return
+          active.ready = true
+          publish()
+        })
+        active.stop = () => {
+          stopped = true
+          subscription.unsubscribe()
+        }
+      } else {
+        const controller = new AbortController()
+        const scoped = (value: () => Promise<string>) => async () => {
+          checkScope()
+          const result = await value()
+          checkScope()
+          return result
+        }
+        const stream = new ShapeStream({
+          url: `${electricUrl}/v1/shape`,
+          log: "changes_only",
+          offset: "now",
+          params: { table: t.table, where: scoped(shapes.where(t.table)) as any },
+          headers: { Authorization: scoped(shapes.authorization(t.table)) },
+          fetchClient: config.fetcher,
+          signal: controller.signal,
+          onError: (error: any) => {
+            if (error?.status === 401 && identity() === subject) {
+              shapes.forget(t.table)
+              return {}
+            }
+          },
+        })
+        const unsubscribe = stream.subscribe((messages) => {
+          if (controller.signal.aborted) return
+          let changed = false
+          for (const message of messages) {
+            const headers = message.headers
+            if (headers.control === "must-refetch") active.ready = false
+            if (headers.operation !== undefined) changed = true
+            if (headers.control === "up-to-date" && !active.ready) {
+              active.ready = true
+              changed = true
+            }
+          }
+          if (changed) publish()
+        }, (error) => {
+          if (controller.signal.aborted) return
+          active.stop()
+          invalidations.delete(tableId)
+          queueMicrotask(() => { throw error })
+        })
+        active.stop = () => {
+          controller.abort()
+          unsubscribe()
+        }
+      }
+    }
+    state.checkScope()
+    // A listener can be reused by callers; each subscription still owns one
+    // reference, so stopping one must not detach another.
+    const active = state
+    const notify = () => listener()
+    active.listeners.add(notify)
+    if (active.ready) queueMicrotask(() => {
+      if (active.listeners.has(notify)) {
+        active.checkScope()
+        notify()
+      }
+    })
+    return () => {
+      active.listeners.delete(notify)
+      if (active.listeners.size === 0 && invalidations.get(tableId) === active) {
+        invalidations.delete(tableId)
+        active.stop()
+      }
+    }
+  }
+
   return {
     collections,
+    subscribeInvalidation,
     ready: executor.waitForInit().then(() => undefined),
     insert(tableId, rows) {
       const t = byId.get(tableId)

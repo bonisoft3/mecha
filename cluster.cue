@@ -14,6 +14,7 @@
 // Caddyfile, pipelines. Names are bare and so are `depends_on` keys; #Runtime
 // lowers the targets into a bayt project, which is what keeps `crud:3000` and
 // `@database:5432` resolving.
+@extern(embed)
 package cluster
 
 import (
@@ -25,6 +26,8 @@ import (
 	bayt "github.com/bonisoft3/bayt/core:bayt"
 	grammar "github.com/bonisoft3/mecha/pgroll"
 )
+
+_electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
 
 // Where postgres applies what an image carries, in name order, on a fresh data
 // directory.
@@ -458,7 +461,12 @@ _devElectricSecret: "dev-electric-secret"
 			}
 			if X.capabilities.server {
 				electric: X._image & {
-					dockerfile: from: name: "docker.io/bonitao/electric:1.8.0@sha256:7b6aed2d5fd356a5e5edd5290eeec0b19859ab798d3cbdb7d9d223fbb872a5ab"
+					dockerfile: {
+						from: name: "docker.io/electricsql/electric-temp:1.8.1@sha256:910d5ebeca68c87c930ccd1b35426c7bc94d79c099ccacc8f27547b74fb4353a"
+						// Initialization must retain requests already waiting for the snapshot.
+						preamble: ["COPY <<'ELIXIR' /tmp/electric-patch.exs\n\(_electricPatch)\nELIXIR"]
+						epilogue: ["RUN DATABASE_URL=postgresql://compile:compile@localhost/compile ELECTRIC_SECRET=compile-only /app/bin/entrypoint eval 'Code.eval_file(\"/tmp/electric-patch.exs\")' && rm /tmp/electric-patch.exs"]
+					}
 					compose: {
 						depends_on: X._schemaReady
 						environment: {

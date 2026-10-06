@@ -1,7 +1,3 @@
-# generated from bayt.cue — do not edit
-FROM docker.io/electricsql/electric-temp:1.8.1@sha256:910d5ebeca68c87c930ccd1b35426c7bc94d79c099ccacc8f27547b74fb4353a AS electric
-WORKDIR /monorepo/libraries/mecha
-COPY <<'ELIXIR' /tmp/electric-patch.exs
 defmodule Mecha.SnapshotWaiterRegression do
   alias Electric.Shapes.Consumer
   alias Consumer.State
@@ -97,18 +93,3 @@ else
   Mecha.SnapshotWaiterRegression.run()
   File.write!(beam_path, beam)
 end
-
-ELIXIR
-COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.electric.json ./.bayt/
-RUN DATABASE_URL=postgresql://compile:compile@localhost/compile ELECTRIC_SECRET=compile-only /app/bin/entrypoint eval 'Code.eval_file("/tmp/electric-patch.exs")' && rm /tmp/electric-patch.exs
-
-FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS electric_bayt_ctxs
-WORKDIR /monorepo/libraries/mecha
-COPY --parents .bayt/compose.electric.yaml .bayt/Dockerfile.electric .bayt/bayt.electric.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
-COPY --from=libraries_mecha-database_bayt /monorepo /monorepo
-COPY --from=libraries_mecha-migrate_bayt /monorepo /monorepo
-ARG SOURCE_DATE_EPOCH
-ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
-FROM scratch AS electric_bayt
-COPY --from=electric_bayt_ctxs /monorepo /monorepo

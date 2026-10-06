@@ -20,6 +20,8 @@
 
 # Service and package contracts
 
+* [[../services/electric/README|Electric image]] - reference: The pinned runtime and snapshot initialization correction verified during its build.
+
 * [The auth service's token contract](../services/auth/README.md) - reference: The HS256 token this service mints, PostgREST verifies and policies read through auth_uid().
 * [Row-level security: the tenancy floor](../services/database/rls/README.md) - reference: The row isolation every mecha database carries, whatever emitted its tables, and what its audit proves.
 * [ticker](../services/ticker/README.md) - reference: The periodic wake's contract — clock, poke, tick, outcome — how an app declares a schedule, and why a tick needs no durability.

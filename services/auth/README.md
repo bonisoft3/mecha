@@ -21,6 +21,14 @@ the emitter writes the policies that call `auth_uid()`.
   `table` and `where` must equal the token's, and a subset snapshot narrows it
   with the `subset__*` parameters the gate names ([proxy](../../docs/proxy.md)).
 
+When the catalogs prove a leaf table's `scope_id` is a stored generated
+NOT NULL constant `'public:'`, its shape predicate retains only the subject's
+public scope. Readers share one Electric log while their tokens keep distinct
+subjects. Defaults, mutable or private scopes, virtual generated columns and
+tables with descendants retain the full subject scope set. Keyed shapes keep
+their row authorization; every request must still match its token's table and
+exact predicate.
+
 The alternative was server-side sessions. It was refused because the WebAuthn
 challenge is the only state a ceremony needs, and a short-lived `state` JWT
 carries it without giving the service anything to lose on restart.

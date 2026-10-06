@@ -23,6 +23,55 @@ await sql`CREATE TABLE IF NOT EXISTS article (
   id uuid primary key default gen_random_uuid(),
   scope_id text generated always as ('public:') stored not null
 )`;
+await sql`CREATE TABLE IF NOT EXISTS scoped_article (
+  id uuid primary key default gen_random_uuid(),
+  scope_id text not null default 'public:'
+)`;
+await sql`CREATE TABLE IF NOT EXISTS mutable_article (
+  id uuid primary key default gen_random_uuid(),
+  scope_id text not null
+)`;
+await sql`CREATE TABLE IF NOT EXISTS owned_article (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null,
+  scope_id text generated always as ('user:' || owner_id) stored not null
+)`;
+await sql`CREATE TABLE IF NOT EXISTS private_article (
+  id uuid primary key default gen_random_uuid(),
+  scope_id text generated always as ('user:private') stored not null
+)`;
+await sql`CREATE TABLE IF NOT EXISTS virtual_article (
+  id uuid primary key default gen_random_uuid(),
+  scope_id text generated always as ('public:') virtual not null
+)`;
+await sql`CREATE TABLE IF NOT EXISTS nullable_article (
+  id uuid primary key default gen_random_uuid(),
+  scope_id text generated always as ('public:') stored
+)`;
+await sql`CREATE TABLE IF NOT EXISTS partitioned_article (
+  id int,
+  owner_id uuid not null,
+  scope_id text generated always as ('public:') stored not null
+) PARTITION BY RANGE (id)`;
+await sql`CREATE TABLE IF NOT EXISTS partitioned_article_child (
+  id int,
+  owner_id uuid not null,
+  scope_id text generated always as ('user:' || owner_id) stored not null
+)`;
+await sql`DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_inherits
+    WHERE inhparent = 'partitioned_article'::regclass AND inhrelid = 'partitioned_article_child'::regclass) THEN
+    ALTER TABLE partitioned_article ATTACH PARTITION partitioned_article_child FOR VALUES FROM (0) TO (10);
+  END IF;
+END $$`;
+await sql`CREATE TABLE IF NOT EXISTS inherited_article (
+  id int,
+  owner_id uuid not null,
+  scope_id text generated always as ('public:') stored not null
+)`;
+await sql`CREATE TABLE IF NOT EXISTS inherited_article_child (
+  scope_id text generated always as ('user:' || owner_id) stored not null
+) INHERITS (inherited_article)`;
 // A per-row shape is answered as the subject, so the role the gate switches
 // to has to exist, and the fixture needs a policy for it to read through:
 // gk_doc is readable by its owner, gk_line is content of a doc.
@@ -36,7 +85,8 @@ await sql`CREATE TABLE IF NOT EXISTS gk_doc (
 )`;
 await sql`CREATE TABLE IF NOT EXISTS gk_line (
   id uuid primary key default gen_random_uuid(),
-  doc_id uuid not null references gk_doc(id)
+  doc_id uuid not null references gk_doc(id),
+  scope_id text generated always as ('public:') stored not null
 )`;
 await sql`ALTER TABLE gk_doc ENABLE ROW LEVEL SECURITY`;
 await sql`DROP POLICY IF EXISTS gk_doc_own ON gk_doc`;
@@ -268,14 +318,70 @@ Deno.test({
   name: "the shape token carries the subject's scopes, not the client's request",
   ...opts,
   async fn() {
-    const { res, uid } = await mint("article");
+    const { res, uid } = await mint("scoped_article");
     assertEquals(res.status, 200);
     const body = await res.json();
     // The same derivation the CRUD path reads, so the two cannot disagree.
     assertEquals(body.where, `scope_id IN ('public:','user:${uid}')`);
     const claims = await verifyJwt(body.token);
-    assertEquals(claims!.table, "article");
+    assertEquals(claims!.table, "scoped_article");
     assertEquals(claims!.where, body.where);
+  },
+});
+
+Deno.test({
+  name: "public stored-generated leaf scopes share one predicate while keeping distinct subjects",
+  ...opts,
+  async fn() {
+    const first = await mint("article");
+    const second = await mint("article");
+    assert(first.uid !== second.uid);
+    for (const minted of [first, second]) {
+      assertEquals(minted.res.status, 200);
+      const body = await minted.res.json();
+      assertEquals(body.where, "scope_id IN ('public:')");
+      const claims = await verifyJwt(body.token);
+      assertEquals(claims!.sub, minted.uid);
+      assertEquals(claims!.table, "article");
+      assertEquals(claims!.where, body.where);
+      const uri = `/v1/shape?table=article&where=${encodeURIComponent(body.where)}`;
+      assertEquals((await handler(shapeReq(body.token, uri))).status, 200);
+      const wider = `scope_id IN ('public:','user:${minted.uid}')`;
+      assertEquals((await handler(shapeReq(body.token, `/v1/shape?table=article&where=${encodeURIComponent(wider)}`))).status, 403);
+    }
+  },
+});
+
+Deno.test({
+  name: "defaults, mutable scopes, private generated scopes and virtual scopes retain full subject reach",
+  ...opts,
+  async fn() {
+    for (const table of ["scoped_article", "mutable_article", "owned_article", "private_article", "virtual_article"]) {
+      const minted = await mint(table);
+      assertEquals(minted.res.status, 200, table);
+      const body = await minted.res.json();
+      assertEquals(body.where, `scope_id IN ('public:','user:${minted.uid}')`, table);
+      assertEquals((await verifyJwt(body.token))!.where, body.where);
+    }
+    assertEquals((await mint("nullable_article")).res.status, 409);
+  },
+});
+
+Deno.test({
+  name: "public parent expressions cannot remove reachable private scopes stored by descendants",
+  ...opts,
+  async fn() {
+    for (const [table, insertInto] of [
+      ["partitioned_article", "partitioned_article"],
+      ["inherited_article", "inherited_article_child"],
+    ]) {
+      const { res, uid } = await mint(table);
+      assertEquals(res.status, 200);
+      await sql`INSERT INTO ${sql(insertInto)} (id, owner_id) VALUES (1, ${uid}::uuid)`;
+      const rows = await sql`SELECT scope_id FROM ${sql(table)} WHERE owner_id = ${uid}::uuid`;
+      assertEquals(rows.map((row) => row.scope_id), [`user:${uid}`]);
+      assertEquals((await res.json()).where, `scope_id IN ('public:','user:${uid}')`, table);
+    }
   },
 });
 

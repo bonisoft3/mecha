@@ -21,6 +21,7 @@ say:
         stop: true
         cmds:
           - do: "pnpm --dir packages run test"
+          - do: "mise x -- task test:browser"
       # The single-file page's cluster under the pins a bundler takes from it.
       cluster:
         priority: -1

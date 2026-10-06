@@ -1,114 +1,6 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { validateIdentifier } from './validate.js'
-
-// Operator map: PostgREST operator → SQL operator
-const OP_MAP: Record<string, string> = {
-  eq: '=',
-  neq: '!=',
-  gt: '>',
-  gte: '>=',
-  lt: '<',
-  lte: '<=',
-  like: 'LIKE',
-  ilike: 'ILIKE',
-}
-
-interface Filter {
-  col: string
-  op: string
-  value: string
-}
-
-function parseFilters(params: URLSearchParams): Filter[] {
-  const filters: Filter[] = []
-  for (const [key, val] of params.entries()) {
-    if (key === 'select') continue
-    const dotIdx = val.indexOf('.')
-    if (dotIdx === -1) continue
-    const op = val.slice(0, dotIdx)
-    const value = val.slice(dotIdx + 1)
-    if (op in OP_MAP || op === 'is' || op === 'in') {
-      filters.push({ col: key, op, value })
-    }
-  }
-  return filters
-}
-
-function buildWhereClause(
-  filters: Filter[],
-  params: unknown[],
-): string {
-  if (filters.length === 0) return ''
-
-  const clauses = filters.map((f) => {
-    const quotedCol = `"${validateIdentifier(f.col)}"`
-
-    if (f.op === 'is') {
-      // IS NULL / IS TRUE / IS FALSE — no parameter binding
-      const upper = f.value.toUpperCase()
-      if (upper === 'NULL') return `${quotedCol} IS NULL`
-      if (upper === 'TRUE') return `${quotedCol} IS TRUE`
-      if (upper === 'FALSE') return `${quotedCol} IS FALSE`
-      return `${quotedCol} IS NULL`
-    }
-
-    if (f.op === 'in') {
-      // value looks like (v1,v2,v3)
-      const inner = f.value.replace(/^\(|\)$/g, '')
-      const values = inner.split(',').map((v) => v.trim())
-      const placeholders = values.map((v) => {
-        params.push(v)
-        return `$${params.length}`
-      })
-      return `${quotedCol} IN (${placeholders.join(', ')})`
-    }
-
-    const sqlOp = OP_MAP[f.op]
-    params.push(f.value)
-    return `${quotedCol} ${sqlOp} $${params.length}`
-  })
-
-  return ' WHERE ' + clauses.join(' AND ')
-}
-
-interface OrderTerm {
-  col: string
-  dir: 'ASC' | 'DESC'
-  nulls: 'NULLS FIRST' | 'NULLS LAST' | null
-}
-
-function parseOrder(params: URLSearchParams): OrderTerm[] {
-  const raw = params.get('order')
-  if (!raw) return []
-  return raw.split(',').map((term) => {
-    const parts = term.trim().split('.')
-    const col = parts[0]
-    const dir = parts[1]?.toLowerCase() === 'desc' ? 'DESC' : 'ASC'
-    let nulls: OrderTerm['nulls'] = null
-    for (const p of parts.slice(2)) {
-      if (p.toLowerCase() === 'nullsfirst') nulls = 'NULLS FIRST'
-      else if (p.toLowerCase() === 'nullslast') nulls = 'NULLS LAST'
-    }
-    return { col, dir, nulls }
-  })
-}
-
-function buildOrderClause(terms: OrderTerm[]): string {
-  if (terms.length === 0) return ''
-  const parts = terms.map((t) => {
-    const col = `"${validateIdentifier(t.col)}"`
-    return t.nulls ? `${col} ${t.dir} ${t.nulls}` : `${col} ${t.dir}`
-  })
-  return ' ORDER BY ' + parts.join(', ')
-}
-
-function parsePagination(params: URLSearchParams): { limit: number | null; offset: number | null } {
-  const limitRaw = params.get('limit')
-  const offsetRaw = params.get('offset')
-  const limit = limitRaw !== null && /^\d+$/.test(limitRaw) ? parseInt(limitRaw, 10) : null
-  const offset = offsetRaw !== null && /^\d+$/.test(offsetRaw) ? parseInt(offsetRaw, 10) : null
-  return { limit, offset }
-}
+import { planRead, ReadQueryError, writeWhere } from './rest-read.js'
 
 function parsePrefer(header: string | null): {
   returnRepresentation: boolean
@@ -185,41 +77,21 @@ async function handleGet(
   const params = url.searchParams
   const prefer = parsePrefer(req.headers.get('Prefer'))
 
-  const selectParam = params.get('select')
-  const columns = selectParam
-    ? selectParam
-        .split(',')
-        .map((c) => `"${validateIdentifier(c.trim())}"`)
-        .join(', ')
-    : '*'
-
-  const filters = parseFilters(params)
-  const bindParams: unknown[] = []
-  const where = buildWhereClause(filters, bindParams)
-
-  const order = buildOrderClause(parseOrder(params))
-  const { limit, offset } = parsePagination(params)
-
-  let limitClause = ''
-  if (limit !== null) limitClause += ` LIMIT ${limit}`
-  if (offset !== null) limitClause += ` OFFSET ${offset}`
-
-  const sql = `SELECT ${columns} FROM "${table}"${where}${order}${limitClause}`
-  const result = await db.query(sql, bindParams)
+  const plan = await planRead(db, table, params)
+  const result = await db.query<{ data: unknown }>(plan.sql, plan.params)
 
   const responseHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
 
   if (prefer.countExact) {
-    const countSql = `SELECT COUNT(*) AS count FROM "${table}"${where}`
-    const countResult = await db.query<{ count: string }>(countSql, bindParams)
+    const countResult = await db.query<{ count: string }>(plan.countSql, plan.params)
     const total = parseInt(countResult.rows[0]?.count ?? '0', 10)
-    const rangeOffset = offset ?? 0
+    const rangeOffset = plan.offset
     const rangeEnd = rangeOffset + result.rows.length - 1
-    const rangeEndStr = result.rows.length === 0 ? rangeOffset : rangeEnd
-    responseHeaders['Content-Range'] = `${rangeOffset}-${rangeEndStr}/${total}`
+    const rangeEndStr = result.rows.length === 0 ? '*' : `${rangeOffset}-${rangeEnd}`
+    responseHeaders['Content-Range'] = `${rangeEndStr}/${total}`
   }
 
-  return new Response(JSON.stringify(result.rows), {
+  return new Response(JSON.stringify(result.rows.map((row) => row.data)), {
     status: 200,
     headers: responseHeaders,
   })
@@ -298,8 +170,7 @@ async function handlePatch(
     .map((c) => `"${validateIdentifier(c)}" = ${bindWritten(asJson, c, body[c], bindParams)}`)
     .join(', ')
 
-  const filters = parseFilters(url.searchParams)
-  const where = buildWhereClause(filters, bindParams)
+  const where = writeWhere(url.searchParams, bindParams)
   const returning = prefer.returnRepresentation ? ' RETURNING *' : ''
 
   const sql = `UPDATE "${table}" SET ${setClause}${where}${returning}`
@@ -320,8 +191,7 @@ async function handleDelete(
   url: URL,
 ): Promise<Response> {
   const bindParams: unknown[] = []
-  const filters = parseFilters(url.searchParams)
-  const where = buildWhereClause(filters, bindParams)
+  const where = writeWhere(url.searchParams, bindParams)
 
   const sql = `DELETE FROM "${table}"${where}`
   await db.query(sql, bindParams)
@@ -409,7 +279,7 @@ export function createRestHandler(
       return await route(db, req)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      const isValidationError = message.startsWith('Invalid identifier:')
+      const isValidationError = err instanceof ReadQueryError || message.startsWith('Invalid identifier:')
       return new Response(JSON.stringify({ error: message }), {
         status: isValidationError ? 400 : 500,
         headers: { 'Content-Type': 'application/json' },

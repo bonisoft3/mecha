@@ -55,6 +55,13 @@ tasks:
       - task: test:compute
       - task: test:pgroll
       - task: test:cluster
+      - task: test:browser
+
+  test:browser:
+    desc: "browser PostgREST reads under their request scopes"
+    dir: packages/mecha-browser
+    cmds:
+      - mise x -- deno test --config cluster.deno.json --lock deno.lock --frozen --allow-read --allow-env rest_read_test.ts
 
   test:cluster:
     desc: "what a cluster refuses of its initdb steps, and which services its change feed brings"

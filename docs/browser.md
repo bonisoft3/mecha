@@ -36,7 +36,7 @@ the change path does is best-effort.
 | component | package | what it is |
 |---|---|---|
 | PostgreSQL | `@electric-sql/pglite` 0.5.8 | Postgres in WASM, with one connection, as a superuser |
-| PostgREST | `postgrest-js` | A subset: GET, POST, PATCH and DELETE on a table; `eq neq gt gte lt lte like ilike is in`; `select`, `order`, `limit`/`offset`; `Prefer` return, count and resolution. No RPC, no embedding; `ignore-duplicates` is a bare `ON CONFLICT DO NOTHING`, and `merge-duplicates` conflicts on `id` only. A value written to a column whose type has a domain representation (a cast from json by a function) goes through that function, a JSON null as SQL NULL, and one written to a json or jsonb column is the JSON it was sent (a string stays a JSON string, a null is SQL NULL), as PostgREST's does. A handler given `scopes` does what `db-pre-request` does: it sets `app.scopes` and switches role inside the request's transaction |
+| PostgREST | `postgrest-js` | A subset: GET, POST, PATCH and DELETE on a table; `eq neq gt gte lt lte like ilike is in`; `select`, `order`, `limit`/`offset`; `Prefer` return, count and resolution. To-one embeds use foreign keys or invoker computed relationships; no RPC or to-many embeds; `ignore-duplicates` is a bare `ON CONFLICT DO NOTHING`, and `merge-duplicates` conflicts on `id` only. A value written to a column whose type has a domain representation (a cast from json by a function) goes through that function, a JSON null as SQL NULL, and one written to a json or jsonb column is the JSON it was sent (a string stays a JSON string, a null is SQL NULL), as PostgREST's does. A handler given `scopes` does what `db-pre-request` does: it sets `app.scopes` and switches role inside the request's transaction |
 | Electric | `cluster.ts` | Electric's HTTP shape protocol over a per-table log, fed by triggers |
 | auth | `cluster.ts` | One guest per boot, with unsigned tokens |
 | conduit, mesh, bus, transform | `pipeline` | rpk-format YAML: `pipeline.processors` and `output.http_client`. The `input` is ignored, because `pg_notify('cdc')` is the input. It handles `jq` (jq-wasm), `bloblang`, `http`, `branch`, `switch`, `try`/`catch`, `unarchive` and `log`, and refuses any other processor when the YAML is loaded. A `switch` check is `meta("k")`, `env("k")` or a string, with `${VAR}` filled from the environment, compared with `==` or `!=`; any other check is refused at load. The row arrives as `{data: "<row json>"}`, the envelope daprd delivers |
@@ -53,6 +53,13 @@ turns any platform's adapter into TanStack DB collections.
 is the browser's adapter: PGlite `live.changes()` feeds a collection, and
 writes go through the REST handler. The analytical reader is
 [`@mecha/lake`](../packages/lake/README.md).
+
+Computed relationships use PostgreSQL's existing function contract: a public
+stable or immutable function taking exactly one source row and returning
+`SETOF` a public relation with `ROWS 1`. They run with the caller's permissions
+and RLS; security-definer functions are excluded. Returning more than one row
+fails the request instead of truncating it. An exact function name overrides
+an unhinted foreign-key relation; explicit foreign-key hints retain their meaning.
 
 ## The one-user cluster
 
@@ -78,6 +85,10 @@ the page reloads: Electric's client retries a 500 without end, and stops on a
 falls further behind, or presents another boot's handle (`<table>-<boot id>`),
 gets `409 must-refetch` and starts from a snapshot. A live request waits up to
 20 s. A table that carries a shape must have a primary key, or boot fails.
+The embedder can pass the existing shell `schema` to identify `server` views:
+these answer reads without a shape or notification trigger. Physical server
+tables retain shapes because live queries can depend on their changes.
+Views declared `live` or `offline` still fail the primary-key requirement.
 
 A shape synced on demand is served as Electric serves it. `offset=now`, or
 `offset=-1` with `log=changes_only`, answers the position and no rows. A

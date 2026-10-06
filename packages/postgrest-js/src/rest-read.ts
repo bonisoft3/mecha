@@ -14,17 +14,26 @@ interface Selection {
 }
 
 interface ForeignKey {
+  kind: 'foreign-key'
   name: string
   target: string
   columns: string[]
   referenced: string[]
 }
 
+interface ComputedRelation {
+  kind: 'computed'
+  name: string
+  target: string
+}
+
+type Relation = ForeignKey | ComputedRelation
+
 interface Node {
   table: string
   alias: string
   selections: Selection[]
-  children: Map<string, { node: Node; fk: ForeignKey; inner: boolean }>
+  children: Map<string, { node: Node; relation: Relation; inner: boolean }>
   filters: Filter[]
 }
 
@@ -168,16 +177,16 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
   for (const key of ['select', 'order']) {
     if (search.getAll(key).length > 1) throw new ReadQueryError(`Duplicate ${key}`)
   }
-  const metadata = new Map<string, ForeignKey[]>()
+  const metadata = new Map<string, Relation[]>()
   let nextAlias = 0
   async function resolve(table: string, selections: Selection[]): Promise<Node> {
     const node: Node = { table, alias: `r${nextAlias++}`, selections, children: new Map(), filters: [] }
     for (const selection of selections) {
       if (!selection.children) continue
-      let keys = metadata.get(table)
-      if (!keys) {
+      let relations = metadata.get(table)
+      if (!relations) {
         const result = await db.query<ForeignKey>(`
-          SELECT c.conname AS name, target.relname AS target,
+          SELECT 'foreign-key' AS kind, c.conname AS name, target.relname AS target,
                  array_agg(source_col.attname::text ORDER BY cols.ordinality) AS columns,
                  array_agg(target_col.attname::text ORDER BY cols.ordinality) AS referenced
             FROM pg_catalog.pg_constraint c
@@ -190,16 +199,32 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
             JOIN pg_catalog.pg_attribute target_col ON target_col.attrelid = target.oid AND target_col.attnum = cols.target_num
            WHERE c.contype = 'f' AND source_ns.nspname = 'public' AND target_ns.nspname = 'public' AND source.relname = $1
            GROUP BY c.oid, c.conname, target.relname`, [table])
-        keys = result.rows
-        metadata.set(table, keys)
+        const computed = await db.query<ComputedRelation>(`
+          SELECT 'computed' AS kind, p.proname AS name, target.relname AS target
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace function_ns ON function_ns.oid = p.pronamespace
+            JOIN pg_catalog.pg_class source ON source.reltype = p.proargtypes[0]
+            JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
+            JOIN pg_catalog.pg_class target ON target.reltype = p.prorettype
+            JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
+           WHERE function_ns.nspname = 'public' AND source_ns.nspname = 'public'
+             AND target_ns.nspname = 'public' AND source.relname = $1
+             AND target.relkind IN ('r', 'p', 'v', 'm', 'f')
+             AND p.prokind = 'f' AND p.pronargs = 1 AND p.pronargdefaults = 0
+             AND p.proargmodes IS NULL AND p.proretset AND p.prorows = 1
+             AND p.provolatile IN ('s', 'i') AND NOT p.prosecdef`, [table])
+        relations = [...result.rows, ...computed.rows]
+        metadata.set(table, relations)
       }
-      const candidates = keys.filter((fk) => {
+      const computed = relations.filter((relation) => relation.kind === 'computed' && relation.name === selection.name && !selection.hint)
+      const candidates = computed.length ? computed : relations.filter((fk) => {
+        if (fk.kind !== 'foreign-key') return false
         const matches = fk.target === selection.name || fk.name === selection.name || (fk.columns.length === 1 && fk.columns[0] === selection.name)
         return matches && (!selection.hint || fk.name === selection.hint || (fk.columns.length === 1 && fk.columns[0] === selection.hint))
       })
       if (candidates.length !== 1) throw new ReadQueryError(`${candidates.length ? 'Ambiguous' : 'Unknown'} to-one relation: ${table}.${selection.name}`)
-      const fk = candidates[0]
-      node.children.set(selection.key, { node: await resolve(fk.target, selection.children), fk, inner: selection.inner })
+      const relation = candidates[0]
+      node.children.set(selection.key, { node: await resolve(relation.target, selection.children), relation, inner: selection.inner })
     }
     return node
   }
@@ -226,8 +251,15 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
       const child = node.children.get(selection.key)
       if (child) {
         const nested = compile(child.node)
-        const join = child.fk.columns.map((col, i) => `${quote(child.node.alias)}.${quote(child.fk.referenced[i])} = ${quote(node.alias)}.${quote(col)}`)
-        const from = `FROM public.${quote(child.node.table)} AS ${quote(child.node.alias)} WHERE ${[...join, ...nested.conditions].join(' AND ')}`
+        const relation = child.relation
+        const join = relation.kind === 'foreign-key'
+          ? relation.columns.map((col, i) => `${quote(child.node.alias)}.${quote(relation.referenced[i])} = ${quote(node.alias)}.${quote(col)}`)
+          : []
+        const source = relation.kind === 'computed'
+          ? `public.${quote(relation.name)}(${quote(node.alias)}.*)`
+          : `public.${quote(child.node.table)}`
+        const predicates = [...join, ...nested.conditions]
+        const from = `FROM ${source} AS ${quote(child.node.alias)}${predicates.length ? ` WHERE ${predicates.join(' AND ')}` : ''}`
         value = `(SELECT ${nested.json} ${from})`
         if (child.inner) conditions.push(`EXISTS (SELECT 1 ${from})`)
       } else value = `${quote(node.alias)}.${quote(selection.name)}`

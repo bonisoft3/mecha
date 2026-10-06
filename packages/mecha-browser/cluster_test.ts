@@ -17,6 +17,44 @@ const schema = `
   INSERT INTO flag (id, featured, n, tags, meta) VALUES ('00000000-0000-4000-8000-000000000001', true, 3, '{a,b}', '{"k": 1}');
 `
 
+Deno.test('request views boot without shapes while physical server sources still invalidate live reads', async () => {
+  const db = await PGlite.create()
+  try {
+    const cluster = await createCluster({
+      db, sql: [rls, schema, `
+        CREATE ROLE app_user;
+        CREATE VIEW flag_read WITH (security_invoker=true) AS SELECT * FROM flag;
+        GRANT SELECT ON flag, flag_read TO app_user;
+      `], tables: ['flag', 'flag_read'],
+      schema: { flag: { durability: 'server' }, flag_read: { durability: 'server' } },
+      log: console.error, fail: (e) => { throw e },
+    })
+    const read = () => cluster.handle(new Request('http://cluster.local/crud/flag_read?select=n'))
+    assert.deepEqual(await (await read()).json(), [{ n: 3 }])
+    await db.query('UPDATE flag SET n = 4')
+    assert.deepEqual(await (await read()).json(), [{ n: 4 }])
+    const shape = await cluster.handle(new Request('http://cluster.local/electric/v1/shape?table=flag&offset=-1'))
+    assert.equal(shape.status, 200)
+    const unsupported = await cluster.handle(new Request('http://cluster.local/electric/v1/shape?table=flag_read&offset=-1'))
+    assert.equal(unsupported.status, 400)
+    assert.deepEqual((await db.query("SELECT tgname FROM pg_trigger WHERE tgrelid = 'flag_read'::regclass")).rows, [])
+  } finally {
+    await db.close()
+  }
+})
+
+Deno.test('a live view still fails the shape primary-key contract', async () => {
+  const db = await PGlite.create()
+  try {
+    await assert.rejects(() => createCluster({
+      db, sql: [rls, schema, 'CREATE VIEW flag_read AS SELECT * FROM flag'], tables: ['flag_read'],
+      schema: { flag_read: { durability: 'live' } }, log: console.error, fail: (e) => { throw e },
+    }), /flag_read carries a shape and has no primary key/)
+  } finally {
+    await db.close()
+  }
+})
+
 Deno.test('a shape answers every value as Postgres text, in its snapshot and in its log', async () => {
   const db = await PGlite.create()
   const cluster = await createCluster({ db, sql: [rls, schema], tables: ['flag'], log: console.error, fail: (e) => { throw e } })

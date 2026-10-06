@@ -175,3 +175,147 @@ Deno.test('PostgREST browser reads preserve projection, filter, pagination and R
     await db.close()
   }
 })
+
+// Views have no FK constraints, and a computed relation must run with the same
+// subject as its source read even when its return type has independent RLS.
+Deno.test('PostgREST browser view reads discover invoker to-one computed relationships', async (test) => {
+  const db = await PGlite.create()
+  try {
+    await db.exec(schema)
+    await db.exec(`
+      INSERT INTO team VALUES (3, 'Another United', 'BR', 'a');
+      CREATE TABLE game (id int PRIMARY KEY REFERENCES championship, slug text, scope_id text NOT NULL);
+      INSERT INTO game VALUES (10, 'visible-game', 'a'), (20, 'hidden-game', 'b');
+      ALTER TABLE game ENABLE ROW LEVEL SECURITY;
+      CREATE POLICY game_scope ON game USING (scope_id = ANY(string_to_array(current_setting('app.scopes', true), ',')));
+      CREATE VIEW team_campaign_point WITH (security_invoker=true) AS
+        SELECT id, group_id, home_id AS team_id, championship_id AS game_id, scope_id FROM card;
+      CREATE FUNCTION team(campaign team_campaign_point) RETURNS SETOF team
+        LANGUAGE sql STABLE ROWS 1 SET search_path=public,pg_temp AS $$
+          SELECT source.* FROM team source WHERE source.id=campaign.team_id
+        $$;
+      CREATE FUNCTION game(campaign team_campaign_point) RETURNS SETOF game
+        LANGUAGE sql STABLE ROWS 1 SET search_path=public,pg_temp AS $$
+          SELECT source.* FROM game source WHERE source.id=campaign.game_id
+        $$;
+      CREATE FUNCTION many(campaign team_campaign_point) RETURNS SETOF team
+        LANGUAGE sql STABLE ROWS 100 AS $$ SELECT * FROM team $$;
+      CREATE FUNCTION scalar(campaign team_campaign_point) RETURNS team
+        LANGUAGE sql STABLE AS $$ SELECT * FROM team WHERE id=campaign.team_id $$;
+      CREATE FUNCTION volatile_relation(campaign team_campaign_point) RETURNS SETOF team
+        LANGUAGE sql VOLATILE ROWS 1 AS $$ SELECT * FROM team WHERE id=campaign.team_id $$;
+      CREATE FUNCTION privileged(campaign team_campaign_point) RETURNS SETOF team
+        LANGUAGE sql STABLE ROWS 1 SECURITY DEFINER AS $$ SELECT * FROM team WHERE id=campaign.team_id $$;
+      CREATE FUNCTION default_arg(campaign team_campaign_point, extra int DEFAULT 1) RETURNS SETOF team
+        LANGUAGE sql STABLE ROWS 1 AS $$ SELECT * FROM team WHERE id=campaign.team_id $$;
+      CREATE FUNCTION wrong_source(source card) RETURNS SETOF team
+        LANGUAGE sql STABLE ROWS 1 AS $$ SELECT * FROM team WHERE id=source.home_id $$;
+      CREATE FUNCTION lying_many(campaign team_campaign_point) RETURNS SETOF team
+        LANGUAGE sql STABLE ROWS 1 SET search_path=public,pg_temp AS $$ SELECT * FROM team $$;
+      GRANT SELECT ON game, team_campaign_point TO reader;
+      REVOKE ALL ON FUNCTION team(team_campaign_point), game(team_campaign_point) FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION team(team_campaign_point), game(team_campaign_point) TO reader;
+    `)
+    const handler = createRestHandler(db, { role: 'reader', scopes: () => ['a'] })
+    const request = (query: string, headers?: HeadersInit) => handler(new Request(`http://localhost/team_campaign_point?${query}`, { headers }))
+    const rows = async (query: string) => {
+      const response = await request(query)
+      const body = await response.json()
+      assert.equal(response.status, 200, JSON.stringify(body))
+      return body
+    }
+
+    await test.step('the campaign projection retains source and related RLS', async () => {
+      assert.deepEqual(await rows('select=*,team(name),game(slug)&group_id=eq.1&team_id=eq.1&limit=800'), [{
+        id: 1, group_id: 1, team_id: 1, game_id: 10, scope_id: 'a',
+        team: { name: 'Alpha United' }, game: { slug: 'visible-game' },
+      }])
+      assert.deepEqual(await rows('select=id,team(name),game(slug)&order=id.asc'), [
+        { id: 1, team: { name: 'Alpha United' }, game: { slug: 'visible-game' } },
+        { id: 2, team: { name: 'Alpha United' }, game: { slug: 'visible-game' } },
+        { id: 3, team: null, game: null },
+      ])
+      const other = createRestHandler(db, { role: 'reader', scopes: () => ['b'] })
+      const response = await other(new Request('http://localhost/team_campaign_point?select=id,team(name),game(slug)', { headers: { Prefer: 'count=exact' } }))
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), [{ id: 4, team: { name: 'Secret FC' }, game: { slug: 'hidden-game' } }])
+      assert.equal(response.headers.get('Content-Range'), '0-0/1')
+    })
+
+    await test.step('left filters, inner filters, aliases, exact counts and pagination agree', async () => {
+      const left = await request('select=id,team(name)&team.name=eq.Nope&order=id.asc&limit=1', { Prefer: 'count=exact' })
+      assert.equal(left.status, 200)
+      assert.deepEqual(await left.json(), [{ id: 1, team: null }])
+      assert.equal(left.headers.get('Content-Range'), '0-0/3')
+      const inner = await request('select=id,opponent:team!inner(name),game!inner(slug)&opponent.name=eq.Alpha%20United&game.slug=eq.visible-game&order=id.asc&offset=1&limit=1', { Prefer: 'count=exact' })
+      assert.equal(inner.status, 200)
+      assert.deepEqual(await inner.json(), [{ id: 2, opponent: { name: 'Alpha United' }, game: { slug: 'visible-game' } }])
+      assert.equal(inner.headers.get('Content-Range'), '1-1/2')
+      assert.deepEqual(await rows('select=id,game!inner(slug,championship!inner(show_country))&game.championship.show_country=is.true&order=id.asc'), [
+        { id: 1, game: { slug: 'visible-game', championship: { show_country: true } } },
+        { id: 2, game: { slug: 'visible-game', championship: { show_country: true } } },
+      ])
+      assert.deepEqual(await rows('select=id,team!inner(name)&team.name=eq.' + encodeURIComponent("' OR true --")), [])
+      assert.deepEqual(await rows('select=id,team!inner(name)&team.name=eq.Secret%20FC'), [])
+    })
+
+    await test.step('unsupported signatures and hostile relation names fail closed', async () => {
+      for (const query of [
+        'select=many(name)', 'select=scalar(name)', 'select=volatile_relation(name)',
+        'select=privileged(name)', 'select=default_arg(name)', 'select=wrong_source(name)',
+        'select=team!missing(name)', 'select=team(name);DROP TABLE game',
+        'select=id,team(name)&team.name=unsupported.Secret%20FC',
+      ]) {
+        const response = await request(query)
+        assert.equal(response.status, 400, `${query}: ${await response.text()}`)
+      }
+      const ambiguous = await handler(new Request('http://localhost/card?select=team(name)'))
+      assert.equal(ambiguous.status, 400)
+      assert.match(await ambiguous.text(), /Ambiguous to-one relation/)
+    })
+
+    await test.step('an exact computed relation overrides the unhinted FK name and keeps explicit FK hints', async () => {
+      await db.exec(`
+        CREATE FUNCTION team(source card) RETURNS SETOF team
+          LANGUAGE sql STABLE ROWS 1 AS $$ SELECT * FROM team WHERE id=source.home_id $$;
+      `)
+      const response = await handler(new Request('http://localhost/card?select=id,team(name),away:team!away_id(name)&id=eq.1'))
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), [{ id: 1, team: { name: 'Alpha United' }, away: null }])
+    })
+
+    await test.step('a source column named like its SQL alias cannot select an unchecked overload', async () => {
+      await db.exec(`
+        CREATE VIEW overload_source WITH (security_invoker=true) AS
+          SELECT id, home_id AS team_id, 'wrong-overload'::text AS r0 FROM card;
+        CREATE FUNCTION related(source overload_source) RETURNS SETOF team
+          LANGUAGE sql STABLE ROWS 1 AS $$ SELECT * FROM team WHERE id=source.team_id $$;
+        CREATE FUNCTION related(source text) RETURNS SETOF team
+          LANGUAGE sql STABLE ROWS 1 SECURITY DEFINER AS $$ SELECT * FROM team WHERE id=2 $$;
+        GRANT SELECT ON overload_source TO reader;
+      `)
+      const response = await handler(new Request('http://localhost/overload_source?select=id,related(name)&id=eq.1'))
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), [{ id: 1, related: { name: 'Alpha United' } }])
+      const filtered = await handler(new Request('http://localhost/overload_source?select=id,related!inner(name)&related.name=eq.Secret%20FC', { headers: { Prefer: 'count=exact' } }))
+      assert.equal(filtered.status, 200)
+      assert.deepEqual(await filtered.json(), [])
+      assert.equal(filtered.headers.get('Content-Range'), '*/0')
+    })
+
+    await test.step('ROWS 1 does not silently truncate a function that returns multiple rows', async () => {
+      const response = await request('select=id,lying_many(name)&id=eq.1', { Prefer: 'count=exact' })
+      assert.equal(response.status, 500)
+      assert.match(await response.text(), /more than one row returned/)
+    })
+
+    await test.step('the caller needs permission to execute a computed relationship', async () => {
+      await db.exec('REVOKE EXECUTE ON FUNCTION game(team_campaign_point) FROM reader')
+      const response = await request('select=id,game(slug)&id=eq.1')
+      assert.equal(response.status, 500)
+      assert.match(await response.text(), /permission denied for function game/)
+    })
+  } finally {
+    await db.close()
+  }
+})

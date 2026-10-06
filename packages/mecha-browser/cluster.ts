@@ -29,6 +29,7 @@ export interface ClusterConfig {
   sql: string[]
   /** Server tables that carry shapes. */
   tables: string[]
+  schema?: Record<string, { durability?: string }>
   /** Where a request's failure is written before it is answered as a 500. */
   log: (line: string) => void
   /** Where a failure no request can answer is raised: a change whose row
@@ -111,6 +112,14 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
   const logs = new Map<string, Log>()
   const bootId = crypto.randomUUID().slice(0, 8)
   for (const table of cfg.tables) {
+    // Physical server tables can invalidate live joins. A request-only view
+    // has no independent changes, primary key, or notification trigger.
+    if (cfg.schema?.[table]?.durability === 'server') {
+      const relation = await db.query<{ relkind: string }>(
+        'SELECT relkind FROM pg_class WHERE oid = $1::regclass', [table],
+      )
+      if (relation.rows[0]?.relkind === 'v') continue
+    }
     const cols = await db.query<{ column_name: string; udt_name: string; is_nullable: string }>(
       `SELECT column_name, udt_name, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position`,
       [table],

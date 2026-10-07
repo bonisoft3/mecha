@@ -24,7 +24,10 @@ the change path does is best-effort.
   and supplies the PGlite instance. The bare imports are pinned in
   `cluster.deno.json`.
 - **`bootPlatform`** ([`src/factory.ts`](../packages/mecha-browser/src/factory.ts))
-  opens PGlite on IndexedDB (`idb://mecha`). An MSW service worker answers
+  opens PGlite on IndexedDB (`idb://mecha-icu-full-0.0.2`). The storage
+  namespace belongs to its ICU data version: a different namespace starts from
+  the application's schema and seed, without reusing incompatible collation
+  indexes. An MSW service worker answers
   `/crud/*` and the app's own `routes`. It returns the same `PlatformContext`
   as `@mecha/client`'s `bootPlatform`, which reads Electric shapes and fetches
   `/crud` on a server, so an app chooses its platform at boot.
@@ -32,6 +35,11 @@ the change path does is best-effort.
   postgrest-js on `:8080` through `node:http` (`sayt launch@browser`).
 
 ## What stands in for what
+
+All framework-owned PGlite instances use [[../packages/mecha-browser/src/database.ts|createDatabase]],
+which loads full ICU data before schema creation. The single-file release supplies
+that archive from its embedded payload; other entry points load the pinned package.
+ICU data is required for declared collations to honor case and accent equivalence.
 
 | component | package | what it is |
 |---|---|---|

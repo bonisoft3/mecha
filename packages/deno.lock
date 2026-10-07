@@ -3,6 +3,8 @@
   "specifiers": {
     "npm:@electric-sql/client@1.5.27": "1.5.27",
     "npm:@electric-sql/client@^1.5.27": "1.5.27",
+    "npm:@electric-sql/pglite-icu-full@0.0.2": "0.0.2",
+    "npm:@electric-sql/pglite@0.5.8": "0.5.8",
     "npm:@electric-sql/pglite@~0.5.8": "0.5.8",
     "npm:@tanstack/db@0.8.0": "0.8.0_typescript@5.9.3",
     "npm:@tanstack/electric-db-collection@0.4.0": "0.4.0_typescript@5.9.3",
@@ -26,6 +28,9 @@
         "@rollup/rollup-darwin-arm64"
       ],
       "bin": true
+    },
+    "@electric-sql/pglite-icu-full@0.0.2": {
+      "integrity": "sha512-K/yQbMlODpnwmjIPUkM6dFKVQjdGKVPArdjmlK275KVWDY+AbHCDEuvcDZXneQw8ELYKHnXhPEhJWSFUtpLk4A=="
     },
     "@electric-sql/pglite@0.5.8": {
       "integrity": "sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q=="
@@ -1140,7 +1145,8 @@
       "mecha-browser": {
         "packageJson": {
           "dependencies": [
-            "npm:@electric-sql/pglite@~0.5.8",
+            "npm:@electric-sql/pglite-icu-full@0.0.2",
+            "npm:@electric-sql/pglite@0.5.8",
             "npm:@tanstack/db@0.8.0",
             "npm:msw@^2.7.0",
             "npm:typescript@^5.7.0",

@@ -1,4 +1,4 @@
-import { PGlite } from '@electric-sql/pglite'
+import { createDatabase } from './database.js'
 import { live } from '@electric-sql/pglite/live'
 import { createRestHandler } from '@mecha/postgrest-js'
 import { PipelineRegistry, createCDCListener } from '@mecha/conduit-js'
@@ -113,7 +113,7 @@ async function main() {
   console.log(`[mecha-dev] Starting with profile: ${profile}`)
 
   // 1. Initialize PGlite (in-memory for dev)
-  const pglite = await PGlite.create({
+  const pglite = await createDatabase({
     extensions: { live },
   })
   await pglite.exec(DEMO_SCHEMA)

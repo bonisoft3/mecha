@@ -1,4 +1,4 @@
-import { PGlite } from '@electric-sql/pglite'
+import { createDatabase } from './database.js'
 import { live } from '@electric-sql/pglite/live'
 import { createRestHandler, applyScopeSession } from '@mecha/postgrest-js'
 import { pgliteCollectionOptions } from '@mecha/tanstackdb-pglite'
@@ -13,8 +13,9 @@ import { createModelHandler } from './model-handler.js'
  * Returns PlatformContext with adapter backed by pgliteCollectionOptions.
  */
 export async function bootPlatform(config: BrowserConfig): Promise<PlatformContext> {
-  // 1. Create PGlite with live extension
-  const pglite = await PGlite.create('idb://mecha', {
+  // ICU data and the indexes built with it share a storage namespace.
+  const pglite = await createDatabase({
+    dataDir: 'idb://mecha-icu-full-0.0.2',
     extensions: { live },
   })
   await pglite.exec(config.schema)

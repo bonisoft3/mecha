@@ -3,6 +3,7 @@
   "imports": {
     "@electric-sql/client": "npm:@electric-sql/client@1.5.27",
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
+    "@electric-sql/pglite-icu-full": "npm:@electric-sql/pglite-icu-full@0.0.2",
     "@mecha/postgrest-js": "../postgrest-js/src/index.ts",
     "../postgrest-js/src/rest-handler.js": "../postgrest-js/src/rest-handler.ts",
     "../postgrest-js/src/rest-read.js": "../postgrest-js/src/rest-read.ts",

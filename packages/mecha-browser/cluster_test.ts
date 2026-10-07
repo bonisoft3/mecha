@@ -4,6 +4,7 @@
 // on `featured=is.true` showed nothing.
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
+import { createDatabase } from './src/database.ts'
 import { isVisibleInSnapshot, ShapeStream } from '@electric-sql/client'
 import { type Cluster, createCluster } from './cluster.ts'
 
@@ -341,4 +342,19 @@ Deno.test('a subset leaves the stream where it was, so a change outside it still
   assert.deepEqual(seen.map((m) => `${m.headers.operation} ${m.value?.id} ${m.value?.game ?? ''}`), ['insert 1 7', 'update 3 9'])
   stream.unsubscribeAll()
   await db.close()
+})
+
+Deno.test('the browser database honors case and accent insensitive ICU collations by default', async () => {
+  const db = await createDatabase({})
+  try {
+    await db.exec(`
+      CREATE COLLATION search (provider = icu, locale = 'und-u-ks-level1', deterministic = false);
+      CREATE TABLE names (name text COLLATE search);
+      INSERT INTO names VALUES ('Flamengo'), ('São Paulo'), ('Other');
+    `)
+    assert.deepEqual((await db.query("SELECT name FROM names WHERE name LIKE '%flamengo%' OR name LIKE '%sao%' ORDER BY name")).rows,
+      [{ name: 'Flamengo' }, { name: 'São Paulo' }])
+  } finally {
+    await db.close()
+  }
 })

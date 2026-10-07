@@ -1,0 +1,30 @@
+input:
+  redis_streams:
+    url: ${REDIS_URL}
+    streams: [cdc-events]
+    body_key: data
+    consumer_group: ${COMPUTE_GROUP}
+    client_id: compute
+    start_from_oldest: true
+    auto_replay_nacks: true
+pipeline:
+  threads: 1
+  processors:
+    - mapping: |
+        let table = this.data.parse_json().__table
+        root.tables = [if $table.type() == "string" && $table != "" { $table } else { throw("CDC event has no table") }]
+output:
+  switch:
+    cases:
+      - check: errored()
+        output:
+          reject: ${! error() }
+      - output:
+          http_client:
+            url: http://compute:9997/invalidate
+            verb: POST
+            timeout: 30m
+            max_in_flight: 1
+            headers:
+              Content-Type: application/json
+              Authorization: Bearer ${SERVICE_JWT:}

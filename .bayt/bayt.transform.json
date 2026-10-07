@@ -54,6 +54,7 @@
         "exclude": []
       }
     ],
+    "epilogue": [],
     "cmd": [
       "streams",
       "--no-api",
@@ -63,7 +64,6 @@
     "mounts": [],
     "secrets": {},
     "extra_hosts": [],
-    "epilogue": [],
     "healthcheck": null,
     "expose": [],
     "entrypoint": null,

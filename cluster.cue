@@ -28,6 +28,7 @@ import (
 )
 
 _electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
+_computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 
 // Where postgres applies what an image carries, in name order, on a fresh data
 // directory.
@@ -36,6 +37,8 @@ _electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
 // Where the migrate image holds the pgroll migrations it applies, as
 // <name>.json.
 #PgRollDir: "/pgroll"
+
+#ConduitSlot: {app: string, name: "\(strings.Replace(app, "-", "_", -1))_conduit_slot"}
 
 // The tenancy floor's migration, which ships with the image whatever emitted
 // the tables above it. It need not follow a caller's grants: it grants only to
@@ -105,7 +108,7 @@ _devElectricSecret: "dev-electric-secret"
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
-		computations: [...{name: string, file: string, every: int & >0, to: [...string] & [_, ...], wasm: [...string], onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$"}]
+		computations: [...{name: string, file: string, to: [...string] & [_, ...], wasm: [...string], onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$"}]
 		// Names only: the cluster needs to know whether any schedule exists,
 		// never what it says. One brings the ticker, its clock and the table
 		// they sweep (#ScheduleMigration); the caller's migrations seed it.
@@ -132,12 +135,12 @@ _devElectricSecret: "dev-electric-secret"
 
 		// The change feed: conduit reading the WAL onto the bus (redis, behind
 		// the mesh-events sidecar) and transform running the pipelines off it.
-		// A pipeline or a schedule turns it on, and refuses it off: the
+		// A pipeline, computation or schedule turns it on, and refuses it off: the
 		// pipeline would never run, and the ticker's wake is addressed to that
 		// sidecar. Off otherwise, since nothing in the cluster reads the feed.
 		// The WAL is the data plane's, so it presupposes `server`.
 		capture: *false | bool
-		if len(X.state.pipelines) > 0 || len(X.state.schedules) > 0 {
+		if len(X.state.pipelines)+len(X.state.computations)+len(X.state.schedules) > 0 {
 			capture: true
 		}
 		if capture {
@@ -598,21 +601,28 @@ _devElectricSecret: "dev-electric-secret"
 					}
 				}
 			}
-			if len(X.state.pipelines) > 0 {
+			if len(X.state.pipelines)+len(X.state.computations) > 0 {
 				transform: X._image & {
 					srcs: globs: [for p in X.state.pipelines {p.file}]
 					dockerfile: {
 						from: name: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
-						cmd: list.Concat([["streams", "--no-api"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}]])
+						if len(X.state.computations) > 0 {
+							epilogue: ["COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"]
+						}
+						cmd: list.Concat([["streams", "--no-api"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 {"/compute-events.yaml"}]])
 					}
 					compose: {
 						depends_on: {redis: _healthy, crud: _healthy}
+						if len(X.state.computations) > 0 {
+							depends_on: compute: _started
+						}
 						environment: {
 							// Straight to PostgREST: the proxy's client-facing Prefer
 							// injection would clobber the pipelines' merge-duplicates upserts.
 							CRUD_URL:  "http://crud:3000"
 							REDIS_URL: "redis://redis:6379"
+							if len(X.state.computations) > 0 {COMPUTE_GROUP: "\(X.meta.app)-compute"}
 							if X.capabilities.auth {
 								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
 							}
@@ -645,16 +655,16 @@ _devElectricSecret: "dev-electric-secret"
 						])
 					}
 					compose: {
-						depends_on: {X._schemaReady, crud: _healthy}
+						depends_on: {X._schemaReady, crud: _healthy, conduit: _healthy}
 						environment: {
 							CRUD_URL:     "http://crud:3000"
 							DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							LAKE_DIR:     "/lake"
+							CDC_SLOT:     (#ConduitSlot & {app: X.meta.app}).name
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
-								name:  c.name
-								file:  "/app/computations/\(c.name).js"
-								every: c.every
-								to:    c.to
+								name: c.name
+								file: "/app/computations/\(c.name).js"
+								to:   c.to
 								wasm: [for w in c.wasm {_target[w]}]
 								if c.onComplete != _|_ {onComplete: c.onComplete}
 							}])
@@ -736,7 +746,7 @@ _devElectricSecret: "dev-electric-secret"
 							"mesh-events": _healthy
 							conduit:       _healthy
 						}
-						if len(X.state.pipelines) > 0 {
+						if len(X.state.pipelines)+len(X.state.computations) > 0 {
 							transform: _started
 						}
 						if len(X.state.computations) > 0 {

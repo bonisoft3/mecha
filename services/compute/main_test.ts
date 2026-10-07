@@ -1,4 +1,4 @@
-// The compute service's scheduling, sink contract and Postgres reads.
+// The compute service's CDC invalidation, sink contract and Postgres reads.
 //
 // The Postgres tests start a throwaway cluster with the initdb on PATH and
 // need DuckDB's postgres and ducklake extensions installed (install.ts), as
@@ -8,6 +8,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   Computation,
   Database,
+  handler,
   Lake,
   type Reader,
   type Runnable,
@@ -17,34 +18,22 @@ import {
   type Snapshots,
   type Store,
 } from "./main.ts";
-import { Runner } from "./workers.ts";
+import { type Job, Runner } from "./workers.ts";
 
-/** Fingerprints are a counter per table, bumped by `change`. */
 class FakeLake implements Snapshots, Reader {
-  counts = new Map<string, number>();
   attached = false;
-
-  change(table: string) {
-    this.counts.set(table, (this.counts.get(table) ?? 0) + 1);
-  }
+  copies: string[][] = [];
 
   async attach() {
     this.attached = true;
   }
-
   async detach() {
     this.attached = false;
   }
-
-  async fingerprint(tables: string[]) {
+  async hold(tables: string[]) {
     assert(this.attached);
-    return JSON.stringify(tables.map((t) => this.counts.get(t) ?? 0));
+    this.copies.push([...tables]);
   }
-
-  async hold() {
-    assert(this.attached);
-  }
-
   async query() {
     assert(!this.attached, "a program ran with Postgres attached");
     return [];
@@ -62,13 +51,11 @@ class FakeSinks {
 
 type Fake = Runnable & { runs: number; onComplete?: string };
 
-function computation(name: string, every: number, reads = ["game"], to = ["sink"]): Fake {
+function computation(name: string, reads = ["game"], to = ["sink"]): Fake {
   const c: Fake = {
     name,
-    every,
     reads,
     to,
-    ran: null,
     runs: 0,
     async run(lake) {
       await lake.query("");
@@ -79,40 +66,82 @@ function computation(name: string, every: number, reads = ["game"], to = ["sink"
   return c;
 }
 
-Deno.test("each computation is looked at on its own interval", async () => {
-  // One tick at the shortest interval ran every computation that often.
+Deno.test("bootstrap runs all computations; invalidations select declared reads, including derived inputs", async () => {
   const lake = new FakeLake();
   const sinks = new FakeSinks();
-  const fast = computation("fast", 10, ["game"], ["a"]);
-  const slow = computation("slow", 30, ["game"], ["b"]);
-  const service = new Service([fast, slow], lake, sinks);
-  assertEquals(await service.tick(0), 10);
-  assertEquals([fast.runs, slow.runs], [1, 1]);
-  lake.change("game");
-  assertEquals(await service.tick(10), 20);
-  assertEquals([fast.runs, slow.runs], [2, 1]);
-  // Nothing changed since the fast one ran: it is looked at and skipped.
-  assertEquals(await service.tick(20), 30);
-  assertEquals([fast.runs, slow.runs], [2, 1]);
-  assertEquals(await service.tick(30), 40);
-  assertEquals([fast.runs, slow.runs], [2, 2]);
-  assertEquals(await service.tick(40), 50);
-  assertEquals([fast.runs, slow.runs], [2, 2]);
+  const ratings = computation("ratings", ["game"], ["rating"]);
+  const chances = computation("chances", ["game", "rating"], ["chance"]);
+  const service = new Service([ratings, chances], lake, sinks);
+  await service.refresh();
+  assertEquals([ratings.runs, chances.runs], [1, 1]);
+  await service.refresh(["unrelated", "chance"]);
+  assertEquals([ratings.runs, chances.runs], [1, 1]);
+  await service.refresh(["rating"]);
+  assertEquals([ratings.runs, chances.runs], [1, 2]);
+  await service.refresh(["game", "rating"]);
+  assertEquals([ratings.runs, chances.runs], [2, 3]);
+  // A redelivery rereads current state; no statistics update is required.
+  await service.refresh(["game"]);
+  assertEquals([ratings.runs, chances.runs], [3, 4]);
+  assertEquals(lake.copies.length, 7);
 });
 
-Deno.test("a computation runs when any read changed", async () => {
+Deno.test("overlapping delivery stays unacknowledged until it can take its own snapshot", async () => {
   const lake = new FakeLake();
-  const sinks = new FakeSinks();
-  const c = computation("c", 5, ["game", "team"]);
-  const service = new Service([c], lake, sinks);
-  await service.tick(0);
-  lake.change("player");
-  await service.tick(5);
-  assertEquals(c.runs, 1);
-  lake.change("team");
-  await service.tick(10);
-  assertEquals(c.runs, 2);
-  assertEquals(sinks.applied, ["c", "c"]);
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const c = computation("c");
+  const sinks = {
+    async apply() {
+      started.resolve();
+      await release.promise;
+    },
+  };
+  const handle = handler(new Service([c], lake, sinks), "secret");
+  const event = () =>
+    new Request("http://compute/invalidate", {
+      method: "POST",
+      headers: { authorization: "Bearer secret" },
+      body: JSON.stringify({ tables: ["game"] }),
+    });
+  const first = handle(event());
+  await started.promise;
+  assertEquals((await handle(event())).status, 503);
+  assertEquals(lake.copies.length, 1);
+  release.resolve();
+  assertEquals((await first).status, 204);
+  assertEquals((await handle(event())).status, 204);
+  assertEquals(lake.copies.length, 2);
+});
+
+Deno.test("invalidations require credentials and valid table names before reading inputs", async () => {
+  const lake = new FakeLake();
+  const handle = handler(
+    new Service([computation("c")], lake, new FakeSinks()),
+    "secret",
+  );
+  assertEquals(
+    (await handle(new Request("http://compute/invalidate", { method: "POST" })))
+      .status,
+    401,
+  );
+  for (
+    const body of [{}, { tables: [null] }, { tables: ["game;drop table game"] }]
+  ) {
+    await assertRejects(
+      () =>
+        handle(
+          new Request("http://compute/invalidate", {
+            method: "POST",
+            headers: { authorization: "Bearer secret" },
+            body: JSON.stringify(body),
+          }),
+        ),
+      Error,
+      "invalidation requires",
+    );
+  }
+  assertEquals(lake.copies, []);
 });
 
 type Request = [string, string, unknown];
@@ -186,7 +215,7 @@ Deno.test("rows no longer produced are deleted and unchanged ones not rewritten"
   crud.tables.set("team_chance", new Set(["a", "b"]));
   const database = new FakeDatabase(crud);
   const sinks = new Sinks(database, crud.url, "jwt");
-  const c = computation("chances", 30, ["game"], ["team_chance", "game_importance"]);
+  const c = computation("chances", ["game"], ["team_chance", "game_importance"]);
   // Rows found at start are unknown: each produced one is written once.
   await sinks.apply(c, { team_chance: [{ id: "a", rank: 1 }, { id: "c", rank: 2 }], game_importance: [] });
   assertEquals(crud.take(), [
@@ -228,7 +257,7 @@ for (
     await using crud = new Crud();
     const database = new FakeDatabase(crud);
     const sinks = new Sinks(database, crud.url, undefined);
-    await assertRejects(() => sinks.apply(computation("chances", 30, ["game"], ["team_chance"]), out));
+    await assertRejects(() => sinks.apply(computation("chances", ["game"], ["team_chance"]), out));
     assertEquals(crud.take(), []);
     assertEquals(database.checked, []);
   });
@@ -237,7 +266,7 @@ for (
 Deno.test("completion RPC waits for successful sink writes and a failed hook remains retryable", async () => {
   await using crud = new Crud();
   const lake = new FakeLake();
-  const c = computation("history", 30, ["game"], ["sink", "other"]);
+  const c = computation("history", ["game"], ["sink", "other"]);
   c.onComplete = "capture_team_odds_history";
   c.run = async () => ({
     sink: [{ id: "today", value: 7 }],
@@ -253,8 +282,11 @@ Deno.test("completion RPC waits for successful sink writes and a failed hook rem
   c.run = async () => {
     throw new Error("calculation failed");
   };
-  await assertRejects(() => service.step(c), Error, "calculation failed");
-  assertEquals(c.ran, null);
+  await assertRejects(
+    () => service.refresh(["game"]),
+    Error,
+    "calculation failed",
+  );
   assertEquals(
     crud.take(),
     [],
@@ -263,8 +295,11 @@ Deno.test("completion RPC waits for successful sink writes and a failed hook rem
   c.run = calculate;
 
   crud.failures.add("/other?on_conflict=id");
-  await assertRejects(() => service.step(c), Error, "injected failure");
-  assertEquals(c.ran, null, "failed sink write does not mark the input as run");
+  await assertRejects(
+    () => service.refresh(["game"]),
+    Error,
+    "injected failure",
+  );
   assertEquals(crud.take().map(([method, path]) => [method, path]), [
     ["POST", "/sink?on_conflict=id"],
     ["POST", "/other?on_conflict=id"],
@@ -272,8 +307,11 @@ Deno.test("completion RPC waits for successful sink writes and a failed hook rem
 
   crud.failures.delete("/other?on_conflict=id");
   crud.failures.add("/rpc/capture_team_odds_history");
-  await assertRejects(() => service.step(c), Error, "injected failure");
-  assertEquals(c.ran, null, "failed completion RPC leaves the run retryable");
+  await assertRejects(
+    () => service.refresh(["game"]),
+    Error,
+    "injected failure",
+  );
   assertEquals(crud.take().map(([method, path]) => [method, path]), [
     ["POST", "/sink?on_conflict=id"],
     ["POST", "/other?on_conflict=id"],
@@ -289,18 +327,17 @@ Deno.test("completion RPC waits for successful sink writes and a failed hook rem
   ]);
 
   crud.failures.delete("/rpc/capture_team_odds_history");
-  await service.step(c);
+  await service.refresh(["game"]);
   assertEquals(
     crud.take(),
     [["POST", "/rpc/capture_team_odds_history", {}]],
     "retry repeats the idempotent hook without rewriting committed sink rows",
   );
-  assertEquals(c.ran, JSON.stringify([0]));
-  await service.step(c);
+  await service.refresh(["game"]);
   assertEquals(
     crud.take(),
-    [],
-    "unchanged inputs do not invoke the completion hook",
+    [["POST", "/rpc/capture_team_odds_history", {}]],
+    "redelivery repeats the idempotent completion hook",
   );
 });
 
@@ -310,7 +347,7 @@ Deno.test("onComplete accepts only one lowercase SQL/PostgREST identifier", asyn
       Computation.load({
         name: "bad",
         file: "unused.js",
-        every: 1,
+
         to: ["sink"],
         wasm: [],
         onComplete: "rpc/capture",
@@ -326,7 +363,7 @@ Deno.test("onComplete does not exceed PostgreSQL's identifier limit", async () =
       Computation.load({
         name: "bad",
         file: "unused.js",
-        every: 1,
+
         to: ["sink"],
         wasm: [],
         onComplete: `capture_${"x".repeat(57)}`,
@@ -369,7 +406,7 @@ async function postgres() {
   const probe = Deno.listen({ hostname: "127.0.0.1", port: 0 });
   const port = (probe.addr as Deno.NetAddr).port;
   probe.close();
-  const options = `-p ${port} -c listen_addresses=localhost -c unix_socket_directories=''`;
+  const options = `-p ${port} -c listen_addresses=localhost -c unix_socket_directories='' -c track_counts=off -c wal_level=logical`;
   await run("pg_ctl", ["-D", `${root}/data`, "-w", "-o", options, "-l", `${root}/log`, "start"]);
   return {
     url: `postgresql://postgres@localhost:${port}/postgres`,
@@ -391,93 +428,136 @@ async function eventually(predicate: () => Promise<boolean>, seconds = 15) {
 const pgTest = (name: string, fn: () => Promise<void>) =>
   Deno.test({ name, ignore: !pgTools, sanitizeResources: false, sanitizeOps: false, fn });
 
-pgTest("the fingerprint sees a commit out of xid order", async () => {
-  // A transaction holding an older xid that commits after a younger one:
-  // row counts and the newest stamped txid both miss it, which is how the
-  // lake once kept a result recorded under a long transaction.
+pgTest("bootstrap refuses the pre-capture gap and snapshots commits made while capture starts", async () => {
   await using pg = await postgres();
-  await psql(
-    pg.url,
-    `CREATE TABLE game (id int PRIMARY KEY, v int, txid bigint DEFAULT pg_current_xact_id()::text::bigint);
+  await psql(pg.url, "CREATE TABLE game (id int PRIMARY KEY); INSERT INTO game VALUES (1)");
+  const database = await Database.open(pg.url, undefined);
+  await assertRejects(() => database.requireCapture("test_compute"), Error, "not ready");
+  const transaction = new Deno.Command("psql", { args: [pg.url, "-Xq"], stdin: "piped", stdout: "null" }).spawn();
+  const writer = transaction.stdin.getWriter();
+  await writer.write(new TextEncoder().encode("BEGIN; INSERT INTO game VALUES (2);\n"));
+  await eventually(async () => (await psql(pg.url,
+    "SELECT count(*) FROM pg_stat_activity WHERE state='idle in transaction' AND backend_xid IS NOT NULL")) === "1");
+  const creating = new Deno.Command("psql", {
+    args: [pg.url, "-XAtqc", "SELECT pg_create_logical_replication_slot('test_compute', 'pgoutput')"], stdout: "null",
+  }).spawn();
+  await eventually(async () => (await psql(pg.url,
+    "SELECT count(*) FROM pg_replication_slots WHERE slot_name='test_compute' AND confirmed_flush_lsn IS NULL")) === "1");
+  // Slot presence precedes its consistent point while old writers are open.
+  await assertRejects(() => database.requireCapture("test_compute"), Error, "not ready");
+  await writer.write(new TextEncoder().encode("COMMIT;\n"));
+  await writer.close();
+  assert((await transaction.status).success);
+  assert((await creating.status).success);
+  await database.requireCapture("test_compute");
+  const lake = await Lake.open(pg.url, await Deno.makeTempDir());
+  await lake.attach();
+  await lake.hold(["game"]);
+  await lake.detach();
+  assertEquals(await lake.query("SELECT id FROM game ORDER BY id"), [{ id: 1 }, { id: 2 }]);
+});
+
+pgTest(
+  "a new snapshot sees a commit out of xid order without statistics",
+  async () => {
+    // A transaction holding an older xid that commits after a younger one:
+    // row counts and the newest stamped txid both miss it, which is how the
+    // lake once kept a result recorded under a long transaction.
+    await using pg = await postgres();
+    await psql(
+      pg.url,
+      `CREATE TABLE game (id int PRIMARY KEY, v int, txid bigint DEFAULT pg_current_xact_id()::text::bigint);
      CREATE FUNCTION restamp() RETURNS trigger LANGUAGE plpgsql AS
        $$BEGIN NEW.txid := pg_current_xact_id()::text::bigint; RETURN NEW; END$$;
      CREATE TRIGGER restamp BEFORE UPDATE ON game FOR EACH ROW EXECUTE FUNCTION restamp();
      INSERT INTO game (id, v) VALUES (1, 0), (2, 0);`,
-  );
-  const older = new Deno.Command("psql", { args: [pg.url, "-Xq"], stdin: "piped", stdout: "null" }).spawn();
-  const writer = older.stdin.getWriter();
-  await writer.write(new TextEncoder().encode("BEGIN; UPDATE game SET v = 1 WHERE id = 1;\n"));
-  await eventually(async () =>
-    (await psql(
+    );
+    const older = new Deno.Command("psql", {
+      args: [pg.url, "-Xq"],
+      stdin: "piped",
+      stdout: "null",
+    }).spawn();
+    const writer = older.stdin.getWriter();
+    await writer.write(
+      new TextEncoder().encode("BEGIN; UPDATE game SET v = 1 WHERE id = 1;\n"),
+    );
+    await eventually(async () =>
+      (await psql(
+        pg.url,
+        "SELECT count(*) FROM pg_stat_activity WHERE backend_xid IS NOT NULL AND state = 'idle in transaction'",
+      )) === "1"
+    );
+    await psql(pg.url, "UPDATE game SET v = 2 WHERE id = 2");
+    const lake = await Lake.open(pg.url, await Deno.makeTempDir());
+    await lake.attach();
+    await lake.hold(["game"]);
+    await lake.detach();
+    const stamped = await psql(pg.url, "SELECT count(*), max(txid) FROM game");
+    assertEquals(await lake.query("SELECT v FROM game ORDER BY id"), [
+      { v: 0 },
+      { v: 2 },
+    ]);
+    await writer.write(new TextEncoder().encode("COMMIT;\n"));
+    await writer.close();
+    assert((await older.status).success);
+    assertEquals(
+      await psql(pg.url, "SELECT count(*), max(txid) FROM game"),
+      stamped,
+    );
+    await lake.attach();
+    await lake.hold(["game"]);
+    await lake.detach();
+    assertEquals(await lake.query("SELECT v FROM game ORDER BY id"), [
+      { v: 1 },
+      { v: 2 },
+    ]);
+  },
+);
+
+pgTest(
+  "a fresh snapshot replaces truncated data without statistics",
+  async () => {
+    await using pg = await postgres();
+    await psql(
       pg.url,
-      "SELECT count(*) FROM pg_stat_activity WHERE backend_xid IS NOT NULL AND state = 'idle in transaction'",
-    )) === "1"
-  );
-  await psql(pg.url, "UPDATE game SET v = 2 WHERE id = 2");
-  const lake = await Lake.open(pg.url, await Deno.makeTempDir());
-  const seen = async () => {
+      "CREATE TABLE game (id int PRIMARY KEY); INSERT INTO game VALUES (1)",
+    );
+    const lake = await Lake.open(pg.url, await Deno.makeTempDir());
     await lake.attach();
-    try {
-      return JSON.parse(await lake.fingerprint(["game"]))[0][0];
-    } finally {
-      await lake.detach();
-    }
-  };
-  // The younger update is counted; the older, still open, is not yet.
-  await eventually(async () => (await seen()) === "3");
-  await lake.attach();
-  await lake.hold(["game"], await lake.fingerprint(["game"]));
-  await lake.detach();
-  const stamped = await psql(pg.url, "SELECT count(*), max(txid) FROM game");
-  assertEquals(await lake.query("SELECT v FROM game ORDER BY id"), [{ v: 0 }, { v: 2 }]);
-  await writer.write(new TextEncoder().encode("COMMIT;\n"));
-  await writer.close();
-  assert((await older.status).success);
-  assertEquals(await psql(pg.url, "SELECT count(*), max(txid) FROM game"), stamped);
-  await eventually(async () => (await seen()) === "4");
-  await lake.attach();
-  await lake.hold(["game"], await lake.fingerprint(["game"]));
-  await lake.detach();
-  assertEquals(await lake.query("SELECT v FROM game ORDER BY id"), [{ v: 1 }, { v: 2 }]);
-});
-
-pgTest("the fingerprint sees a TRUNCATE", async () => {
-  // TRUNCATE moves none of the tuple counters, so a fingerprint of them alone
-  // kept a lake copy of rows the table no longer held.
-  await using pg = await postgres();
-  await psql(pg.url, "CREATE TABLE game (id int PRIMARY KEY); INSERT INTO game VALUES (1)");
-  const lake = await Lake.open(pg.url, await Deno.makeTempDir());
-  const seen = async () => {
+    await lake.hold(["game"]);
+    await lake.detach();
+    assertEquals(await lake.query("SELECT * FROM game"), [{ id: 1 }]);
+    await psql(pg.url, "TRUNCATE game");
     await lake.attach();
-    try {
-      return await lake.fingerprint(["game"]);
-    } finally {
-      await lake.detach();
-    }
-  };
-  await eventually(async () => JSON.parse(await seen())[0][0] === "1");
-  const before = await seen();
-  await psql(pg.url, "TRUNCATE game");
-  await eventually(async () => (await seen()) !== before, 5);
-});
+    await lake.hold(["game"]);
+    await lake.detach();
+    assertEquals(await lake.query("SELECT * FROM game"), []);
+  },
+);
 
-pgTest("reads are copied from one snapshot", async () => {
-  await using pg = await postgres();
-  await psql(pg.url, "CREATE TABLE a (id int); CREATE TABLE b (id int); INSERT INTO a VALUES (1); INSERT INTO b VALUES (1)");
-  const lake = await Lake.open(pg.url, await Deno.makeTempDir());
-  await lake.attach();
-  await lake.hold(["a"], await lake.fingerprint(["a"]));
-  await lake.hold(["b"], await lake.fingerprint(["b"]));
-  assertEquals(lake.snapshots, 2);
-  // Each is current, but from two snapshots: read together, they are copied again.
-  await lake.hold(["a", "b"], await lake.fingerprint(["a", "b"]));
-  assertEquals(lake.snapshots, 3);
-  await lake.hold(["a", "b"], await lake.fingerprint(["a", "b"]));
-  await lake.hold(["b"], await lake.fingerprint(["b"]));
-  assertEquals(lake.snapshots, 3);
-  await lake.detach();
-  await assertRejects(() => lake.query("SELECT * FROM pg.public.a"));
-});
+pgTest(
+  "each invalidation replaces all declared inputs before detaching Postgres",
+  async () => {
+    await using pg = await postgres();
+    await psql(
+      pg.url,
+      "CREATE TABLE a (id int); CREATE TABLE b (id int); INSERT INTO a VALUES (1); INSERT INTO b VALUES (1)",
+    );
+    const lake = await Lake.open(pg.url, await Deno.makeTempDir());
+    await lake.attach();
+    await lake.hold(["a", "b"]);
+    await lake.detach();
+    await psql(pg.url, "BEGIN; UPDATE a SET id=2; UPDATE b SET id=2; COMMIT");
+    await lake.attach();
+    await lake.hold(["a", "b"]);
+    await lake.detach();
+    assertEquals(
+      await lake.query("SELECT a.id a, b.id b FROM a CROSS JOIN b"),
+      [{ a: 2, b: 2 }],
+    );
+    await assertRejects(() => lake.query("SELECT * FROM pg.public.a"));
+  },
+);
 
 pgTest("a query answers plain rows", async () => {
   await using pg = await postgres();
@@ -488,7 +568,7 @@ pgTest("a query answers plain rows", async () => {
   );
   const lake = await Lake.open(pg.url, await Deno.makeTempDir());
   await lake.attach();
-  await lake.hold(["t"], await lake.fingerprint(["t"]));
+  await lake.hold(["t"]);
   await lake.detach();
   assertEquals(
     await lake.query(
@@ -527,7 +607,7 @@ pgTest("a row breaking a constraint writes nothing", async () => {
   const b = "00000000-0000-4000-8000-000000000002";
   await psql(pg.url, `INSERT INTO chance VALUES ('${a}', 1)`);
   const sinks = new Sinks(await Database.open(pg.url, undefined), crud.url, undefined);
-  const c = computation("chances", 30, ["game"], ["chance", "other"]);
+  const c = computation("chances", ["game"], ["chance", "other"]);
   await assertRejects(
     () => sinks.apply(c, { other: [{ id: b }], chance: [{ id: b, percent: 50.5 }, { id: a, percent: 101.5 }] }),
     Error,
@@ -559,7 +639,7 @@ pgTest("the check deletes after every sink's upserts, as crud does", async () =>
      INSERT INTO a VALUES ('a1'); INSERT INTO b VALUES ('b0', 'a1'); GRANT ALL ON a, b TO service`,
   );
   const sinks = new Sinks(await Database.open(pg.url, token), crud.url, token);
-  await sinks.apply(computation("moved", 30, ["game"], ["a", "b"]), { a: [{ id: "a2" }], b: [{ id: "b0", a_id: "a2" }] });
+  await sinks.apply(computation("moved", ["game"], ["a", "b"]), { a: [{ id: "a2" }], b: [{ id: "b0", a_id: "a2" }] });
   assertEquals(crud.take(), [
     ["POST", "/a?on_conflict=id", [{ id: "a2" }]],
     ["POST", "/b?on_conflict=id", [{ id: "b0", a_id: "a2" }]],
@@ -580,7 +660,7 @@ pgTest("a sink crud's role cannot write writes nothing", async () => {
   );
   const sinks = new Sinks(await Database.open(pg.url, token), crud.url, token);
   await assertRejects(
-    () => sinks.apply(computation("denied", 30, ["game"], ["open", "locked"]), { open: [{ id: "o" }], locked: [{ id: "l" }] }),
+    () => sinks.apply(computation("denied", ["game"], ["open", "locked"]), { open: [{ id: "o" }], locked: [{ id: "l" }] }),
     Error,
     "permission denied",
   );
@@ -604,7 +684,7 @@ pgTest("the check runs under the limits crud's role sets", async () => {
   );
   const sinks = new Sinks(await Database.open(pg.url, token), crud.url, token);
   await assertRejects(
-    () => sinks.apply(computation("slow", 30, ["game"], ["quick", "slow"]), { quick: [{ id: "q" }], slow: [{ id: "s" }] }),
+    () => sinks.apply(computation("slow", ["game"], ["quick", "slow"]), { quick: [{ id: "q" }], slow: [{ id: "s" }] }),
     Error,
     "statement timeout",
   );
@@ -720,7 +800,7 @@ Deno.test("a run plans in rounds and finishes in job order", async () => {
   await Deno.writeFile(`${dir}/echo.wasm`, ECHO);
   const games = Array.from({ length: 9 }, (_, i) => ({ id: `g${i}` }));
   const reader = { query: async () => games };
-  const spec = { name: "rounds", file: `${dir}/rounds.js`, every: 1, to: ["sink"], wasm: [`${dir}/echo.wasm`] };
+  const spec = { name: "rounds", file: `${dir}/rounds.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`] };
   const runner = new Runner({ echo: await WebAssembly.compile(ECHO) });
   try {
     const seed = await seedOf("rounds");
@@ -729,6 +809,47 @@ Deno.test("a run plans in rounds and finishes in job order", async () => {
       await (await Computation.load(spec, runner)).run(reader),
       { sink: games.map((g) => ({ id: g.id, seed, all })) },
     );
+  } finally {
+    runner.close();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("CDC fanout reuses only an identical fresh read; failures and caller mutations cannot poison the answer", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${dir}/rounds.js`, ROUNDS);
+  class CountingRunner extends Runner {
+    calls = 0;
+    fail = false;
+    override async run(jobs: Job[]) {
+      this.calls++;
+      if (this.fail) throw new Error("injected job failure");
+      return await super.run(jobs);
+    }
+  }
+  const runner = new CountingRunner({ echo: await WebAssembly.compile(ECHO) });
+  try {
+    const c = await Computation.load(
+      { name: "rounds", file: `${dir}/rounds.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`] }, runner,
+    );
+    const rows = [{ id: "g1" }];
+    let reads = 0;
+    const reader = { query: async () => { reads++; return rows; } };
+    const first = await c.run(reader) as { sink: { id: string }[] };
+    const expected = structuredClone(first);
+    first.sink[0].id = "caller-mutated";
+    assertEquals(await c.run(reader), expected);
+    assertEquals([reads, runner.calls], [2, 2]);
+    await assertRejects(() => c.run({ query: () => Promise.reject(new Error("read failed")) }), Error, "read failed");
+    rows[0].id = "g2";
+    runner.fail = true;
+    await assertRejects(() => c.run(reader), Error, "injected job failure");
+    runner.fail = false;
+    const changed = await c.run(reader) as { sink: { id: string }[] };
+    assertEquals(changed.sink[0].id, "g2");
+    assertEquals(runner.calls, 5);
+    assertEquals(await c.run(reader), changed);
+    assertEquals(runner.calls, 5);
   } finally {
     runner.close();
     await Deno.remove(dir, { recursive: true });
@@ -757,7 +878,7 @@ Deno.test("a job naming a wasm the computation does not ship fails the run", asy
   const runner = new Runner({ echo: await WebAssembly.compile(ECHO) });
   try {
     const c = await Computation.load(
-      { name: "stray", file: `${dir}/stray.js`, every: 1, to: ["sink"], wasm: [`${dir}/echo.wasm`] },
+      { name: "stray", file: `${dir}/stray.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`] },
       runner,
     );
     await assertRejects(() => c.run({ query: async () => [{ id: "g" }] }), Error, "no {wasm, input} of echo");
@@ -779,7 +900,7 @@ Deno.test("a plan that changes a job already answered fails the run", async () =
   const runner = new Runner({ echo: await WebAssembly.compile(ECHO) });
   try {
     const c = await Computation.load(
-      { name: "fickle", file: `${dir}/fickle.js`, every: 1, to: [], wasm: [`${dir}/echo.wasm`] },
+      { name: "fickle", file: `${dir}/fickle.js`, to: [], wasm: [`${dir}/echo.wasm`] },
       runner,
     );
     await assertRejects(() => c.run({ query: async () => [] }), Error, "plan changed the jobs it was answered");

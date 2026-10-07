@@ -82,7 +82,12 @@ Each hop acknowledges upstream only after downstream accepted:
 There is no dead-letter stream: a record every layer refuses stays in its
 group's pending list, retried forever. The `maxRetries`, `redeliverInterval` and
 `processingTimeout` in `redis-streams.yaml` govern Dapr's own subscribers, and
-nothing subscribes through Dapr.
+nothing subscribes through Dapr. Computations use the same direct Redis input
+in [[../services/compute/events.yaml]], forwarding invalidations to compute over
+HTTP. The output waits for completion, nacks failures, and the input replays.
+The compute consumer has a stable identity so container replacement also
+recovers pending messages. Delivery is at least once; it provides no version
+fence across concurrent writers.
 
 ## Duplicates
 

@@ -59,3 +59,4 @@ say:
         stop: true
         cmds:
           - do: "mise x -- deno test --no-config --no-lock --allow-run=docker,cue --allow-read --allow-write --allow-env --allow-net services/migrate/migrate_test.ts tests/planes_test.ts"
+          - do: "mise x -- task integrate:compute"

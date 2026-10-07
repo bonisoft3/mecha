@@ -425,9 +425,9 @@ Rejected:
   bulk insert; a tick is the app's row, with mecha's five columns written last.
 - **A `schedule_run` table with a `historyLimit`**: retention is a level the app
   declares.
-- **`done` as a filter over the emits table**: that table is a change-feed
-  source and the publication is the loop breaker, so `done` names a different
-  table.
+- **`done` as a filter over the emits table**: the current schedule contract
+  keeps the occurrence and its outcome in different tables. Publication
+  carries both; consumers select the changes they handle.
 
 ## Not built
 

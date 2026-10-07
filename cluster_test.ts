@@ -12,7 +12,7 @@ type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
   schedules: string[];
-  computations: { name: string; file: string; every: number; to: string[]; wasm: string[]; onComplete?: string }[];
+  computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string }[];
 };
 
 /** `field` of a cluster given `state` and `capabilities`, as `cue export` answers it. */
@@ -31,8 +31,45 @@ async function exported(state: Partial<State>, field: string, capabilities: Reco
 
 const copied = (state: Partial<State>) => exported(state, "surface.targets.database.dockerfile.copy[0].srcs");
 
+Deno.test("a computation alone gets a durable CDC consumer without a clock", async () => {
+  const got = await exported({
+    computations: [{ name: "c", file: "c.js", to: ["sink"], wasm: [] }],
+  }, "surface.targets");
+  assert.equal(got.ok, true, got.stderr);
+  assert.equal(got.value.clock, undefined);
+  assert.equal(got.value.ticker, undefined);
+  assert.equal(got.value.launch.compose.depends_on.transform.condition, "service_started");
+  assert.equal(got.value.launch.compose.depends_on.conduit.condition, "service_healthy");
+  assert.equal(got.value.compute.compose.depends_on.conduit.condition, "service_healthy");
+  assert.equal(got.value.compute.compose.environment.CDC_SLOT, "t_conduit_slot");
+  assert.ok(got.value.redis);
+  assert.ok(got.value.conduit);
+  assert.deepEqual(got.value.transform.dockerfile.cmd, [
+    "streams",
+    "--no-api",
+    "/compute-events.yaml",
+  ]);
+  assert.equal(
+    got.value.transform.compose.environment.COMPUTE_GROUP,
+    "t-compute",
+  );
+  assert.equal(
+    got.value.transform.compose.depends_on.compute.condition,
+    "service_started",
+  );
+  assert.match(
+    got.value.transform.dockerfile.epilogue[0],
+    /client_id: compute/,
+  );
+  assert.equal(
+    "every" in
+      JSON.parse(got.value.compute.compose.environment.COMPUTATIONS)[0],
+    false,
+  );
+});
+
 Deno.test("compute configuration carries only declared completion RPCs and refuses invalid identifiers", async () => {
-  const computation = { name: "chances", file: "chances.js", every: 30, to: ["chance"], wasm: [] };
+  const computation = { name: "chances", file: "chances.js", to: ["chance"], wasm: [] };
   const field = "surface.targets.compute.compose.environment.COMPUTATIONS";
   const plain = await exported({ computations: [computation] }, field);
   assert.equal(plain.ok, true, plain.stderr);

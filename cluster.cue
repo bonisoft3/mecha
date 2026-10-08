@@ -397,6 +397,16 @@ _devElectricSecret: "dev-electric-secret"
 					[for s in X.meta.statics if !strings.HasPrefix(s.file, X.meta.runtime) {s.file}],
 				])
 				dockerfile: {
+					// The root an app static's target mirrors its path under, or "".
+					let _under = [for s in X.meta.statics {[
+						if !strings.HasPrefix(s.file, X.meta.runtime) if strings.HasSuffix(s.target, "/\(s.file)") {strings.TrimSuffix(s.target, s.file)},
+						"",
+					][0]}]
+					// Runs of consecutive statics under one root; any other static
+					// is a run of its own.
+					let _prev = list.Concat([[null], _under])
+					let _starts = [for i, u in _under if u == "" || _prev[i] != u {i}]
+					let _end = {for r, i in _starts {"\(i)": [if r+1 < len(_starts) {_starts[r+1]}, len(_under)][0]}}
 					from: name: "caddy:2.9-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0"
 					copy: list.Concat([
 						[{srcs: [X.meta.caddyfile], dst: "/etc/caddy/Caddyfile"}],
@@ -405,16 +415,18 @@ _devElectricSecret: "dev-electric-secret"
 						// what makes it optional: a context without .certs copies
 						// nothing, and the door then serves Caddy's own CA.
 						[{srcs: [".cert[s]"], dst: "/certs/"}],
-						[for s in X.meta.statics {
+						// One COPY, so one image layer, per run: the image stays
+						// under the overlay depth limit however many statics an
+						// app serves, and runs keep their order for overwrites.
+						[for i, s in X.meta.statics if _end["\(i)"] != _|_ {[
 							if strings.HasPrefix(s.file, X.meta.runtime) {
-								from: {name: "root"}
-								srcs: [strings.TrimPrefix(s.file, X.meta.root)]
-							}
-							if !strings.HasPrefix(s.file, X.meta.runtime) {
-								srcs: [s.file]
-							}
-							dst: s.target
-						}],
+								{from: {name: "root"}, srcs: [strings.TrimPrefix(s.file, X.meta.root)], dst: s.target}
+							},
+							if _under[i] != "" {
+								{srcs: [for t in list.Slice(X.meta.statics, i, _end["\(i)"]) {t.file}], dst: _under[i], parents: true}
+							},
+							{srcs: [s.file], dst: s.target},
+						][0]}],
 					])
 				}
 				compose: {

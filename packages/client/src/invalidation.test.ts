@@ -57,6 +57,10 @@ function protocol() {
       offset++
       waiting[0].answer([{ key: '"public"."task"/"unloaded"', value: { id: "unloaded" }, headers: { operation } }, ready()])
     },
+    send(...messages: unknown[]) {
+      offset++
+      waiting[0].answer([...messages, ready()])
+    },
     reset() {
       handle++
       holdInitial = true
@@ -97,6 +101,39 @@ describe("dependency invalidation", () => {
       expect(wake).toHaveBeenCalledTimes(4)
     } finally { stop() }
     expect(server.waiting).toHaveLength(0)
+  })
+
+  // A read decides whether a change could move it by testing its own filter
+  // on the rows the change named; without them every write to the table, to
+  // any row, re-runs every read over it.
+  it("hands listeners the changed rows, whole, and nothing when which rows moved is unknown", async () => {
+    const server = protocol()
+    const c = client(server)
+    const wake = vi.fn()
+    const stop = c.subscribeInvalidation("tasks", wake)
+    try {
+      await pending(server)
+      expect(server.requests[0].url.searchParams.get("replica")).toBe("full")
+      expect(wake).toHaveBeenLastCalledWith(undefined)
+      const key = (id: string) => `"public"."task"/"${id}"`
+      server.send(
+        { key: key("a"), value: { id: "a", team: "x" }, headers: { operation: "insert" } },
+        { key: key("b"), value: { id: "b", team: "y" }, old_value: { team: "x" }, headers: { operation: "update" } },
+        { key: key("c"), value: { id: "c", team: "z" }, headers: { operation: "delete" } },
+      )
+      await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(2))
+      expect(wake).toHaveBeenLastCalledWith([
+        { type: "insert", key: key("a"), value: { id: "a", team: "x" } },
+        { type: "update", key: key("b"), value: { id: "b", team: "y" }, previousValue: { id: "b", team: "x" } },
+        { type: "delete", key: key("c"), previousValue: { id: "c", team: "z" } },
+      ])
+      await pending(server)
+      server.reset()
+      await pending(server)
+      server.ready()
+      await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(3))
+      expect(wake).toHaveBeenLastCalledWith(undefined)
+    } finally { stop() }
   })
 
   it("invalidates after initial catch-up and after reset catch-up, closing reads made during either gap", async () => {

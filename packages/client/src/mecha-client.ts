@@ -205,14 +205,28 @@ export interface MechaClient {
   syncPhase(tableId: string, key: string): SyncPhase | undefined
   subscribeSyncPhases(listener: () => void): () => void
   /**
-   * Authorized dependency changes, without retaining a table snapshot. The
-   * first caught-up position and every shape reset also invalidate reads.
-   * Grant families retain their existing authorized union; local tables watch
-   * their local collection. Dispose subscriptions before changing accounts;
-   * once a grant family has been used, an account change needs a new client.
+   * Authorized dependency changes, without retaining a table snapshot. A
+   * listener is handed the changed rows, normalized as a collection holds
+   * them, so a read can tell whether a change could move it; it is handed
+   * nothing when which rows moved is unknown: the first caught-up position,
+   * every shape reset, a late subscriber catching up. Grant families retain
+   * their existing authorized union; local tables watch their local
+   * collection. Dispose subscriptions before changing accounts; once a grant
+   * family has been used, an account change needs a new client.
    */
-  subscribeInvalidation(tableId: string, listener: () => void): () => void
+  subscribeInvalidation(tableId: string, listener: InvalidationListener): () => void
 }
+
+/** A row a dependency change named: its value after the change, before it, or
+ * both, in the shape a collection's change set carries. */
+export interface InvalidationChange {
+  type: "insert" | "update" | "delete"
+  key: string
+  value?: Record<string, unknown>
+  previousValue?: Record<string, unknown>
+}
+/** Changed rows, or undefined when which rows changed is not known. */
+export type InvalidationListener = (changes?: readonly InvalidationChange[]) => void
 
 const DELETE_CONFIRM_TIMEOUT_MS = 30_000
 
@@ -870,9 +884,9 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     return tx.commit().then(() => undefined)
   }
 
-  type Invalidation = { listeners: Set<() => void>; stop: () => void; ready: boolean; checkScope: () => void }
+  type Invalidation = { listeners: Set<InvalidationListener>; stop: () => void; ready: boolean; checkScope: () => void }
   const invalidations = new Map<string, Invalidation>()
-  function subscribeInvalidation(tableId: string, listener: () => void): () => void {
+  function subscribeInvalidation(tableId: string, listener: InvalidationListener): () => void {
     const t = byId.get(tableId)
     if (t === undefined) throw new Error(`unknown table id: ${tableId}`)
     if (reachable.has(tableId)) checkFamilyAccount(true)
@@ -885,14 +899,17 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       state = { listeners: new Set(), stop: () => {}, ready: false, checkScope }
       invalidations.set(tableId, state)
       const active = state
-      const publish = () => {
+      const publish = (changes?: readonly InvalidationChange[]) => {
         checkScope()
-        for (const fn of active.listeners) fn()
+        for (const fn of active.listeners) fn(changes)
       }
       if (isLocal(t) || reachable.has(tableId)) {
         // Grant families need their authorized per-row shape union. They
         // remain eager independently of server-read invalidation.
-        const subscription = collections[tableId].subscribeChanges(publish, { includeInitialState: false })
+        const subscription = collections[tableId].subscribeChanges(
+          (changes) => publish(changes as unknown as InvalidationChange[]),
+          { includeInitialState: false },
+        )
         let stopped = false
         collections[tableId].onFirstReady(() => {
           if (stopped) return
@@ -915,9 +932,13 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
           url: `${electricUrl}/v1/shape`,
           log: "changes_only",
           offset: "now",
-          params: { table: t.table, where: scoped(shapes.where(t.table)) as any },
+          // Whole rows, so a read's predicate can be tested on any change:
+          // without them an update names only the columns it changed and a
+          // delete only the key.
+          params: { table: t.table, where: scoped(shapes.where(t.table)) as any, replica: "full" },
           headers: { Authorization: scoped(shapes.authorization(t.table)) },
           fetchClient: config.fetcher,
+          parser: parserOf(t),
           signal: controller.signal,
           onError: (error: any) => {
             if (error?.status === 401 && identity() === subject) {
@@ -928,17 +949,29 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         })
         const unsubscribe = stream.subscribe((messages) => {
           if (controller.signal.aborted) return
-          let changed = false
+          const changes: InvalidationChange[] = []
+          let unknown = false
           for (const message of messages) {
-            const headers = message.headers
+            const headers = message.headers as { control?: string; operation?: InvalidationChange["type"] }
             if (headers.control === "must-refetch") active.ready = false
-            if (headers.operation !== undefined) changed = true
+            if (headers.operation !== undefined) {
+              const { key, value, old_value } = message as unknown as {
+                key: string; value: Record<string, unknown>; old_value?: Record<string, unknown>
+              }
+              const row = normalizeRow(t.fields, value, "electric")
+              changes.push(
+                headers.operation === "insert" ? { type: "insert", key, value: row }
+                : headers.operation === "delete" ? { type: "delete", key, previousValue: row }
+                : { type: "update", key, value: row, previousValue: normalizeRow(t.fields, { ...value, ...old_value }, "electric") },
+              )
+            }
             if (headers.control === "up-to-date" && !active.ready) {
               active.ready = true
-              changed = true
+              unknown = true
             }
           }
-          if (changed) publish()
+          if (unknown) publish()
+          else if (changes.length > 0) publish(changes)
         }, (error) => {
           if (controller.signal.aborted) return
           active.stop()
@@ -955,7 +988,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     // A listener can be reused by callers; each subscription still owns one
     // reference, so stopping one must not detach another.
     const active = state
-    const notify = () => listener()
+    const notify: InvalidationListener = (changes) => listener(changes)
     active.listeners.add(notify)
     if (active.ready) queueMicrotask(() => {
       if (active.listeners.has(notify)) {

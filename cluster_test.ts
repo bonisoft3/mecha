@@ -53,10 +53,14 @@ Deno.test("a computation alone gets a durable CDC consumer without a clock", asy
     got.value.transform.compose.environment.COMPUTE_GROUP,
     "t-compute",
   );
+  // Compute opens its port after its bootstrap run; an invalidation delivered
+  // before that is refused and spends the consumer's bounded retries.
   assert.equal(
     got.value.transform.compose.depends_on.compute.condition,
-    "service_started",
+    "service_healthy",
   );
+  assert.equal(got.value.launch.compose.depends_on.compute.condition, "service_healthy");
+  assert.deepEqual(got.value.compute.compose.healthcheck.test, ["CMD", "portcheck", "--port", "9997"]);
   assert.match(
     got.value.transform.dockerfile.epilogue[0],
     /client_id: compute/,

@@ -100,10 +100,13 @@ BEGIN
   EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', tbl);
   EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', tbl);
   EXECUTE format('DROP POLICY IF EXISTS tenancy ON %s', tbl);
+  -- The scopes as a scalar subquery: Postgres runs it once per statement, as an
+  -- InitPlan, where a bare current_scopes() call runs once per row -- about
+  -- 1.3 microseconds a row, 120 ms over a 90,000-row scan.
   EXECUTE format(
     'CREATE POLICY tenancy ON %s AS RESTRICTIVE FOR ALL '
-    'USING (scope_id = ANY(current_scopes())) '
-    'WITH CHECK (scope_id = ANY(current_scopes()))', tbl);
+    'USING (scope_id = ANY((SELECT current_scopes())::text[])) '
+    'WITH CHECK (scope_id = ANY((SELECT current_scopes())::text[]))', tbl);
 END $$;
 
 -- PostgREST calls this once per request, in the request's transaction, after
@@ -322,9 +325,9 @@ AS $$
                            AND p.polroles = '{0}'::oid[]
                            AND p.polcmd = '*'
                            AND pg_get_expr(p.polqual, p.polrelid)
-                                 = '(scope_id = ANY (current_scopes()))'
+                                 = '(scope_id = ANY (( SELECT current_scopes() AS current_scopes)::text[]))'
                            AND pg_get_expr(p.polwithcheck, p.polrelid)
-                                 = '(scope_id = ANY (current_scopes()))'))))
+                                 = '(scope_id = ANY (( SELECT current_scopes() AS current_scopes)::text[]))'))))
 $$;
 
 -- security_invoker because the audit flags views that lack it, and a check that

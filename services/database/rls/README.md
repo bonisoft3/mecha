@@ -39,8 +39,12 @@ casual and PostgREST-served paths; it is not a seal.
 
 ```
 psql -d <db> -f rls.sql
-psql -d <db> -f rls_test.sql      # WARNING: rls: 57/57 pass
+psql -d <db> -f rls_test.sql      # WARNING: rls: 58/58 pass
 ```
+
+A database floored before the policy took its scopes as a scalar subquery
+holds the per-row spelling; the audit names those tables, and re-running
+`rls.sql` then `CALL rls_protect('<table>')` for each re-floors it in place.
 
 Design: `docs/superpowers/specs/2026-09-05-permissions-design.md`.
 

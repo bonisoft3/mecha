@@ -313,8 +313,8 @@ describe('scope session', () => {
       ALTER TABLE "posting" ENABLE ROW LEVEL SECURITY;
       ALTER TABLE "posting" FORCE ROW LEVEL SECURITY;
       CREATE POLICY tenancy ON "posting" AS RESTRICTIVE FOR ALL
-        USING (scope_id = ANY(current_scopes()))
-        WITH CHECK (scope_id = ANY(current_scopes()));
+        USING (scope_id = ANY((SELECT current_scopes())::text[]))
+        WITH CHECK (scope_id = ANY((SELECT current_scopes())::text[]));
       CREATE POLICY wide ON "posting" FOR ALL USING (true) WITH CHECK (true);
       CREATE ROLE app_user NOLOGIN;
       GRANT USAGE ON SCHEMA public TO app_user;

@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { handler, type Runnable, Service } from "./main.ts";
+import { type Runnable, serve, Service } from "./main.ts";
 
 const REDIS = "redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933";
 const text = (b: Uint8Array) => new TextDecoder().decode(b).trim();
@@ -67,18 +67,7 @@ Deno.test("Redis delivery waits for publication, recovers on consumer replacemen
       output = value as number;
     },
   });
-  const server = Deno.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    onListen() {},
-    onError(error) {
-      if (
-        !(error instanceof Error) ||
-        error.message !== "injected publication failure"
-      ) throw error;
-      return new Response(null, { status: 500 });
-    },
-  }, handler(service, "test-token"));
+  const server = serve(service, "test-token", 0);
   let consumer: Deno.ChildProcess | undefined;
   const stopped: Promise<Deno.CommandOutput>[] = [];
   const stop = async () => {
@@ -101,9 +90,7 @@ Deno.test("Redis delivery waits for publication, recovers on consumer replacemen
           "-s",
           "http.enabled=false",
           "-s",
-          `output.switch.cases.1.output.http_client.url=http://127.0.0.1:${server.addr.port}/invalidate`,
-          "-s",
-          "output.switch.cases.1.output.http_client.retries=0",
+          `output.switch.cases.1.output.fallback.0.retry.output.http_client.url=http://127.0.0.1:${server.addr.port}/invalidate`,
           "events.yaml",
         ],
         cwd: new URL(".", import.meta.url),
@@ -163,6 +150,74 @@ Deno.test("Redis delivery waits for publication, recovers on consumer replacemen
   } finally {
     release.resolve();
     await stop();
+    await server.shutdown();
+    await command("docker", "rm", "-f", container);
+  }
+});
+
+// The retry is bounded: a delivery compute keeps refusing crashes the consumer,
+// so the stack fails loudly with compute's error rather than retrying it forever.
+Deno.test("Redis delivery crashes once a refused invalidation outlasts its retries", async () => {
+  const container = await command("docker", "run", "-d", "--rm", "-p", "127.0.0.1::6379", REDIS);
+  const failing: Runnable = { name: "copy", reads: ["source"], to: ["result"], async run() {} };
+  let refusals = 0;
+  let refuse = true;
+  let accepted = 0;
+  const log = console.error;
+  console.error = () => {};
+  const server = serve(
+    new Service([failing], { async attach() {}, async detach() {}, async hold() {}, async query() { return []; } }, {
+      async apply() {
+        if (!refuse) return void accepted++;
+        refusals++;
+        throw new Error("a bug no retry fixes");
+      },
+    }),
+    "test-token",
+    0,
+  );
+  try {
+    const port = (await command("docker", "port", container, "6379/tcp")).split(":").at(-1);
+    await command(
+      "docker", "exec", container, "redis-cli", "XADD", "cdc-events", "*", "data",
+      JSON.stringify({ data: JSON.stringify({ __table: "source", id: "row" }) }),
+    );
+    const retry = "output.switch.cases.1.output.fallback.0.retry";
+    const consume = (signal: AbortSignal) =>
+      new Deno.Command("redpanda-connect", {
+        args: [
+          "run", "--disable-telemetry", "-s", "http.enabled=false",
+          "-s", `${retry}.output.http_client.url=http://127.0.0.1:${server.addr.port}/invalidate`,
+          "-s", `${retry}.backoff.initial_interval=100ms`,
+          "-s", `${retry}.max_retries=2`,
+          "events.yaml",
+        ],
+        cwd: new URL(".", import.meta.url),
+        env: { REDIS_URL: `redis://127.0.0.1:${port}`, COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
+        stdout: "piped",
+        stderr: "piped",
+        signal,
+      });
+    const out = await consume(AbortSignal.timeout(30_000)).output();
+    assertEquals(out.success, false);
+    // Compute refused it once and on each retry, and the crash names its error.
+    assertEquals(refusals, 3);
+    const said = text(out.stdout) + text(out.stderr);
+    if (!said.includes("compute refused an invalidation through every retry") || !said.includes("a bug no retry fixes")) {
+      throw new Error(`no crash naming compute's error: ${said}`);
+    }
+    // The refused invalidation stayed pending: a restarted consumer delivers it first.
+    refuse = false;
+    const again = new AbortController();
+    const restarted = consume(again.signal).spawn();
+    try {
+      await until(async () => accepted === 1);
+    } finally {
+      again.abort();
+      await restarted.output();
+    }
+  } finally {
+    console.error = log;
     await server.shutdown();
     await command("docker", "rm", "-f", container);
   }

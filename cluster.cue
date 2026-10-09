@@ -627,7 +627,7 @@ _devElectricSecret: "dev-electric-secret"
 					compose: {
 						depends_on: {redis: _healthy, crud: _healthy}
 						if len(X.state.computations) > 0 {
-							depends_on: compute: _started
+							depends_on: compute: _healthy
 						}
 						environment: {
 							// Straight to PostgREST: the proxy's client-facing Prefer
@@ -657,7 +657,15 @@ _devElectricSecret: "dev-electric-secret"
 				// Two computations may share a wasm module; it ships once.
 				let _wasm = [for w, _ in {for c in X.state.computations for w in c.wasm {(w): true}} {file: w, target: "/app/computations/\(path.Base(w, path.Unix))"}]
 				let _target = {for w in _wasm {(w.file): w.target}}
-				compute: X._image & {
+				// Healthy once it serves: its port opens after the bootstrap run, and an
+				// invalidation refused while that runs would spend its retries.
+				compute: bayt.healthcheck.tcp & X._image & {
+					healthcheck: {
+						port:           9997
+						interval:       "5s"
+						start_interval: "1s"
+						start_period:   "15m"
+					}
 					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}]])
 					dockerfile: {
 						from: (_from & {in: X.meta.images.compute}).out
@@ -762,7 +770,7 @@ _devElectricSecret: "dev-electric-secret"
 							transform: _started
 						}
 						if len(X.state.computations) > 0 {
-							compute: _started
+							compute: _healthy
 						}
 						if X.capabilities.auth {
 							auth: _started

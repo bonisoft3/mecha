@@ -55,8 +55,11 @@
 // written; the writes then go through crud as the service role, the path every
 // pipeline writes by: changed rows upserted on id in every sink, then the rows
 // no longer produced deleted. Crud has no transaction across requests, so a
-// write failing past the check leaves a mix that the service, dying, replaces
-// on restart.
+// write failing past the check leaves a mix. A failed delivery answers 500 and
+// the service keeps serving: the Connect consumer resends it with backoff and,
+// past its retries, crashes (events.yaml). A resend reads a fresh snapshot and
+// rewrites every row of the sinks the failed write touched, which replaces the
+// mix and outlasts a deadlock or a row deleted mid-run.
 //
 // Environment: CRUD_URL, DATABASE_URL, CDC_SLOT, LAKE_DIR, COMPUTATIONS (JSON list of
 // {name, file, to, wasm}, wasm being the module files it ships);
@@ -292,7 +295,9 @@ export class Lake implements Reader {
     return new Lake(databaseUrl, con, readerOf(reader));
   }
 
+  /** A failed delivery may have left Postgres attached; each one starts clean. */
   async attach() {
+    await this.con.run("DETACH DATABASE IF EXISTS pg");
     await this.con.run(
       `ATTACH ${literal(this.databaseUrl)} AS pg (TYPE postgres, READ_ONLY)`,
     );
@@ -306,13 +311,21 @@ export class Lake implements Reader {
    * declared inputs in one transaction instead of caching by those counters. */
   async hold(tables: string[]) {
     await this.con.run("BEGIN");
-    for (const t of tables) {
-      await this.con.run(`DROP TABLE IF EXISTS lake.${t}`);
-      await this.con.run(
-        `CREATE TABLE lake.${t} AS SELECT * FROM pg.public.${t}`,
-      );
+    try {
+      for (const t of tables) {
+        await this.con.run(`DROP TABLE IF EXISTS lake.${t}`);
+        await this.con.run(
+          `CREATE TABLE lake.${t} AS SELECT * FROM pg.public.${t}`,
+        );
+      }
+      await this.con.run("COMMIT");
+    } catch (e) {
+      // The connection serves the next delivery's snapshot.
+      await this.con.run("ROLLBACK").catch((r) => {
+        throw new AggregateError([e, r], "a snapshot failed, and so did its rollback");
+      });
+      throw e;
     }
-    await this.con.run("COMMIT");
     // Only the newest snapshot is read; older ones are files nobody will.
     await this.con.run(
       "CALL ducklake_expire_snapshots('lake', older_than => now())",
@@ -507,14 +520,21 @@ export class Sinks {
     }
     const plan = await this.plan(c, out);
     await this.database.check(Object.fromEntries(Object.entries(plan).map(([t, [rows, deletes]]) => [t, [rows, deletes]])));
-    for (const [table, [rows]] of Object.entries(plan)) {
-      for (let i = 0; i < rows.length; i += BATCH) await this.send("POST", `${table}?on_conflict=id`, rows.slice(i, i + BATCH));
-    }
-    for (const [table, [, deletes]] of Object.entries(plan)) {
-      for (let i = 0; i < deletes.length; i += DELETES) {
-        const ids = deletes.slice(i, i + DELETES).map((k) => JSON.stringify(k)).join(",");
-        await this.send("DELETE", `${table}?id=in.(${encodeURIComponent(ids)})`);
+    try {
+      for (const [table, [rows]] of Object.entries(plan)) {
+        for (let i = 0; i < rows.length; i += BATCH) await this.send("POST", `${table}?on_conflict=id`, rows.slice(i, i + BATCH));
       }
+      for (const [table, [, deletes]] of Object.entries(plan)) {
+        for (let i = 0; i < deletes.length; i += DELETES) {
+          const ids = deletes.slice(i, i + DELETES).map((k) => JSON.stringify(k)).join(",");
+          await this.send("DELETE", `${table}?id=in.(${encodeURIComponent(ids)})`);
+        }
+      }
+    } catch (e) {
+      // Some writes may have landed: what the sinks hold is unknown again, so
+      // the redelivery rewrites every row it produces.
+      for (const table of Object.keys(plan)) this.held.delete(table);
+      throw e;
     }
     for (const [table, [, , now]] of Object.entries(plan)) this.held.set(table, now);
     if (c.onComplete !== undefined) {
@@ -572,7 +592,14 @@ export class Service {
 
   private async step(c: Runnable) {
     await this.lake.attach();
-    await this.lake.hold(c.reads);
+    try {
+      await this.lake.hold(c.reads);
+    } catch (e) {
+      await this.lake.detach().catch((d) => {
+        throw new AggregateError([e, d], "a snapshot failed, and so did detaching Postgres");
+      });
+      throw e;
+    }
     await this.lake.detach();
     const started = performance.now();
     const out = await c.run(this.lake);
@@ -586,7 +613,7 @@ export class Service {
 }
 
 /** Internal delivery endpoint. A 2xx means every affected output and hook
- * completed; failures propagate to the host, which exits for broker replay. */
+ * completed; a failure reaches serve's onError. */
 export function handler(service: Service, jwt: string | undefined) {
   return async (req: Request): Promise<Response> => {
     if (req.method !== "POST" || new URL(req.url).pathname !== "/invalidate") {
@@ -637,15 +664,25 @@ async function main() {
     new Sinks(database, need("CRUD_URL"), jwt),
   );
   await service.refresh();
-  const failed = Promise.withResolvers<never>();
-  const server = Deno.serve({
-    port: 9997,
+  await serve(service, jwt, 9997).finished;
+}
+
+/** An error as one line, each cause of an aggregate included. */
+function said(error: unknown): string {
+  if (error instanceof AggregateError) return `${error.message}: ${error.errors.map(said).join("; ")}`;
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The delivery server; a failed delivery is logged and answered 500 with its
+ * message, which Connect's crash quotes once the retries run out. */
+export function serve(service: Service, jwt: string | undefined, port: number) {
+  return Deno.serve({
+    port,
     onError(error) {
-      failed.reject(error);
-      return new Response(null, { status: 500 });
+      console.error(error);
+      return new Response(said(error), { status: 500 });
     },
   }, handler(service, jwt));
-  await Promise.race([server.finished, failed.promise]);
 }
 
 if (import.meta.main) await main();

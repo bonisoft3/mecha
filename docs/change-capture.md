@@ -84,7 +84,10 @@ group's pending list, retried forever. The `maxRetries`, `redeliverInterval` and
 `processingTimeout` in `redis-streams.yaml` govern Dapr's own subscribers, and
 nothing subscribes through Dapr. Computations use the same direct Redis input
 in [[../services/compute/events.yaml]], forwarding invalidations to compute over
-HTTP. The output waits for completion, nacks failures, and the input replays.
+HTTP. The output waits for completion and resends a refused invalidation with
+exponential backoff; still refused after twelve retries, it crashes the transform process, so
+the stack fails loudly, and the invalidation, still pending, is replayed first
+when it restarts.
 The compute consumer has a stable identity so container replacement also
 recovers pending messages. Delivery is at least once; it provides no version
 fence across concurrent writers.

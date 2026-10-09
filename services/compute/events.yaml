@@ -19,12 +19,29 @@ output:
       - check: errored()
         output:
           reject: ${! error() }
+      # Compute answers a failed delivery 500, the error in the body, and keeps
+      # serving; it is retried here with exponential backoff. A delivery
+      # still refused after twelve retries (about eight minutes of backoff) is
+      # no transient failure: crash, so the stack fails loudly. The delivery
+      # stays pending and is replayed first when Connect restarts.
       - output:
-          http_client:
-            url: http://compute:9997/invalidate
-            verb: POST
-            timeout: 30m
-            max_in_flight: 1
-            headers:
-              Content-Type: application/json
-              Authorization: Bearer ${SERVICE_JWT:}
+          fallback:
+            - retry:
+                backoff:
+                  initial_interval: 1s
+                  max_interval: 1m
+                  max_elapsed_time: 0s
+                max_retries: 12
+                output:
+                  http_client:
+                    url: http://compute:9997/invalidate
+                    verb: POST
+                    timeout: 30m
+                    retries: 0
+                    max_in_flight: 1
+                    headers:
+                      Content-Type: application/json
+                      Authorization: Bearer ${SERVICE_JWT:}
+            - drop: {}
+              processors:
+                - crash: 'compute refused an invalidation through every retry: ${! @fallback_error }'

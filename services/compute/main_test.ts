@@ -13,6 +13,7 @@ import {
   type Reader,
   type Runnable,
   seedOf,
+  serve,
   Service,
   Sinks,
   type Snapshots,
@@ -86,6 +87,61 @@ Deno.test("bootstrap runs all computations; invalidations select declared reads,
   assertEquals(lake.copies.length, 7);
 });
 
+// A failed snapshot once left Postgres attached, and every later delivery
+// failed at attach for as long as the process lived.
+Deno.test("a failed snapshot detaches, and the next delivery takes its own", async () => {
+  let fail = true;
+  const lake = new class extends FakeLake {
+    override async attach() {
+      assert(!this.attached, "attached twice");
+      await super.attach();
+    }
+    override async hold(tables: string[]) {
+      if (fail) throw new Error("connection reset");
+      await super.hold(tables);
+    }
+  }();
+  const service = new Service([computation("c")], lake, new FakeSinks());
+  await assertRejects(() => service.refresh(), Error, "connection reset");
+  assert(!lake.attached);
+  fail = false;
+  assert(await service.refresh());
+  assertEquals(lake.copies, [["game"]]);
+});
+
+// A cleanup failing after a failed snapshot must not hide why the snapshot
+// failed: the error compute answers carries both.
+Deno.test("a detach failing after a failed snapshot reports both", async () => {
+  const lake = new class extends FakeLake {
+    override async hold() {
+      throw new Error("connection reset");
+    }
+    override async detach() {
+      throw new Error("DETACH pg: no such catalog");
+    }
+  }();
+  const service = new Service([computation("c")], lake, new FakeSinks());
+  const e = await assertRejects(() => service.refresh(), AggregateError);
+  assertEquals(e.errors.map((x: Error) => x.message), ["connection reset", "DETACH pg: no such catalog"]);
+  // And over HTTP, where Connect's crash quotes the body.
+  const log = console.error;
+  console.error = () => {};
+  const server = serve(service, undefined, 0);
+  try {
+    const r = await fetch(`http://localhost:${server.addr.port}/invalidate`, {
+      method: "POST",
+      body: JSON.stringify({ tables: ["game"] }),
+    });
+    assertEquals(
+      await r.text(),
+      "a snapshot failed, and so did detaching Postgres: connection reset; DETACH pg: no such catalog",
+    );
+  } finally {
+    console.error = log;
+    await server.shutdown();
+  }
+});
+
 Deno.test("overlapping delivery stays unacknowledged until it can take its own snapshot", async () => {
   const lake = new FakeLake();
   const started = Promise.withResolvers<void>();
@@ -112,6 +168,38 @@ Deno.test("overlapping delivery stays unacknowledged until it can take its own s
   assertEquals((await first).status, 204);
   assertEquals((await handle(event())).status, 204);
   assertEquals(lake.copies.length, 2);
+});
+
+// A failed delivery used to exit the process, which a compose stack run with
+// --abort-on-container-exit took down whole: a deadlock victim or a row deleted
+// mid-run ended the run instead of being redelivered.
+Deno.test("a failed delivery answers 500 and the next delivery is served", async () => {
+  let fail = true;
+  const sinks = {
+    async apply() {
+      if (fail) throw new Error("deadlock detected");
+    },
+  };
+  const errors: unknown[] = [];
+  const log = console.error;
+  console.error = (e: unknown) => void errors.push(e);
+  const server = serve(new Service([computation("c")], new FakeLake(), sinks), "secret", 0);
+  try {
+    const deliver = () =>
+      fetch(`http://localhost:${server.addr.port}/invalidate`, {
+        method: "POST",
+        headers: { authorization: "Bearer secret" },
+        body: JSON.stringify({ tables: ["game"] }),
+      });
+    const refused = await deliver();
+    assertEquals([refused.status, await refused.text()], [500, "deadlock detected"]);
+    assertEquals((errors[0] as Error).message, "deadlock detected");
+    fail = false;
+    assertEquals((await deliver()).status, 204);
+  } finally {
+    console.error = log;
+    await server.shutdown();
+  }
 });
 
 Deno.test("invalidations require credentials and valid table names before reading inputs", async () => {
@@ -239,6 +327,27 @@ Deno.test("rows no longer produced are deleted and unchanged ones not rewritten"
   crud.tables.get("team_chance")!.delete("a");
   await sinks.apply(c, { team_chance: [{ id: "a", rank: 2 }], game_importance: [{ id: "g", home: 1.5 }] });
   assertEquals(crud.take(), [["POST", "/team_chance?on_conflict=id", [{ id: "a", rank: 2 }]]]);
+});
+
+// Compute keeps serving after a failed delivery, so what it believes a sink
+// holds outlives the failure. A write that failed after another landed left
+// that belief stale, and a redelivery producing the old value again skipped
+// the row the failed run had already overwritten.
+Deno.test("a write failing after another landed makes the redelivery rewrite every row", async () => {
+  await using crud = new Crud();
+  const sinks = new Sinks(new FakeDatabase(crud), crud.url, "jwt");
+  const c = computation("chances", ["game"], ["team_chance", "game_importance"]);
+  await sinks.apply(c, { team_chance: [{ id: "a", rank: 1 }], game_importance: [] });
+  crud.take();
+  crud.failures.add("/game_importance?on_conflict=id");
+  await assertRejects(() => sinks.apply(c, { team_chance: [{ id: "a", rank: 2 }], game_importance: [{ id: "g", home: 1 }] }));
+  crud.take();
+  crud.failures.clear();
+  await sinks.apply(c, { team_chance: [{ id: "a", rank: 1 }], game_importance: [{ id: "g", home: 1 }] });
+  assertEquals(crud.take(), [
+    ["POST", "/team_chance?on_conflict=id", [{ id: "a", rank: 1 }]],
+    ["POST", "/game_importance?on_conflict=id", [{ id: "g", home: 1 }]],
+  ]);
 });
 
 for (

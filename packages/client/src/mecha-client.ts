@@ -721,6 +721,41 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   // looks handlers up by name, so the registry must be derivable from config
   // alone.
   const mutationFns: Record<string, any> = {}
+  // Outbox replay has no screen-owned subscriber; its acknowledgement keeps
+  // the changes-only shape alive for the network request and its txid.
+  const mutationLease = async (tableId: string) => {
+    const collection = collections[tableId]
+    if (collection.status === "error") {
+      throw new Error(`collection ${tableId} cannot acknowledge a mutation while its changefeed is in error`)
+    }
+    let stopReady = () => {}
+    let stopError = () => {}
+    let readinessError: Error | undefined
+    const ready = collection.isReady()
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+        stopReady = collection.once("status:ready", () => resolve())
+        stopError = collection.once("status:error", () => {
+          readinessError = new Error(`collection ${tableId} failed while preparing mutation acknowledgement`)
+          resolve()
+        })
+      })
+    let subscription: ReturnType<typeof collection.subscribeChanges> | undefined
+    try {
+      subscription = collection.subscribeChanges(() => {}, { includeInitialState: false })
+      await ready
+      if (readinessError !== undefined) throw readinessError
+      stopReady()
+      stopError()
+      const active = subscription
+      return () => active.unsubscribe()
+    } catch (error) {
+      stopReady()
+      stopError()
+      subscription?.unsubscribe()
+      throw error
+    }
+  }
   // PostgREST rejects generated and trigger-managed columns on write.
   const cleanRow = (row: any) => {
     if (!row || typeof row !== "object") return row
@@ -736,42 +771,57 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     // Local tiers take no mutation handlers — see `durability`.
     if (isLocal(t)) continue
     mutationFns[`insert:${t.id}`] = async ({ transaction, idempotencyKey }: any) => {
-      const row = transaction.mutations[0].modified
-      const res = await doFetch(`${crudUrl}/${t.table}`, {
-        method: "POST",
-        headers: headers({ Prefer: "return=representation", "Idempotency-Key": idempotencyKey }),
-        body: JSON.stringify(cleanRow(row)),
-      })
-      await requireOk(res, `insert ${t.table}`)
-      const returned = await res.json()
-      if (!Array.isArray(returned)) throw new Error(`insert ${t.table} returned a non-array representation`)
-      await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
-      setPhase(`${t.id}:${row[t.key]}`, null)
+      const release = await mutationLease(t.id)
+      try {
+        const row = transaction.mutations[0].modified
+        const res = await doFetch(`${crudUrl}/${t.table}`, {
+          method: "POST",
+          headers: headers({ Prefer: "return=representation", "Idempotency-Key": idempotencyKey }),
+          body: JSON.stringify(cleanRow(row)),
+        })
+        await requireOk(res, `insert ${t.table}`)
+        const returned = await res.json()
+        if (!Array.isArray(returned)) throw new Error(`insert ${t.table} returned a non-array representation`)
+        await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
+        setPhase(`${t.id}:${row[t.key]}`, null)
+      } finally {
+        release()
+      }
     }
     mutationFns[`update:${t.id}`] = async ({ transaction }: any) => {
-      const m = transaction.mutations[0]
-      const key = m.key ?? m.original?.[t.key]
-      const res = await doFetch(`${crudUrl}/${t.table}?${t.key}=eq.${encodeURIComponent(key)}`, {
-        method: "PATCH",
-        headers: headers({ Prefer: "return=representation" }),
-        body: JSON.stringify(cleanRow(m.changes)),
-      })
-      await requireOk(res, `update ${t.table}`)
-      const returned = await res.json()
-      if (!Array.isArray(returned)) throw new Error(`update ${t.table} returned a non-array representation`)
-      await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
-      setPhase(`${t.id}:${key}`, null)
+      const release = await mutationLease(t.id)
+      try {
+        const m = transaction.mutations[0]
+        const key = m.key ?? m.original?.[t.key]
+        const res = await doFetch(`${crudUrl}/${t.table}?${t.key}=eq.${encodeURIComponent(key)}`, {
+          method: "PATCH",
+          headers: headers({ Prefer: "return=representation" }),
+          body: JSON.stringify(cleanRow(m.changes)),
+        })
+        await requireOk(res, `update ${t.table}`)
+        const returned = await res.json()
+        if (!Array.isArray(returned)) throw new Error(`update ${t.table} returned a non-array representation`)
+        await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
+        setPhase(`${t.id}:${key}`, null)
+      } finally {
+        release()
+      }
     }
     mutationFns[`delete:${t.id}`] = async ({ transaction }: any) => {
-      const m = transaction.mutations[0]
-      const key = m.key ?? m.original?.[t.key]
-      const res = await doFetch(`${crudUrl}/${t.table}?${t.key}=eq.${encodeURIComponent(key)}`, {
-        method: "DELETE",
-        headers: headers(),
-      })
-      await requireOk(res, `delete ${t.table}`)
-      await confirmDelete(t.id, t.key, key)
-      setPhase(`${t.id}:${key}`, null)
+      const release = await mutationLease(t.id)
+      try {
+        const m = transaction.mutations[0]
+        const key = m.key ?? m.original?.[t.key]
+        const res = await doFetch(`${crudUrl}/${t.table}?${t.key}=eq.${encodeURIComponent(key)}`, {
+          method: "DELETE",
+          headers: headers(),
+        })
+        await requireOk(res, `delete ${t.table}`)
+        await confirmDelete(t.id, t.key, key)
+        setPhase(`${t.id}:${key}`, null)
+      } finally {
+        release()
+      }
     }
   }
 

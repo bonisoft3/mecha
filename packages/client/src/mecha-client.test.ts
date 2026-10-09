@@ -44,6 +44,82 @@ describe("createMechaClient", () => {
   it("closes an idle shape within one navigation, not five minutes", () => {
     expect((client.collections.tasks as any).config.gcTime).toBe(5_000)
   })
+
+  it("keeps a changes-only shape alive until every remote mutation is acknowledged", async () => {
+    const electric = fakeElectric({
+      schema: {
+        task: { id: { type: "text" }, title: { type: "text" }, txid: { type: "int8" } },
+        blocker: { id: { type: "text" }, txid: { type: "int8" } },
+      },
+    })
+    let txid = 0
+    let blockerTxid = 0
+    let refuse = false
+    const changefeedReady = new Map<string, boolean>()
+    let mutationBeforeChangefeed = false
+    const methods: string[] = []
+    const remote = createMechaClient({
+      tables: [
+        { id: "task", table: "task", sync: "on-demand" },
+        { id: "blocker", table: "blocker", sync: "on-demand" },
+      ],
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+      shapeIdleMs: 200,
+      fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input instanceof Request ? input.url : input))
+        if (!url.pathname.startsWith("/crud/")) {
+          const response = await electric.fetcher(input, init)
+          const table = url.searchParams.get("table")
+          if (table && url.searchParams.get("live") !== "true") changefeedReady.set(table, true)
+          return response
+        }
+        const table = url.pathname.split("/").at(-1)!
+        mutationBeforeChangefeed ||= !changefeedReady.get(table)
+        const method = init?.method ?? "GET"
+        methods.push(`${table}:${method}`)
+        if (refuse && table === "blocker") return Response.json({ message: "refused" }, { status: 409 })
+        txid += 1
+        if (method === "DELETE") {
+          electric.push("task", { operation: "delete", value: { id: "t1", title: "after", txid: String(txid) }, txid })
+          return new Response(null, { status: 204 })
+        }
+        const body = JSON.parse(String(init?.body))
+        if (table === "blocker") {
+          blockerTxid = txid
+          return Response.json([{ id: "b1", txid: String(txid) }], { status: 201 })
+        }
+        const row = { id: "t1", title: body.title ?? "after", txid: String(txid) }
+        electric.push("task", { operation: method === "POST" ? "insert" : "update", value: row, txid })
+        return Response.json([row], { status: method === "POST" ? 201 : 200 })
+      }) as typeof fetch,
+    })
+
+    await remote.insert("task", [{ id: "t1", title: "before" }])
+    await remote.update("task", [{ key: "t1", changes: { title: "after" } }])
+    const blocked = remote.insert("blocker", [{ id: "b1" }])
+    await vi.waitFor(() => expect(blockerTxid).toBeGreaterThan(0))
+    const removed = remote.remove("task", ["t1"])
+    await vi.waitFor(() => expect(remote.collections.task.status).toBe("cleaned-up"))
+    changefeedReady.set("task", false)
+    refuse = true
+    const refused = remote.insert("blocker", [{ id: "b2" }])
+    electric.push("blocker", { operation: "insert", value: { id: "b1", txid: String(blockerTxid) }, txid: blockerTxid })
+    await vi.waitFor(() => expect(methods).toContain("task:DELETE"))
+    await blocked
+    await removed
+    await vi.waitFor(() => expect(remote.collections.task.status).toBe("cleaned-up"))
+    await expect(refused).rejects.toThrow(/409/)
+    await vi.waitFor(() => expect(remote.collections.blocker.status).toBe("cleaned-up"))
+
+    expect(methods).toEqual(["task:POST", "task:PATCH", "blocker:POST", "task:DELETE", "blocker:POST"])
+    expect(mutationBeforeChangefeed).toBe(false)
+    expect(electric.subsets).toEqual([])
+    const requests = electric.requests.filter((url) => url.searchParams.get("table") === "task")
+    expect(requests.length).toBeGreaterThan(0)
+    expect(requests.every((url) => url.searchParams.get("log") === "changes_only")).toBe(true)
+  }, 10_000)
 })
 
 // A table stating only the carriers these rows use. It is an input and not a

@@ -5,12 +5,15 @@ type Queryable = Pick<PGlite, 'query'>
 
 export class ReadQueryError extends Error {}
 
+type Aggregate = 'sum' | 'avg' | 'min' | 'max' | 'count'
+
 interface Selection {
   name: string
   key: string
   hint?: string
   inner: boolean
   children?: Selection[]
+  aggregate?: Aggregate
 }
 
 interface ForeignKey {
@@ -80,12 +83,22 @@ function splitList(raw: string): string[] {
 function parseSelect(raw: string, depth = 0): Selection[] {
   if (depth > 16) throw new ReadQueryError('Select nesting exceeds 16 levels')
   const keys = new Set<string>()
-  return splitList(raw).map((term) => {
+  const selections = splitList(raw).map((term): Selection => {
     if (term === '*') {
       if (keys.has('*')) throw new ReadQueryError('Duplicate wildcard')
       keys.add('*')
       return { name: '*', key: '*', inner: false }
     }
+    const aggregate = /^(?:([A-Za-z_][A-Za-z0-9_]*):)?(?:([A-Za-z_][A-Za-z0-9_]*)\.(sum|avg|min|max|count)|count)\(\)$/.exec(term)
+    if (aggregate) {
+      if (depth !== 0) throw new ReadQueryError('Embedded aggregates are unsupported')
+      const operation = (aggregate[3] ?? 'count') as Aggregate
+      const key = aggregate[1] ?? operation
+      if (keys.has(key)) throw new ReadQueryError(`Duplicate select key: ${key}`)
+      keys.add(key)
+      return { name: aggregate[2] ?? '*', key, inner: false, aggregate: operation }
+    }
+    if (/^(?:[A-Za-z_][A-Za-z0-9_]*:)?\*\./.test(term)) throw new ReadQueryError('Wildcard aggregates are unsupported')
     const open = term.indexOf('(')
     const head = open < 0 ? term : term.slice(0, open)
     const match = /^([A-Za-z_][A-Za-z0-9_]*:)?([A-Za-z_][A-Za-z0-9_]*)(![A-Za-z_][A-Za-z0-9_]*)?(!inner)?$/.exec(head)
@@ -104,6 +117,11 @@ function parseSelect(raw: string, depth = 0): Selection[] {
     if (!term.endsWith(')')) throw new ReadQueryError(`Malformed relation: ${term}`)
     return { name, key, hint, inner, children: parseSelect(term.slice(open + 1, -1), depth + 1) }
   })
+  if (selections.some((selection) => selection.aggregate)) {
+    if (selections.some((selection) => selection.name === '*' && !selection.aggregate)) throw new ReadQueryError('Wildcard selection with aggregates is unsupported')
+    if (selections.some((selection) => selection.children)) throw new ReadQueryError('Embedded resources with aggregates are unsupported')
+  }
+  return selections
 }
 
 function parseFilter(column: string, raw: string): Filter {
@@ -246,7 +264,7 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
     const conditions = node.filters.map((filter) => filterSql(filter, `${quote(node.alias)}.${quote(filter.column)}`, params))
     const fields: string[] = []
     for (const selection of node.selections) {
-      if (selection.name === '*') continue
+      if (selection.name === '*' && !selection.aggregate) continue
       let value: string
       const child = node.children.get(selection.key)
       if (child) {
@@ -262,20 +280,27 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
         const from = `FROM ${source} AS ${quote(child.node.alias)}${predicates.length ? ` WHERE ${predicates.join(' AND ')}` : ''}`
         value = `(SELECT ${nested.json} ${from})`
         if (child.inner) conditions.push(`EXISTS (SELECT 1 ${from})`)
+      } else if (selection.aggregate) {
+        const column = selection.name === '*' ? '*' : `${quote(node.alias)}.${quote(selection.name)}`
+        value = `${selection.aggregate.toUpperCase()}(${column})`
       } else value = `${quote(node.alias)}.${quote(selection.name)}`
       fields.push(`'${selection.key}', ${value}`)
     }
-    const base = node.selections.some((s) => s.name === '*') ? `to_jsonb(${quote(node.alias)})` : `'{}'::jsonb`
+    const base = node.selections.some((s) => s.name === '*' && !s.aggregate) ? `to_jsonb(${quote(node.alias)})` : `'{}'::jsonb`
     return { json: fields.length ? `${base} || jsonb_build_object(${fields.join(', ')})` : base, conditions }
   }
   const compiled = compile(root)
   const from = `FROM public.${quote(root.table)} AS ${quote(root.alias)}`
   const where = compiled.conditions.length ? ` WHERE ${compiled.conditions.join(' AND ')}` : ''
-  const base = `SELECT ${compiled.json} AS data ${from}${where}`
+  const aggregated = root.selections.some((selection) => selection.aggregate)
+  const grouped = new Set(root.selections.filter((selection) => !selection.aggregate).map((selection) => selection.name))
+  const group = aggregated && grouped.size ? ` GROUP BY ${[...grouped].map((column) => `${quote(root.alias)}.${quote(column)}`).join(', ')}` : ''
+  const base = `SELECT ${compiled.json} AS data ${from}${where}${group}`
   const terms = search.get('order')
   const order = terms === null ? '' : ' ORDER BY ' + splitList(terms).map((term) => {
     const match = /^([A-Za-z_][A-Za-z0-9_]*)(?:\.(asc|desc))?(?:\.(nullsfirst|nullslast))?$/i.exec(term)
     if (!match) throw new ReadQueryError(`Unsupported order: ${term}`)
+    if (aggregated && !grouped.has(match[1])) throw new ReadQueryError(`Aggregate ordering requires a grouped column: ${term}`)
     return `${quote(root.alias)}.${quote(match[1])} ${(match[2] ?? 'asc').toUpperCase()}${match[3] ? (match[3].toLowerCase() === 'nullsfirst' ? ' NULLS FIRST' : ' NULLS LAST') : ''}`
   }).join(', ')
   const limit = pagination(search, 'limit')

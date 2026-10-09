@@ -18,6 +18,10 @@
 * [Capabilities](capabilities.md) - concept: The switches in cluster.cue that add planes to a cluster — data, change feed, auth, blobs, schedules — and what mecha's own stack runs beside them.
 * [State machines](machines.md) - concept: Trigger-driven statechart reducers inside PostgreSQL — deterministic transitions, relational effects, timeouts, and ticker sweeps.
 
+# Decisions
+
+* [An authorized blob plane](decisions/2026-10-08-authorized-blob-plane.md) - decision, unbuilt: Closes the blob plane at the proxy, publishes images only through signed imgproxy URLs computed in SQL, and lets row policy own attachment, so an app needs no media service of its own.
+
 # Service and package contracts
 
 * [[../services/electric/README|Electric image]] - reference: The pinned runtime and snapshot initialization correction verified during its build.

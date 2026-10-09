@@ -224,6 +224,80 @@ describe('createRestHandler', () => {
   })
 })
 
+describe('scalar aggregate reads', () => {
+  let db: PGlite
+  let handler: (req: Request) => Promise<Response>
+  const read = (select: string, filter = '') => handler(new Request(
+    `http://localhost/appearances?select=${encodeURIComponent(select)}${filter}`,
+    { headers: { Prefer: 'count=exact' } },
+  ))
+
+  beforeAll(async () => {
+    db = await PGlite.create()
+    await db.exec(`
+      CREATE TABLE owners (id text PRIMARY KEY, name text NOT NULL);
+      CREATE TABLE appearances (id integer PRIMARY KEY, owner_id text REFERENCES owners, minutes integer, included boolean NOT NULL);
+      INSERT INTO owners VALUES ('a', 'Alpha'), ('b', 'Beta'), ('c', 'Gamma');
+      INSERT INTO appearances VALUES
+        (1, 'a', 10, true), (2, 'a', NULL, true), (3, 'a', 0, true), (4, 'a', 900, false),
+        (5, 'b', 30, true), (6, 'b', 40, true), (7, 'c', NULL, true);
+    `)
+    handler = createRestHandler(db)
+  })
+
+  afterAll(async () => {
+    await db.close()
+  })
+
+  it('filters source rows before calculating grouped totals and both kinds of count', async () => {
+    const response = await read('id:owner_id,total:minutes.sum(),minutes.count(),rows:count(),minutes.avg(),minutes.min(),minutes.max()', '&owner_id=eq.a&included=is.true')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual([{ id: 'a', total: 10, count: 2, rows: 3, avg: 5, min: 0, max: 10 }])
+  })
+
+  it('distinguishes row count from non-null column count using aliases', async () => {
+    const response = await read('id:owner_id,total:minutes.sum(),present:minutes.count(),rows:count()', '&owner_id=eq.a&included=is.true')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual([{ id: 'a', total: 10, present: 2, rows: 3 }])
+  })
+
+  it('groups by every selected scalar column and paginates the resulting groups', async () => {
+    const response = await read('id:owner_id,included,total:minutes.sum(),count()', '&included=is.true&order=owner_id.asc&limit=1&offset=1')
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Content-Range')).toBe('1-1/3')
+    expect(await response.json()).toEqual([{ id: 'b', included: true, total: 70, count: 2 }])
+  })
+
+  it('preserves SQL null aggregates, zero totals and empty ungrouped counts', async () => {
+    const empty = await read('total:minutes.sum(),count()', '&owner_id=eq.missing')
+    expect(await empty.json()).toEqual([{ total: null, count: 0 }])
+    const zero = await read('minutes.sum(),minutes.avg(),minutes.min(),minutes.max(),count()', '&minutes=eq.0')
+    expect(await zero.json()).toEqual([{ sum: 0, avg: 0, min: 0, max: 0, count: 1 }])
+    const nulls = await read('total:minutes.sum(),average:minutes.avg(),present:minutes.count(),rows:count()', '&owner_id=eq.c')
+    expect(await nulls.json()).toEqual([{ total: null, average: null, present: 0, rows: 1 }])
+    const emptyGroups = await read('id:owner_id,total:minutes.sum(),count()', '&owner_id=eq.missing')
+    expect(await emptyGroups.json()).toEqual([])
+  })
+
+  it.each([
+    'minutes.sum();DROP TABLE appearances', 'bad"alias:minutes.sum()', 'minutes.stddev()',
+    '*.sum()', '*,minutes.sum()', 'minutes.sum(),owner:owner_id(name)', 'owner:owner_id(count())',
+    'minutes.sum(),minutes.sum()',
+  ])('rejects unsupported or unsafe aggregate selection %s', async (select) => {
+    expect((await read(select)).status).toBe(400)
+  })
+
+  it('rejects aggregate ordering instead of compiling a nonexistent source column', async () => {
+    expect((await read('id:owner_id,total:minutes.sum()', '&order=total.desc')).status).toBe(400)
+  })
+
+  it('retains scalar aliases, wildcard rows, to-one embedding and embedded filters', async () => {
+    const response = await read('*,owner:owner_id(name)', '&id=eq.1&owner.name=eq.Alpha')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual([{ id: 1, owner_id: 'a', minutes: 10, included: true, owner: { name: 'Alpha' } }])
+  })
+})
+
 describe('scope session', () => {
   let db: PGlite
 

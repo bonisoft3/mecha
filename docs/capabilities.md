@@ -52,7 +52,8 @@ What bites:
 
 - **Nothing on the plane authorizes.** Anyone who reaches `/blobs` can list,
   read, overwrite and delete every object. Anyone who reaches `/img` can make
-  imgproxy fetch and transform any of them.
+  imgproxy fetch and transform any of them. [An authorized blob
+  plane](decisions/2026-10-08-authorized-blob-plane.md) is proposed.
 - **A blob is outside the database.** No row-level policy covers it and no
   change is captured for it. A row carries the object's key, and a key is safe
   to put on the bus where a credential is not.

@@ -473,63 +473,63 @@ url = "https://github.com/pnpm/pnpm/releases/download/v10.32.1/pnpm-win-x64.exe"
 url_api = "https://api.github.com/repos/pnpm/pnpm/releases/assets/371216281"
 
 [[tools."github:redpanda-data/connect"]]
-version = "4.46.0"
+version = "4.112.0"
 backend = "github:redpanda-data/connect"
 
 [tools."github:redpanda-data/connect"."platforms.linux-arm64"]
-checksum = "sha256:295aafcda6a8428ccee8c0ef42152b2006083c0fb1cbf8e9ff2852676f58222f"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_linux_arm64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651907"
+checksum = "sha256:d8145ba1a85a6eda9511545637d10ea35c66cec004fedcb3ea5dc81fc240d45c"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206911"
 
 [tools."github:redpanda-data/connect"."platforms.linux-arm64-musl"]
-checksum = "sha256:295aafcda6a8428ccee8c0ef42152b2006083c0fb1cbf8e9ff2852676f58222f"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_linux_arm64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651907"
+checksum = "sha256:d8145ba1a85a6eda9511545637d10ea35c66cec004fedcb3ea5dc81fc240d45c"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206911"
 
 [tools."github:redpanda-data/connect"."platforms.linux-x64"]
-checksum = "sha256:88c34f98976ea7f2dde426a02085aeb44f5539dbf987de7fc8207cc83108b788"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651913"
+checksum = "sha256:d7615f24ecacedaee88cd41583e9895bc936df57f230d2ae5383c03a81e10d26"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206921"
 
 [tools."github:redpanda-data/connect"."platforms.linux-x64-baseline"]
-checksum = "sha256:88c34f98976ea7f2dde426a02085aeb44f5539dbf987de7fc8207cc83108b788"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651913"
+checksum = "sha256:d7615f24ecacedaee88cd41583e9895bc936df57f230d2ae5383c03a81e10d26"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206921"
 
 [tools."github:redpanda-data/connect"."platforms.linux-x64-musl"]
-checksum = "sha256:88c34f98976ea7f2dde426a02085aeb44f5539dbf987de7fc8207cc83108b788"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651913"
+checksum = "sha256:d7615f24ecacedaee88cd41583e9895bc936df57f230d2ae5383c03a81e10d26"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206921"
 
 [tools."github:redpanda-data/connect"."platforms.linux-x64-musl-baseline"]
-checksum = "sha256:88c34f98976ea7f2dde426a02085aeb44f5539dbf987de7fc8207cc83108b788"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_linux_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651913"
+checksum = "sha256:d7615f24ecacedaee88cd41583e9895bc936df57f230d2ae5383c03a81e10d26"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206921"
 
 [tools."github:redpanda-data/connect"."platforms.macos-arm64"]
-checksum = "sha256:298b4f5bf85a1a3f45574976984f575764ff36bf85d25ec0e9b3dbe8ee91fc06"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_darwin_arm64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651904"
+checksum = "sha256:fca5aca68cb83f9d98b3703c2e691f6f8605c4db6b1d517c6efd6e31050a2585"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206902"
 
 [tools."github:redpanda-data/connect"."platforms.macos-x64"]
-checksum = "sha256:b8db41622a946a00469aed8f8110a6f15d8b0543881dbd61fe973ded0be49a7b"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_darwin_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651912"
+checksum = "sha256:6069f8065a5f2e30f2b7ea9602e61be42e3d098b4d3fbfac74158f84a977fa2b"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_darwin_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206924"
 
 [tools."github:redpanda-data/connect"."platforms.macos-x64-baseline"]
-checksum = "sha256:b8db41622a946a00469aed8f8110a6f15d8b0543881dbd61fe973ded0be49a7b"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_darwin_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651912"
+checksum = "sha256:6069f8065a5f2e30f2b7ea9602e61be42e3d098b4d3fbfac74158f84a977fa2b"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_darwin_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206924"
 
 [tools."github:redpanda-data/connect"."platforms.windows-x64"]
-checksum = "sha256:4ab8a06ac3eeb030857a83a7648220361c4602ec2de19a1b3850d379ac85c76b"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_windows_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651902"
+checksum = "sha256:c875c91187b47240d6d7cc3175e2e10f40364a20797794cc3e58e899dfbcb42d"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_windows_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206916"
 
 [tools."github:redpanda-data/connect"."platforms.windows-x64-baseline"]
-checksum = "sha256:4ab8a06ac3eeb030857a83a7648220361c4602ec2de19a1b3850d379ac85c76b"
-url = "https://github.com/redpanda-data/connect/releases/download/v4.46.0/redpanda-connect_4.46.0_windows_amd64.tar.gz"
-url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/224651902"
+checksum = "sha256:c875c91187b47240d6d7cc3175e2e10f40364a20797794cc3e58e899dfbcb42d"
+url = "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_windows_amd64.tar.gz"
+url_api = "https://api.github.com/repos/redpanda-data/connect/releases/assets/605206916"
 
 [[tools.node]]
 version = "22.23.3"

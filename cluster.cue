@@ -617,7 +617,7 @@ _devElectricSecret: "dev-electric-secret"
 				transform: X._image & {
 					srcs: globs: [for p in X.state.pipelines {p.file}]
 					dockerfile: {
-						from: name: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
+						from: name: "redpandadata/connect:4.112.0@sha256:5b70cd14fd2bbb8fe02a80358ed1510169596218d0d46cd7768659b1d1cf8420"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
 						if len(X.state.computations) > 0 {
 							epilogue: ["COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"]

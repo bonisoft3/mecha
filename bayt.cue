@@ -32,7 +32,7 @@ _postgres: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1b
 // The one pgroll in the repository: every migration a cluster is given runs
 // through it, and pgroll/pgroll_test.ts holds the grammar to its tag.
 _pgroll: "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
-_connect: "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
+_connect: "redpandadata/connect:4.112.0@sha256:5b70cd14fd2bbb8fe02a80358ed1510169596218d0d46cd7768659b1d1cf8420"
 // The services' Deno is the repository's (mise.toml), on glibc, which the
 // compute service's DuckDB binding needs; one base for all three.
 _deno: "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"

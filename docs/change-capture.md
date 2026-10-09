@@ -29,7 +29,7 @@ PostgREST ─► PostgreSQL ── publication conduit_pub, slot conduit_slot
 | WAL → Conduit | Conduit v0.14.0, `builtin:postgres` in `logrepl` mode, `snapshotMode: never`, forwarding what its `tables` names. The pipeline is the consumer's template (`meta.conduitTemplate`; mecha's is [`cdc-to-dapr.yaml`](../services/cdc/pipelines/cdc-to-dapr.yaml)), `envsubst`-rendered at every start |
 | Conduit → Dapr | the `standalone:http` connector v0.4.0, baked into `conduit-image` |
 | Dapr → bus | daprd 1.16.1, pubsub component `redis-streams` ([components](../services/mesh/dapr/components/)); the topic is the stream key |
-| bus → pipelines | Redpanda Connect 4.46.0 (`rpk`) reading Redis itself, one consumer group per pipeline; `state.pipelines` in [`cluster.cue`](../cluster.cue) |
+| bus → pipelines | Redpanda Connect 4.112.0 (`rpk`) reading Redis itself, one consumer group per pipeline; `state.pipelines` in [`cluster.cue`](../cluster.cue) |
 
 Dapr holds the publish side: Conduit names a component and a topic, and what
 backs the component is Dapr's configuration. The consumer side is not

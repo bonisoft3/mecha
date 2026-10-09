@@ -29,7 +29,7 @@
     "preamble": [],
     "preambleCopyContexts": [],
     "from": {
-      "name": "redpandadata/connect:4.46.0@sha256:f84ebd666931dc667b8b33c70900ff49a34c73d1811b096f668e360d66a05d4c"
+      "name": "redpandadata/connect:4.112.0@sha256:5b70cd14fd2bbb8fe02a80358ed1510169596218d0d46cd7768659b1d1cf8420"
     },
     "copy": [
       {

@@ -330,6 +330,40 @@ BEGIN
     RAISE EXCEPTION '38 a subjectless request did not hold exactly public:';
   END IF;
 
+  -- A write's response names its transaction, which is how the client
+  -- confirms the write against its shape stream: as the 32-bit xid Electric
+  -- reports, added to the headers already set. A read names none, nor does a
+  -- function call, since naming one assigns it. A fresh cluster's epoch is 0,
+  -- where the xid and the 64-bit xid8 print alike, so 62 reads the hook's own
+  -- text for the narrowing a value cannot show.
+  PERFORM set_config('request.method', 'DELETE', true);
+  PERFORM set_config('request.path', '/_f_public', true);
+  PERFORM set_config('response.headers', '[{"Cache-Control": "no-store"}]', true);
+  PERFORM app_pre_request();
+  IF current_setting('response.headers')::jsonb
+     <> jsonb_build_array(jsonb_build_object('Cache-Control', 'no-store'),
+                          jsonb_build_object('x-txid', pg_current_xact_id()::xid::text))
+     OR (current_setting('response.headers')::jsonb -> 1 ->> 'x-txid')::bigint >= 4294967296 THEN
+    RAISE EXCEPTION '59 a write did not add its 32-bit transaction id: %', current_setting('response.headers');
+  END IF;
+  PERFORM set_config('request.method', 'GET', true);
+  PERFORM set_config('response.headers', '', true);
+  PERFORM app_pre_request();
+  IF current_setting('response.headers') <> '' THEN
+    RAISE EXCEPTION '60 a read named a transaction: %', current_setting('response.headers');
+  END IF;
+  PERFORM set_config('request.method', 'POST', true);
+  PERFORM set_config('request.path', '/rpc/_f_call', true);
+  PERFORM app_pre_request();
+  IF current_setting('response.headers') <> '' THEN
+    RAISE EXCEPTION '61 a function call named a transaction: %', current_setting('response.headers');
+  END IF;
+  IF pg_get_functiondef('public.app_pre_request'::regproc) NOT LIKE '%pg_current_xact_id()::xid::text%' THEN
+    RAISE EXCEPTION '62 the hook names the transaction in another form than the 32-bit xid';
+  END IF;
+  PERFORM set_config('request.path', '', true);
+  PERFORM set_config('request.method', '', true);
+
   -- The floor over a public table. `public:` is a scope like any other, so the
   -- same restrictive policy carries it; what differs is only that every subject
   -- holds it. Nothing here says a public row is *writable* -- the floor's WITH
@@ -504,7 +538,7 @@ BEGIN
   IF n = 0 THEN RAISE EXCEPTION '58 the floor evaluates its scopes without an InitPlan'; END IF;
   RESET ROLE;
 
-  RAISE WARNING 'rls: 58/58 pass';
+  RAISE WARNING 'rls: 62/62 pass';
 END $$;
 
 DROP TABLE _f_posting, _f_note, _f_denied;

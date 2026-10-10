@@ -113,10 +113,19 @@ END $$;
 -- switching to the request role. It is what makes current_scopes() a constant
 -- for the statement rather than a subquery per row.
 --
+-- A write to a table also names the transaction it runs in, as `x-txid`: the
+-- client confirms the write by seeing that transaction in its shape stream,
+-- and only this hook runs inside the transaction before PostgREST answers.
+-- The id is the 32-bit xid, the form Electric reports a change's transaction
+-- and a snapshot's bounds in; the 64-bit xid8 differs from it once the epoch
+-- moves past 0. Not for a read, nor for a function call, which may be one:
+-- naming a transaction assigns it an id, spent for nothing there. Added to
+-- whatever headers the request already set rather than replacing them.
+--
 -- It must exist wherever PGRST_DB_PRE_REQUEST names it, and that setting is
 -- unconditional for a server app -- so it cannot be conditional either, which
--- rules out emitting it per app. It can live here because it reads one setting
--- and writes another and depends on nothing an app declares.
+-- rules out emitting it per app. It can live here because it reads settings
+-- and writes others and depends on nothing an app declares.
 --
 -- Not SECURITY DEFINER: it reaches no table.
 CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void
@@ -129,6 +138,12 @@ BEGIN
   END IF;
   PERFORM set_config('app.scopes',
     array_to_string(public.subject_scopes(sub), ','), true);
+  IF current_setting('request.method', true) IN ('POST', 'PATCH', 'PUT', 'DELETE')
+     AND current_setting('request.path', true) NOT LIKE '/rpc/%' THEN
+    PERFORM set_config('response.headers',
+      (coalesce(nullif(current_setting('response.headers', true), ''), '[]')::jsonb
+        || jsonb_build_array(jsonb_build_object('x-txid', pg_current_xact_id()::xid::text)))::text, true);
+  END IF;
 END $$;
 
 -- Tables the floor cannot cover, declared rather than discovered.

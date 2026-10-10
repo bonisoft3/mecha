@@ -21,7 +21,6 @@ export interface UnionUtils {
   drop(source: Collection<any, any, any>): void
   /** Resolves when any source has seen the txid; write confirmation reads this. */
   awaitTxId(txid: number, timeout?: number): Promise<boolean>
-  awaitMatch(matchFn: (message: any) => boolean, timeout?: number): Promise<boolean>
 }
 
 export interface UnionConfig {
@@ -122,10 +121,6 @@ export function unionCollectionOptions(config: UnionConfig) {
     awaitTxId(txid, timeout) {
       if (sink === null) return Promise.resolve(true)
       return anyOf([...sources], (s) => (s as any).utils?.awaitTxId?.(txid, timeout))
-    },
-    awaitMatch(matchFn, timeout) {
-      if (sink === null) return Promise.resolve(true)
-      return anyOf([...sources], (s) => (s as any).utils?.awaitMatch?.(matchFn, timeout))
     },
   }
 

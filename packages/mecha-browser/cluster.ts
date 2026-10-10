@@ -145,12 +145,16 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
   // caps a payload at eight kilobytes and a row need not fit. The transaction's
   // own id rides along, since a deleted row's column holds the transaction that
   // last wrote it and the client confirms a delete by the one that removed it.
+  // Ids are the 32-bit xid, as Electric reports them and as the CRUD handler
+  // names a write's (postgrest-js); a snapshot's bounds below are too. A row's
+  // own `txid` column is the 64-bit xid8 it is ordered by, which differs from
+  // the xid once the epoch moves, so no message's txids read it.
   await db.exec(`CREATE OR REPLACE FUNCTION shape_notify() RETURNS trigger LANGUAGE plpgsql AS $$
     DECLARE r jsonb; k jsonb := '{}'::jsonb; c text;
     BEGIN
       IF TG_OP = 'DELETE' THEN r := to_jsonb(OLD); ELSE r := to_jsonb(NEW); END IF;
       FOREACH c IN ARRAY TG_ARGV LOOP k := k || jsonb_build_object(c, r -> c); END LOOP;
-      PERFORM pg_notify('shape', json_build_object('table', TG_TABLE_NAME, 'op', TG_OP, 'key', k, 'scope', r -> 'scope_id', 'txid', txid_current())::text);
+      PERFORM pg_notify('shape', json_build_object('table', TG_TABLE_NAME, 'op', TG_OP, 'key', k, 'scope', r -> 'scope_id', 'txid', pg_current_xact_id()::xid::text::bigint)::text);
       RETURN NULL;
     END $$;`)
   for (const [table, l] of logs) {
@@ -165,14 +169,13 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     return `json_object(ARRAY[${cols.map(literal).join(', ')}]::text[], ARRAY[${cols.map((c) => `t.${ident(c)}::text`).join(', ')}]::text[])`
   }
 
-  /** `txid` is the change's transaction, or null for a row no change carries
-   * (a snapshot's, which a client would judge as a change it already holds);
-   * left out, it is the row's own. */
-  const rowMessage = (table: string, operation: string, row: Row, txid?: number | null) => {
+  /** `txid` is the transaction that wrote the row, or null for a row no change
+   * carries (a subset snapshot's, which a client would judge as a change it
+   * already holds). */
+  const rowMessage = (table: string, operation: string, row: Row, txid: number | null) => {
     const l = logs.get(table)!
     const headers: Record<string, unknown> = { operation, relation: ['public', table] }
-    const tx = txid === undefined ? (operation !== 'delete' && row.txid != null ? Number(row.txid) : undefined) : txid ?? undefined
-    if (tx !== undefined) headers.txids = [tx]
+    if (txid !== null) headers.txids = [txid]
     return { key: `"public"."${table}"/${l.pk.map((c) => `"${String(row[c])}"`).join('/')}`, value: row, headers }
   }
 
@@ -286,8 +289,10 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
       })
     }
     if (offset === '-1') {
-      const rows = await serialize(() => db.query<{ r: Row }>(`SELECT ${asText(table)} AS r FROM ${ident(table)} t WHERE ${shapeWhere(reach)}`))
-      const msgs: unknown[] = rows.rows.map((x) => rowMessage(table, 'insert', x.r))
+      // Each row under the transaction that last wrote it, its xmin, so a write
+      // a page awaits is confirmed by a log read from the start too.
+      const rows = await serialize(() => db.query<{ r: Row; x: string }>(`SELECT ${asText(table)} AS r, t.xmin::text AS x FROM ${ident(table)} t WHERE ${shapeWhere(reach)}`))
+      const msgs: unknown[] = rows.rows.map((x) => rowMessage(table, 'insert', x.r, Number(x.x)))
       msgs.push(upToDate())
       return new Response(JSON.stringify(msgs), {
         headers: { ...base, 'electric-offset': offsetOf(l.filled), 'electric-schema': JSON.stringify(l.schema), 'electric-up-to-date': 'true' },
@@ -357,7 +362,7 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
       (where === null ? '' : ` AND (${where})`) + (order === null ? '' : ` ORDER BY ${order}`) + (limit === null ? '' : ` LIMIT ${limit}`)
     const read = await serialize(async () => {
       const seen = (await db.query<{ xmin: string; xmax: string; xip: string[] }>(
-        'SELECT pg_snapshot_xmin(s)::text AS xmin, pg_snapshot_xmax(s)::text AS xmax, ARRAY(SELECT pg_snapshot_xip(s)::text) AS xip FROM pg_current_snapshot() s',
+        'SELECT pg_snapshot_xmin(s)::xid::text AS xmin, pg_snapshot_xmax(s)::xid::text AS xmax, ARRAY(SELECT pg_snapshot_xip(s)::xid::text) AS xip FROM pg_current_snapshot() s',
       )).rows[0]
       // A predicate Postgres refuses (a column it lacks, a literal its column
       // cannot hold) is the client's error; a 500 would be retried as the

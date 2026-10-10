@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { and, createCollection, createLiveQueryCollection, eq, or } from "@tanstack/db"
 import { electricCollectionOptions } from "@tanstack/electric-db-collection"
 import { WebLocksLeader } from "@tanstack/offline-transactions"
@@ -8,6 +8,14 @@ import { fakeElectric } from "./fake-electric.js"
 // Transport and delivery are exercised E2E against a live cluster (todo's
 // verify walk); these cover the config-level contracts only.
 describe("createMechaClient", () => {
+  // Node's navigator has no onLine, which the outbox reads as offline: it
+  // would hold every remote mutation and never send one.
+  beforeEach(() => {
+    Object.defineProperty(navigator, "onLine", { value: true, configurable: true })
+  })
+  afterEach(() => {
+    delete (navigator as { onLine?: boolean }).onLine
+  })
   const client = createMechaClient({
     tables: [{ id: "tasks", table: "task" }],
     electricUrl: "http://localhost:0/electric",
@@ -81,18 +89,20 @@ describe("createMechaClient", () => {
         methods.push(`${table}:${method}`)
         if (refuse && table === "blocker") return Response.json({ message: "refused" }, { status: 409 })
         txid += 1
+        const named = { headers: { "x-txid": String(txid) } }
         if (method === "DELETE") {
-          electric.push("task", { operation: "delete", value: { id: "t1", title: "after", txid: String(txid) }, txid })
-          return new Response(null, { status: 204 })
+          const row = { id: "t1", title: "after", txid: String(txid) }
+          electric.push("task", { operation: "delete", value: row, txid })
+          return Response.json([row], named)
         }
         const body = JSON.parse(String(init?.body))
         if (table === "blocker") {
           blockerTxid = txid
-          return Response.json([{ id: "b1", txid: String(txid) }], { status: 201 })
+          return Response.json([{ id: "b1", txid: String(txid) }], { status: 201, ...named })
         }
         const row = { id: "t1", title: body.title ?? "after", txid: String(txid) }
         electric.push("task", { operation: method === "POST" ? "insert" : "update", value: row, txid })
-        return Response.json([row], { status: method === "POST" ? 201 : 200 })
+        return Response.json([row], { status: method === "POST" ? 201 : 200, ...named })
       }) as typeof fetch,
     })
 
@@ -104,13 +114,15 @@ describe("createMechaClient", () => {
     await vi.waitFor(() => expect(remote.collections.task.status).toBe("cleaned-up"))
     changefeedReady.set("task", false)
     refuse = true
-    const refused = remote.insert("blocker", [{ id: "b2" }])
+    // Observed as it is made: it is refused while the test still waits on
+    // the rest, and a rejection nothing has handled yet is reported as one.
+    const refused = expect(remote.insert("blocker", [{ id: "b2" }])).rejects.toThrow(/409/)
     electric.push("blocker", { operation: "insert", value: { id: "b1", txid: String(blockerTxid) }, txid: blockerTxid })
     await vi.waitFor(() => expect(methods).toContain("task:DELETE"))
     await blocked
     await removed
     await vi.waitFor(() => expect(remote.collections.task.status).toBe("cleaned-up"))
-    await expect(refused).rejects.toThrow(/409/)
+    await refused
     await vi.waitFor(() => expect(remote.collections.blocker.status).toBe("cleaned-up"))
 
     expect(methods).toEqual(["task:POST", "task:PATCH", "blocker:POST", "task:DELETE", "blocker:POST"])
@@ -119,6 +131,46 @@ describe("createMechaClient", () => {
     const requests = electric.requests.filter((url) => url.searchParams.get("table") === "task")
     expect(requests.length).toBeGreaterThan(0)
     expect(requests.every((url) => url.searchParams.get("log") === "changes_only")).toBe(true)
+  }, 10_000)
+
+  // A write that changed nothing is quiet only when its row is gone; a row this
+  // reader still holds that the server would not change is a refusal (a row
+  // policy that shows it but forbids the change), and must say so rather than
+  // let the optimistic state stand until the stream contradicts it. Replays
+  // of rows already gone, which resolve, are replay.test.ts.
+  it("refuses an update or a delete that changed no rows of a row the reader still holds", async () => {
+    const electric = fakeElectric({
+      schema: { task: { id: { type: "text" }, title: { type: "text" }, txid: { type: "int8" } } },
+      rows: { task: [{ id: "t1", title: "kept", txid: "1" }] },
+    })
+    const methods: string[] = []
+    const remote = createMechaClient({
+      tables: [{ id: "task", table: "task" }],
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+      fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input instanceof Request ? input.url : input))
+        if (!url.pathname.startsWith("/crud/")) return electric.fetcher(input, init)
+        const method = init?.method ?? "GET"
+        methods.push(method)
+        if (method !== "POST") return Response.json([], { headers: { "x-txid": "9" } })
+        const row = { id: "t2", title: "next", txid: "2" }
+        electric.push("task", { operation: "insert", value: row, txid: 2 })
+        return Response.json([row], { status: 201, headers: { "x-txid": "2" } })
+      }) as typeof fetch,
+    })
+    const task = remote.collections.task
+    await task.toArrayWhenReady()
+
+    await expect(remote.remove("task", ["t1"])).rejects.toThrow(/delete task changed no rows/)
+    expect(task.get("t1")).toMatchObject({ title: "kept" })
+    await expect(remote.update("task", [{ key: "t1", changes: { title: "changed" } }])).rejects.toThrow(/update task changed no rows/)
+    expect(task.get("t1")).toMatchObject({ title: "kept" })
+    await remote.insert("task", [{ id: "t2", title: "next" }])
+
+    expect(methods).toEqual(["DELETE", "PATCH", "POST"])
+    await task.cleanup()
   }, 10_000)
 })
 

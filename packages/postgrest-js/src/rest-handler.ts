@@ -189,14 +189,35 @@ async function handleDelete(
   db: Queryable,
   table: string,
   url: URL,
+  req: Request,
 ): Promise<Response> {
+  const prefer = parsePrefer(req.headers.get('Prefer'))
   const bindParams: unknown[] = []
   const where = writeWhere(url.searchParams, bindParams)
+  const returning = prefer.returnRepresentation ? ' RETURNING *' : ''
 
-  const sql = `DELETE FROM "${table}"${where}`
-  await db.query(sql, bindParams)
+  const sql = `DELETE FROM "${table}"${where}${returning}`
+  const result = await db.query(sql, bindParams)
 
+  if (prefer.returnRepresentation) {
+    return new Response(JSON.stringify(result.rows), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
   return new Response(null, { status: 204 })
+}
+
+/**
+ * What mecha's pre-request hook adds to a write's response on the server tier
+ * (rls.sql): the transaction it ran in, which the client confirms the write by,
+ * as the 32-bit xid the shape stream reports. Read inside that transaction, so
+ * the request must run in one.
+ */
+async function namingTransaction(db: Queryable, res: Response): Promise<Response> {
+  const txid = await db.query<{ txid: string }>('SELECT pg_current_xact_id()::xid::text AS txid')
+  res.headers.set('x-txid', txid.rows[0].txid)
+  return res
 }
 
 /**
@@ -263,12 +284,12 @@ export function createRestHandler(
     try {
       // Transaction-local, not session-level: PGlite is one connection, shared
       // with the app's own collection queries. `SET LOCAL` expires at commit,
-      // and PGlite serialises transactions, so no two requests overlap.
-      if (auth) {
-        const scopes = await auth.scopes(req)
-        const role = auth.role ?? 'app_user'
+      // and PGlite serialises transactions, so no two requests overlap. A
+      // write runs in one without auth too: its response names it.
+      if (auth || req.method.toUpperCase() !== 'GET') {
+        const scopes = auth ? await auth.scopes(req) : undefined
         const res = await db.transaction(async (tx) => {
-          await tx.exec(scopeSql(scopes, role, true))
+          if (auth) await tx.exec(scopeSql(scopes!, auth.role ?? 'app_user', true))
           return await route(tx, req)
         })
         // PGlite yields undefined for a transaction it rolled back without
@@ -327,11 +348,11 @@ async function route(db: Queryable, req: Request): Promise<Response> {
     case 'GET':
       return await handleGet(db, table, url, req)
     case 'POST':
-      return await handlePost(db, table, req)
+      return await namingTransaction(db, await handlePost(db, table, req))
     case 'PATCH':
-      return await handlePatch(db, table, url, req)
+      return await namingTransaction(db, await handlePatch(db, table, url, req))
     case 'DELETE':
-      return await handleDelete(db, table, url)
+      return await namingTransaction(db, await handleDelete(db, table, url, req))
     default:
       return new Response(
         JSON.stringify({ error: `Method ${req.method} not allowed` }),

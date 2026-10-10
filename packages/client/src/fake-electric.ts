@@ -91,6 +91,14 @@ function predicate(where: string, params: Record<string, string>): (row: FakeRow
   return test
 }
 
+// One cursor for every fake in the process, moving on every response, as
+// Electric's moves with time. Electric's client remembers per shape URL, for
+// 60 s, the cursor it last saw up to date, and holds back up-to-date from a
+// response at that same cursor as a cached replay: a shape reopened — by a
+// collection restarted, or a second client standing in for a reloaded page —
+// against a cursor that never moves would never be ready.
+let cursor = 0
+
 export function fakeElectric(options: FakeElectricOptions) {
   const key = options.key ?? "id"
   const server: Record<string, FakeRow[]> = Object.fromEntries(Object.entries(options.rows ?? {}).map(([t, rows]) => [t, [...rows]]))
@@ -108,7 +116,7 @@ export function fakeElectric(options: FakeElectricOptions) {
     "electric-handle": `h-${table}`,
     "electric-offset": `0_${stream(table).offset}`,
     "electric-schema": JSON.stringify(options.schema[table]),
-    "electric-cursor": String(stream(table).offset),
+    "electric-cursor": String(++cursor),
   })
   const message = (table: string, operation: string, value: FakeRow, txid?: number) => ({
     key: `"public"."${table}"/"${value[key]}"`,

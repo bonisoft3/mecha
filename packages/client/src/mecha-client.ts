@@ -20,9 +20,7 @@ import { createStorageAdapter } from "./storage.js"
  * Writes: durable offline transactions (IndexedDB outbox, leader election,
  * retry-until-delivered) whose mutation functions POST/PATCH/DELETE against
  * PostgREST and then confirm against the shape stream before completing:
- * inserts and updates await the write's txid (the `txid` column every mecha
- * table carries, returned via Prefer: return=representation); deletes confirm
- * against the delete operation itself (see confirmDelete).
+ * every write awaits the transaction that made it (see confirmWrite).
  *
  * Retries are idempotent end to end: keys are client-minted, mecha's proxy
  * injects `resolution=ignore-duplicates` on POST, PATCH/DELETE are naturally
@@ -228,7 +226,7 @@ export interface InvalidationChange {
 /** Changed rows, or undefined when which rows changed is not known. */
 export type InvalidationListener = (changes?: readonly InvalidationChange[]) => void
 
-const DELETE_CONFIRM_TIMEOUT_MS = 30_000
+const CONFIRM_TIMEOUT_MS = 30_000
 
 /**
  * A collection opens its Electric shape on its first subscriber and closes it
@@ -698,7 +696,6 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     throw new Error(message)
   }
 
-  /** Await the write's txid in the shape stream (inserts and updates). */
   function platformTxid(value: unknown): number {
     if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
       throw new Error(`txid is not an integer: ${String(value)}`)
@@ -710,25 +707,45 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     return Number(parsed)
   }
 
-  async function confirmTxid(collectionId: string, rows: any[]): Promise<void> {
-    const txid = rows?.[0]?.txid
-    if (txid === undefined || txid === null) return // ignore-duplicates replay: nothing new to await
-    await (collections[collectionId] as any).utils.awaitTxId(platformTxid(txid))
-  }
-
   /**
-   * Await the key's delete operation in the shape stream. A DELETE response
-   * can only carry the row's previous txid, so deletes confirm by matching
-   * the operation itself (the package's awaitMatch util).
+   * Confirms a write by its transaction's visibility, the same way for every
+   * write. The server names the transaction in the response (`x-txid`, set by
+   * the pre-request hook in the write's own transaction), and the collection
+   * resolves once its stream carries a change from that transaction or a
+   * snapshot already holding it (electric-db-collection's awaitTxId).
+   *
+   * A write that changed no rows has no change for any stream to carry, so it
+   * has nothing to confirm and resolves at once. That is what makes a replay
+   * safe: the outbox replays, after a reload, a write an earlier page applied
+   * but left before its stream confirmed, and the replay meets its own effect
+   * — an insert its row (ignore-duplicates), a delete its row gone. Awaiting a
+   * change there would wait on a stream that opened after the original
+   * committed, time out, retry forever, and hold every later write behind it,
+   * since the outbox runs one transaction at a time.
+   *
+   * Except where this reader still holds the row it named: an update or a
+   * delete that changed nothing while the synced collection has the key is
+   * the server refusing it (a row policy that shows the row but forbids the
+   * change), and is refused here too, so the optimistic state rolls back. A
+   * key the collection lacks is a row already gone.
+   *
+   * Which rows changed is the response's representation, so every write asks
+   * for one.
    */
-  async function confirmDelete(collectionId: string, keyColumn: string, key: string): Promise<void> {
-    const utils = (collections[collectionId] as any).utils
-    await utils.awaitMatch(
-      (message: any) =>
-        message?.headers?.operation === "delete" &&
-        String(message?.value?.[keyColumn] ?? message?.key ?? "") === String(key),
-      DELETE_CONFIRM_TIMEOUT_MS,
-    )
+  async function confirmWrite(collectionId: string, res: Response, what: string, key?: unknown): Promise<void> {
+    const changed = await res.json()
+    if (!Array.isArray(changed)) throw new Error(`${what} returned a non-array representation`)
+    if (changed.length === 0) {
+      // The synced rows, not the optimistic view this write already changed;
+      // @tanstack/db 0.8.0 has no public accessor for them.
+      if (key !== undefined && (collections[collectionId] as any)._state.syncedData.has(key)) {
+        throw new NonRetriableError(`${what} changed no rows: the server refused ${String(key)}, which this reader still holds`)
+      }
+      return
+    }
+    const txid = res.headers.get("x-txid")
+    if (txid === null) throw new Error(`${what} changed rows but its response names no transaction (x-txid)`)
+    await (collections[collectionId] as any).utils.awaitTxId(platformTxid(txid), CONFIRM_TIMEOUT_MS)
   }
 
   // Static per-table mutation function names: outbox replay after a reload
@@ -794,9 +811,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
           body: JSON.stringify(cleanRow(row)),
         })
         await requireOk(res, `insert ${t.table}`)
-        const returned = await res.json()
-        if (!Array.isArray(returned)) throw new Error(`insert ${t.table} returned a non-array representation`)
-        await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
+        await confirmWrite(t.id, res, `insert ${t.table}`)
         setPhase(`${t.id}:${row[t.key]}`, null)
       } finally {
         release()
@@ -813,9 +828,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
           body: JSON.stringify(cleanRow(m.changes)),
         })
         await requireOk(res, `update ${t.table}`)
-        const returned = await res.json()
-        if (!Array.isArray(returned)) throw new Error(`update ${t.table} returned a non-array representation`)
-        await confirmTxid(t.id, returned.map((item) => normalizeRow(t.fields, item, "postgres")))
+        await confirmWrite(t.id, res, `update ${t.table}`, key)
         setPhase(`${t.id}:${key}`, null)
       } finally {
         release()
@@ -828,10 +841,10 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         const key = m.key ?? m.original?.[t.key]
         const res = await doFetch(`${crudUrl}/${t.table}?${t.key}=eq.${encodeURIComponent(key)}`, {
           method: "DELETE",
-          headers: headers(),
+          headers: headers({ Prefer: "return=representation" }),
         })
         await requireOk(res, `delete ${t.table}`)
-        await confirmDelete(t.id, t.key, key)
+        await confirmWrite(t.id, res, `delete ${t.table}`, key)
         setPhase(`${t.id}:${key}`, null)
       } finally {
         release()

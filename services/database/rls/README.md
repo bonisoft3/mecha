@@ -39,7 +39,7 @@ casual and PostgREST-served paths; it is not a seal.
 
 ```
 psql -d <db> -f rls.sql
-psql -d <db> -f rls_test.sql      # WARNING: rls: 58/58 pass
+psql -d <db> -f rls_test.sql      # WARNING: rls: 62/62 pass
 ```
 
 A database floored before the policy took its scopes as a scalar subquery

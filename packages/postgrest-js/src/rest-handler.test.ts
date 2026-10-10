@@ -106,6 +106,33 @@ describe('createRestHandler', () => {
     expect(rows.rows).toHaveLength(0)
   })
 
+  // The client confirms a write by the transaction that made it, and counts
+  // what it changed from the representation: a delete of a row already gone
+  // changed nothing, so it has nothing to confirm.
+  it('names the transaction of a write, and only of a write', async () => {
+    const post = await handler(new Request('http://localhost/hello', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify({ id: 'tx-1', message: 'named' }),
+    }))
+    const xmin = await db.query<{ xmin: string }>(`SELECT xmin::text AS xmin FROM "hello" WHERE "id" = 'tx-1'`)
+    expect(post.headers.get('x-txid')).toBe(xmin.rows[0].xmin)
+
+    const read = await handler(new Request('http://localhost/hello?id=eq.tx-1', { method: 'GET' }))
+    expect(read.headers.get('x-txid')).toBeNull()
+
+    const remove = () => handler(new Request('http://localhost/hello?id=eq.tx-1', {
+      method: 'DELETE',
+      headers: { 'Prefer': 'return=representation' },
+    }))
+    const removed = await remove()
+    expect(removed.status).toBe(200)
+    expect(await removed.json()).toEqual([{ id: 'tx-1', message: 'named' }])
+    expect(Number(removed.headers.get('x-txid'))).toBeGreaterThan(Number(xmin.rows[0].xmin))
+    const again = await remove()
+    expect(await again.json()).toEqual([])
+  })
+
   it('returns 404 for unknown table', async () => {
     const req = new Request('http://localhost/nonexistent', { method: 'GET' })
     const res = await handler(req)

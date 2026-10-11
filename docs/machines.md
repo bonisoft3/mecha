@@ -24,7 +24,7 @@ User / API write ──► PostgREST / CRUD ──► PostgreSQL
                       │  1. Check transition (OLD.status ─► NEW.status)│
                       │  2. Verify guards & timeout bounds            │
                       │  3. Execute Level-3 Relational Effects        │
-                      │     (insert, ensure, upsert, accumulate,      │
+                      │     (create, ensure, upsert, accumulate,      │
                       │      delete, call, notify)                    │
                       └───────────────────────┬───────────────────────┘
                                               │
@@ -56,7 +56,7 @@ state transition:
 
 | effect | operation | SQL execution | purpose |
 |---|---|---|---|
-| `insert` | Append | `INSERT INTO <table> (...) VALUES (...)` | Appending immutable audit or ledger records. |
+| `create` | Append | `INSERT INTO <table> (...) VALUES (...)` | Appending immutable audit or ledger records. |
 | `ensure` | Idempotent insert | `INSERT INTO <table> (...) VALUES (...) ON CONFLICT DO NOTHING` | Guaranteeing existence of dependent records without duplicate errors. |
 | `upsert` | Replace | `INSERT INTO <table> (...) VALUES (...) ON CONFLICT (<pk>) DO UPDATE SET ...` | Updating child or summary records keyed by primary key. |
 | `accumulate`| Aggregation | `INSERT INTO <table> (...) VALUES (...) ON CONFLICT (<group>) DO UPDATE SET count = count + 1, sum = sum + EXCLUDED.amount` | Incremental materialized views and ledger totals without separate workers. |

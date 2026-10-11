@@ -67,8 +67,9 @@
 // mix and outlasts a deadlock or a row deleted mid-run.
 //
 // Environment: CRUD_URL, DATABASE_URL, CDC_SLOT, LAKE_DIR, COMPUTATIONS (JSON list of
-// {name, file, to, wasm, endowments}, wasm being the module files it ships
-// and endowments what its module may use past the language);
+// {name, file, to, wasm, endowments?}, wasm being the module files it ships
+// and endowments what its module may use past the language, absent where it
+// declares none, as a cluster written before the field spells it);
 // SERVICE_JWT where the cluster has auth.
 
 import { fileURLToPath } from "node:url";
@@ -161,7 +162,8 @@ export type Spec = {
   to: string[];
   wasm: string[];
   onComplete?: string;
-  endowments: string[];
+  /** What the module may use past the language; absent, it declares none. */
+  endowments?: string[];
 };
 
 /** What the service needs of a computation; tests stand in their own. */
@@ -213,7 +215,7 @@ export class Computation implements Runnable {
         `computation ${spec.name}: onComplete is no SQL/PostgREST RPC identifier: ${spec.onComplete}`,
       );
     }
-    const { compiled, reads, queries } = await admit(spec.file, spec.endowments);
+    const { compiled, reads, queries } = await admit(spec.file, spec.endowments ?? []);
     if (!spec.to.every((t) => IDENTIFIER.test(t))) {
       throw new Error(`computation ${spec.name}: a sink's table name is no identifier: ${spec.to}`);
     }
@@ -228,7 +230,7 @@ export class Computation implements Runnable {
       await seedOf(spec.name),
       runner,
       spec.onComplete,
-      spec.endowments,
+      spec.endowments ?? [],
     );
   }
 

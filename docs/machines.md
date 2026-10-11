@@ -25,7 +25,7 @@ User / API write ──► PostgREST / CRUD ──► PostgreSQL
                       │  2. Verify guards & timeout bounds            │
                       │  3. Execute Level-3 Relational Effects        │
                       │     (create, ensure, upsert, accumulate,      │
-                      │      delete, call, notify)                    │
+                      │      update, delete, call, notify)            │
                       └───────────────────────┬───────────────────────┘
                                               │
                                               ▼ Committed WAL
@@ -60,6 +60,7 @@ state transition:
 | `ensure` | Idempotent insert | `INSERT INTO <table> (...) VALUES (...) ON CONFLICT DO NOTHING` | Guaranteeing existence of dependent records without duplicate errors. |
 | `upsert` | Replace | `INSERT INTO <table> (...) VALUES (...) ON CONFLICT (<pk>) DO UPDATE SET ...` | Updating child or summary records keyed by primary key. |
 | `accumulate`| Aggregation | `INSERT INTO <table> (...) VALUES (...) ON CONFLICT (<group>) DO UPDATE SET count = count + 1, sum = sum + EXCLUDED.amount` | Incremental materialized views and ledger totals without separate workers. |
+| `update` | Absolute update | `UPDATE <table> SET ... WHERE <predicate>` — the rows `where`/`rawWhere` name, else the row the values' key names, else every row | Patching a sibling row's columns to stated values, keyed by the row and not by a conflict. |
 | `delete` | Cascade/Prune | `DELETE FROM <table> WHERE <predicate>` | Cleaning up transient child records upon terminal state. |
 | `call` | Stored procedure| `PERFORM <function>(...)` | Invoking domain-specific procedural logic. |
 | `notify` | Signaling | `PERFORM pg_notify('<channel>', <payload>)` | Waking a daemon inside the cluster; nothing is recorded. |

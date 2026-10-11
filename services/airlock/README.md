@@ -11,7 +11,7 @@ This file is the contract.
 
 | | |
 |---|---|
-| **ledger** | `airlock.external_effect_ledger` ([airlock.sql](airlock.sql)), in a schema only its owner may use: one row per effect performed, keyed `<effect>:<key fields>`, holding the instance's primary key, the request frozen at the claim, how many runs began, and the outcome. |
+| **ledger** | `airlock.external_effect_ledger` ([airlock.sql](airlock.sql)), in a schema only its owner may use: one row per effect performed, keyed `<effect>:<key fields>`, holding the instance's primary key, the input frozen at the claim, how many runs began, and the outcome. |
 | **claim** | The guard's insert of that row, in the transition's own commit, with the Graphile job enqueued beside it only if the insert added a row. |
 | **run** | One handler call. It commits `entered + 1` before it calls the sink. |
 | **outcome** | `{target, kind, data, reconciled}`, `kind` being `done`, `failed` or `unknown`. Committed on its own, then the machine is moved to `target`; a crash between the two re-delivers the move alone. |
@@ -71,20 +71,20 @@ language (no clock, no `Math.random`, no host time zone or locale). It exports e
 `issue`, plus `reconcile` where its sink is not idempotent and reconciles:
 
 ```js
-export async function issue(request, sink, secrets) {
-  const r = await sink.fetch("/v1/charges", { method: "POST", body: request });
+export async function issue(input, sink, secrets) {
+  const r = await sink.fetch("/v1/charges", { method: "POST", body: input });
   if (r.status === 402) return { failed: r.body };     // the sink refused: onError, kind failed
   if (r.status >= 300) throw new Error(`${r.status}`); // no answer: retried, then unknown
   return { done: r.body };                             // onDone
 }
 
-export async function reconcile(request, sink) {
+export async function reconcile(input, sink) {
   const r = await sink.fetch(`/v1/charges?key=${encodeURIComponent(sink.key)}`);
   return r.status === 404 ? { absent: true } : { done: r.body };
 }
 ```
 
-- `request` is frozen. `sink.key` is the ledger key, also sent as every request's
+- `input` is XState's word: the effect's `input`, frozen. `sink.key` is the ledger key, also sent as every request's
   `Idempotency-Key`.
 - `sink.fetch(path, {method, body})` takes an absolute path in plain characters: no
   `%` before the query, no empty or dot segment. It answers `{status, body}`, the body

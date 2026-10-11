@@ -9,7 +9,9 @@ import { Cron } from "croner";
 
 export type Schedule = {
   name: string;
-  cron: string;
+  /** A cadence, or null for a one-shot row due at `due_at`. */
+  cron: string | null;
+  due_at?: string | null;
   time_zone: string;
   max_lateness_seconds: number;
   /** The watermark: the last tick this schedule is known to have resolved. */
@@ -110,6 +112,14 @@ function onTheWallClock(minute: string, hour: string, at: Date, zone: string): b
  * without walking the whole backlog to count it.
  */
 export function due(s: Schedule, now: Date, cap: number = WALK_CAP): Tick[] {
+  if (s.cron === null) {
+    // One instant: owed once it has passed and the watermark has not reached
+    // it. Clearing the watermark owes it again, which is how a row is re-armed.
+    if (s.due_at === null || s.due_at === undefined) throw new Error(`${s.name}: a schedule states a cron or a due_at`);
+    const at = new Date(s.due_at);
+    if (at > now || (s.last_tick_at !== null && new Date(s.last_tick_at) >= at)) return [];
+    return [{ schedule: s.name, tick_at: at.toISOString(), late: false }];
+  }
   const fields = s.cron.trim().split(/\s+/);
   if (fields.length !== 5) {
     throw new Error(`${s.name}: five-field cron required, got "${s.cron}"`);

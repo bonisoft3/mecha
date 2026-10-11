@@ -21,6 +21,8 @@
 package mecha
 
 import (
+	"list"
+
 	bayt "github.com/bonisoft3/bayt/core:bayt"
 	apt "github.com/bonisoft3/bayt/distros/apt"
 	mise "github.com/bonisoft3/bayt/stacks/mise"
@@ -64,6 +66,7 @@ _stack: cluster.#Cluster & {
 			ticker:     {ref: ":ticker-image"}
 			clock:      {ref: ":clock-image"}
 			compute:    {ref: ":compute-image"}
+			airlock:    {ref: ":airlock-image"}
 		}
 		// A plain-HTTP door: mecha's proxy config serves no TLS, and the
 		// smoke suites and the benchmark address localhost:8080.
@@ -133,7 +136,7 @@ _mecha: bayt.#project & _where & {
 		// ---- The images -------------------------------------------------
 
 		"database-image": _image & {
-			srcs: globs: ["services/database/rls/rls.sql", "services/ticker/schedule.sql", "services/migrate/migrate.sh"]
+			srcs: globs: ["services/database/rls/rls.sql", "services/ticker/schedule.sql", "services/airlock/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
 			dockerfile: {
 				from: name: _postgres
 				// plv8 hosts a Jessie validation inside the write's transaction.
@@ -156,17 +159,27 @@ _mecha: bayt.#project & _where & {
 				// The data directory lives on the container's writable layer.
 				preamble: ["ENV PGDATA=/postgresql-data"]
 				// The tenancy floor ships with the image, whatever emitted the
-				// tables above it. The ticker's table is staged outside the
-				// initdb directory, for a cluster that declares a schedule to
-				// place.
+				// tables above it. The ticker's table and the airlock's steps
+				// are staged outside the initdb directory, for a cluster that
+				// declares a schedule or an effect to place.
 				// The migration runner runs this image too, with its own
 				// entrypoint: pgroll, and the psql its ledger checks and the
 				// schema reload go through.
 				copy: [
 					{srcs: ["services/database/rls/rls.sql"], dst: "\(cluster.#InitdbDir)/\(cluster.#TenancyMigration)"},
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
+					{srcs: ["services/airlock/graphile.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#GraphileMigration)"},
+					{srcs: ["services/airlock/airlock.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#AirlockMigration)"},
 					{from: {name: _pgroll}, srcs: ["/usr/bin/pgroll"], dst: "/usr/local/bin/pgroll"},
 					{srcs: ["services/migrate/migrate.sh"], dst: "/migrate.sh", chmod: "755"},
+				]
+				// The airlock's step carries the ticker's schedule table ahead of
+				// its own, so a guard that re-arms the wake finds it before any
+				// caller step that could write a row into an invoking state; a
+				// cluster that also declares a schedule runs the same text again
+				// at 020, where every statement holds.
+				epilogue: [
+					"RUN cat \(cluster.#StagedDir)/\(cluster.#ScheduleMigration) \(cluster.#StagedDir)/\(cluster.#AirlockMigration) > /tmp/airlock.sql && mv /tmp/airlock.sql \(cluster.#StagedDir)/\(cluster.#AirlockMigration)",
 				]
 				cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
 					"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
@@ -222,7 +235,7 @@ _mecha: bayt.#project & _where & {
 		// running service reaches no extension host. Workers take no
 		// permissions of their own, an option Deno still calls unstable.
 		"compute-image": _image & {
-			let _files = ["deno.json", "deno.lock", "main.ts", "workers.ts", "cage.ts", "language.ts", "job.ts", "wasi.ts", "install.ts"]
+			let _files = ["deno.json", "deno.lock", "main.ts", "workers.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "endowments.ts", "language.ts", "job.ts", "wasi.ts", "install.ts"]
 			srcs: globs: [for f in _files {"services/compute/\(f)"}]
 			dockerfile: {
 				from: name: _deno
@@ -233,6 +246,25 @@ _mecha: bayt.#project & _where & {
 					"RUN deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env install.ts",
 				]
 				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "/app/main.ts"]
+			}
+		}
+		// The airlock and the mail bridge: one image, two commands, each scoped
+		// by the cluster target that runs it, and the bindings-only
+		// configuration the airlock's daprd copies from it (dapr.yaml).
+		// The handler's cage is compute's realm, so the compute files it
+		// imports sit at ../compute beside it, where the source names them.
+		"airlock-image": _image & {
+			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "inward.ts", "mail.ts", "dapr.yaml"]
+			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "endowments.ts", "language.ts", "workers.ts"]
+			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
+			dockerfile: {
+				from: name: _deno
+				workdir: "/app/airlock"
+				copy: [
+					{srcs: [for f in _airlock {"services/airlock/\(f)"}], dst: "/app/airlock/"},
+					{srcs: [for f in _compute {"services/compute/\(f)"}], dst: "/app/compute/"},
+				]
+				epilogue: ["RUN deno cache --frozen main.ts cage.ts mail.ts"]
 			}
 		}
 		"clock-image": _image & {

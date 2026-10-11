@@ -1,0 +1,19 @@
+# The airlock daprd's configuration: the bindings API and nothing else, over
+# HTTP and over gRPC, which daprd always serves and which an HTTP-only list
+# leaves whole. With service invocation gone, an invoke whose target is a full
+# URL, which daprd would forward to any origin, cannot be asked; and with
+# state, pubsub, secrets, metadata and shutdown gone too, the only traffic this
+# daprd can originate is a call of a binding the program declared.
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: airlock
+spec:
+  api:
+    allowed:
+      - name: bindings
+        version: v1.0
+        protocol: http
+      - name: bindings
+        version: v1
+        protocol: grpc

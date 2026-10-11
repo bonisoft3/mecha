@@ -3,6 +3,7 @@
 // and the module's admission, compiled once and loaded in a cage.
 
 import { ModuleSource } from "@endo/module-source";
+import { endowable } from "./language.ts";
 
 /** A job as the runner takes it: the wasm module's name and its stdin, JSON. */
 export type Job = { wasm: string; input: string };
@@ -48,9 +49,10 @@ export class Cage {
     return answer;
   }
 
-  /** The module, as `compile` made it, loaded: its reads and queries, as data. */
-  async load(compiled: ModuleSource): Promise<{ reads: unknown; queries: unknown }> {
-    const { reads, queries } = await this.ask({ source: compiled, file: this.file });
+  /** The module, as `compile` made it, loaded with the endowments it declares:
+   * its reads and queries, as data. */
+  async load(compiled: ModuleSource, endowments: string[]): Promise<{ reads: unknown; queries: unknown }> {
+    const { reads, queries } = await this.ask({ source: compiled, file: this.file, endowments });
     return { reads, queries };
   }
 
@@ -77,13 +79,14 @@ export type Admitted = { compiled: ModuleSource; reads: string[]; queries: Recor
 /** A table name the service quotes nowhere. */
 export const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** The module at `file` as the service loads it. */
-export async function admit(file: string): Promise<Admitted> {
+/** The module at `file`, endowed with what its computation declares, as the
+ * service loads it. */
+export async function admit(file: string, endowments: string[]): Promise<Admitted> {
   const compiled = compile(file, await Deno.readTextFile(file));
   const cage = new Cage(file);
   let declared: { reads: unknown; queries: unknown };
   try {
-    declared = await cage.load(compiled);
+    declared = await cage.load(compiled, endowable(endowments, `computation ${file}`));
   } finally {
     cage.close();
   }

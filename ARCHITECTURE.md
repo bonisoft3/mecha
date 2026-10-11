@@ -23,6 +23,10 @@ browser ─► Caddy ─┬─ /crud ─────► PostgREST ─► Postgre
                                                                       Redpanda ─► Arroyo
                                                                                     │
                                                             PostgREST ◄─ webhook ───┘
+
+PostgreSQL (ledger, graphile_worker) ◄─► airlock ◄── clock
+                                           │
+                       Dapr (airlock-mesh, bindings only) ─► a declared binding's origin
 ```
 
 The routes are mecha's own Caddyfile's; a consumer's differs
@@ -43,11 +47,12 @@ The routes are mecha's own Caddyfile's; a consumer's differs
 | Auth | the auth service's WebAuthn and tokens | [its contract](services/auth/README.md) |
 | Object storage, images | rclone-s3, imgproxy | [the blob plane](docs/capabilities.md#the-blob-plane) |
 | Periodic wake | ticker, clock | [its contract](services/ticker/README.md), [the first request](docs/deployment.md#the-first-request) |
+| External effects | airlock, on Graphile Worker; its daprd (airlock-mesh), allowed the bindings API alone; a bridge per declared bridge | [its contract](services/airlock/README.md#in-a-cluster), [pronto's record](../../plugins/pronto/docs/decisions/2026-10-03-external-effects.md) |
 | The same cluster in a page | PGlite and a stand-in per service | [the browser platform](docs/browser.md) |
 
 A cluster turns its planes on in `cluster.cue`
 ([invariant 7](README.md#7-additive-capabilities)): data, the change feed,
-auth, blobs, and a schedule ([capabilities](docs/capabilities.md)). The same services run at every
+auth, blobs, a schedule and an effect ([capabilities](docs/capabilities.md)). The same services run at every
 tier of [invariant 4](README.md#4-vertical-scalability-down-and-up); what each
 tier runs them on is [tiers and clouds](docs/deployment.md), and what is not
 built is [PENDING.md](PENDING.md).

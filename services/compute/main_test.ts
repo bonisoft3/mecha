@@ -459,6 +459,7 @@ Deno.test("onComplete accepts only one lowercase SQL/PostgREST identifier", asyn
 
         to: ["sink"],
         wasm: [],
+        endowments: [],
         onComplete: "rpc/capture",
       }, undefined as unknown as Runner),
     Error,
@@ -475,6 +476,7 @@ Deno.test("onComplete does not exceed PostgreSQL's identifier limit", async () =
 
         to: ["sink"],
         wasm: [],
+        endowments: [],
         onComplete: `capture_${"x".repeat(57)}`,
       }, undefined as unknown as Runner),
     Error,
@@ -909,7 +911,7 @@ Deno.test("a run plans in rounds and finishes in job order", async () => {
   await Deno.writeFile(`${dir}/echo.wasm`, ECHO);
   const games = Array.from({ length: 9 }, (_, i) => ({ id: `g${i}` }));
   const reader = { query: async () => games };
-  const spec = { name: "rounds", file: `${dir}/rounds.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`] };
+  const spec = { name: "rounds", file: `${dir}/rounds.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`], endowments: [] };
   const runner = new Runner({ echo: await WebAssembly.compile(ECHO) });
   try {
     const seed = await seedOf("rounds");
@@ -939,7 +941,7 @@ Deno.test("CDC fanout reuses only an identical fresh read; failures and caller m
   const runner = new CountingRunner({ echo: await WebAssembly.compile(ECHO) });
   try {
     const c = await Computation.load(
-      { name: "rounds", file: `${dir}/rounds.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`] }, runner,
+      { name: "rounds", file: `${dir}/rounds.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`], endowments: [] }, runner,
     );
     const rows = [{ id: "g1" }];
     let reads = 0;
@@ -987,7 +989,7 @@ Deno.test("a job naming a wasm the computation does not ship fails the run", asy
   const runner = new Runner({ echo: await WebAssembly.compile(ECHO) });
   try {
     const c = await Computation.load(
-      { name: "stray", file: `${dir}/stray.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`] },
+      { name: "stray", file: `${dir}/stray.js`, to: ["sink"], wasm: [`${dir}/echo.wasm`], endowments: [] },
       runner,
     );
     await assertRejects(() => c.run({ query: async () => [{ id: "g" }] }), Error, "no {wasm, input} of echo");
@@ -1009,7 +1011,7 @@ Deno.test("a plan that changes a job already answered fails the run", async () =
   const runner = new Runner({ echo: await WebAssembly.compile(ECHO) });
   try {
     const c = await Computation.load(
-      { name: "fickle", file: `${dir}/fickle.js`, to: [], wasm: [`${dir}/echo.wasm`] },
+      { name: "fickle", file: `${dir}/fickle.js`, to: [], wasm: [`${dir}/echo.wasm`], endowments: [] },
       runner,
     );
     await assertRejects(() => c.run({ query: async () => [] }), Error, "plan changed the jobs it was answered");

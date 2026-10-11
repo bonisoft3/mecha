@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"list"
 	"path"
+	"regexp"
 	"strings"
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
@@ -52,10 +53,109 @@ _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 // only when it turns on what the step serves.
 #StagedDir: "/usr/share/mecha/initdb"
 
-// The ticker's table, placed where a schedule is declared. Its name places it
-// after a caller's grants, whose reach it revokes, and before the seed the
-// caller names after it.
+// The ticker's table, placed where a schedule is declared, and carried inside
+// the airlock's step where an effect is (bayt.cue). Its name places it after
+// a caller's grants, whose reach it revokes, and before the seed the caller
+// names after it.
 #ScheduleMigration: "020_schedule.sql"
+
+// Graphile Worker's schema and the airlock's tables, placed where an effect
+// is declared, on the first digits after the steps a caller opens with
+// (pronto's 000-010: extensions, roles, grants, types, tables, policies,
+// publication, validations, and the machines, whose guards are plpgsql and
+// resolve add_job and the ledger only when they run). Every caller step that
+// can write a row, a held seed included, is numbered above them, since a row
+// written into an invoking state claims the ledger and enqueues as it is
+// written; a caller step on these digits is refused where effects are
+// declared, as any two steps sharing digits are. The ledger's schema is its
+// own (services/airlock/airlock.sql), so no grant over `public`, made before
+// these steps or after, reaches it.
+#GraphileMigration: "011_graphile_worker.sql"
+#AirlockMigration:  "012_airlock.sql"
+
+// What a sink may be: an https origin whose host is a DNS name of at least
+// two labels, the last opening with a letter. This is spelling only: a
+// single-label host (`database`) or an IP literal is refused here; a name that
+// resolves inward, which spelling cannot see, is not, since the daprd dials
+// what its binding names (pronto's external effects record, "The wall is the
+// allowlist").
+#OriginPattern: "^https://([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?(:[0-9]{1,5})?$"
+#Origin:        =~#OriginPattern
+
+// A DNS label, which an effect's name is because its Dapr endpoint's is.
+#EffectName: "^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+
+// What a computation's or an effect's module may be endowed with past the
+// language, each only where its declaration names it, as pronto endows an
+// omnishell module with Intl. services/compute/language.ts holds the same
+// list (ENDOWABLE), and cluster_test.ts holds them to each other.
+#CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams"]
+#CageEndowment:  or(#CageEndowments)
+
+// An environment variable's name: where a secret reaches the airlock.
+#SecretName: "^[A-Z][A-Z0-9_]*$"
+
+// A server a bridge dials: a DNS name of two labels or more and its port.
+// Spelling only, as #OriginPattern is; the bridge refuses a name that
+// resolves inward at the address it connected (services/airlock/mail.ts).
+#ServerPattern: "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?:[0-9]{1,5}$"
+
+// A bridge: a container on the airlock's outbound network that takes HTTP
+// from its daprd and speaks another protocol to one declared server, its
+// `--allow-net` being that server and nothing else. `mail` is mecha's own,
+// services/airlock/mail.ts: SMTP, STARTTLS required unless the program says
+// the server is one it owns and runs in the clear.
+#Bridge: B={
+	name:   =~#EffectName
+	kind:   "mail"
+	server: =~#ServerPattern
+	tls:    *"starttls" | "none"
+	// The right-hand side of every Message-ID the bridge sends.
+	domain: =~"^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?$"
+	// The environment variables holding the server's credentials, together
+	// or not at all.
+	user?:     =~#SecretName
+	password?: =~#SecretName
+	if B.user != _|_ {password: =~#SecretName}
+	if B.password != _|_ {user: =~#SecretName}
+}
+
+// What the mail bridge may read of its environment.
+_bridgeEnv: ["MAIL_SMTP", "MAIL_TLS", "MAIL_MESSAGE_ID_DOMAIN", "MAIL_USER", "MAIL_PASSWORD", "ETHEREAL_API", "ETHEREAL_API_KEY", "ETHEREAL_CACHE", "ETHEREAL_WEB"]
+
+// The port every bridge serves its daprd on.
+#BridgePort: 8080
+
+// An external effect as the cluster places it: its name, the one origin it
+// may reach or the bridge it reaches through, and where the app keeps its
+// handler and its binding.
+#Effect: E={
+	name: =~#EffectName
+	{origin: #Origin} | {bridge: =~#EffectName}
+	handler:  *"effects/\(E.name).js" | string
+	endpoint: *"services/airlock/dapr/\(E.name).yaml" | string
+	// The environment variables whose values the handler is handed.
+	secrets?: [...=~#SecretName]
+}
+
+// The networks around the airlock. `airlock`, internal, holds the airlock, the
+// database and the airlock's daprd, so the airlock reaches the world only
+// through that daprd; `airlock-out`, internal, holds the daprd and the
+// bridges, which no other service reaches. What goes out leaves on a network
+// of its own, which nothing else joins: `airlock-egress` for the daprd's
+// declared bindings, and `bridge-<name>-egress` for each bridge's one server.
+// `airlock-wake`, internal, holds the airlock and the ticker alone, so the
+// ticker's wake reaches the airlock's health port and nothing of its daprd.
+// None of them stands on the default network, where every other service is,
+// so no service there reaches the daprd's bindings API or a bridge. A consumer
+// declares the networks at the top of its compose model, which bayt does not
+// write; `surface.networks` is what it declares.
+#AirlockNetworks: {
+	airlock: internal:        true
+	"airlock-out": internal:  true
+	"airlock-wake": internal: true
+	"airlock-egress": {}
+}
 
 // A health wait states no `restart`: bayt adds `restart: true` to every one
 // (plugins/bayt/core/gen_compose.cue), so a dependency recreated inside an
@@ -108,11 +208,20 @@ _devElectricSecret: "dev-electric-secret"
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
-		computations: [...{name: string, file: string, to: [...string] & [_, ...], wasm: [...string], onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$"}]
+		computations: [...{name: string, file: string, to: [...string] & [_, ...], wasm: [...string], onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$", endowments: *[] | [...#CageEndowment]}]
 		// Names only: the cluster needs to know whether any schedule exists,
 		// never what it says. One brings the ticker, its clock and the table
 		// they sweep (#ScheduleMigration); the caller's migrations seed it.
 		schedules: [...string]
+		// The external effects (services/airlock/README.md states the
+		// contract). One brings the airlock, the daprd it goes out through,
+		// the ticker and clock that wake it, and the tables they keep
+		// (#GraphileMigration, #AirlockMigration, the schedule table inside
+		// the latter).
+		effects: [...#Effect]
+		// The bridges those effects reach through, each placed as
+		// bridge-<name> (#Bridge).
+		bridges: *[] | [...#Bridge]
 	}
 
 	capabilities: {
@@ -126,8 +235,9 @@ _devElectricSecret: "dev-electric-secret"
 		server: *true | bool
 		// The auth plane: a WebAuthn auth service issuing app_user JWTs, JWT
 		// validation on crud, and the service token on transform. Off, the
-		// stack is the pre-auth one, byte for byte. Identity is a row the
-		// cluster keeps, so it presupposes `server`.
+		// stack is the pre-auth one, byte for byte, but for crud verifying
+		// the service token where a wake needs it (_serviceToken). Identity
+		// is a row the cluster keeps, so it presupposes `server`.
 		auth: *false | bool
 		if auth {
 			server: true
@@ -146,6 +256,10 @@ _devElectricSecret: "dev-electric-secret"
 		if capture {
 			server: true
 		}
+		// An effect runs from the database's queue and settles in its ledger.
+		if len(X.state.effects) > 0 {
+			server: true
+		}
 
 		// The blob plane: rclone-s3 object store (S3 wire protocol, bucket
 		// mecha-objects, no auth keys — dev posture) and imgproxy, behind the
@@ -158,10 +272,10 @@ _devElectricSecret: "dev-electric-secret"
 	}
 
 	// Every step postgres runs at initdb, keyed by the three digits its name
-	// opens with: the image's floor, the step the cluster places for a
-	// schedule, and the caller's migrations. Postgres globs the directory in
-	// its locale's order and a replay sorts it by byte; digits no other step
-	// holds, then `_`, put both in one order. The database copies the caller's
+	// opens with: the image's floor, the steps the cluster places for a
+	// schedule and for effects, and the caller's migrations. Postgres globs
+	// the directory in its locale's order and a replay sorts it by byte;
+	// digits no other step holds, then `_`, put both in one order. The database copies the caller's
 	// steps out of this, so a name it refuses fails the cluster where it is
 	// built.
 	_initdb: [K=string]: =~"(^|/)[0-9]{3}_[^/]*$" & =~"(^|/)\(K)_[^/]*$"
@@ -169,6 +283,10 @@ _devElectricSecret: "dev-electric-secret"
 		(strings.SliceRunes(#TenancyMigration, 0, 3)): #TenancyMigration
 		if len(X.state.schedules) > 0 {
 			(strings.SliceRunes(#ScheduleMigration, 0, 3)): #ScheduleMigration
+		}
+		if len(X.state.effects) > 0 {
+			(strings.SliceRunes(#GraphileMigration, 0, 3)): #GraphileMigration
+			(strings.SliceRunes(#AirlockMigration, 0, 3)):  #AirlockMigration
 		}
 		for m in X.state.migrations {(strings.SliceRunes(path.Base(m, path.Unix), 0, 3)): m}
 	}
@@ -190,6 +308,55 @@ _devElectricSecret: "dev-electric-secret"
 		database: _healthy
 		if len(X.state.pgroll) > 0 {migrate: _completed}
 	}
+
+	// The effects as every target reads them. A field's pattern is checked
+	// when the field is exported, not when an interpolation reads it, so each
+	// is matched here; one refused leaves an index out of range in every
+	// command line and path built from it.
+	_effects: [for e in X.state.effects {
+		name:     [if regexp.Match(#EffectName, e.name) {e.name}][0]
+		handler:  e.handler
+		endpoint: e.endpoint
+	}]
+	// The origins and the bridges the effects reach, read from the
+	// declaration as the signing keys are, so a refused origin or a bridge no
+	// one declared fails the export rather than dropping out of a list.
+	_origins: [for e in X.state.effects if e.origin != _|_ {[if regexp.Match(#OriginPattern, e.origin) {e.origin}][0]}]
+	_reached: [for e in X.state.effects if e.bridge != _|_ {[if list.Contains(_bridgeNames, e.bridge) {e.bridge}][0]}]
+	_bridgeNames: [for b in X.state.bridges {b.name}]
+	_bridges: [for b in X.state.bridges {
+		name:   [if regexp.Match(#EffectName, b.name) {b.name}][0]
+		kind:   b.kind
+		server: [if regexp.Match(#ServerPattern, b.server) {b.server}][0]
+		tls:    b.tls
+		domain: b.domain
+		if b.user != _|_ {
+			user:     [if regexp.Match(#SecretName, b.user) {b.user}][0]
+			password: [if regexp.Match(#SecretName, b.password) {b.password}][0]
+		}
+	}]
+	// The secrets, each matched like the fields above. Read from the
+	// declaration, so a refused name fails the export instead of silently
+	// leaving the airlock without it.
+	_secrets: [for e in X.state.effects if e.secrets != _|_ for s in e.secrets {[if regexp.Match(#SecretName, s) {s}][0]}]
+
+	// The steps the database image stages and this cluster places.
+	// A schedule or an effect is woken by the ticker: a declared schedule by
+	// its cadence, an effect by the one-shot row its guard re-arms, so a
+	// cluster scaled to zero comes up for what was enqueued meanwhile.
+	_wakes: len(X.state.schedules) > 0 || len(X.state.effects) > 0
+	// The ticker reads and writes through crud as `service`, the role PostgREST
+	// switches to on the token's claim and the one the schedule tables admit:
+	// crud verifies the service token wherever something wakes, with or without
+	// the auth plane. The token is a claim, not a peer identity, which is why no
+	// transport credential stands in for it: without it every call is anon's.
+	_serviceToken: X.capabilities.auth || X._wakes
+	// The schedule table reaches an effect's cluster inside the airlock's
+	// step (bayt.cue), ahead of any caller step.
+	_staged: list.Concat([
+		[if len(X.state.schedules) > 0 {#ScheduleMigration}],
+		[if len(X.state.effects) > 0 for m in [#GraphileMigration, #AirlockMigration] {m}],
+	])
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 	let jwtSecret = "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
@@ -241,6 +408,14 @@ _devElectricSecret: "dev-electric-secret"
 				}
 			}
 		}
+		// The networks a consumer declares at the top of its compose model;
+		// the targets below join them by name.
+		if len(X.state.effects) > 0 {
+			networks: {
+				#AirlockNetworks
+				for b in X._bridges {"bridge-\(b.name)-egress": {}}
+			}
+		}
 		targets: [string]: _
 		targets: {
 			if X.capabilities.server {
@@ -255,18 +430,19 @@ _devElectricSecret: "dev-electric-secret"
 					dockerfile: {
 						from: (_from & {in: X.meta.images.database}).out
 						// The image carries the extensions and the tenancy floor,
-						// and stages the ticker's table, placed only where a
-						// schedule is declared; the app's migrations join them in
+						// and stages the ticker's table and the airlock's steps,
+						// placed only where a schedule or an effect is declared;
+						// the app's migrations join them in
 						// the initdb directory, which postgres runs in name order
 						// on a fresh data directory. That directory lives on the
 						// container's writable layer, which `--force-recreate`
 						// discards with it.
 						copy: list.Concat([
-							[{srcs: [for _, m in X._initdb if m != #TenancyMigration && m != #ScheduleMigration {m}], dst: "\(#InitdbDir)/"}],
-							[if len(X.state.schedules) > 0 {
+							[{srcs: [for _, m in X._initdb if m != #TenancyMigration && !list.Contains(X._staged, m) {m}], dst: "\(#InitdbDir)/"}],
+							[for m in X._staged {
 								from: (_from & {in: X.meta.images.database}).out
-								srcs: ["\(#StagedDir)/\(#ScheduleMigration)"]
-								dst:  "\(#InitdbDir)/\(#ScheduleMigration)"
+								srcs: ["\(#StagedDir)/\(m)"]
+								dst:  "\(#InitdbDir)/\(m)"
 							}],
 						])
 					}
@@ -292,6 +468,7 @@ _devElectricSecret: "dev-electric-secret"
 						// One rebuild entry per migration: the list is the consumer's, and
 						// mecha's own stack keeps a fixture outside the migrations directory.
 						develop: watch: [for m in X.state.migrations {action: "rebuild", path: "../\(m)", target: "/docker-entrypoint-initdb.d"}]
+						if len(X.state.effects) > 0 {networks: ["default", "airlock"]}
 					}
 				}
 				// Only a cluster given pgroll migrations gets a runner: one with
@@ -345,7 +522,7 @@ _devElectricSecret: "dev-electric-secret"
 							PGRST_SERVER_HOST:       "*"
 							PGRST_SERVER_PORT:       "3000"
 							PGRST_ADMIN_SERVER_PORT: "3001"
-							if X.capabilities.auth {
+							if X._serviceToken {
 								PGRST_JWT_SECRET: jwtSecret
 							}
 						}
@@ -686,6 +863,7 @@ _devElectricSecret: "dev-electric-secret"
 								file: "/app/computations/\(c.name).js"
 								to:   c.to
 								wasm: [for w in c.wasm {_target[w]}]
+								endowments: c.endowments
 								if c.onComplete != _|_ {onComplete: c.onComplete}
 							}])
 							if X.capabilities.auth {
@@ -708,9 +886,10 @@ _devElectricSecret: "dev-electric-secret"
 					}
 				}
 			}
-			// Only an app that declares a schedule gets a clock. A ticker with
-			// nothing to sweep is a container answering pokes nobody sends.
-			if len(X.state.schedules) > 0 {
+			// Only an app that declares a schedule or an effect gets a clock. A
+			// ticker with nothing to sweep is a container answering pokes nobody
+			// sends.
+			if X._wakes {
 				ticker: X._image & {
 					dockerfile: {
 						from: (_from & {in: X.meta.images.ticker}).out
@@ -721,12 +900,18 @@ _devElectricSecret: "dev-electric-secret"
 						environment: {
 							// Straight to PostgREST, like the pipelines above.
 							CRUD_URL: "http://crud:3000"
-							// mesh-events, never mesh: the wake has to reach the
-							// daprd bundled with the WAL reader and the pipeline
-							// worker, which is the unit asleep at cloud tier.
-							MESH_URL:    "http://mesh-events:3500"
+							// The units a tick needs up, each asleep at cloud tier:
+							// mesh-events, never mesh, the daprd bundled with the WAL
+							// reader and the pipeline worker; and the airlock, for the
+							// job a guard enqueued.
+							WAKE_URLS: strings.Join(list.Concat([
+								[if X.capabilities.capture {"http://mesh-events:3500/v1.0/healthz/outbound"}],
+								[if len(X.state.effects) > 0 {"http://airlock:9997/healthz"}],
+							]), ",")
 							SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
 						}
+						// The airlock's health port, on a network holding the two alone.
+						if len(X.state.effects) > 0 {networks: ["default", "airlock-wake"]}
 						restart: "on-failure"
 					}
 				}
@@ -737,11 +922,138 @@ _devElectricSecret: "dev-electric-secret"
 					compose: {
 						depends_on: ticker: _started
 						environment: {
+							POKE_URL:      "http://ticker:9998"
 							POKE_INTERVAL: "${POKE_INTERVAL:-60s}"
 							POKE_CALLER:   "compose"
 							SERVICE_JWT:   "${SERVICE_JWT:-\(_devServiceJwt)}"
 						}
 						restart: "on-failure"
+					}
+				}
+			}
+			// Only an app that declares an effect gets an airlock, as only one
+			// that declares a schedule gets a ticker. The airlock reaches the
+			// database and its daprd (#AirlockNetworks); the daprd offers the
+			// bindings API alone (services/airlock/dapr.yaml), and its bindings
+			// are the program's declarations, so the only traffic leaving for the
+			// world is a call of a declared binding. Nothing pokes it: its
+			// worker hears a guard's enqueue at the guard's commit
+			// (services/airlock/airlock.ts), and the instance is up whenever
+			// the cluster is.
+			if len(X.state.effects) > 0 {
+				airlock: bayt.healthcheck.tcp & X._image & {
+					// The port opens once every handler is admitted and the worker
+					// runs; it serves nothing.
+					healthcheck: {
+						port:           9997
+						interval:       "5s"
+						start_interval: "500ms"
+						start_period:   "30s"
+					}
+					srcs: globs: list.Concat([[X.meta.airlock], [for e in X._effects {e.handler}]])
+					dockerfile: {
+						from: (_from & {in: X.meta.images.airlock}).out
+						workdir: "/app/airlock"
+						// Delivered where the manifest names them: AIRLOCK_DIR's
+						// effects.json, and effects/<name>.js beside it.
+						copy: list.Concat([
+							[{srcs: [X.meta.airlock], dst: "/airlock/effects.json"}],
+							[for e in X._effects {srcs: [e.handler], dst: "/airlock/effects/\(e.name).js"}],
+						])
+						// Its own reach, besides the network's: the database, its
+						// daprd and the health port. Reads are unscoped because Graphile's
+						// config search stats every directory up to `/`. A handler
+						// runs in a worker with no permissions at all (handler.ts).
+						cmd: ["run", "--frozen", "--unstable-worker-options", "--allow-net=database:5432,airlock-mesh:3500,0.0.0.0:9997", "--allow-read", "--allow-env", "--allow-sys", "main.ts"]
+					}
+					compose: {
+						depends_on: {X._schemaReady, "airlock-mesh": _healthy}
+						environment: {
+							// The owner, not `service`: the ledger is closed to every
+							// other role, and Graphile's migrate check, run at every
+							// start, alters its own schema after an upgrade.
+							DATABASE_URL: databaseUrl
+							MESH_URL:     "http://airlock-mesh:3500"
+							AIRLOCK_DIR:  "/airlock"
+							// A secret has no default: compose refuses to start without
+							// it rather than hand a handler a guessable one.
+							for k in X._secrets {
+								(k): "${\(k):?\(k) is required: an effect declares it}"
+							}
+						}
+						networks: ["airlock", "airlock-wake"]
+						restart: "on-failure"
+						develop: watch: list.Concat([
+							[{action: "sync+restart", path: "../\(X.meta.airlock)", target: "/airlock/effects.json"}],
+							[for e in X._effects {action: "sync+restart", path: "../\(e.handler)", target: "/airlock/effects/\(e.name).js"}],
+						])
+					}
+				}
+				// The airlock's daprd: one output binding per effect and nothing
+				// else, no Redis component and no resiliency policy, so a call is
+				// made once and the ledger's `entered` counts every attempt; and
+				// the bindings API alone, so no invoke reaches a full URL.
+				"airlock-mesh": bayt.healthcheck.tcp & X._image & {
+					healthcheck: {
+						port:           3500
+						interval:       "5s"
+						start_interval: "500ms"
+						start_period:   "30s"
+					}
+					srcs: globs: [for e in X._effects {e.endpoint}]
+					dockerfile: {
+						from: (_from & {in: X.meta.images.mesh}).out
+						copy: list.Concat([
+							[{from: (_from & {in: X.meta.images.airlock}).out, srcs: ["/app/airlock/dapr.yaml"], dst: "/dapr/config.yaml"}],
+							[for e in X._effects {srcs: [e.endpoint], dst: "/dapr/airlock/\(e.name).yaml"}],
+						])
+						entrypoint: ["/daprd", "--app-id", "airlock", "--dapr-listen-addresses", "0.0.0.0", "--resources-path", "/dapr/airlock", "--config", "/dapr/config.yaml", "--dapr-http-port", "3500", "--log-level", "info"]
+					}
+					compose: {
+						depends_on: {for b in X._reached {"bridge-\(b)": _started}}
+						// What this daprd may reach, on the container where an operator
+						// looks (daprd reads neither): the declared origins and bridges.
+						environment: {
+							AIRLOCK_ORIGINS: strings.Join(X._origins, " ")
+							AIRLOCK_BRIDGES: strings.Join([for b in X._bridges {b.name}], " ")
+						}
+						networks: ["airlock", "airlock-out", "airlock-egress"]
+						restart: "on-failure"
+						develop: watch: [for e in X._effects {action: "sync+restart", path: "../\(e.endpoint)", target: "/dapr/airlock/\(e.name).yaml"}]
+					}
+				}
+				// Each bridge: mecha's mail bridge, a sink the cluster hosts, its net
+				// permission being its port and its one server, reached only by
+				// the airlock's daprd on `airlock-out`.
+				for b in X._bridges {
+					"bridge-\(b.name)": bayt.healthcheck.tcp & X._image & {
+						healthcheck: {
+							port:           #BridgePort
+							interval:       "5s"
+							start_interval: "500ms"
+							start_period:   "30s"
+						}
+						dockerfile: {
+							from: (_from & {in: X.meta.images.airlock}).out
+							workdir: "/app/airlock"
+							// Its own variables, the ETHEREAL_* nodemailer reads on import
+							// (unset here), the host name it greets the server with, and
+							// nothing to read.
+							cmd: ["run", "--frozen", "--allow-net=0.0.0.0:\(#BridgePort),\(b.server)", "--allow-env=\(strings.Join(_bridgeEnv, ","))", "--allow-sys=hostname", "mail.ts"]
+						}
+						compose: {
+							environment: {
+								MAIL_SMTP:              b.server
+								MAIL_TLS:               b.tls
+								MAIL_MESSAGE_ID_DOMAIN: b.domain
+								if b.user != _|_ {
+									MAIL_USER:     "${\(b.user):?\(b.user) is required: bridge \(b.name)'s user}"
+									MAIL_PASSWORD: "${\(b.password):?\(b.password) is required: bridge \(b.name)'s password}"
+								}
+							}
+							networks: ["airlock-out", "bridge-\(b.name)-egress"]
+							restart: "on-failure"
+						}
 					}
 				}
 			}
@@ -781,8 +1093,11 @@ _devElectricSecret: "dev-electric-secret"
 						}
 						// A clock absent from here is a clock nothing starts. It
 						// pulls the ticker in behind it.
-						if len(X.state.schedules) > 0 {
+						if X._wakes {
 							clock: _started
+						}
+						if len(X.state.effects) > 0 {
+							airlock: _healthy
 						}
 
 						// Consumer-added services (escape hatches) gate here by
@@ -870,7 +1185,11 @@ _devElectricSecret: "dev-electric-secret"
 			ticker:   #From
 			clock:    #From
 			compute:  #From
+			airlock:  #From
 		}
+		// The program's effects.json (services/airlock/README.md), relative to
+		// the app dir.
+		airlock: *"services/airlock/effects.json" | string
 		// The proxy's config, relative to the app dir.
 		caddyfile: *"docker/Caddyfile" | string
 		// The one published door, in compose's `host:container` form.
@@ -893,7 +1212,9 @@ _devElectricSecret: "dev-electric-secret"
 // wait on. Rebuilt field by field rather than unified: unifying a qualified
 // `depends_on` onto the bare one would keep both key sets. A target nulled
 // by a hatch is dropped, and a wait on a name no target answers to fails
-// here rather than at `up`.
+// here rather than at `up`. A target joins the networks its compose block
+// names, under its bare name on each, and the default network only when it
+// names none.
 #Runtime: R={
 	project: string
 	cluster: #Cluster
@@ -904,15 +1225,19 @@ _devElectricSecret: "dev-electric-secret"
 		t: _
 		out: [if W.t.compose.depends_on != _|_ {W.t.compose.depends_on}, {}][0]
 	}
+	_networks: N={
+		t: _
+		out: [if N.t.compose.networks != _|_ {N.t.compose.networks}, ["default"]][0]
+	}
 	targets: {
 		for n, t in R._live {
 			(n): {
 				for f, v in t if f != "compose" && f != "deps" {(f): v}
 				deps: [for k, _ in (R._waits & {"t": t}).out {":\(k):outs"}]
 				compose: {
-					for f, v in t.compose if f != "depends_on" {(f): v}
+					for f, v in t.compose if f != "depends_on" && f != "networks" {(f): v}
 					depends_on: {for k, v in (R._waits & {"t": t}).out {("\(R.project)-\(k)"): v}}
-					networks: default: aliases: [n]
+					networks: {for nw in (R._networks & {"t": t}).out {(nw): aliases: [n]}}
 				}
 			}
 		}

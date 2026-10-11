@@ -378,16 +378,18 @@ export function httpCrud(base: string, serviceJwt: string): Crud {
   };
 }
 
-/** dapr's own readiness, which it answers 204 without consulting the app
- * channel — unlike `/v1.0/healthz`, which answers 500 until daprd's
- * initialization, blocked on the app channel accepting a connection, is done. */
-export function httpPoke(mesh: string): Poke {
+/** One GET to each unit that must exist for a tick to be read: daprd's own
+ * readiness (`/v1.0/healthz/outbound`, which it answers 204 without consulting
+ * the app channel — unlike `/v1.0/healthz`, which answers 500 until daprd's
+ * initialization, blocked on the app channel accepting a connection, is done)
+ * and the airlock's `/healthz`. Every one must answer, or the wake failed. */
+export function httpPoke(urls: string[]): Poke {
   return async () => {
-    const res = await fetch(`${mesh}/v1.0/healthz/outbound`, {
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-    });
-    await res.body?.cancel();
-    if (!res.ok) throw new Error(`poke ${mesh}: ${res.status}`);
+    for (const url of urls) {
+      const res = await fetch(url, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+      await res.body?.cancel();
+      if (!res.ok) throw new Error(`poke ${url}: ${res.status}`);
+    }
   };
 }
 
@@ -396,13 +398,13 @@ if (import.meta.main) {
   if (!CRUD_URL) throw new Error("CRUD_URL is required");
   const SERVICE_JWT = Deno.env.get("SERVICE_JWT");
   if (!SERVICE_JWT) throw new Error("SERVICE_JWT is required");
-  const MESH_URL = Deno.env.get("MESH_URL");
-  if (!MESH_URL) throw new Error("MESH_URL is required");
+  const WAKE_URLS = Deno.env.get("WAKE_URLS");
+  if (!WAKE_URLS) throw new Error("WAKE_URLS is required");
   Deno.serve(
     { port: 9998 },
     handler(
       httpCrud(CRUD_URL, SERVICE_JWT),
-      httpPoke(MESH_URL),
+      httpPoke(WAKE_URLS.split(",")),
       SERVICE_JWT,
       () => new Date(),
     ),

@@ -51,6 +51,12 @@ services:
       service: libraries_mecha-compute-image
     profiles:
     - compute-image
+  airlock-image:
+    extends:
+      file: ./compose.airlock-image.yaml
+      service: libraries_mecha-airlock-image
+    profiles:
+    - airlock-image
   clock-image:
     extends:
       file: ./compose.clock-image.yaml

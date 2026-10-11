@@ -3,7 +3,12 @@
 -- caller's migrations seed it by name after it.
 CREATE TABLE IF NOT EXISTS schedule (
   name                 TEXT PRIMARY KEY,
-  cron                 TEXT NOT NULL,
+  -- A cadence, or a single instant: a one-shot row is due once `due_at` has
+  -- passed and its watermark has not, and is re-armed by clearing the
+  -- watermark. The airlock's step seeds one, `airlock`, which pronto's guard
+  -- re-arms (services/airlock/airlock.sql).
+  cron                 TEXT,
+  due_at               TIMESTAMPTZ,
   time_zone            TEXT NOT NULL DEFAULT 'UTC',
   suspended            BOOLEAN NOT NULL DEFAULT FALSE,
   max_lateness_seconds INTEGER NOT NULL DEFAULT 300,
@@ -15,7 +20,8 @@ CREATE TABLE IF NOT EXISTS schedule (
   emits_values         JSONB NOT NULL DEFAULT '{}',
   last_tick_at         TIMESTAMPTZ,
   CHECK (concurrency_policy <> 'Forbid'
-         OR (done_entity IS NOT NULL AND done_filter IS NOT NULL))
+         OR (done_entity IS NOT NULL AND done_filter IS NOT NULL)),
+  CHECK ((cron IS NULL) <> (due_at IS NULL))
 );
 
 -- The default privileges a caller's grants set reach every table made after

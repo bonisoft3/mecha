@@ -1,26 +1,43 @@
-// What a cluster refuses of the steps its database runs at initdb, and which
-// services its change feed brings.
+// What a cluster refuses of the steps its database runs at initdb, which
+// services its change feed brings, and where it places the airlock.
 //
 //   deno test --no-config --no-lock --allow-read --allow-run=cue cluster_test.ts
 
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { ENDOWABLE } from "./services/compute/language.ts";
 
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
+type Effect = { name: string; origin?: string; bridge?: string; handler?: string; endpoint?: string; secrets?: string[] };
+type Bridge = { name: string; kind: string; server: string; tls?: string; domain: string; user?: string; password?: string };
 type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
   schedules: string[];
   computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string }[];
+  effects?: Effect[];
+  bridges?: Bridge[];
+};
+
+const cluster = (state: Partial<State>, capabilities: Record<string, boolean>) => {
+  const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...state };
+  return `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
 };
 
 /** `field` of a cluster given `state` and `capabilities`, as `cue export` answers it. */
 async function exported(state: Partial<State>, field: string, capabilities: Record<string, boolean> = {}) {
-  const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...state };
-  const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
+  return await evaluated(`(${cluster(state, capabilities)}).${field}`);
+}
+
+/** `field` of the cluster lowered into a bayt project named `p`. */
+async function lowered(state: Partial<State>, field: string) {
+  return await evaluated(`(#Runtime & {project: "p", cluster: ${cluster(state, {})}}).${field}`);
+}
+
+async function evaluated(expression: string) {
   const out = await new Deno.Command("cue", {
-    args: ["export", ".:cluster", "-e", `(${cluster}).${field}`],
+    args: ["export", ".:cluster", "-e", expression],
     cwd: MECHA,
     stdout: "piped",
     stderr: "piped",
@@ -157,6 +174,216 @@ Deno.test("a cluster given a pipeline refuses the change feed off", async () => 
   assert.match(got.stderr, /capabilities\.capture: conflicting values/);
 });
 
+const AIRLOCK = ["airlock", "airlock-mesh"];
+const PROBE: Effect = { name: "probe", origin: "https://sink.example.test" };
+
+type Targets = Record<string, {
+  dockerfile: { cmd?: unknown; entrypoint?: string[]; copy?: { srcs: string[]; dst: string; from?: unknown }[] };
+  compose: { depends_on?: Record<string, unknown>; environment?: Record<string, string>; networks?: unknown };
+}>;
+
+async function targets(state: Partial<State>): Promise<Targets> {
+  const got = await exported(state, "surface.targets");
+  assert.equal(got.ok, true, got.stderr);
+  return got.value;
+}
+
+// The airlock exists only where a program declares an effect, as the ticker
+// exists only where one declares a schedule: placed anywhere else it would be
+// a worker listening for jobs nobody enqueues, and the steps a database that
+// never claims a ledger runs for nothing.
+Deno.test("a cluster with no effect places no airlock, no steps of its own and no networks", async () => {
+  for (const state of [{}, { schedules: ["tick"] }, { pipelines: [{ name: "p", file: "p.yaml" }] }]) {
+    const t = await targets(state);
+    assert.deepEqual(AIRLOCK.filter((n) => n in t), [], JSON.stringify(state));
+    assert.deepEqual(Object.keys(t.launch.compose.depends_on ?? {}).filter((n) => n.startsWith("airlock")), []);
+    const dsts = (t.database.dockerfile.copy ?? []).map((c) => c.dst);
+    assert.deepEqual(dsts.filter((d) => /\/01[12]_/.test(d)), []);
+    assert.equal((await exported(state, "surface.networks")).ok, false, "no networks to declare");
+  }
+});
+
+Deno.test("an effect places the airlock and its daprd, and the ticker and clock to wake them, and launch waits on them", async () => {
+  const t = await targets({ effects: [PROBE] });
+  assert.deepEqual(AIRLOCK.filter((n) => n in t), AIRLOCK);
+  assert.deepEqual(t.launch.compose.depends_on?.airlock, { condition: "service_healthy" });
+  assert.deepEqual(t.launch.compose.depends_on?.clock, { condition: "service_started" });
+  assert.equal("airlock-clock" in t, false, "the worker hears an enqueue at its commit; the platform's ticker wakes a cluster asleep");
+  // The wake reaches what a tick needs up: the airlock alone here, no change
+  // feed being on; mesh-events alone for a schedule; both for both.
+  assert.equal(t.ticker.compose.environment?.WAKE_URLS, "http://airlock:9997/healthz");
+  assert.equal((await targets({ schedules: ["tick"] })).ticker.compose.environment?.WAKE_URLS, "http://mesh-events:3500/v1.0/healthz/outbound");
+  assert.equal((await targets({ schedules: ["tick"], effects: [PROBE] })).ticker.compose.environment?.WAKE_URLS, "http://mesh-events:3500/v1.0/healthz/outbound,http://airlock:9997/healthz");
+  assert.deepEqual(Object.keys(t.airlock.compose.environment ?? {}).sort(), ["AIRLOCK_DIR", "DATABASE_URL", "MESH_URL"]);
+  assert.deepEqual(t.airlock.dockerfile.cmd, [
+    "run", "--frozen", "--unstable-worker-options", "--allow-net=database:5432,airlock-mesh:3500,0.0.0.0:9997",
+    "--allow-read", "--allow-env", "--allow-sys", "main.ts",
+  ]);
+  assert.deepEqual(t.airlock.dockerfile.copy, [
+    { srcs: ["services/airlock/effects.json"], dst: "/airlock/effects.json" },
+    { srcs: ["effects/probe.js"], dst: "/airlock/effects/probe.js" },
+  ]);
+  // The daprd holds the program's bindings and mecha's bindings-only allowlist,
+  // and runs under it.
+  assert.deepEqual(t["airlock-mesh"].dockerfile.copy?.map(({ srcs, dst, from }) => ({ srcs, dst, from: from !== undefined })), [
+    { srcs: ["/app/airlock/dapr.yaml"], dst: "/dapr/config.yaml", from: true },
+    { srcs: ["services/airlock/dapr/probe.yaml"], dst: "/dapr/airlock/probe.yaml", from: false },
+  ]);
+  assert.ok((t["airlock-mesh"].dockerfile.entrypoint ?? []).join(" ").includes("--config /dapr/config.yaml"));
+  assert.equal(t["airlock-mesh"].compose.environment?.AIRLOCK_ORIGINS, "https://sink.example.test");
+  const staged = (t.database.dockerfile.copy ?? []).filter((c) => c.from !== undefined);
+  // The schedule table rides inside 012 (bayt.cue), ahead of a caller's steps.
+  assert.deepEqual(staged.map((c) => [c.srcs, c.dst]), [
+    [["/usr/share/mecha/initdb/011_graphile_worker.sql"], "/docker-entrypoint-initdb.d/011_graphile_worker.sql"],
+    [["/usr/share/mecha/initdb/012_airlock.sql"], "/docker-entrypoint-initdb.d/012_airlock.sql"],
+  ]);
+  const networks = await exported({ effects: [PROBE] }, "surface.networks");
+  assert.deepEqual(networks.value, { airlock: { internal: true }, "airlock-out": { internal: true }, "airlock-wake": { internal: true }, "airlock-egress": {} });
+});
+
+// Every other service stands on the default network, so none of the airlock's
+// may: one there could call the daprd's bindings API, which performs an effect
+// with no claim and no ledger row.
+Deno.test("the airlock reaches the world only through its daprd, which goes out on a network nothing else joins", async () => {
+  const got = await lowered({ effects: [PROBE] }, "targets");
+  assert.equal(got.ok, true, got.stderr);
+  const t = got.value as Targets;
+  const on = (n: string) => t[n].compose.networks as Record<string, { aliases: string[] }>;
+  const joined = (nw: string) => Object.keys(t).filter((n) => nw in on(n)).sort();
+  assert.deepEqual(on("airlock"), { airlock: { aliases: ["airlock"] }, "airlock-wake": { aliases: ["airlock"] } });
+  // The ticker's wake reaches the airlock's health port on a network the two hold alone.
+  assert.deepEqual(on("ticker"), { default: { aliases: ["ticker"] }, "airlock-wake": { aliases: ["ticker"] } });
+  assert.deepEqual(joined("airlock-wake"), ["airlock", "ticker"]);
+  assert.deepEqual(on("airlock-mesh"), {
+    airlock: { aliases: ["airlock-mesh"] },
+    "airlock-out": { aliases: ["airlock-mesh"] },
+    "airlock-egress": { aliases: ["airlock-mesh"] },
+  });
+  assert.deepEqual(on("database"), { default: { aliases: ["database"] }, airlock: { aliases: ["database"] } });
+  for (const n of ["crud", "caddy", "electric", "launch"]) assert.deepEqual(on(n), { default: { aliases: [n] } }, n);
+  assert.deepEqual(joined("airlock-egress"), ["airlock-mesh"]);
+  assert.deepEqual(joined("default").filter((n) => n.startsWith("airlock")), []);
+});
+
+Deno.test("a step taking the airlock's digits is refused only where an effect is declared", async () => {
+  for (const m of ["m/011_x.sql", "m/012_x.sql"]) {
+    assert.equal((await copied({ migrations: [m] })).ok, true, m);
+    const got = await copied({ migrations: [m], effects: [PROBE] });
+    assert.equal(got.ok, false, m);
+    assert.match(got.stderr, /_initdb\."01[12]": conflicting values/, m);
+  }
+});
+
+// The airlock's daprd sits on the cluster's default network. A service's name
+// there, or an address, is refused by its spelling; a name that resolves
+// inward is not seen by spelling, and is the record's residual.
+Deno.test("an origin that is not an https DNS name of two labels or more is refused", async () => {
+  for (const origin of [
+    "http://api.pay.example", "https://api.pay.example/v1", "https://database", "https://database:5432",
+    "https://10.0.0.1", "https://[::1]", "https://user@api.pay.example", "https://API.pay.example",
+  ]) {
+    const got = await exported({ effects: [{ name: "x", origin }] }, "surface.targets");
+    assert.equal(got.ok, false, origin);
+  }
+});
+
+Deno.test("an effect whose name is not a DNS label is refused", async () => {
+  for (const name of ["Pay", "-pay", "pay_x", "pay-"]) {
+    const got = await exported({ effects: [{ name, origin: PROBE.origin }] }, "surface.targets");
+    assert.equal(got.ok, false, name);
+  }
+});
+
+Deno.test("a secret reaches the airlock as a required variable, with no default, once however many effects name it", async () => {
+  const t = await targets({ effects: [{ ...PROBE, secrets: ["PROBE_KEY", "SHARED_KEY"] }, { ...PROBE, name: "other", secrets: ["SHARED_KEY"] }] });
+  assert.equal(t.airlock.compose.environment?.PROBE_KEY, "${PROBE_KEY:?PROBE_KEY is required: an effect declares it}");
+  assert.equal(t.airlock.compose.environment?.SHARED_KEY, "${SHARED_KEY:?SHARED_KEY is required: an effect declares it}");
+  for (const secret of ["probe_key", "1KEY", ""]) {
+    const got = await exported({ effects: [{ ...PROBE, secrets: [secret] }] }, "surface.targets");
+    assert.equal(got.ok, false, secret);
+  }
+});
+
+const MAIL: Bridge = { name: "mail", kind: "mail", server: "smtp.mail.example:587", domain: "airlock.example" };
+const CONFIRM: Effect = { name: "confirm", bridge: "mail" };
+
+Deno.test("a bridge an effect reaches goes out on a network of its own, its net permission its port and its one server", async () => {
+  const t = await targets({ effects: [PROBE, CONFIRM], bridges: [{ ...MAIL, user: "MAIL_USER_VAR", password: "MAIL_PASSWORD_VAR" }] });
+  const bridge = t["bridge-mail"];
+  assert.ok(bridge, "bridge-mail is placed");
+  assert.deepEqual(bridge.dockerfile.cmd, [
+    "run", "--frozen", "--allow-net=0.0.0.0:8080,smtp.mail.example:587",
+    "--allow-env=MAIL_SMTP,MAIL_TLS,MAIL_MESSAGE_ID_DOMAIN,MAIL_USER,MAIL_PASSWORD,ETHEREAL_API,ETHEREAL_API_KEY,ETHEREAL_CACHE,ETHEREAL_WEB",
+    "--allow-sys=hostname", "mail.ts",
+  ]);
+  assert.deepEqual(bridge.compose.networks, ["airlock-out", "bridge-mail-egress"]);
+  const networks = await exported({ effects: [PROBE, CONFIRM], bridges: [MAIL] }, "surface.networks");
+  assert.deepEqual(networks.value["bridge-mail-egress"], {});
+  assert.deepEqual(bridge.compose.environment, {
+    MAIL_SMTP: "smtp.mail.example:587",
+    MAIL_TLS: "starttls",
+    MAIL_MESSAGE_ID_DOMAIN: "airlock.example",
+    MAIL_USER: "${MAIL_USER_VAR:?MAIL_USER_VAR is required: bridge mail's user}",
+    MAIL_PASSWORD: "${MAIL_PASSWORD_VAR:?MAIL_PASSWORD_VAR is required: bridge mail's password}",
+  });
+  // daprd reaches the bridge by name, and waits for it.
+  assert.equal(t["airlock-mesh"].compose.environment?.AIRLOCK_BRIDGES, "mail");
+  assert.deepEqual(t["airlock-mesh"].compose.depends_on?.["bridge-mail"], { condition: "service_started" });
+  // A bridged effect adds no origin.
+  assert.equal(t["airlock-mesh"].compose.environment?.AIRLOCK_ORIGINS, "https://sink.example.test");
+});
+
+Deno.test("a bridge is refused unless its server is a DNS name and port, its domain a DNS name, and its credentials come together", async () => {
+  for (const bridge of [
+    { ...MAIL, server: "smtp.mail.example" },
+    { ...MAIL, server: "database:5432" },
+    { ...MAIL, server: "10.0.0.1:25" },
+    { ...MAIL, domain: "airlock" },
+    { ...MAIL, tls: "implicit" },
+    { ...MAIL, user: "MAIL_USER_VAR" },
+    { ...MAIL, name: "Mail" },
+  ]) {
+    const got = await exported({ effects: [CONFIRM], bridges: [bridge] }, "surface.targets");
+    assert.equal(got.ok, false, JSON.stringify(bridge));
+  }
+});
+
+Deno.test("an effect reaches one origin or one declared bridge, never both and never an undeclared one", async () => {
+  for (const [effects, bridges] of [
+    [[{ name: "confirm", bridge: "smtp" }], [MAIL]],
+    [[{ name: "confirm", bridge: "mail", origin: PROBE.origin }], [MAIL]],
+    [[{ name: "confirm" }], [MAIL]],
+  ] as [Effect[], Bridge[]][]) {
+    const got = await exported({ effects, bridges }, "surface.targets");
+    assert.equal(got.ok, false, JSON.stringify(effects));
+  }
+});
+
+// Two languages hold one list: what the cages can endow (language.ts) and what
+// a declaration may name (#CageEndowments).
+Deno.test("a declaration may name exactly what the cages can endow", async () => {
+  const out = await new Deno.Command("cue", { args: ["eval", ".:cluster", "-e", "#CageEndowments", "--out", "json"], cwd: MECHA, stdout: "piped" }).output();
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(out.stdout)).sort(), [...ENDOWABLE].sort());
+});
+
+// The ticker writes as `service` on the token's role claim, so crud verifies
+// the token wherever something wakes; the auth plane itself stays a choice.
+Deno.test("a cluster that wakes has crud verify the service token, without the auth plane", async () => {
+  for (const state of [{ effects: [PROBE] }, { schedules: ["tick"] }]) {
+    const t = await targets(state);
+    assert.equal(t.crud.compose.environment?.PGRST_JWT_SECRET, "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}");
+    assert.equal(t.auth, undefined);
+  }
+  const quiet = await targets({});
+  assert.equal(quiet.crud.compose.environment?.PGRST_JWT_SECRET, undefined);
+});
+
+Deno.test("a cluster given an effect refuses the data plane off", async () => {
+  const got = await exported({ effects: [PROBE] }, "capabilities", { server: false });
+  assert.equal(got.ok, false);
+  assert.match(got.stderr, /capabilities\.server: conflicting values/);
+});
+
 // The shape gate admits subset snapshots on the premise that Electric parses a
 // subset with no subquery (services/auth/main.ts). A feature flag would turn
 // subqueries on, and with them a subset that reads another table as Electric's
@@ -260,5 +487,5 @@ Deno.test("a cluster takes the published images and no others", async () => {
   assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
   const { images, published } = JSON.parse(new TextDecoder().decode(out.stdout));
   assert.deepEqual([...images].sort(), [...published].sort());
-  assert.deepEqual([...published].sort(), ["auth", "clock", "compute", "conduit", "database", "mesh", "ticker"]);
+  assert.deepEqual([...published].sort(), ["airlock", "auth", "clock", "compute", "conduit", "database", "mesh", "ticker"]);
 });

@@ -1,0 +1,12 @@
+{
+  "imports": {
+    "@endo/module-source": "npm:@endo/module-source@1.4.0",
+    "@grpc/grpc-js": "npm:@grpc/grpc-js@1.14.4",
+    "@std/assert": "jsr:@std/assert@1.0.8",
+    "graphile-worker": "npm:graphile-worker@0.18.0",
+    "nodemailer": "npm:nodemailer@10.0.13",
+    "pg": "npm:pg@8.16.3",
+    "ses": "npm:ses@1.15.0"
+  },
+  "lock": true
+}

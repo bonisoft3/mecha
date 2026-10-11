@@ -143,6 +143,8 @@
         "globs": [
           "services/database/rls/rls.sql",
           "services/ticker/schedule.sql",
+          "services/airlock/graphile.sql",
+          "services/airlock/airlock.sql",
           "services/migrate/migrate.sh"
         ],
         "exclude": []
@@ -163,6 +165,8 @@
             "globs": [
               "services/database/rls/rls.sql",
               "services/ticker/schedule.sql",
+              "services/airlock/graphile.sql",
+              "services/airlock/airlock.sql",
               "services/migrate/migrate.sh"
             ],
             "exclude": []

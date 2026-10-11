@@ -1,0 +1,216 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
+    },
+    "workdir": "/app/airlock",
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "services/airlock/deno.json",
+          "services/airlock/deno.lock",
+          "services/airlock/main.ts",
+          "services/airlock/airlock.ts",
+          "services/airlock/handler.ts",
+          "services/airlock/cage.ts",
+          "services/airlock/reentry.ts",
+          "services/airlock/inward.ts",
+          "services/airlock/mail.ts",
+          "services/airlock/dapr.yaml"
+        ],
+        "dst": "/app/airlock/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "services/compute/compartment.ts",
+          "services/compute/realm.ts",
+          "services/compute/crypto.ts",
+          "services/compute/endowments.ts",
+          "services/compute/language.ts",
+          "services/compute/workers.ts"
+        ],
+        "dst": "/app/compute/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "epilogue": [
+      "RUN deno cache --frozen main.ts cage.ts mail.ts"
+    ],
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "airlock-image",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "services/airlock/deno.json",
+      "services/airlock/deno.lock",
+      "services/airlock/main.ts",
+      "services/airlock/airlock.ts",
+      "services/airlock/handler.ts",
+      "services/airlock/cage.ts",
+      "services/airlock/reentry.ts",
+      "services/airlock/inward.ts",
+      "services/airlock/mail.ts",
+      "services/airlock/dapr.yaml",
+      "services/compute/compartment.ts",
+      "services/compute/realm.ts",
+      "services/compute/crypto.ts",
+      "services/compute/endowments.ts",
+      "services/compute/language.ts",
+      "services/compute/workers.ts"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "airlock-image_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.airlock-image.yaml",
+          ".bayt/Dockerfile.airlock-image",
+          ".bayt/bayt.airlock-image.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.airlock-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "airlock-image_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.airlock-image.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "airlock-image_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/airlock/deno.json",
+          "services/airlock/deno.lock",
+          "services/airlock/main.ts",
+          "services/airlock/airlock.ts",
+          "services/airlock/handler.ts",
+          "services/airlock/cage.ts",
+          "services/airlock/reentry.ts",
+          "services/airlock/inward.ts",
+          "services/airlock/mail.ts",
+          "services/airlock/dapr.yaml",
+          "services/compute/compartment.ts",
+          "services/compute/realm.ts",
+          "services/compute/crypto.ts",
+          "services/compute/endowments.ts",
+          "services/compute/language.ts",
+          "services/compute/workers.ts"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.airlock-image.yaml"
+      ]
+    }
+  },
+  "visibility": "public",
+  "emitsSrcs": true,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.airlock-image.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

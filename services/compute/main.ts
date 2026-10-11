@@ -21,7 +21,8 @@
 // `inputs` is {query name: rows}, frozen, as are the outputs. `seed` is a
 // 32-bit integer derived from the computation's name, so a replay is the
 // same draw. plan and finish run in a fresh worker per run with no
-// permissions and no globals beyond the language (cage.ts).
+// permissions and no globals beyond the language (cage.ts); either may answer
+// a promise of its value, since Crypto's operations answer promises.
 //
 // The language is ES module text as SES 1.15's Compartment admits it, the
 // text compiled by @endo/module-source (both as deno.json pins them):
@@ -33,7 +34,11 @@
 //   - no top-level await: the module runs as a plain function;
 //   - ECMAScript's globals as SES permits them (language.ts), so what SES
 //     does not yet know, such as RegExp.escape or Error.isError, is absent;
-//     less the clock, Math.random, and the host's time zone and locale.
+//     less the clock, Math.random, and the host's time zone and locale;
+//   - and past it, only what the computation declares in `endowments`
+//     (language.ts's ENDOWABLE): Crypto, WebCrypto's operations that are
+//     deterministic by their specification (crypto.ts), TextEncoder,
+//     TextDecoder, URL and URLSearchParams. One used undeclared throws.
 //
 // The service loads every computation at startup and dies on one it refuses;
 // admit.ts loads them as it does, for a lint to refuse them first.
@@ -62,7 +67,8 @@
 // mix and outlasts a deadlock or a row deleted mid-run.
 //
 // Environment: CRUD_URL, DATABASE_URL, CDC_SLOT, LAKE_DIR, COMPUTATIONS (JSON list of
-// {name, file, to, wasm}, wasm being the module files it ships);
+// {name, file, to, wasm, endowments}, wasm being the module files it ships
+// and endowments what its module may use past the language);
 // SERVICE_JWT where the cluster has auth.
 
 import { fileURLToPath } from "node:url";
@@ -155,6 +161,7 @@ export type Spec = {
   to: string[];
   wasm: string[];
   onComplete?: string;
+  endowments: string[];
 };
 
 /** What the service needs of a computation; tests stand in their own. */
@@ -197,6 +204,7 @@ export class Computation implements Runnable {
     private seed: number,
     private runner: Runner,
     readonly onComplete: string | undefined,
+    private endowments: string[],
   ) {}
 
   static async load(spec: Spec, runner: Runner): Promise<Computation> {
@@ -205,7 +213,7 @@ export class Computation implements Runnable {
         `computation ${spec.name}: onComplete is no SQL/PostgREST RPC identifier: ${spec.onComplete}`,
       );
     }
-    const { compiled, reads, queries } = await admit(spec.file);
+    const { compiled, reads, queries } = await admit(spec.file, spec.endowments);
     if (!spec.to.every((t) => IDENTIFIER.test(t))) {
       throw new Error(`computation ${spec.name}: a sink's table name is no identifier: ${spec.to}`);
     }
@@ -220,6 +228,7 @@ export class Computation implements Runnable {
       await seedOf(spec.name),
       runner,
       spec.onComplete,
+      spec.endowments,
     );
   }
 
@@ -234,7 +243,7 @@ export class Computation implements Runnable {
     }
     const cage = new Cage(this.file);
     try {
-      await cage.load(this.compiled);
+      await cage.load(this.compiled, this.endowments);
       const ran: Job[] = [];
       const outputs: unknown[] = [];
       let { jobs } = await cage.ask({ inputs, seed: this.seed });

@@ -4,6 +4,7 @@
     "up": false,
     "manual": false,
     "environment": {
+      "POKE_URL": "http://ticker:9998",
       "POKE_INTERVAL": "${POKE_INTERVAL:-60s}",
       "POKE_CALLER": "compose",
       "SERVICE_JWT": "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"

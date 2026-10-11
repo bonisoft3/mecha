@@ -17,7 +17,7 @@ services:
         restart: true
     environment:
       CRUD_URL: http://crud:3000
-      MESH_URL: http://mesh-events:3500
+      WAKE_URLS: http://mesh-events:3500/v1.0/healthz/outbound
       SERVICE_JWT: >-
         ${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}
     image: bayt-libraries_mecha-ticker:${BAYT_IMAGE_TAG:-latest}

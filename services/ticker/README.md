@@ -8,7 +8,7 @@ Four words carry the whole design, and nothing else is a concept:
 | | |
 |---|---|
 | **clock** | The per-tier cadence source. Owns resolution and nothing else. |
-| **poke** | A contentless authenticated HTTP request whose only job is to make a scaled-to-zero unit exist. Two of them: the clock pokes the ticker, the ticker pokes the mesh. |
+| **poke** | A contentless authenticated HTTP request whose only job is to make a scaled-to-zero unit exist. The clock pokes the ticker, and the ticker pokes the units a tick needs: the mesh, and where an effect is declared the [airlock](../airlock/README.md#in-a-cluster). |
 | **tick** | One occurrence of a schedule, as a row in the app's own table, keyed `uuid5(schedule, instant)`. |
 | **outcome** | Where a pipeline says it answered a tick. Keyed by the same tick, in a different table, because a source cannot be its own sink. |
 
@@ -59,18 +59,20 @@ into a service that looks healthy and does half its job:
 |---|---|
 | `CRUD_URL` | PostgREST directly, not the proxy: the proxy's client-facing `Prefer` injection would clobber the resolution below. |
 | `SERVICE_JWT` | Both the incoming poke's credential and the outgoing writes'. |
-| `MESH_URL` | daprd's base URL. See **The wake**. |
+| `WAKE_URLS` | The units a tick needs up, comma-separated, each answering a GET: `mesh-events`'s `/v1.0/healthz/outbound` where the change feed is on, the airlock's `/healthz` where an effect is declared. See **The wake**. |
 
 ## One table of mecha's, and the app's own
 
 `schedule` is mecha's mechanism, created by the database image as
-`020_schedule.sql` where the cluster declares a schedule, and seeded from the
-app's declarations. An app never authors its rows by hand.
+`020_schedule.sql` where the cluster declares a schedule, and inside
+`012_airlock.sql` where it declares an effect, and seeded from the app's
+declarations. An app never authors its rows by hand.
 
 ```sql
 create table schedule (
   name                 text primary key,
-  cron                 text not null,             -- five fields, the only grammar
+  cron                 text,                      -- five fields, the only grammar
+  due_at               timestamptz,               -- or one instant: a one-shot row
   time_zone            text not null default 'UTC',
   suspended            boolean not null default false,
   max_lateness_seconds integer not null default 300,
@@ -82,7 +84,8 @@ create table schedule (
   emits_values         jsonb not null default '{}',
   last_tick_at         timestamptz,               -- the watermark
   check (concurrency_policy <> 'Forbid'
-         or (done_entity is not null and done_filter is not null))
+         or (done_entity is not null and done_filter is not null)),
+  check ((cron is null) <> (due_at is null))
 );
 ```
 
@@ -114,6 +117,19 @@ belt and braces and it breaks idempotency: `resolution=ignore-duplicates`
 resolves against the primary key, so a duplicate `id` comes back as `[]` with
 201, while a *secondary* unique violation comes back `23505` with 409. The
 derived id already is that uniqueness.
+
+### A one-shot row
+
+A row with `due_at` in place of `cron` is owed once that instant has passed and
+its watermark has not reached it, and is owed again when its watermark is
+cleared. It is how a unit asks to be woken for work it already holds: the
+airlock's initdb step seeds one, named `airlock`, emitting into `airlock_wake`;
+a guard that enqueues an effect (pronto's) re-arms it in the transition's
+commit, so the next sweep emits one tick, whatever the number of claims since
+the last, and wakes the airlock with it. The re-arm writes only a row not yet
+armed and waits on no lock, so claims never queue on the one row. Below cloud
+tier the airlock heard the enqueue itself, and the tick costs a row, which the
+airlock prunes after a day.
 
 ## What the mechanism guarantees
 
@@ -279,8 +295,10 @@ looks like: it puts a message on the bus and wakes neither puller, and every
 CDC pipeline opens by dropping a message whose `.data` is not a non-empty
 string, so it would be discarded on arrival too.
 
-The endpoint is `GET /v1.0/healthz/outbound`, dapr's own readiness, which
-answers 204 and is enough to wake the unit. On daprd 1.16.1 it answers once
+The endpoints are `WAKE_URLS`: `GET /v1.0/healthz/outbound` on `mesh-events`,
+dapr's own readiness, which answers 204 and is enough to wake the unit; and
+`GET /healthz` on the airlock where an effect is declared. Every one must
+answer, or the wake failed. On daprd 1.16.1 it answers once
 daprd's servers are up, before daprd waits on its app channel. `/v1.0/healthz`
 answers 500 until daprd's initialization completes, and that initialization
 blocks until the app channel accepts a connection, so a wake that asked it

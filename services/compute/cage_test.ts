@@ -1,15 +1,15 @@
 // What a computation's module can reach in its cage.
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { LANGUAGE } from "./language.ts";
+import { ENDOWABLE, LANGUAGE } from "./language.ts";
 import { Cage, compile } from "./workers.ts";
 
-async function plan(body: string, inputs: unknown = {}, prelude = "") {
+async function plan(body: string, inputs: unknown = {}, prelude = "", endowments: string[] = []) {
   const cage = new Cage("probe.js");
   try {
     await cage.load(compile("probe.js", `${prelude} export const reads = []; export const queries = {};
       export const plan = (inputs, seed) => { ${body} };
-      export const finish = () => ({});`));
+      export const finish = () => ({});`), endowments);
     return (await cage.ask({ inputs, seed: 7 })).jobs;
   } finally {
     cage.close();
@@ -22,8 +22,9 @@ Deno.test("the cage holds the language and nothing of the host", async () => {
       "self", "navigator", "crypto", "WeakRef"].filter((n) => typeof globalThis[n] !== "undefined");`),
     [],
   );
-  // Pruning the worker's global left the runtime's queueMicrotask behind.
-  assertEquals(await plan(`return Object.getOwnPropertyNames(globalThis).sort();`), [...LANGUAGE].sort());
+  // Pruning the worker's global left the runtime's queueMicrotask behind. The
+  // endowable names are there too, each a refusal until declared.
+  assertEquals(await plan(`return Object.getOwnPropertyNames(globalThis).sort();`), [...LANGUAGE, ...ENDOWABLE].sort());
   // The language is SES's: what it does not permit, lockdown removes.
   assertEquals(await plan(`return [typeof RegExp.escape, typeof Error.isError, typeof Map.prototype.getOrInsert];`), [
     "undefined",
@@ -35,6 +36,37 @@ Deno.test("the cage holds the language and nothing of the host", async () => {
     "1970-01-01T00:00:00.000Z",
     '{"seed":7}',
   ]);
+});
+
+const CRYPTO = ["Crypto", "TextEncoder"];
+
+Deno.test("Crypto, where declared, signs inside the cage, plan may await it, and it cannot be replaced or made random", async () => {
+  assertEquals(
+    await plan(`return (async () => {
+      const key = await Crypto.importKey("raw", new TextEncoder().encode("Jefe"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const mac = await Crypto.sign("HMAC", key, new TextEncoder().encode("what do ya want for nothing?"));
+      return [Array.from(new Uint8Array(mac), (b) => b.toString(16).padStart(2, "0")).join("")];
+    })();`, {}, "", CRYPTO),
+    ["5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"],
+  );
+  assertEquals(await plan(`try { Crypto.sign = () => "x"; } catch {} return [typeof Crypto.getRandomValues, typeof Crypto.subtle, Object.isFrozen(Crypto)];`, {}, "", CRYPTO), [
+    "undefined",
+    "undefined",
+    true,
+  ]);
+  await assertRejects(() => plan(`Crypto.generateKey(); return [];`, {}, "", CRYPTO), Error, "a new key is entropy");
+});
+
+Deno.test("an endowment the module did not declare is a refusal at the line that uses it, not undefined", async () => {
+  await assertRejects(() => plan(`return [typeof Crypto];`), Error, "Crypto is not endowed; declare it");
+  await assertRejects(() => plan(`return [new TextEncoder()];`, {}, "", ["Crypto"]), Error, "TextEncoder is not endowed");
+  assertEquals(await plan(`return [new URL("https://a.example/x?y=1").searchParams.get("y")];`, {}, "", ["URL"]), ["1"]);
+});
+
+Deno.test("a declaration names only what the cage can endow", async () => {
+  for (const endowments of [["Intl"], ["Deno"], ["fetch"], "Crypto"]) {
+    await assertRejects(() => plan(`return [];`, {}, "", endowments as string[]), Error, "are not a list drawn from");
+  }
 });
 
 Deno.test("the clock and Math.random throw", async () => {
@@ -144,7 +176,7 @@ Deno.test("a module exports exactly the contract", async () => {
     await assertRejects(
       () =>
         cage.load(compile("extra.js", `export const reads = []; export const queries = {}; export const plan = () => [];
-          export const finish = () => ({}); export const compute = () => 1;`)),
+          export const finish = () => ({}); export const compute = () => 1;`), []),
       Error,
       "must export exactly finish, plan, queries, reads",
     );
@@ -166,7 +198,7 @@ Deno.test("a module imports nothing", async () => {
     const cage = new Cage("import.js");
     try {
       await assertRejects(
-        () => cage.load(compile("import.js", `import ${JSON.stringify(specifier)}; export const reads = [];`)),
+        () => cage.load(compile("import.js", `import ${JSON.stringify(specifier)}; export const reads = [];`), []),
         Error,
         `import.js ${refused}`,
       );

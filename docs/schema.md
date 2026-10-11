@@ -20,7 +20,7 @@ applies it in name order on an empty data directory. Every step's name opens
 with three digits no other step holds, then `_`, and the cluster refuses any
 other: postgres globs the directory in its locale's order, which skips
 punctuation, and anything replaying it sorts by byte, and only such names
-put both in one order. Two steps are mecha's own, and their digits are taken:
+put both in one order. These steps are mecha's own, and their digits are taken:
 
 - **`003_rls.sql`, the tenancy floor**, in every database
   ([its contract](../services/database/rls/README.md)). It also defines
@@ -29,12 +29,29 @@ put both in one order. Two steps are mecha's own, and their digits are taken:
   extensions, roles and grants a caller opens with and before its tables,
   whose column defaults may call it, and its policies, which call
   `rls_protect`.
+- **`011_graphile_worker.sql` and `012_airlock.sql`, the airlock's queue and
+  ledger**, where the cluster declares an effect
+  ([the airlock](../services/airlock/README.md#in-a-cluster)). The image
+  stages them outside the initdb directory and the `database` target places
+  them there, on the first digits after the steps a caller opens with
+  (pronto's 000-010, the machines last). A guard resolves
+  `graphile_worker.add_job` and the ledger only when it runs, and every
+  caller step that can write a row is numbered above them, so a row written
+  into an invoking state, held seed included, finds both. A caller step on
+  011 or 012 is refused where an effect is declared, as two steps sharing
+  digits always are. The ledger lives in the `airlock` schema, which only its
+  owner may use: a grant over `public`, the form a caller's grants take,
+  reaches nothing there whichever side of these steps it runs on, and the
+  revoke in `012_airlock.sql` removes what default privileges gave the schema
+  or its tables at creation.
 - **`020_schedule.sql`, the table the ticker sweeps**, where the cluster
   declares a schedule
   ([the ticker](../services/ticker/README.md#one-table-of-mechas-and-the-apps-own)).
-  The image stages it outside the initdb directory and the `database` target
-  places it there, after a caller's grants and before the seed the caller
-  names after it.
+  Staged and placed the same way, after a caller's grants and before the
+  seed the caller names after it. Where the cluster declares an effect the
+  same text opens `012_airlock.sql` instead, since the guard a caller's step
+  can fire re-arms a row of it; a cluster with both runs it twice, every
+  statement holding.
 
 The initdb set has no runner and no revision table: **the steps that ran are
 the files in the image's initdb directory.** A new database gets a change by

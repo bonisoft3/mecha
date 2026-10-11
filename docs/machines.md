@@ -62,9 +62,24 @@ state transition:
 | `accumulate`| Aggregation | `INSERT INTO <table> (...) VALUES (...) ON CONFLICT (<group>) DO UPDATE SET count = count + 1, sum = sum + EXCLUDED.amount` | Incremental materialized views and ledger totals without separate workers. |
 | `delete` | Cascade/Prune | `DELETE FROM <table> WHERE <predicate>` | Cleaning up transient child records upon terminal state. |
 | `call` | Stored procedure| `PERFORM <function>(...)` | Invoking domain-specific procedural logic. |
-| `notify` | Signaling | `PERFORM pg_notify('<channel>', <payload>)` | Emitting ephemeral Level-4 signals across the cluster. |
-| `saga` | Cortex Saga | `INSERT INTO "saga" (...) ON CONFLICT DO NOTHING; PERFORM pg_notify('cortex_saga_queue', ...)` | Triggering durable DBOS sagas and Level-4 exterior network acts atomically on transition. |
+| `notify` | Signaling | `PERFORM pg_notify('<channel>', <payload>)` | Waking a daemon inside the cluster; nothing is recorded. |
 | `stream` | DuckStream Signal | `PERFORM pg_notify('duckstream_<name>', ...)` | Signaling Feldera incremental circuits or refreshing streaming views. |
+
+## Invoking an external effect
+
+None of the effects above leaves the cluster. A state reaches outside by *invoking* a
+declared external effect, and only that effect's outcome leaves the state:
+
+```cue
+charging: invoke: {src: "charge", onDone: "settled", onError: "failed"}
+```
+
+Every transition into `charging` claims a row in `airlock.external_effect_ledger`, keyed by
+the effect and the row, and enqueues a Graphile job for the airlock, all in its own commit. A
+key already in the ledger was performed, so entering again under it raises. Leaving
+`charging` requires the ledger to hold an outcome naming the new state, which only the airlock
+writes, and the arrows' actions read it as `outcome`. The grammar, the handler and the
+alternatives are in pronto's [external effects](../../../plugins/pronto/docs/decisions/2026-10-03-external-effects.md).
 
 ## Timeouts and the ticker
 

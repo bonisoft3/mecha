@@ -53,6 +53,7 @@ tasks:
       - buf lint proto
       - task: test:ticker
       - task: test:compute
+      - task: test:airlock
       - task: test:pgroll
       - task: test:cluster
       - task: test:browser
@@ -87,6 +88,29 @@ tasks:
       - "*.ts"
       - "deno.json"
       - "deno.lock"
+
+  test:airlock:
+    desc: "airlock service: re-entry, the manifest, the handler's cage and its one door out, the poke, the inward check, Graphile's initdb step"
+    dir: services/airlock
+    cmds:
+      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-run reentry_test.ts handler_test.ts inward_test.ts graphile_sql_test.ts mail_test.ts admit_test.ts
+    sources:
+      - "*.ts"
+      - "*.sql"
+      - "deno.json"
+      - "deno.lock"
+      - "../compute/realm.ts"
+      - "../compute/compartment.ts"
+      - "../compute/crypto.ts"
+      - "../compute/endowments.ts"
+      - "../compute/language.ts"
+      - "../compute/workers.ts"
+
+  generate:graphile:
+    desc: "write Graphile Worker's schema as the initdb step services/airlock/graphile.sql, from the graphile-worker deno.lock pins"
+    dir: services/airlock
+    cmds:
+      - mise x -- deno run --frozen --allow-read --allow-write graphile_sql.ts
 
   integrate:compute:
     desc: "compute CDC delivery and replay through Redis and Redpanda Connect"
@@ -133,6 +157,12 @@ tasks:
     desc: "Run blobs smoke tests (rclone-s3 + imgproxy)"
     cmds:
       - docker compose up --build --wait smoke-blobs
+
+  integrate:airlock:
+    desc: "airlock end to end: postgres, Graphile, the cluster's daprd and a sink, across crashes; the mail bridge against Mailpit"
+    dir: services/airlock
+    cmds:
+      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-net --allow-run=docker docker_test.ts mail_docker_test.ts
 
   # ================================================================
   # Benchmarks

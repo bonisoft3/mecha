@@ -51,9 +51,10 @@ reach each other on localhost.
 Nothing on a user's request path reaches daprd. The proxy routes no path to
 it, and daprd's app channel points back at caddy. The wake comes from the
 ticker instead ([its contract](../services/ticker/README.md#the-wake)). After
-a sweep emits a tick, the ticker sends `GET /v1.0/healthz/outbound` to
-`MESH_URL`, which is `mesh-events` and never another daprd. It advances no
-watermark until that request lands. A clock outside the unit
+a sweep emits a tick, the ticker GETs each of `WAKE_URLS`: `mesh-events`'s
+`/v1.0/healthz/outbound`, never another daprd's, where the change feed is on,
+and the airlock's `/healthz` where an effect is declared. It advances no
+watermark until every one lands. A clock outside the unit
 ([clocks](../services/ticker/README.md#clocks)) pokes the ticker. On a single
 machine that clock is the `clock` service, an rpk `generate` input that posts
 every `POKE_INTERVAL` (60 s by default). The cloud clock is among the ticker's
@@ -61,14 +62,39 @@ parts [not built](../services/ticker/README.md#not-built).
 
 What bites:
 
-- **Only a cluster that declares a schedule gets a ticker and a clock**
-  (`len(state.schedules) > 0`). At cloud tier, a cluster with no schedule has
-  nothing to wake its WAL reader, and its writes wait in the replication slot.
+- **Only a cluster that declares a schedule or an effect gets a ticker and a
+  clock, and either has crud verify the service token**, since the ticker
+  reads and writes as `service`, the role PostgREST switches to on the token's
+  claim; the auth plane itself stays the app's choice. At cloud tier, a
+  cluster with neither has nothing to wake its WAL reader, and its writes wait
+  in the replication slot.
 - **Below cloud tier the wake still runs, and a failed wake still holds every
-  watermark.** A `MESH_URL` aimed at the wrong daprd therefore shows up as a
+  watermark.** A `WAKE_URLS` entry aimed at the wrong unit therefore shows up as a
   DNS error on a laptop, not as a silent stall in production.
 - **A wake drains everything the unit had backed up**, not only the tick that
   sent it.
+
+## The airlock's wake and wall
+
+A cluster that declares an effect runs the airlock
+([in a cluster](../services/airlock/README.md#in-a-cluster)), a long-lived
+worker that hears each enqueue on Graphile's `jobs:insert` at the guard's
+commit. Its wake is the ticker's: the guard that enqueues re-arms a one-shot
+schedule row ([the ticker](../services/ticker/README.md#a-one-shot-row)), the
+next sweep GETs the airlock's `/healthz`, and where the cluster scales to zero
+that brings it up for what was enqueued meanwhile. Crash recovery needs no stable replica name, so any number
+of instances may run ([after a crash](../services/airlock/README.md#after-a-crash)).
+
+Its wall travels with it: the daprd's bindings-only allowlist and its bindings
+are its configuration on every tier, and the airlock's own `--allow-net` bounds
+it where no network can, such as a k8s pod it shares with daprd. A gateway that
+would make the wall a missing route is [pending](../PENDING.md).
+
+| tier | the airlock's own reach | its daprd's reach |
+|---|---|---|
+| compose | the `airlock` and `airlock-wake` networks and its `--allow-net` | its declared bindings, the bindings API alone |
+| k8s, not built | its `--allow-net`; it would share the pod's network with daprd | the same |
+| Cloud Run, not built | its `--allow-net` | the same |
 
 ## Managed equivalents
 

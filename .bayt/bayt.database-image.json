@@ -31,6 +31,26 @@
         "exclude": []
       },
       {
+        "from": null,
+        "srcs": [
+          "services/airlock/graphile.sql"
+        ],
+        "dst": "/usr/share/mecha/initdb/011_graphile_worker.sql",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "services/airlock/airlock.sql"
+        ],
+        "dst": "/usr/share/mecha/initdb/012_airlock.sql",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
         "from": {
           "name": "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
         },
@@ -54,6 +74,9 @@
         "exclude": []
       }
     ],
+    "epilogue": [
+      "RUN cat /usr/share/mecha/initdb/020_schedule.sql /usr/share/mecha/initdb/012_airlock.sql > /tmp/airlock.sql && mv /tmp/airlock.sql /usr/share/mecha/initdb/012_airlock.sql"
+    ],
     "cmd": [
       "postgres",
       "-c",
@@ -73,7 +96,6 @@
     "mounts": [],
     "secrets": {},
     "extra_hosts": [],
-    "epilogue": [],
     "healthcheck": null,
     "expose": [],
     "entrypoint": null,
@@ -87,6 +109,8 @@
     "globs": [
       "services/database/rls/rls.sql",
       "services/ticker/schedule.sql",
+      "services/airlock/graphile.sql",
+      "services/airlock/airlock.sql",
       "services/migrate/migrate.sh"
     ],
     "exclude": []
@@ -175,6 +199,8 @@
         "globs": [
           "services/database/rls/rls.sql",
           "services/ticker/schedule.sql",
+          "services/airlock/graphile.sql",
+          "services/airlock/airlock.sql",
           "services/migrate/migrate.sh"
         ],
         "exclude": []

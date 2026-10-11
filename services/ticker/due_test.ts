@@ -285,3 +285,13 @@ Deno.test("a range that wraps is an error, not a schedule that never fires", () 
     "22-2",
   );
 });
+
+Deno.test("a one-shot row is owed once its instant has passed, once, and again when its watermark is cleared", () => {
+  const once = { name: "airlock", cron: null, due_at: "2026-10-10T12:00:00.000Z", time_zone: "UTC", max_lateness_seconds: 300, last_tick_at: null };
+  assertEquals(due(once, new Date("2026-10-10T11:59:59Z")), []);
+  assertEquals(due(once, new Date("2026-10-10T12:00:00Z")), [{ schedule: "airlock", tick_at: "2026-10-10T12:00:00.000Z", late: false }]);
+  assertEquals(due(once, new Date("2026-10-10T13:00:00Z")), [{ schedule: "airlock", tick_at: "2026-10-10T12:00:00.000Z", late: false }]);
+  assertEquals(due({ ...once, last_tick_at: "2026-10-10T12:00:00.000Z" }, new Date("2026-10-11T00:00:00Z")), []);
+  assertEquals(due({ ...once, due_at: "2026-10-11T08:00:00.000Z", last_tick_at: "2026-10-10T12:00:00.000Z" }, new Date("2026-10-11T09:00:00Z")).length, 1);
+  assertEquals(due({ ...once, last_tick_at: null }, new Date("2026-10-11T00:00:00Z")).length, 1);
+});

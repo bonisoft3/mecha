@@ -133,7 +133,7 @@ A run then reads the ledger:
 | more, and the sink is idempotent | calls `issue` again, with the same key |
 | more, `reentry: reconcile` | asks `reconcile`; calls `issue` only on `{absent: true}` |
 | more, `reentry: unknown` | settles `unknown` without calling |
-| more, `reentry: {repeat}` | calls `issue` again, as the program stated it may |
+| more, `reentry: repeat` | calls `issue` again; the effect's `note` says why a duplicate is acceptable |
 
 The ledger's `entered`, not Graphile's attempt count, is what runs out: Graphile counts
 a run when it locks the job and keeps that count across a crash and an unlock. A throw

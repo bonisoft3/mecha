@@ -62,6 +62,10 @@ _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 // the framework's (mecha's and pronto's) 800-899, and a caller's seed 900.
 // One file per prefix, so the framework keeps out of the range an app
 // numbers its steps in, and pronto refuses an app step in 8xx.
+_scheduleSql: _ @embed(file="services/ticker/schedule.sql", type=text)
+_machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text)
+#MachineTimersSql: _scheduleSql + "\n" + _machineTimersSql
+
 #ScheduleMigration: "800_schedule.sql"
 // Staged in the database image at 020 for compatibility with the published
 // bonitao/mecha-database:0.8.0 image, and placed in initdb at 800.
@@ -234,6 +238,9 @@ _devElectricSecret: "dev-electric-secret"
 		// never what it says. One brings the ticker, its clock and the table
 		// they sweep (#ScheduleMigration); the caller's migrations seed it.
 		schedules: [...string]
+		// Timed machines share the ticker; their migrations install #MachineTimersSql.
+		timers: *[] | [...string]
+		if len(timers) > 0 {timerCheck: string & !=""}
 		// The external effects (services/airlock/README.md states the
 		// contract). One brings the airlock, the daprd it goes out through,
 		// the ticker and clock that wake it, and the tables they keep
@@ -332,6 +339,7 @@ _devElectricSecret: "dev-electric-secret"
 		database: _healthy
 		if len(X.state.pgroll) > 0 {migrate: _completed}
 		if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
+		if len(X.state.timers) > 0 {"timer-check": _completed}
 	}
 
 	// The effects as every target reads them. A field's pattern is checked
@@ -369,7 +377,7 @@ _devElectricSecret: "dev-electric-secret"
 	// A schedule or an effect is woken by the ticker: a declared schedule by
 	// its cadence, an effect by the one-shot row its interpreter re-arms, so a
 	// cluster scaled to zero comes up for what was enqueued meanwhile.
-	_wakes: len(X.state.schedules) > 0 || len(X.state.effects) > 0
+	_wakes: len(X.state.schedules) > 0 || len(X.state.effects) > 0 || len(X.state.timers) > 0
 	// The ticker reads and writes through crud as `service`, the role PostgREST
 	// switches to on the token's claim and the one the schedule tables admit:
 	// crud verifies the service token wherever something wakes, with or without
@@ -544,6 +552,29 @@ _devElectricSecret: "dev-electric-secret"
 							environment: {
 								PGHOST:     "database"
 								PGUSER:     "${POSTGRES_USER:-postgres}"
+								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
+							}
+						}
+					}
+				}
+				if len(X.state.timers) > 0 {
+					"timer-check": X._image & {
+						dockerfile: {
+							from: (_from & {in: X.meta.images.database}).out
+							entrypoint: ["psql"]
+							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/timer-check.sql"]
+							epilogue: ["COPY <<'TIMERS' /timer-check.sql\n\(X.state.timerCheck)\nTIMERS"]
+						}
+						compose: {
+							depends_on: {
+								database: _healthy
+								if len(X.state.pgroll) > 0 {migrate: _completed}
+								if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
+							}
+							environment: {
+								PGHOST: "database"
+								PGUSER: "${POSTGRES_USER:-postgres}"
 								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
 								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
 							}
@@ -943,7 +974,7 @@ _devElectricSecret: "dev-electric-secret"
 					}
 				}
 			}
-			// Only an app that declares a schedule or an effect gets a clock. A
+			// A schedule, effect or machine timer requires a clock. A
 			// ticker with nothing to sweep is a container answering pokes nobody
 			// sends.
 			if X._wakes {

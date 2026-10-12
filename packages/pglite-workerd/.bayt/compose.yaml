@@ -1,0 +1,29 @@
+# generated from bayt.cue — do not edit
+include:
+- path: ./compose.bayt.yaml
+  required: false
+services:
+  wasm:
+    extends:
+      file: ./compose.wasm.yaml
+      service: libraries_mecha_packages_pglite-workerd-wasm
+    profiles:
+    - wasm
+  dist:
+    extends:
+      file: ./compose.dist.yaml
+      service: libraries_mecha_packages_pglite-workerd-dist
+    profiles:
+    - dist
+  icu:
+    extends:
+      file: ./compose.icu.yaml
+      service: libraries_mecha_packages_pglite-workerd-icu
+    profiles:
+    - icu
+  package:
+    extends:
+      file: ./compose.package.yaml
+      service: libraries_mecha_packages_pglite-workerd-package
+    profiles:
+    - package

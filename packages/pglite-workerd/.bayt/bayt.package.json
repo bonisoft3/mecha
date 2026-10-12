@@ -1,0 +1,151 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": null,
+    "workdir": "/",
+    "copy": [
+      {
+        "from": {
+          "ref": ":dist",
+          "name": "libraries_mecha_packages_pglite-workerd-dist"
+        },
+        "srcs": [
+          "/monorepo/libraries/mecha/packages/pglite-workerd/dist/"
+        ],
+        "dst": "/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": {
+          "ref": ":icu",
+          "name": "libraries_mecha_packages_pglite-workerd-icu"
+        },
+        "srcs": [
+          "/monorepo/libraries/mecha/packages/pglite-workerd/icu/icu-root.tgz"
+        ],
+        "dst": "/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "package",
+  "project": "libraries_mecha_packages_pglite-workerd",
+  "dir": "libraries/mecha/packages/pglite-workerd",
+  "activate": "",
+  "srcs": {
+    "globs": [],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "package_bayt",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.package.yaml",
+          ".bayt/Dockerfile.package",
+          ".bayt/bayt.package.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.package.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+      ]
+    },
+    "outs": {
+      "name": "package_outs",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.package.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": false,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.package.yaml",
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml",
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

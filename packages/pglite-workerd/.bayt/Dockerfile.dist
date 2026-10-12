@@ -1,0 +1,39 @@
+# generated from bayt.cue — do not edit
+FROM node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 AS dist
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+ADD --checksum=sha256:10b24517c31d23bbe952fa8cf9810952cd69cc72e8527f842b23125967dbf72c --unpack=true https://github.com/electric-sql/pglite/archive/ae182ff8bd5ba4acb887d6c925d607a1498aa0b5.tar.gz /src/
+COPY --from=libraries_mecha_packages_pglite-workerd-wasm_outs --parents /monorepo/libraries/mecha/packages/pglite-workerd/release/** /
+COPY --parents patches/pglite.patch ./
+RUN git -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 apply "$PWD/patches/pglite.patch" && cp -R release /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/release
+RUN corepack enable pnpm && corepack install -g pnpm@9.7.0+sha512.dc09430156b427f5ecfc79888899e1c39d2d690f004be70e05230b72cb173d96839587545d09429b55ac3c429c801b4dc3c0e002f653830a420fa2dd4e3cf9cf
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,id=/root/.local/share/pnpm/store,sharing=shared ["pnpm", "-C", "/src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5", "install", "--frozen-lockfile", "--filter", "@electric-sql/pglite..."]
+RUN pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 -r --filter @electric-sql/pglite... build && cp -R /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/dist dist
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.dist.json ./.bayt/
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS dist_ctxs
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --parents patches/pglite.patch ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+FROM scratch AS dist_srcs
+COPY --from=dist_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS dist_outs_ctxs
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --from=libraries_mecha_packages_pglite-workerd-dist --parents /monorepo/libraries/mecha/packages/pglite-workerd/dist/** /
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+FROM scratch AS dist_outs
+COPY --from=dist_outs_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS dist_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --parents .bayt/compose.dist.yaml .bayt/Dockerfile.dist .bayt/bayt.dist.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+COPY --from=libraries_mecha_packages_pglite-workerd-wasm_bayt /monorepo /monorepo
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+FROM scratch AS dist_bayt
+COPY --from=dist_bayt_ctxs /monorepo /monorepo

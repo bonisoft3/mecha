@@ -1,0 +1,3 @@
+# wrangler runs the package's test (test/wrangler.ts).
+[tools]
+"npm:wrangler" = "4.149.0"

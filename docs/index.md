@@ -29,5 +29,7 @@
 * [The auth service's token contract](../services/auth/README.md) - reference: The HS256 token this service mints, PostgREST verifies and policies read through auth_uid().
 * [Row-level security: the tenancy floor](../services/database/rls/README.md) - reference: The row isolation every mecha database carries, whatever emitted its tables, and what its audit proves.
 * [ticker](../services/ticker/README.md) - reference: The periodic wake's contract — clock, poke, tick, outcome — how an app declares a schedule, and why a tick needs no durability.
+* [The edge cluster](../packages/mecha-edge/README.md) - reference: mecha's cluster in one Cloudflare Durable Object over PGlite: signed guest sessions, row policy per request, Electric's shape protocol held open, and the Worker that routes to the object.
+* [PGlite for workerd](../packages/pglite-workerd/README.md) - reference: @electric-sql/pglite 0.5.8 built so a Durable Object loads it as built, its data directory kept page by page in the object's SQLite, and the resumable, verified load that puts a directory there.
 * [airlock](../services/airlock/README.md) - reference: The one way out of a cluster — the ledger a guard claims, the Graphile job its worker hears at the commit, the handler's cage and its sink reached only through a Dapr binding, what a run does after a crash, and the bindings-only daprd a cluster places it behind.
 * [@mecha/lake](../packages/lake/README.md) - reference: The browser-side consumer of a published DuckLake.

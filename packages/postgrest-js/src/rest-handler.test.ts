@@ -413,6 +413,20 @@ describe('scope session', () => {
     await db.exec('RESET ROLE;')
   })
 
+  // One connection serving many subjects (a Durable Object's) reads `auth_uid()`
+  // from claims; set for the session, the last request's subject would answer
+  // for every request after it.
+  it('gives each request its own claims and leaves the session\'s alone', async () => {
+    await db.exec(`SELECT set_config('request.jwt.claims', '{"sub":"session"}', false)`)
+    const sub = (s: string) => createRestHandler(db, { scopes: () => ['household:h1'], claims: () => ({ sub: s }) })
+    await db.exec(`CREATE FUNCTION whoami() RETURNS text LANGUAGE sql STABLE AS $$ SELECT current_setting('request.jwt.claims', true)::json->>'sub' $$;
+      CREATE VIEW me WITH (security_invoker = true) AS SELECT whoami() AS sub; GRANT SELECT ON me TO app_user;`)
+    const [a, b] = await Promise.all([sub('alice')(new Request('http://localhost/me')), sub('bob')(new Request('http://localhost/me'))])
+    expect(await a.json()).toEqual([{ sub: 'alice' }])
+    expect(await b.json()).toEqual([{ sub: 'bob' }])
+    expect((await db.query<{ s: string }>('SELECT whoami() AS s')).rows[0].s).toBe('session')
+  })
+
   it('does not carry a previous subject\'s scopes across a change', async () => {
     const h1 = createRestHandler(db, { scopes: () => ['household:h1'] })
     await h1(new Request('http://localhost/posting'))

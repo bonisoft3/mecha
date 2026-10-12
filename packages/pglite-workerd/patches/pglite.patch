@@ -1,0 +1,394 @@
+diff --git a/packages/pglite-tools/src/pgDumpModFactory.ts b/packages/pglite-tools/src/pgDumpModFactory.ts
+index 6e7f696..4090631 100644
+--- a/packages/pglite-tools/src/pgDumpModFactory.ts
++++ b/packages/pglite-tools/src/pgDumpModFactory.ts
+@@ -23,12 +23,9 @@ export interface PgDumpMod
+   WASM_PREFIX: string
+   INITIAL_MEMORY: number
+   ENV: Record<string, string>
+-  _pgl_set_rw_cbs: (read_cb: number, write_cb: number) => void
+-  addFunction: (
+-    cb: (ptr: any, length: number) => void,
+-    signature: string,
+-  ) => number
+-  removeFunction: (f: number) => void
++  // Host callbacks pglitec.c imports (see pgl_host_* there)
++  pglRead: (ptr: number, max_length: number) => number
++  pglWrite: (ptr: number, length: number) => number
+   onExit: (status: number) => void
+   print: (test: string) => void
+   printErr: (text: string) => void
+diff --git a/packages/pglite-tools/src/pg_dump.ts b/packages/pglite-tools/src/pg_dump.ts
+index 253210d..fe6bf21 100644
+--- a/packages/pglite-tools/src/pg_dump.ts
++++ b/packages/pglite-tools/src/pg_dump.ts
+@@ -35,7 +35,6 @@ async function execPgDump({
+   pg: PGlite
+   args: string[]
+ }): Promise<ExecResult> {
+-  let pgdump_write, pgdump_read
+   let exitCode = 0
+   let stderrOutput: string = ''
+   let stdoutOutput: string = ''
+@@ -60,7 +59,7 @@ async function execPgDump({
+         mod.onRuntimeInitialized = () => {
+           let bufferedBytes: Uint8Array = new Uint8Array()
+ 
+-          pgdump_write = mod.addFunction((ptr: any, length: number) => {
++          mod.pglWrite = (ptr: number, length: number) => {
+             let bytes
+             try {
+               bytes = mod.HEAPU8.subarray(ptr, ptr + length)
+@@ -75,9 +74,9 @@ async function execPgDump({
+             })
+ 
+             return length
+-          }, 'iii')
++          }
+ 
+-          pgdump_read = mod.addFunction((ptr: any, max_length: number) => {
++          mod.pglRead = (ptr: number, max_length: number) => {
+             let length = bufferedBytes.length
+             if (length > max_length) {
+               length = max_length
+@@ -89,9 +88,7 @@ async function execPgDump({
+             }
+             bufferedBytes = bufferedBytes.subarray(length, bufferedBytes.length)
+             return length
+-          }, 'iii')
+-
+-          mod._pgl_set_rw_cbs(pgdump_read, pgdump_write)
++          }
+ 
+           // default $HOME in emscripten is /home/postgres
+           mod.FS.chmod('/home/postgres/.pgpass', 0o0600) // https://www.postgresql.org/docs/current/libpq-pgpass.html
+diff --git a/packages/pglite-utils/src/utils.ts b/packages/pglite-utils/src/utils.ts
+index 3f24aad..0fe48e7 100644
+--- a/packages/pglite-utils/src/utils.ts
++++ b/packages/pglite-utils/src/utils.ts
+@@ -34,14 +34,20 @@ const cachedWasmModules = new Map<string, WebAssembly.Module>()
+ 
+ export async function instantiateWasm(
+   imports: WebAssembly.Imports,
+-  moduleUrl: URL,
+-  module?: WebAssembly.Module,
++  source: WebAssembly.Module | URL,
+ ): Promise<{
+   instance: WebAssembly.Instance
+   module: WebAssembly.Module
+ }> {
+-  if (module || cachedWasmModules.has(moduleUrl.toString())) {
+-    const mod = module || cachedWasmModules.get(moduleUrl.toString())!
++  if (source instanceof WebAssembly.Module) {
++    return {
++      instance: await WebAssembly.instantiate(source, imports),
++      module: source,
++    }
++  }
++  const moduleUrl = source
++  if (cachedWasmModules.has(moduleUrl.toString())) {
++    const mod = cachedWasmModules.get(moduleUrl.toString())!
+     return {
+       instance: await WebAssembly.instantiate(mod, imports),
+       module: mod,
+diff --git a/packages/pglite/src/initdb.ts b/packages/pglite/src/initdb.ts
+index cf99fb8..36f3c61 100644
+--- a/packages/pglite/src/initdb.ts
++++ b/packages/pglite/src/initdb.ts
+@@ -55,8 +55,6 @@ async function execInitdb({
+   args: string[]
+   wasmModule?: WebAssembly.Module
+ }): Promise<ExecResult> {
+-  let system_fn, popen_fn, pclose_fn
+-
+   let needToCallPGmain = false
+   let postgresArgs: string[] = []
+ 
+@@ -101,9 +99,11 @@ async function execInitdb({
+       log(debug, 'initdberr', text)
+     },
+     instantiateWasm: (imports, successCallback) => {
+-      const moduleUrl = new URL('../release/initdb.wasm', import.meta.url)
+       pglUtils
+-        .instantiateWasm(imports, moduleUrl, wasmModule)
++        .instantiateWasm(
++          imports,
++          wasmModule ?? new URL('../release/initdb.wasm', import.meta.url),
++        )
+         .then(({ instance, module }) => {
+           // @ts-ignore wrong type in Emscripten typings
+           successCallback(instance, module)
+@@ -120,14 +120,12 @@ async function execInitdb({
+       },
+       (mod: InitdbMod) => {
+         mod.onRuntimeInitialized = () => {
+-          system_fn = mod.addFunction((cmd_ptr: number) => {
++          mod.pglSystem = (cmd_ptr: number) => {
+             postgresArgs = getArgs(mod.UTF8ToString(cmd_ptr))
+             return callPgMain(postgresArgs)
+-          }, 'pi')
+-
+-          mod._pgl_set_system_fn(system_fn)
++          }
+ 
+-          popen_fn = mod.addFunction((cmd_ptr: number, mode: number) => {
++          mod.pglPopen = (cmd_ptr: number, mode: number) => {
+             const smode = mod.UTF8ToString(mode)
+             postgresArgs = getArgs(mod.UTF8ToString(cmd_ptr))
+ 
+@@ -142,11 +140,9 @@ async function execInitdb({
+                 throw `Unexpected popen mode value ${smode}`
+               }
+             }
+-          }, 'ppi')
+-
+-          mod._pgl_set_popen_fn(popen_fn)
++          }
+ 
+-          pclose_fn = mod.addFunction((stream: number) => {
++          mod.pglPclose = (stream: number) => {
+             if (stream === initdb_stdin_fd || stream === initdb_stdout_fd) {
+               // if the last popen had mode w, execute now postgres' main()
+               if (needToCallPGmain) {
+@@ -157,9 +153,7 @@ async function execInitdb({
+             } else {
+               return mod._pclose(stream)
+             }
+-          }, 'pi')
+-
+-          mod._pgl_set_pclose_fn(pclose_fn)
++          }
+ 
+           {
+             const pglite_stdin_path = pg.Module.stringToUTF8OnStack(pgstdinPath)
+diff --git a/packages/pglite/src/initdbModFactory.ts b/packages/pglite/src/initdbModFactory.ts
+index 323bf83..a7b1cb3 100644
+--- a/packages/pglite/src/initdbModFactory.ts
++++ b/packages/pglite/src/initdbModFactory.ts
+@@ -30,11 +30,12 @@ export interface InitdbMod
+   stringToUTF8OnStack: (s: string) => number
+   ___errno_location: () => number
+   _strerror: (errno: number) => number
+-  _pgl_set_rw_cbs: (read_cb: number, write_cb: number) => void
+-  _pgl_set_system_fn: (system_fn: number) => void
+-  _pgl_set_popen_fn: (popen_fn: number) => void
+-  _pgl_set_pclose_fn: (pclose_fn: number) => void
+-  _pgl_set_pipe_fn: (pipe_fn: number) => void
++  // Host callbacks pglitec.c imports (see pgl_host_* there)
++  pglSystem: (cmd_ptr: number) => number
++  pglPopen: (cmd_ptr: number, mode: number) => number
++  pglPclose: (stream: number) => number
++  pglRead: (ptr: number, max_length: number) => number
++  pglWrite: (ptr: number, length: number) => number
+   _pclose: (stream: number) => number
+   _pipe: (fd: number) => number
+   _pgl_freopen: (filepath: number, mode: number, stream: number) => number
+@@ -46,8 +47,6 @@ export interface InitdbMod
+   _fopen: (path: number, mode: number) => number
+   _fclose: (stream: number) => number
+   _fflush: (stream: number) => number
+-  addFunction: (fn: CallableFunction, signature: string) => number
+-  removeFunction: (f: number) => void
+   callMain: (args: string[]) => number
+   onExit: (status: number) => void
+   print: (test: string) => void
+diff --git a/packages/pglite/src/pglite.ts b/packages/pglite/src/pglite.ts
+index f101618..955d0c9 100644
+--- a/packages/pglite/src/pglite.ts
++++ b/packages/pglite/src/pglite.ts
+@@ -114,13 +114,8 @@ export class PGlite
+   #notifyListeners = new Map<string, Set<(payload: string) => void>>()
+   #globalNotifyListeners = new Set<(channel: string, payload: string) => void>()
+ 
+-  // receive data from wasm
+-  #pglite_socket_write: number = -1
+-
+   #currentQuery = new CurrentQuery()
+ 
+-  // send data to wasm
+-  #pglite_socket_read: number = -1
+   // buffer that holds the data to be sent to wasm
+   #outputData: any = []
+   // read index in the buffer
+@@ -140,9 +135,6 @@ export class PGlite
+   #inputData = new Uint8Array(0)
+   // write index in the buffer
+   #writeOffset: number = 0
+-  #system_fn: number = -1
+-  #popen_fn: number = -1
+-  #pclose_fn: number = -1
+   externalCommandStreamFd: number | null = null
+   #running: boolean = false
+ 
+@@ -329,10 +321,11 @@ export class PGlite
+     // It's resolved value `fsBundleBuffer` is set and used in `getPreloadedPackage`
+     // which is called via `PostgresModFactory` after we have awaited
+     // `fsBundleBufferPromise` below.
+-    const fsBundleUrl = new URL('../release/pglite.data', import.meta.url)
++    // Bundled assets resolve against import.meta.url only when the caller did
++    // not pass them: some hosts (workerd) give a module no URL.
+     const fsBundleBufferPromise = options.fsBundle
+       ? options.fsBundle.arrayBuffer()
+-      : pglUtils.getFsBundle(fsBundleUrl)
++      : pglUtils.getFsBundle(new URL('../release/pglite.data', import.meta.url))
+     let fsBundleBuffer: ArrayBuffer
+     fsBundleBufferPromise.then((buffer) => {
+       fsBundleBuffer = buffer
+@@ -361,10 +354,12 @@ export class PGlite
+         this.#printErr(text)
+       },
+       instantiateWasm: (imports, successCallback) => {
+-        const moduleUrl = new URL('../release/pglite.wasm', import.meta.url)
+-
+         pglUtils
+-          .instantiateWasm(imports, moduleUrl, options.pgliteWasmModule)
++          .instantiateWasm(
++            imports,
++            options.pgliteWasmModule ??
++              new URL('../release/pglite.wasm', import.meta.url),
++          )
+           .then(({ instance, module }) => {
+             // @ts-ignore wrong type in Emscripten typings
+             successCallback(instance, module)
+@@ -664,25 +659,21 @@ export class PGlite
+ 
+   #onRuntimeInitialized(mod: PostgresMod) {
+     // we override system() to intercept any calls that might generate unexpected output
+-    this.#system_fn = mod.addFunction((cmd_ptr: number) => {
++    mod.pglSystem = (cmd_ptr: number) => {
+       this.#log(
+         `Postgres tried to execute ${mod.UTF8ToString(cmd_ptr)}, returning 1.`,
+       )
+       return 1
+-    }, 'pi')
+-
+-    mod._pgl_set_system_fn(this.#system_fn)
++    }
+ 
+-    this.#popen_fn = mod.addFunction((cmd_ptr: number, mode: number) => {
++    mod.pglPopen = (cmd_ptr: number, mode: number) => {
+       const smode = mod.UTF8ToString(mode)
+       const args = mod.UTF8ToString(cmd_ptr)
+       this.externalCommandStreamFd = this.handleExternalCmd(args, smode)
+       return this.externalCommandStreamFd!
+-    }, 'ppp')
+-
+-    mod._pgl_set_popen_fn(this.#popen_fn)
++    }
+ 
+-    this.#pclose_fn = mod.addFunction((stream: number) => {
++    mod.pglPclose = (stream: number) => {
+       if (stream === this.externalCommandStreamFd) {
+         this.mod!._fclose(this.externalCommandStreamFd!)
+         this.externalCommandStreamFd = null
+@@ -690,12 +681,11 @@ export class PGlite
+         throw `Unhandled pclose ${stream}`
+       }
+       this.#log('pclose_fn', stream)
+-    }, 'pi')
+-
+-    mod._pgl_set_pclose_fn(this.#pclose_fn)
++      return 0
++    }
+ 
+-    // set the write callback
+-    this.#pglite_socket_write = mod.addFunction((ptr: any, length: number) => {
++    // receive data from wasm
++    mod.pglWrite = (ptr: number, length: number) => {
+       let bytes
+       try {
+         bytes = this.mod!.HEAPU8.subarray(ptr, ptr + length)
+@@ -704,31 +694,26 @@ export class PGlite
+         throw e
+       }
+       return this.#onData!(bytes)
+-    }, 'iii')
+-
+-    // set the read callback
+-    this.#pglite_socket_read = mod.addFunction(
+-      (ptr: any, max_length: number) => {
+-        // copy current data to wasm buffer
+-        let length = this.#outputData.length - this.#readOffset
+-        if (length > max_length) {
+-          length = max_length
+-        }
+-        this.mod!.HEAP8.set(
+-          (this.#outputData as Uint8Array).subarray(
+-            this.#readOffset,
+-            this.#readOffset + length,
+-          ),
+-          ptr,
+-        )
+-        this.#readOffset += length
+-
+-        return length
+-      },
+-      'iii',
+-    )
++    }
++
++    // send data to wasm
++    mod.pglRead = (ptr: number, max_length: number) => {
++      // copy current data to wasm buffer
++      let length = this.#outputData.length - this.#readOffset
++      if (length > max_length) {
++        length = max_length
++      }
++      this.mod!.HEAP8.set(
++        (this.#outputData as Uint8Array).subarray(
++          this.#readOffset,
++          this.#readOffset + length,
++        ),
++        ptr,
++      )
++      this.#readOffset += length
+ 
+-    mod._pgl_set_rw_cbs(this.#pglite_socket_read, this.#pglite_socket_write)
++      return length
++    }
+   }
+ 
+   #defaultOnData(bytes: Uint8Array): number {
+@@ -807,9 +792,6 @@ export class PGlite
+       } else {
+         this.#log(`An error occured while closing the db`, e.toString())
+       }
+-    } finally {
+-      this.mod!.removeFunction(this.#pglite_socket_read)
+-      this.mod!.removeFunction(this.#pglite_socket_write)
+     }
+ 
+     // Close the filesystem
+diff --git a/packages/pglite/src/postgresMod.ts b/packages/pglite/src/postgresMod.ts
+index d22568e..b2c12b5 100644
+--- a/packages/pglite/src/postgresMod.ts
++++ b/packages/pglite/src/postgresMod.ts
+@@ -28,22 +28,18 @@ export interface PostgresMod
+   pg_extensions: Record<string, Promise<Blob | null>>
+   UTF8ToString: (ptr: number, maxBytesToRead?: number) => string
+   stringToUTF8OnStack: (s: string) => number
+-  _pgl_set_system_fn: (system_fn: number) => void
+-  _pgl_set_popen_fn: (popen_fn: number) => void
+-  _pgl_set_pclose_fn: (pclose_fn: number) => void
+-  _pgl_set_rw_cbs: (read_cb: number, write_cb: number) => void
+-  _pgl_set_pipe_fn: (pipe_fn: number) => number
++  // Host callbacks pglitec.c imports (see pgl_host_* there)
++  pglSystem: (cmd_ptr: number) => number
++  pglPopen: (cmd_ptr: number, mode: number) => number
++  pglPclose: (stream: number) => number
++  pglRead: (ptr: number, max_length: number) => number
++  pglWrite: (ptr: number, length: number) => number
+   _pgl_freopen: (filepath: number, mode: number, stream: number) => number
+   _pgl_pq_flush: () => void
+   _fopen: (path: number, mode: number) => number
+   _fclose: (stream: number) => number
+   _fflush: (stream: number) => void
+   _pgl_proc_exit: (code: number) => number
+-  addFunction: (
+-    cb: (ptr: any, length: number) => void,
+-    signature: string,
+-  ) => number
+-  removeFunction: (f: number) => void
+   callMain: (args?: string[]) => number
+   _PostgresMainLoopOnce: () => void
+   _PostgresMainLongJmp: () => void

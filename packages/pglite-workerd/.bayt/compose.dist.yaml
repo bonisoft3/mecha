@@ -1,0 +1,48 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha_packages_pglite-workerd-dist:
+    build:
+      additional_contexts:
+        libraries_mecha_packages_pglite-workerd-wasm_outs: service:libraries_mecha_packages_pglite-workerd-wasm_outs
+      context: ..
+      dockerfile: .bayt/Dockerfile.dist
+      target: dist
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-dist:${BAYT_IMAGE_TAG:-latest}
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-dist_bayt:
+    build:
+      additional_contexts:
+        libraries_mecha_packages_pglite-workerd-wasm_bayt: service:libraries_mecha_packages_pglite-workerd-wasm_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.dist
+      target: dist_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-dist_bayt:latest
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-dist_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.dist
+      target: dist_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-dist_srcs:latest
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-dist_outs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.dist
+      target: dist_outs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+      additional_contexts:
+        libraries_mecha_packages_pglite-workerd-dist: service:libraries_mecha_packages_pglite-workerd-dist
+    image: bayt-libraries_mecha_packages_pglite-workerd-dist_outs:latest
+    scale: 0

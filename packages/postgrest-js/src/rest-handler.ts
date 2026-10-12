@@ -235,6 +235,11 @@ export interface RestHandlerAuth {
   scopes: (req: Request) => string[] | Promise<string[]>
   /** The non-superuser role policies are written against. */
   role?: string
+  /** The request's JWT claims, as PostgREST puts them in `request.jwt.claims`
+   * for `auth_uid()` and the policies to read. Where one connection serves
+   * many subjects they must be the request's own; absent, whatever the
+   * session holds stands. */
+  claims?: (req: Request) => Record<string, unknown> | Promise<Record<string, unknown>>
 }
 
 /**
@@ -256,15 +261,18 @@ export async function applyScopeSession(
   await db.exec(`RESET ROLE;` + scopeSql(scopes, role, false))
 }
 
-/** `local` decides whether the setting dies with the transaction. */
-function scopeSql(scopes: string[], role: string, local: boolean): string {
+const quote = (s: string) => `'${s.replace(/'/g, "''")}'`
+
+/** `local` decides whether the settings die with the transaction. */
+function scopeSql(scopes: string[], role: string, local: boolean, claims?: Record<string, unknown>): string {
   for (const s of scopes) {
     if (s.includes(',')) {
       throw new Error(`Invalid scope ${s}: a comma would split it into two scopes`)
     }
   }
   return (
-    `SELECT set_config('app.scopes', '${scopes.join(',').replace(/'/g, "''")}', ${local});` +
+    (claims ? `SELECT set_config('request.jwt.claims', ${quote(JSON.stringify(claims))}, ${local});` : '') +
+    `SELECT set_config('app.scopes', ${quote(scopes.join(','))}, ${local});` +
     `SET${local ? ' LOCAL' : ''} ROLE "${validateIdentifier(role)}";`
   )
 }
@@ -288,8 +296,9 @@ export function createRestHandler(
       // write runs in one without auth too: its response names it.
       if (auth || req.method.toUpperCase() !== 'GET') {
         const scopes = auth ? await auth.scopes(req) : undefined
+        const claims = auth?.claims ? await auth.claims(req) : undefined
         const res = await db.transaction(async (tx) => {
-          if (auth) await tx.exec(scopeSql(scopes!, auth.role ?? 'app_user', true))
+          if (auth) await tx.exec(scopeSql(scopes!, auth.role ?? 'app_user', true, claims))
           return await route(tx, req)
         })
         // PGlite yields undefined for a transaction it rolled back without

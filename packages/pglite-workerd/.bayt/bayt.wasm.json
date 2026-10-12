@@ -1,0 +1,187 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [
+      "COPY --from=ghcr.io/nushell/nushell:0.115.1-alpine@sha256:f938ac013d373f4de002900cdc594dab3f2dd55696333e29ed73f48ae724cb77 /usr/bin/nu /usr/local/bin/nu"
+    ],
+    "preambleCopyContexts": [
+      {
+        "name": "ghcr.io/nushell/nushell:0.115.1-alpine@sha256:f938ac013d373f4de002900cdc594dab3f2dd55696333e29ed73f48ae724cb77"
+      }
+    ],
+    "from": {
+      "name": "electricsql/pglite-builder:3.1.74-7@sha256:9e75d29ed19d651b393bf9462bbe770405bd3b26e57d3b76001ac844539835e1"
+    },
+    "add": [
+      {
+        "url": "https://github.com/electric-sql/postgres-pglite/archive/b133782cd759f08b3aeb263b80a963b39c7b7af1.tar.gz",
+        "sha256": "31b7d5c46a9501b653536cce2ba593739144981cb0aa25692b678d68505ad2cd",
+        "dest": "/src/",
+        "unpack": true
+      }
+    ],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "copy": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "wasm",
+  "project": "libraries_mecha_packages_pglite-workerd",
+  "dir": "libraries/mecha/packages/pglite-workerd",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "wasm.nu",
+      "patches/postgres-pglite.patch"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [
+      "release/**"
+    ],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {
+    "PGLITE_VERSION": "0.5.8"
+  },
+  "synthetics": {
+    "bayt": {
+      "name": "wasm_bayt",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.wasm.yaml",
+          ".bayt/Dockerfile.wasm",
+          ".bayt/bayt.wasm.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+      ]
+    },
+    "outs": {
+      "name": "wasm_outs",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "release/**"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "wasm_srcs",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "wasm.nu",
+          "patches/postgres-pglite.patch"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [
+    {
+      "srcs": {
+        "globs": [
+          "wasm.nu",
+          "patches/postgres-pglite.patch"
+        ],
+        "exclude": [],
+        "defaultGlobs": null,
+        "defaultExclude": null
+      },
+      "dockerfile": {
+        "do": "nu wasm.nu /src/postgres-pglite-b133782cd759f08b3aeb263b80a963b39c7b7af1 release"
+      },
+      "name": "builtin",
+      "shell": "exec",
+      "stop": false
+    }
+  ],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

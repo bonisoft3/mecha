@@ -1,0 +1,44 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha_packages_pglite-workerd-wasm:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.wasm
+      target: wasm
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-wasm:${BAYT_IMAGE_TAG:-latest}
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-wasm_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.wasm
+      target: wasm_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-wasm_bayt:latest
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-wasm_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.wasm
+      target: wasm_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-wasm_srcs:latest
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-wasm_outs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.wasm
+      target: wasm_outs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+      additional_contexts:
+        libraries_mecha_packages_pglite-workerd-wasm: service:libraries_mecha_packages_pglite-workerd-wasm
+    image: bayt-libraries_mecha_packages_pglite-workerd-wasm_outs:latest
+    scale: 0

@@ -1,0 +1,34 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha_packages_pglite-workerd-icu:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.icu
+      target: icu
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-icu:${BAYT_IMAGE_TAG:-latest}
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-icu_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.icu
+      target: icu_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-libraries_mecha_packages_pglite-workerd-icu_bayt:latest
+    scale: 0
+  libraries_mecha_packages_pglite-workerd-icu_outs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.icu
+      target: icu_outs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+      additional_contexts:
+        libraries_mecha_packages_pglite-workerd-icu: service:libraries_mecha_packages_pglite-workerd-icu
+    image: bayt-libraries_mecha_packages_pglite-workerd-icu_outs:latest
+    scale: 0

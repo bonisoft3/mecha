@@ -1,0 +1,6 @@
+version: '3'
+includes:
+  bayt:
+    taskfile: ./.bayt/Taskfile.bayt.yml
+    dir: ./
+    optional: true

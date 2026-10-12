@@ -1,0 +1,15 @@
+say:
+  # The package exported to dist/, where the test's wrangler config aliases
+  # @electric-sql/pglite. Bake runs from .bayt/: it resolves the root compose
+  # file's include against the working directory, not the file. A local export
+  # adds to its destination rather than replacing it.
+  build:
+    do: |
+      cd .bayt; rm -rf ../dist
+      mut flags = [--allow=fs.read=.. --allow=fs.write=../dist -f compose.yaml --set 'package.output=type=local,dest=../dist']
+      for spec in ($env.CACHE_FROM? | default '' | lines | where ($it | is-not-empty)) { $flags = ($flags | append [--set $'*.cache-from=($spec)']) }
+      for spec in ($env.CACHE_TO? | default '' | lines | where ($it | is-not-empty)) { $flags = ($flags | append [--set $'*.cache-to=($spec)']) }
+      ^docker buildx bake ...$flags package
+  # Needs dist/ (build) and Docker (restore_test.ts, migrate_test.ts).
+  test:
+    do: mise exec -- deno test -A --frozen test/

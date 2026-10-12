@@ -1,0 +1,15 @@
+# generated from bayt.cue — do not edit
+FROM scratch AS package
+WORKDIR /
+COPY --from=libraries_mecha_packages_pglite-workerd-dist /monorepo/libraries/mecha/packages/pglite-workerd/dist/ /
+COPY --from=libraries_mecha_packages_pglite-workerd-icu /monorepo/libraries/mecha/packages/pglite-workerd/icu/icu-root.tgz /
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.package.json ./.bayt/
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS package_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --parents .bayt/compose.package.yaml .bayt/Dockerfile.package .bayt/bayt.package.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+FROM scratch AS package_bayt
+COPY --from=package_bayt_ctxs /monorepo /monorepo

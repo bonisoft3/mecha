@@ -1,0 +1,356 @@
+diff --git a/build-pglite.sh b/build-pglite.sh
+index 7b887f6071..28a19a8984 100755
+--- a/build-pglite.sh
++++ b/build-pglite.sh
+@@ -42,7 +42,8 @@ PGLITE_CFLAGS="$PGLITE_CFLAGS \
+ -Drecv=pgl_recv -Dsend=pgl_send -Dconnect=pgl_connect \
+ -Dpoll=pgl_poll \
+ -Dshmget=pgl_shmget -Dshmat=pgl_shmat -Dshmdt=pgl_shmdt -Dshmctl=pgl_shmctl \
+--Dlongjmp=pgl_longjmp -Dsiglongjmp=pgl_siglongjmp"
++-Dlongjmp=pgl_longjmp -Dsiglongjmp=pgl_siglongjmp \
++-Ddlopen=pgl_dlopen -Ddlsym=pgl_dlsym -Ddlclose=pgl_dlclose"
+ # we don't want to override sigsetjmp and setjmp!
+ # -Dsigsetjmp=pgl_sigsetjmp -Dsiglongjmp=pgl_siglongjmp \
+ # -Dsetjmp=pgl_setjmp -Dlongjmp=pgl_longjmp"
+diff --git a/pglite/src/pglitec/pgl_static_modules.h b/pglite/src/pglitec/pgl_static_modules.h
+new file mode 100644
+index 0000000000..74b28665a3
+--- /dev/null
++++ b/pglite/src/pglitec/pgl_static_modules.h
+@@ -0,0 +1,22 @@
++/*
++ * Modules linked into the backend instead of loaded as side modules; see
++ * pgl_dlopen() in pglitec.c. A build that links any defines
++ * pgl_static_modules, ending in an entry with a NULL name, each module's
++ * symbols ending likewise.
++ */
++#ifndef PGL_STATIC_MODULES_H
++#define PGL_STATIC_MODULES_H
++
++typedef struct pgl_static_symbol {
++    const char *name;
++    void *address;
++} pgl_static_symbol;
++
++typedef struct pgl_static_module {
++    const char *name;
++    const pgl_static_symbol *symbols;
++} pgl_static_module;
++
++extern const pgl_static_module pgl_static_modules[] __attribute__((weak));
++
++#endif
+diff --git a/pglite/src/pglitec/pglitec.c b/pglite/src/pglitec/pglitec.c
+index b9a1570b42..e85041bc69 100644
+--- a/pglite/src/pglitec/pglitec.c
++++ b/pglite/src/pglitec/pglitec.c
+@@ -25,12 +25,31 @@
+ #include <sys/time.h>
+ #include <setjmp.h>
+ #include <string.h>
++#include <dlfcn.h>
++
++#include "pgl_static_modules.h"
+ 
+ #if defined(__EMSCRIPTEN__)
+ #include <emscripten/emscripten.h>
++/*
++ * The host's callbacks are imports, set as Module properties before the
++ * runtime starts. A function pointer to a JS function would need addFunction,
++ * which compiles a module at runtime; hosts that forbid wasm code generation
++ * (workerd) refuse that.
++ */
++EM_JS(int, pgl_host_system, (const char *command), { return Module['pglSystem'](command); });
++EM_JS(FILE*, pgl_host_popen, (const char *command, const char *mode), { return Module['pglPopen'](command, mode); });
++EM_JS(int, pgl_host_pclose, (FILE* stream), { return Module['pglPclose'](stream); });
++EM_JS(ssize_t, pgl_host_read, (void *buffer, size_t max_length), { return Module['pglRead'](buffer, max_length); });
++EM_JS(ssize_t, pgl_host_write, (const void *buffer, size_t length), { return Module['pglWrite'](buffer, length); });
+ #else
+ #define EMSCRIPTEN_KEEPALIVE
+ // TODO: an include for libpglite
++extern int pgl_host_system(const char *command);
++extern FILE* pgl_host_popen(const char *command, const char *mode);
++extern int pgl_host_pclose(FILE* stream);
++extern ssize_t pgl_host_read(void *buffer, size_t max_length);
++extern ssize_t pgl_host_write(const void *buffer, size_t length);
+ #endif
+ 
+ volatile int is_pglite_active = 0;
+@@ -102,54 +121,19 @@ void EMSCRIPTEN_KEEPALIVE pgl_siglongjmp(sigjmp_buf env, int val) {
+ * This is not available in emscripten atm, so we handle it manually
+ * See pglite.ts in the frontend on how we emulate this instantiation.
+ */
+-typedef ssize_t (*pglite_system_t)(const char *command);
+-pglite_system_t pglite_system = NULL;
+-
+-void EMSCRIPTEN_KEEPALIVE
+-pgl_set_system_fn(pglite_system_t system_fn) {
+-    pglite_system = system_fn;
+-}
+-
+ int EMSCRIPTEN_KEEPALIVE
+ pgl_system(const char *command) {
+-    if (pglite_system) {
+-        return pglite_system(command);
+-    }
+-    // if pglite_system is not set, we assume we cannot exec that command and return != 0
+-    // we could also just call system() and let it crash, but this leads to some stderr messages on Windows
+-    return 123;
+-}
+-
+-typedef FILE* (*pglite_popen_t)(const char *command, const char *mode);
+-pglite_popen_t pglite_popen = NULL;
+-
+-void EMSCRIPTEN_KEEPALIVE
+-pgl_set_popen_fn(pglite_popen_t popen_fn) {
+-    pglite_popen = popen_fn;
++    return pgl_host_system(command);
+ }
+ 
+ FILE* EMSCRIPTEN_KEEPALIVE
+ pgl_popen(const char *command, const char *mode) {
+-    if (pglite_popen) {
+-        return pglite_popen(command, mode);
+-    }
+-    return popen(command, mode);
+-}
+-
+-typedef int (*pglite_pclose_t)(FILE* stream);
+-pglite_pclose_t pglite_pclose = NULL;
+-
+-void EMSCRIPTEN_KEEPALIVE
+-pgl_set_pclose_fn(pglite_pclose_t pclose_fn) {
+-    pglite_pclose = pclose_fn;
++    return pgl_host_popen(command, mode);
+ }
+ 
+ int EMSCRIPTEN_KEEPALIVE
+ pgl_pclose(FILE* stream) {
+-    if (pglite_pclose) {
+-        return pglite_pclose(stream);
+-    }
+-    return pclose(stream);
++    return pgl_host_pclose(stream);
+ }
+ 
+ /* ========== User related functions ==========
+@@ -413,28 +397,6 @@ pgl_munmap(void *addr, size_t length) {
+ * we emulate a socket by overriding the following libc functions.
+ */
+ 
+-/* 
+-* read FROM JS
+-* Callback used for reading data from the frontend
+-*/
+-typedef ssize_t (*pgl_read_t)(void *buffer, size_t max_length);
+-pgl_read_t pgl_read;
+-
+-/* write TO JS
+-* Callback used for writing data to the frontend
+-*/
+-typedef ssize_t (*pgl_write_t)(void *buffer, size_t length);
+-pgl_write_t pgl_write;
+-
+-/*
+-* Set the above callbacks
+-*/
+-void EMSCRIPTEN_KEEPALIVE
+-pgl_set_rw_cbs(pgl_read_t read_cb, pgl_write_t write_cb) {
+-    pgl_read = read_cb;
+-    pgl_write = write_cb;
+-}
+-
+ int EMSCRIPTEN_KEEPALIVE pgl_fcntl(int __fd, int __cmd, ...) {
+ 	// dummy 
+ 	return 0;
+@@ -464,7 +426,7 @@ int EMSCRIPTEN_KEEPALIVE pgl_getsockname(int __fd, struct sockaddr * __addr,
+ */
+ 
+ ssize_t EMSCRIPTEN_KEEPALIVE pgl_recv(int __fd, void *__buf, size_t __n, int __flags) {
+-	ssize_t got = pgl_read(__buf, __n);
++	ssize_t got = pgl_host_read(__buf, __n);
+ 	return got;
+ }
+ 
+@@ -473,7 +435,7 @@ ssize_t EMSCRIPTEN_KEEPALIVE pgl_recv(int __fd, void *__buf, size_t __n, int __f
+ */
+ 
+ ssize_t EMSCRIPTEN_KEEPALIVE pgl_send(int __fd, const void *__buf, size_t __n, int __flags) {
+-	ssize_t wrote = pgl_write(__buf, __n);
++	ssize_t wrote = pgl_host_write(__buf, __n);
+ 	return wrote;
+ }
+ 
+@@ -491,4 +453,56 @@ struct pollfd {
+ int EMSCRIPTEN_KEEPALIVE pgl_poll(struct pollfd fds[], ssize_t nfds, int timeout) {
+     // dummy
+ 	return nfds;
+-}
+\ No newline at end of file
++}
++/* ========== Statically linked modules ==========
++*
++* A build may link modules (plpgsql, dict_snowball) into the backend instead of
++* loading them as side modules, for hosts that cannot compile wasm at runtime.
++* dlopen() of a file whose basename (without .so) names one of them returns
++* its entry in pgl_static_modules, and dlsym() on that handle looks the symbol
++* up in the entry. Every other file goes to the dynamic linker.
++*/
++
++static const pgl_static_module *
++pgl_static_module_of(const void *handle) {
++    if (!pgl_static_modules)
++        return NULL;
++    for (const pgl_static_module *m = pgl_static_modules; m->name; m++)
++        if (m == handle)
++            return m;
++    return NULL;
++}
++
++void* EMSCRIPTEN_KEEPALIVE
++pgl_dlopen(const char *file, int mode) {
++    if (file && pgl_static_modules) {
++        const char *base = strrchr(file, '/');
++        size_t len;
++        base = base ? base + 1 : file;
++        len = strlen(base);
++        if (len > 3 && strcmp(base + len - 3, ".so") == 0)
++            len -= 3;
++        for (const pgl_static_module *m = pgl_static_modules; m->name; m++)
++            if (strlen(m->name) == len && strncmp(m->name, base, len) == 0)
++                return (void *) m;
++    }
++    return dlopen(file, mode);
++}
++
++void* EMSCRIPTEN_KEEPALIVE
++pgl_dlsym(void *handle, const char *name) {
++    const pgl_static_module *m = pgl_static_module_of(handle);
++    if (!m)
++        return dlsym(handle, name);
++    for (const pgl_static_symbol *s = m->symbols; s->name; s++)
++        if (strcmp(s->name, name) == 0)
++            return s->address;
++    return NULL;
++}
++
++int EMSCRIPTEN_KEEPALIVE
++pgl_dlclose(void *handle) {
++    if (pgl_static_module_of(handle))
++        return 0;
++    return dlclose(handle);
++}
+diff --git a/src/backend/tcop/postgres.c b/src/backend/tcop/postgres.c
+index 09a273c6d7..43d730b65d 100644
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -55,6 +55,7 @@
+ #include "pgstat.h"
+ #include "postmaster/interrupt.h"
+ #include "postmaster/postmaster.h"
++#include "postmaster/startup.h"
+ #include "replication/logicallauncher.h"
+ #include "replication/logicalworker.h"
+ #include "replication/slot.h"
+@@ -239,6 +240,14 @@ void initDummyPort() {
+ }
+ 
+ void pgl_startPGlite() {
++	/*
++	 * Crash recovery's phases (ResetUnloggedRelations, SyncDataDirectory)
++	 * leave STARTUP_PROGRESS_TIMEOUT firing every log_startup_progress_interval;
++	 * a postmaster's startup process exits after recovery, but this backend
++	 * lives on, and a pending timer keeps its host awake.
++	 */
++	disable_startup_progress_timeout();
++	pgl_cancel_idle_alarm();
+ 	initDummyPort();
+ 	whereToSendOutput = DestRemote;
+ 	// initdb execs postgres in single mode, which sets this to true
+@@ -4324,7 +4333,9 @@ void PostgresSendReadyForQueryIfNecessary() {
+ 			}
+ 			else
+ 			{
++#ifndef __PGLITE__
+ 				long		stats_timeout;
++#endif
+ 
+ 				/*
+ 				 * Process incoming notifies (including self-notifies), if
+@@ -4349,6 +4360,15 @@ void PostgresSendReadyForQueryIfNecessary() {
+ 				 * performance impact. That's OK because pgstat_report_stat()
+ 				 * won't have us wake up sooner than a prior call.
+ 				 */
++#ifdef __PGLITE__
++				/*
++				 * PGlite is idle whenever control is back with its host, and a
++				 * pending timer keeps a host that hibernates idle code (a
++				 * Durable Object) awake: flush now instead of arming
++				 * IDLE_STATS_UPDATE_TIMEOUT to retry later.
++				 */
++				pgstat_report_stat(true);
++#else
+ 				stats_timeout = pgstat_report_stat(false);
+ 				if (stats_timeout > 0)
+ 				{
+@@ -4362,6 +4382,7 @@ void PostgresSendReadyForQueryIfNecessary() {
+ 					if (get_timeout_active(IDLE_STATS_UPDATE_TIMEOUT))
+ 						disable_timeout(IDLE_STATS_UPDATE_TIMEOUT, false);
+ 				}
++#endif
+ 
+ 				set_ps_display("idle");
+ 				pgstat_report_activity(STATE_IDLE, NULL);
+@@ -4381,6 +4402,9 @@ void PostgresSendReadyForQueryIfNecessary() {
+ 			ReadyForQuery(whereToSendOutput);
+ 			send_ready_for_query = false;
+ 		}
++#ifdef __PGLITE__
++	pgl_cancel_idle_alarm();
++#endif
+ }
+ 
+ void PostgresMainLoopOnce() {
+diff --git a/src/backend/utils/misc/timeout.c b/src/backend/utils/misc/timeout.c
+index d92efa1255..d554227579 100644
+--- a/src/backend/utils/misc/timeout.c
++++ b/src/backend/utils/misc/timeout.c
+@@ -828,3 +828,25 @@ get_timeout_finish_time(TimeoutId id)
+ {
+ 	return all_timeouts[id].fin_time;
+ }
++
++#ifdef __PGLITE__
++/*
++ * disable_alarm() leaves the interval timer armed, to save setitimer() calls,
++ * and the stale interrupt is ignored when it fires. PGlite returns to its host
++ * after every message, and a host that hibernates idle code (a Durable Object)
++ * stays awake while a timer is pending, so with no timeout active the timer
++ * is cancelled.
++ */
++void
++pgl_cancel_idle_alarm(void)
++{
++	struct itimerval timeval;
++
++	if (num_active_timeouts > 0 || !signal_pending)
++		return;
++	MemSet(&timeval, 0, sizeof(struct itimerval));
++	if (setitimer(ITIMER_REAL, &timeval, NULL) != 0)
++		elog(FATAL, "could not disable SIGALRM timer: %m");
++	signal_pending = false;
++}
++#endif
+diff --git a/src/include/utils/timeout.h b/src/include/utils/timeout.h
+index 7b19beafdc..134838530d 100644
+--- a/src/include/utils/timeout.h
++++ b/src/include/utils/timeout.h
+@@ -92,5 +92,8 @@ extern bool get_timeout_active(TimeoutId id);
+ extern bool get_timeout_indicator(TimeoutId id, bool reset_indicator);
+ extern TimestampTz get_timeout_start_time(TimeoutId id);
+ extern TimestampTz get_timeout_finish_time(TimeoutId id);
++#ifdef __PGLITE__
++extern void pgl_cancel_idle_alarm(void);
++#endif
+ 
+ #endif							/* TIMEOUT_H */

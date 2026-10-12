@@ -1,0 +1,256 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8"
+    },
+    "add": [
+      {
+        "url": "https://github.com/electric-sql/pglite/archive/ae182ff8bd5ba4acb887d6c925d607a1498aa0b5.tar.gz",
+        "sha256": "10b24517c31d23bbe952fa8cf9810952cd69cc72e8527f842b23125967dbf72c",
+        "dest": "/src/",
+        "unpack": true
+      }
+    ],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "copy": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "dist",
+  "project": "libraries_mecha_packages_pglite-workerd",
+  "dir": "libraries/mecha/packages/pglite-workerd",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "patches/pglite.patch"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [
+      "dist/**"
+    ],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "dist_bayt",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.dist.yaml",
+          ".bayt/Dockerfile.dist",
+          ".bayt/bayt.dist.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+      ]
+    },
+    "outs": {
+      "name": "dist_outs",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "dist/**"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "dist_srcs",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "patches/pglite.patch"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [
+        "wasm_outs_srcs"
+      ],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": true,
+  "deps": [
+    "wasm_outs"
+  ],
+  "sameProjectDeps": [
+    "wasm_outs"
+  ],
+  "transitiveDeps": [
+    "wasm_outs"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "wasm_outs",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "outs": {
+        "globs": [
+          "release/**"
+        ],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [
+    {
+      "srcs": {
+        "globs": [
+          "patches/pglite.patch"
+        ],
+        "exclude": [],
+        "defaultGlobs": null,
+        "defaultExclude": null
+      },
+      "shell": "sh",
+      "dockerfile": {
+        "do": "git -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 apply \"$PWD/patches/pglite.patch\" && cp -R release /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/release"
+      },
+      "name": "patch",
+      "stop": false
+    },
+    {
+      "srcs": {
+        "globs": [
+          "patches/pglite.patch"
+        ],
+        "exclude": [],
+        "defaultGlobs": null,
+        "defaultExclude": null
+      },
+      "shell": "sh",
+      "dockerfile": {
+        "do": "corepack enable pnpm && corepack install -g pnpm@9.7.0+sha512.dc09430156b427f5ecfc79888899e1c39d2d690f004be70e05230b72cb173d96839587545d09429b55ac3c429c801b4dc3c0e002f653830a420fa2dd4e3cf9cf"
+      },
+      "name": "pnpm",
+      "stop": false
+    },
+    {
+      "srcs": {
+        "globs": [
+          "patches/pglite.patch"
+        ],
+        "exclude": [],
+        "defaultGlobs": null,
+        "defaultExclude": null
+      },
+      "dockerfile": {
+        "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 install --frozen-lockfile --filter @electric-sql/pglite...",
+        "mounts": [
+          {
+            "type": "cache",
+            "target": "/root/.local/share/pnpm/store",
+            "scope": "global",
+            "required": false
+          }
+        ]
+      },
+      "name": "install",
+      "shell": "exec",
+      "stop": false
+    },
+    {
+      "srcs": {
+        "globs": [
+          "patches/pglite.patch"
+        ],
+        "exclude": [],
+        "defaultGlobs": null,
+        "defaultExclude": null
+      },
+      "shell": "sh",
+      "dockerfile": {
+        "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 -r --filter @electric-sql/pglite... build && cp -R /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/dist dist"
+      },
+      "name": "builtin",
+      "stop": false
+    }
+  ],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

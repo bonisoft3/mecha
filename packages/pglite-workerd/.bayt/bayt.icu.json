@@ -1,0 +1,142 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "node:22.23.3-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8"
+    },
+    "add": [
+      {
+        "url": "https://registry.npmjs.org/@electric-sql/pglite-icu-full/-/pglite-icu-full-0.0.2.tgz",
+        "sha256": "683455259b053abbc8e31bfea7e2957c44aba4bb5d56c22d5f4e91d5d2680626",
+        "dest": "/src/",
+        "unpack": true
+      }
+    ],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "copy": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "icu",
+  "project": "libraries_mecha_packages_pglite-workerd",
+  "dir": "libraries/mecha/packages/pglite-workerd",
+  "activate": "",
+  "srcs": {
+    "globs": [],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [
+      "icu/**"
+    ],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "icu_bayt",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.icu.yaml",
+          ".bayt/Dockerfile.icu",
+          ".bayt/bayt.icu.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+      ]
+    },
+    "outs": {
+      "name": "icu_outs",
+      "project": "libraries_mecha_packages_pglite-workerd",
+      "dir": "libraries/mecha/packages/pglite-workerd",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "icu/**"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "internal",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+      ]
+    }
+  },
+  "visibility": "internal",
+  "emitsSrcs": false,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [
+    {
+      "srcs": {
+        "globs": [],
+        "exclude": [],
+        "defaultGlobs": null,
+        "defaultExclude": null
+      },
+      "shell": "sh",
+      "dockerfile": {
+        "do": "mkdir -p /tmp/icu icu && tar -xzf /src/package/dist/icu.76.tgz -C /tmp/icu icudt76l/res_index.res icudt76l/keyTypeData.res icudt76l/timezoneTypes.res icudt76l/coll/ucadata.icu icudt76l/coll/root.res && tar -C /tmp/icu --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - icudt76l | gzip -n > icu/icu-root.tgz"
+      },
+      "name": "builtin",
+      "stop": false
+    }
+  ],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

@@ -1,0 +1,10 @@
+# generated from bayt.cue — do not edit
+include:
+- path: ./compose.wasm.yaml
+  required: false
+- path: ./compose.dist.yaml
+  required: false
+- path: ./compose.icu.yaml
+  required: false
+- path: ./compose.package.yaml
+  required: false

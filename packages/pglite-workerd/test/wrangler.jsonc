@@ -1,0 +1,15 @@
+{
+  "name": "pglite-workerd-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-09-01",
+  "durable_objects": { "bindings": [{ "name": "FIXTURE", "class_name": "Fixture" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fixture"] }],
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Data", "globs": ["**/*.data", "**/*.tgz"], "fallthrough": false }
+  ],
+  "alias": {
+    "@electric-sql/pglite": "../dist/index.js",
+    "@electric-sql/pglite/basefs": "../dist/fs/base.js"
+  }
+}

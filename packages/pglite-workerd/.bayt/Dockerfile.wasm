@@ -1,0 +1,36 @@
+# generated from bayt.cue — do not edit
+FROM electricsql/pglite-builder:3.1.74-7@sha256:9e75d29ed19d651b393bf9462bbe770405bd3b26e57d3b76001ac844539835e1 AS wasm
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --from=ghcr.io/nushell/nushell:0.115.1-alpine@sha256:f938ac013d373f4de002900cdc594dab3f2dd55696333e29ed73f48ae724cb77 /usr/bin/nu /usr/local/bin/nu
+ADD --checksum=sha256:31b7d5c46a9501b653536cce2ba593739144981cb0aa25692b678d68505ad2cd --unpack=true https://github.com/electric-sql/postgres-pglite/archive/b133782cd759f08b3aeb263b80a963b39c7b7af1.tar.gz /src/
+COPY --parents wasm.nu patches/postgres-pglite.patch ./
+ENV PGLITE_VERSION=0.5.8
+RUN ["nu", "wasm.nu", "/src/postgres-pglite-b133782cd759f08b3aeb263b80a963b39c7b7af1", "release"]
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.wasm.json ./.bayt/
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS wasm_ctxs
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --parents wasm.nu patches/postgres-pglite.patch ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+FROM scratch AS wasm_srcs
+COPY --from=wasm_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS wasm_outs_ctxs
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --from=libraries_mecha_packages_pglite-workerd-wasm --parents /monorepo/libraries/mecha/packages/pglite-workerd/release/** /
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+FROM scratch AS wasm_outs
+COPY --from=wasm_outs_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS wasm_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
+COPY --parents .bayt/compose.wasm.yaml .bayt/Dockerfile.wasm .bayt/bayt.wasm.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+FROM scratch AS wasm_bayt
+COPY --from=wasm_bayt_ctxs /monorepo /monorepo

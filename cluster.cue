@@ -241,7 +241,7 @@ _devElectricSecret: "dev-electric-secret"
 		// the latter).
 		effects: [...#Effect]
 		// Current claim triggers are refreshed with the ledger in one transaction.
-		if len(effects) > 0 {effectGuards: string & !=""}
+		if len(effects) > 0 {effectInterpreters: string & !=""}
 
 		// The bridges those effects reach through, each placed as
 		// bridge-<name> (#Bridge).
@@ -367,7 +367,7 @@ _devElectricSecret: "dev-electric-secret"
 
 	// The steps the database image stages and this cluster places.
 	// A schedule or an effect is woken by the ticker: a declared schedule by
-	// its cadence, an effect by the one-shot row its guard re-arms, so a
+	// its cadence, an effect by the one-shot row its interpreter re-arms, so a
 	// cluster scaled to zero comes up for what was enqueued meanwhile.
 	_wakes: len(X.state.schedules) > 0 || len(X.state.effects) > 0
 	// The ticker reads and writes through crud as `service`, the role PostgREST
@@ -534,7 +534,7 @@ _devElectricSecret: "dev-electric-secret"
 							from: (_from & {in: X.meta.images.database}).out
 							entrypoint: ["psql"]
 							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/airlock-upgrade.sql"]
-							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\(#AirlockUpgradeSql)\n\(X.state.effectGuards)\nAIRLOCK"]
+							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\(#AirlockUpgradeSql)\n\(X.state.effectInterpreters)\nAIRLOCK"]
 						}
 						compose: {
 							depends_on: {
@@ -960,7 +960,7 @@ _devElectricSecret: "dev-electric-secret"
 							// The units a tick needs up, each asleep at cloud tier:
 							// mesh-events, never mesh, the daprd bundled with the WAL
 							// reader and the pipeline worker; and the airlock, for the
-							// job a guard enqueued.
+							// job an interpreter enqueued.
 							WAKE_URLS: strings.Join(list.Concat([
 								[if X.capabilities.capture {"http://mesh-events:3500/v1.0/healthz/outbound"}],
 								[if len(X.state.effects) > 0 {"http://airlock:9997/healthz"}],
@@ -994,7 +994,7 @@ _devElectricSecret: "dev-electric-secret"
 			// bindings API alone (services/airlock/dapr.yaml), and its bindings
 			// are the program's declarations, so the only traffic leaving for the
 			// world is a call of a declared binding. Nothing pokes it: its
-			// worker hears a guard's enqueue at the guard's commit
+			// worker hears an interpreter's enqueue at the interpreter's commit
 			// (services/airlock/airlock.ts), and the instance is up whenever
 			// the cluster is.
 			if len(X.state.effects) > 0 {

@@ -2,7 +2,7 @@
 // The worker an effect's handler runs in: compute's realm (../compute/realm.ts),
 // no permissions, and a Compartment holding the language and nothing of the
 // host. What the handler gets past the language is three arguments: the
-// input the guard froze into the ledger; a sink whose `fetch` takes a path,
+// input the interpreter froze into the ledger; a sink whose `fetch` takes a path,
 // which crosses here as a message so the host decides where it goes
 // (handler.ts); and the values of the secrets the effect declares, read by the
 // host and never written to the ledger. The sink's `key` is the ledger key,

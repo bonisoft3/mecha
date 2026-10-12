@@ -17,13 +17,13 @@ type State = {
   schedules: string[];
   computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string }[];
   effects?: Effect[];
-  effectGuards?: string;
+  effectInterpreters?: string;
   pgroll?: Record<string, { operations: unknown[] }>;
   bridges?: Bridge[];
 };
 
 const cluster = (state: Partial<State>, capabilities: Record<string, boolean>) => {
-  const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...(state.effects?.length ? { effectGuards: "SELECT 1;" } : {}), ...state };
+  const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...(state.effects?.length ? { effectInterpreters: "SELECT 1;" } : {}), ...state };
   return `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
 };
 
@@ -249,11 +249,11 @@ Deno.test("an effect places the airlock and its daprd, and the ticker and clock 
   assert.deepEqual(networks.value, { airlock: { internal: true }, "airlock-out": { internal: true }, "airlock-wake": { internal: true }, "airlock-egress": {} });
 });
 
-Deno.test("ledger upgrades require current guards and finish before schema readers start", async () => {
-  for (const effectGuards of [undefined, ""]) {
-    const refused = await evaluated(cluster({ effects: [PROBE], effectGuards }, {}));
+Deno.test("ledger upgrades require current interpreters and finish before schema readers start", async () => {
+  for (const effectInterpreters of [undefined, ""]) {
+    const refused = await evaluated(cluster({ effects: [PROBE], effectInterpreters }, {}));
     assert.equal(refused.ok, false);
-    assert.match(refused.stderr, /effectGuards|airlock-upgrade/);
+    assert.match(refused.stderr, /effectInterpreters|airlock-upgrade/);
   }
   for (const pgroll of [{}, { "01_a": { operations: [] } }] as NonNullable<State["pgroll"]>[]) {
     const got = await exported({ effects: [PROBE], pgroll }, "surface.targets", { auth: true, capture: true });

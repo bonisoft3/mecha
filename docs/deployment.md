@@ -78,8 +78,8 @@ What bites:
 
 A cluster that declares an effect runs the airlock
 ([in a cluster](../services/airlock/README.md#in-a-cluster)), a long-lived
-worker that hears each enqueue on Graphile's `jobs:insert` at the guard's
-commit. Its wake is the ticker's: the guard that enqueues re-arms a one-shot
+worker that hears each enqueue on Graphile's `jobs:insert` at the interpreter's
+commit. Its wake is the ticker's: the interpreter that enqueues re-arms a one-shot
 schedule row ([the ticker](../services/ticker/README.md#a-one-shot-row)), the
 next sweep GETs the airlock's `/healthz`, and where the cluster scales to zero
 that brings it up for what was enqueued meanwhile. Crash recovery needs no stable replica name, so any number

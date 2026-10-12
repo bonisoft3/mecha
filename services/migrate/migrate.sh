@@ -14,6 +14,8 @@ set -euo pipefail
 dir=$1
 baseline=$2
 : "${DATABASE_URL:?names the database to migrate}"
+# Comma-separated; empty where the cluster places no step a service needs.
+: "${REQUIRED_TABLES:=}"
 export PGROLL_PG_URL=$DATABASE_URL
 # Byte order, which is the order a fresh volume replays them in.
 export LC_ALL=C
@@ -25,6 +27,16 @@ ask() { psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -qtA "$@"; }
 applied() {
 	ask -v name="$1" <<< "SELECT count(*) FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'pgroll' AND done AND name = :'name';"
 }
+
+# A table an initdb step the cluster places creates exists only on a volume
+# initdb built. Over an older one the service that reads it would run against
+# nothing, so the volume is refused here instead.
+for table in ${REQUIRED_TABLES//,/ }; do
+	if [ "$(ask -v table="$table" <<< "SELECT to_regclass(format('public.%I', :'table')) IS NOT NULL;")" != t ]; then
+		echo "migrate: this cluster needs table $table, which only initdb creates and this volume predates; recreate the volume" >&2
+		exit 1
+	fi
+done
 
 pgroll init
 

@@ -57,7 +57,15 @@ _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 // the airlock's step where an effect is (bayt.cue). Its name places it after
 // a caller's grants, whose reach it revokes, and before the seed the caller
 // names after it.
-#ScheduleMigration: "020_schedule.sql"
+//
+// Initdb prefixes are split three ways: a caller's own steps hold 000-799,
+// the framework's (mecha's and pronto's) 800-899, and a caller's seed 900.
+// One file per prefix, so the framework keeps out of the range an app
+// numbers its steps in, and pronto refuses an app step in 8xx.
+#ScheduleMigration: "800_schedule.sql"
+// Staged in the database image at 020 for compatibility with the published
+// bonitao/mecha-database:0.8.0 image, and placed in initdb at 800.
+#ScheduleStaged: "020_schedule.sql"
 
 // Graphile Worker's schema and the airlock's tables, placed where an effect
 // is declared, on the first digits after the steps a caller opens with
@@ -354,16 +362,17 @@ _devElectricSecret: "dev-electric-secret"
 	// The schedule table reaches an effect's cluster inside the airlock's
 	// step (bayt.cue), ahead of any caller step.
 	_staged: list.Concat([
-		[if len(X.state.schedules) > 0 {#ScheduleMigration}],
-		[if len(X.state.effects) > 0 for m in [#GraphileMigration, #AirlockMigration] {m}],
+		[if len(X.state.schedules) > 0 {{src: #ScheduleStaged, dst: #ScheduleMigration}}],
+		[if len(X.state.effects) > 0 for m in [#GraphileMigration, #AirlockMigration] {{src: m, dst: m}}],
 	])
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 	let jwtSecret = "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
 	// The scheme and host a reader reaches the door at, stated by the
 	// deployment and never read off a request: the door answers any Host. Its
-	// default is the door's own name for a person's browser (the Caddyfile's).
-	let origin = "${ORIGIN:-https://localhost:8443}"
+	// default is the door's own name for a person's browser (the Caddyfile's)
+	// on the port it binds, which bayt fills into `${<door.env>}`.
+	let origin = "${ORIGIN:-\(X.meta.door.scheme)://localhost:${\(X.meta.door.env)}}"
 
 	surface: {
 		// What the app's absolute addresses are spelled against
@@ -438,11 +447,11 @@ _devElectricSecret: "dev-electric-secret"
 						// container's writable layer, which `--force-recreate`
 						// discards with it.
 						copy: list.Concat([
-							[{srcs: [for _, m in X._initdb if m != #TenancyMigration && !list.Contains(X._staged, m) {m}], dst: "\(#InitdbDir)/"}],
-							[for m in X._staged {
+							[{srcs: [for _, m in X._initdb if m != #TenancyMigration && !list.Contains([for s in X._staged {s.dst}], m) {m}], dst: "\(#InitdbDir)/"}],
+							[for s in X._staged {
 								from: (_from & {in: X.meta.images.database}).out
-								srcs: ["\(#StagedDir)/\(m)"]
-								dst:  "\(#InitdbDir)/\(m)"
+								srcs: ["\(#StagedDir)/\(s.src)"]
+								dst:  "\(#InitdbDir)/\(s.dst)"
 							}],
 						])
 					}
@@ -493,7 +502,12 @@ _devElectricSecret: "dev-electric-secret"
 						}
 						compose: {
 							depends_on: database: _healthy
-							environment: DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
+							environment: {
+								DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
+								// The schedule step is initdb's alone, so a volume older
+								// than the cluster's first schedule lacks its table.
+								if len(X.state.schedules) > 0 {REQUIRED_TABLES: "schedule"}
+							}
 						}
 					}
 				}
@@ -606,15 +620,19 @@ _devElectricSecret: "dev-electric-secret"
 						][0]}],
 					])
 				}
+				// One published door. For an app it is h2 over TLS; the plain
+				// listener still exists inside the container — the healthcheck
+				// above uses it — but is deliberately NOT published: the
+				// browser's six-connections-per-origin cap only exists on
+				// HTTP/1.1, and a second front door is a path that only ever
+				// runs on a laptop (docs/proxy.md).
+				expose: door: {
+					port: X.meta.door.port
+					publish: environment: X.meta.door.env
+					if X.meta.door.host != _|_ {host: X.meta.door.host}
+				}
 				compose: {
 					build: additional_contexts: root: strings.TrimSuffix("../\(X.meta.root)", "/")
-					// One published door. For an app it is h2 over TLS; the plain
-					// listener still exists inside the container — the healthcheck
-					// above uses it — but is deliberately NOT published: the
-					// browser's six-connections-per-origin cap only exists on
-					// HTTP/1.1, and a second front door is a path that only ever
-					// runs on a laptop (docs/proxy.md).
-					ports: [X.meta.door]
 					// The Caddyfile substitutes this into the electric route, which is
 					// the only place the secret is added. Same default as the electric
 					// service reads, and both are overridden together or neither.
@@ -1192,8 +1210,16 @@ _devElectricSecret: "dev-electric-secret"
 		airlock: *"services/airlock/effects.json" | string
 		// The proxy's config, relative to the app dir.
 		caddyfile: *"docker/Caddyfile" | string
-		// The one published door, in compose's `host:container` form.
-		door: *"${CADDY_TLS_HOST_PORT:-0}:8443" | string
+		// The one published door: the port the proxy listens on, the scheme
+		// it serves, and the host variable that moves it. Unset, the host port
+		// is `host` where people type it, else the project's own
+		// (bayt's #port.publish); only what a person brings up binds it.
+		door: {
+			port:   *8443 | int
+			scheme: *"https" | "http"
+			env:    *"CADDY_TLS_HOST_PORT" | string
+			host?:  int
+		}
 		// The conduit pipeline, an envsubst template, relative to the app dir.
 		conduitTemplate: *"docker/conduit-pipeline.yaml" | string
 		statics: [...#Static]

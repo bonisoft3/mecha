@@ -583,6 +583,28 @@ describe("a table synced on demand", () => {
     await view.cleanup()
   })
 
+  // A screen drawing a region per row asks the same shape for one subset per
+  // row, all at once. Each was its own snapshot, each pausing the stream until
+  // its rows arrived: twenty on golaberto's chances page, and under load the
+  // last of them past 30 s (Electric's "held the pause lock for 30s"), which
+  // the server renderer waited out before answering.
+  it("loads the subsets asked for together as one snapshot", async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({ id: `p${i}`, game_id: `g${i}`, a: "0", b: "0", txid: "5" }))
+    const electric = fakeElectric({ schema: { player_game: schema }, rows: { player_game: rows }, xmin: 1 })
+    const c = client(electric)
+    // Ordered, as a region's read is: without a limit the order selects nothing.
+    const views = rows.map((r) => createLiveQueryCollection({
+      query: (q) => q.from({ row: c.collections.player_game }).where(({ row }) => eq(row.game_id, r.game_id)).orderBy(({ row }) => row.a),
+    }))
+    for (const view of views) view.startSyncImmediate()
+    for (const view of views) await until(() => view.isReady() && !view.isLoadingSubset, "settled")
+    // One snapshot of all twenty, whatever the stream asks of it beside.
+    expect(new Set(electric.subsets.map((x) => x.where)).size).toBe(1)
+    expect(electric.subsets.map((x) => Object.keys(x.params).length)).not.toContain(1)
+    expect(views.map((v) => v.toArray.map((r: any) => r.id))).toEqual(rows.map((r) => [r.id]))
+    for (const view of views) await view.cleanup()
+  })
+
   // A subset is a snapshot of the shape at one moment, and the live stream
   // carries every change to the shape from the moment the collection opened.
   // The two must merge without a row going back in time or arriving partial:

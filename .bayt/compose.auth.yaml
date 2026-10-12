@@ -9,6 +9,9 @@ services:
       context: ..
       dockerfile: .bayt/Dockerfile.auth
       target: auth
+      tags:
+      - bayt-libraries_mecha-auth:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-auth:latest
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
@@ -24,7 +27,7 @@ services:
       PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-https://localhost:*}
-    image: bayt-libraries_mecha-auth:${BAYT_IMAGE_TAG:-latest}
+    image: bayt-libraries_mecha-auth:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:
       default:
         aliases:

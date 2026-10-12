@@ -138,9 +138,15 @@ Deno.test("a step taking the digits of a step mecha places is refused", async ()
   assert.equal(floor.ok, false);
   assert.match(floor.stderr, /_initdb\."003": conflicting values/);
 
-  const scheduled = await copied({ migrations: ["m/020_x.sql"], schedules: ["tick"] });
+  const scheduled = await copied({ migrations: ["m/800_x.sql"], schedules: ["tick"] });
   assert.equal(scheduled.ok, false);
-  assert.match(scheduled.stderr, /_initdb\."020": conflicting values/);
+  assert.match(scheduled.stderr, /_initdb\."800": conflicting values/);
+});
+
+// GolAberto's own steps hold 010 through 047, the schedule's old 020 among them.
+Deno.test("a schedule leaves the low hundreds to the caller's steps", async () => {
+  const got = await copied({ migrations: ["m/020_x.sql", "m/021_y.sql"], schedules: ["tick"] });
+  assert.equal(got.ok, true, got.stderr);
 });
 
 const FEED = ["conduit", "mesh-events", "redis", "transform"];
@@ -468,6 +474,22 @@ Deno.test("the migrate runner takes the database image", async () => {
   }).output();
   assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
   assert.deepEqual(JSON.parse(new TextDecoder().decode(out.stdout)), { from: { name: "img" }, entrypoint: ["/migrate.sh"] });
+});
+
+// The schedule table is initdb's alone: a volume older than the cluster's
+// first schedule lacks it, and the runner is told to refuse that volume.
+Deno.test("a schedule makes the migrate runner require its table", async () => {
+  const env = async (schedules: string[]) => {
+    const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: {migrations: [], pipelines: [], schedules: ${JSON.stringify(schedules)}, pgroll: {"01_a": {operations: []}}}}`;
+    const out = await new Deno.Command("cue", {
+      args: ["export", ".:cluster", "-e", `(${cluster}).surface.targets.migrate.compose.environment`],
+      cwd: MECHA, stdout: "piped", stderr: "piped",
+    }).output();
+    assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
+    return JSON.parse(new TextDecoder().decode(out.stdout));
+  };
+  assert.equal((await env(["tick"])).REQUIRED_TABLES, "schedule");
+  assert.equal((await env([])).REQUIRED_TABLES, undefined);
 });
 
 // The blob store is rclone's own image: the bucket made and the server

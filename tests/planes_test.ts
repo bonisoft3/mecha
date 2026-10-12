@@ -16,7 +16,7 @@ const PROJECT = `mecha-planes-${RUN}`;
 // bayt names an image the same in every checkout; a tag of this run's own
 // keeps a concurrent build elsewhere from retagging what these boots start.
 const TAG = `planes-${RUN}`;
-const SCHEDULE_STEP = "/docker-entrypoint-initdb.d/020_schedule.sql";
+const SCHEDULE_STEP = "/docker-entrypoint-initdb.d/800_schedule.sql";
 
 type Out = { ok: boolean; code: number; stdout: string; stderr: string };
 

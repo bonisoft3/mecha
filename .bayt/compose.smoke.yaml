@@ -10,6 +10,9 @@ services:
       context: ..
       dockerfile: .bayt/Dockerfile.smoke
       target: smoke
+      tags:
+      - bayt-libraries_mecha-smoke:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-smoke:latest
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
@@ -25,7 +28,7 @@ services:
       libraries_mecha-electric:
         condition: service_healthy
         restart: true
-    image: bayt-libraries_mecha-smoke:${BAYT_IMAGE_TAG:-latest}
+    image: bayt-libraries_mecha-smoke:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     scale: 0
   libraries_mecha-smoke_bayt:
     build:

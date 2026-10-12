@@ -4,7 +4,8 @@
     "up": false,
     "manual": false,
     "environment": {
-      "DATABASE_URL": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable"
+      "DATABASE_URL": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable",
+      "REQUIRED_TABLES": "schedule"
     },
     "ports": [],
     "volumes": [],

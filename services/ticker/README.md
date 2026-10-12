@@ -64,9 +64,13 @@ into a service that looks healthy and does half its job:
 ## One table of mecha's, and the app's own
 
 `schedule` is mecha's mechanism, created by the database image as
-`020_schedule.sql` where the cluster declares a schedule, and inside
+`800_schedule.sql` where the cluster declares a schedule, and inside
 `012_airlock.sql` where it declares an effect, and seeded from the app's
-declarations. An app never authors its rows by hand.
+declarations at `801`. 800–899 is the framework's initdb range; an app's own
+steps hold 000–799 and its seed 900
+([schema](../../docs/schema.md#how-a-schema-reaches-the-database)). An app
+never authors its rows by hand. Both steps are initdb's, so they reach only a
+volume initdb builds, and migrate refuses a volume that lacks the table.
 
 ```sql
 create table schedule (

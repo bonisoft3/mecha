@@ -9,6 +9,9 @@ services:
       context: ..
       dockerfile: .bayt/Dockerfile.mesh-events
       target: mesh-events
+      tags:
+      - bayt-libraries_mecha-mesh-events:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-mesh-events:latest
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
@@ -28,7 +31,7 @@ services:
       retries: 30
       start_period: 30s
       start_interval: 500ms
-    image: bayt-libraries_mecha-mesh-events:${BAYT_IMAGE_TAG:-latest}
+    image: bayt-libraries_mecha-mesh-events:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:
       default:
         aliases:

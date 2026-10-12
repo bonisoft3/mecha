@@ -350,6 +350,46 @@ function parenthesizedLoad(opts: LoadSubsetOptions): LoadSubsetOptions {
   }
 }
 
+/** Predicates one snapshot carries at most: they travel in its URL. */
+const SUBSET_BATCH = 64
+
+/**
+ * The subsets asked for in one turn of the event loop, each a bare `where`,
+ * loaded as one snapshot of their union. A snapshot pauses the shape's stream
+ * until its rows arrive, and a screen drawing a region per row asks for one
+ * subset per row of the same shape, all at once: twenty snapshots of one shape
+ * against Postgres together, and under load the last of them past 30 s
+ * (Electric's "held the pause lock for 30s"). A subset with a limit or a
+ * cursor is its own.
+ */
+export function coalescedLoad(load: (opts: LoadSubsetOptions) => true | Promise<void>) {
+  type Waiting = { where: IR.BasicExpression<boolean>; resolve: () => void; reject: (e: unknown) => void }
+  let batch: Waiting[] | null = null
+  const flush = () => {
+    const waiting = batch!
+    batch = null
+    for (let at = 0; at < waiting.length; at += SUBSET_BATCH) {
+      const part = waiting.slice(at, at + SUBSET_BATCH)
+      const where = part.length === 1 ? part[0].where : new IR.Func("or", part.map((w) => w.where)) as IR.BasicExpression<boolean>
+      Promise.resolve()
+        .then(() => load({ where }))
+        .then(() => { for (const w of part) w.resolve() }, (e) => { for (const w of part) w.reject(e) })
+    }
+  }
+  return (opts: LoadSubsetOptions): true | Promise<void> => {
+    // Without a limit an order selects nothing: the union's rows are the same.
+    if (opts.where === undefined || opts.limit !== undefined || opts.cursor !== undefined) return load(opts)
+    const where = opts.where
+    return new Promise<void>((resolve, reject) => {
+      if (batch === null) {
+        batch = []
+        setTimeout(flush, 0)
+      }
+      batch.push({ where, resolve, reject })
+    })
+  }
+}
+
 export function createMechaClient(config: MechaClientConfig): MechaClient {
   let bound: Types | undefined
   const typeTable = (): Types => {
@@ -506,7 +546,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       if (!onDemand || load === undefined) return result
       return {
         ...(result as object),
-        loadSubset: (opts: LoadSubsetOptions) => {
+        loadSubset: coalescedLoad((opts: LoadSubsetOptions) => {
           const loaded = load(parenthesizedLoad(opts))
           if (loaded === true) return true
           return loaded.catch((error) => {
@@ -516,7 +556,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
             for (const fn of failureListeners) fn(error)
             throw error
           })
-        },
+        }),
       }
     }
     return createCollection({

@@ -44,7 +44,7 @@ put both in one order. These steps are mecha's own, and their digits are taken:
   reaches nothing there whichever side of these steps it runs on, and the
   revoke in `012_airlock.sql` removes what default privileges gave the schema
   or its tables at creation.
-- **`020_schedule.sql`, the table the ticker sweeps**, where the cluster
+- **`800_schedule.sql`, the table the ticker sweeps**, where the cluster
   declares a schedule
   ([the ticker](../services/ticker/README.md#one-table-of-mechas-and-the-apps-own)).
   Staged and placed the same way, after a caller's grants and before the
@@ -52,6 +52,14 @@ put both in one order. These steps are mecha's own, and their digits are taken:
   same text opens `012_airlock.sql` instead, since the guard a caller's step
   can fire re-arms a row of it; a cluster with both runs it twice, every
   statement holding.
+
+Prefixes are split three ways: a caller's own steps hold 000–799, the
+framework's 800–899 (this schedule table at 800, pronto's seed of it at 801),
+and a caller's seed 900. The airlock's 011 and 012 predate the split. A step
+the framework places only exists on a volume initdb built: a cluster that
+declares its first schedule over an existing volume finds no `schedule`
+table, and migrate refuses to start rather than leave the ticker sweeping
+nothing ([pending](../../../plugins/pronto/PENDING.md#pipelines-and-schedules)).
 
 The initdb set has no runner and no revision table: **the steps that ran are
 the files in the image's initdb directory.** A new database gets a change by

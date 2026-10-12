@@ -5,6 +5,9 @@ services:
       context: ..
       dockerfile: .bayt/Dockerfile.redpanda
       target: redpanda
+      tags:
+      - bayt-libraries_mecha-redpanda:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-redpanda:latest
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
@@ -26,7 +29,7 @@ services:
       retries: 6
       start_period: 15s
       start_interval: 500ms
-    image: bayt-libraries_mecha-redpanda:${BAYT_IMAGE_TAG:-latest}
+    image: bayt-libraries_mecha-redpanda:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:
       default:
         aliases:

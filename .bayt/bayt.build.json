@@ -115,7 +115,11 @@
       "outs": {
         "globs": [
           "proto/**",
-          "packages/**"
+          "packages/**",
+          "[m]ise.toml",
+          "[.]mise.toml",
+          "[m]ise.lock",
+          "[.]tool-versions"
         ],
         "exclude": []
       },
@@ -132,7 +136,11 @@
           "dir": "libraries/mecha",
           "outs": {
             "globs": [
-              "packages/**"
+              "packages/**",
+              "[m]ise.toml",
+              "[.]mise.toml",
+              "[m]ise.lock",
+              "[.]tool-versions"
             ],
             "exclude": []
           }

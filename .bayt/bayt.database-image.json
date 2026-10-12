@@ -33,6 +33,16 @@
       {
         "from": null,
         "srcs": [
+          "services/ticker/schedule.sql"
+        ],
+        "dst": "/usr/share/mecha/initdb/800_schedule.sql",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
           "services/airlock/graphile.sql"
         ],
         "dst": "/usr/share/mecha/initdb/011_graphile_worker.sql",
@@ -75,7 +85,7 @@
       }
     ],
     "epilogue": [
-      "RUN cat /usr/share/mecha/initdb/020_schedule.sql /usr/share/mecha/initdb/012_airlock.sql > /tmp/airlock.sql && mv /tmp/airlock.sql /usr/share/mecha/initdb/012_airlock.sql"
+      "RUN cat /usr/share/mecha/initdb/800_schedule.sql /usr/share/mecha/initdb/012_airlock.sql > /tmp/airlock.sql && mv /tmp/airlock.sql /usr/share/mecha/initdb/012_airlock.sql"
     ],
     "cmd": [
       "postgres",

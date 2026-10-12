@@ -118,7 +118,7 @@
         "srcs": [
           "/usr/share/mecha/initdb/020_schedule.sql"
         ],
-        "dst": "/docker-entrypoint-initdb.d/020_schedule.sql",
+        "dst": "/docker-entrypoint-initdb.d/800_schedule.sql",
         "link": true,
         "parents": false,
         "exclude": []

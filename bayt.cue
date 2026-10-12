@@ -71,7 +71,7 @@ _stack: cluster.#Cluster & {
 		// A plain-HTTP door: mecha's proxy config serves no TLS, and the
 		// smoke suites and the benchmark address localhost:8080.
 		caddyfile:       "services/proxy/Caddyfile"
-		door:            "8080:8080"
+		door: {port: 8080, scheme: "http", env: "MECHA_DOOR_HOST_PORT", host: 8080}
 		conduitTemplate: "services/cdc/pipelines/cdc-to-dapr.yaml"
 		statics: []
 	}
@@ -167,6 +167,7 @@ _mecha: bayt.#project & _where & {
 				// schema reload go through.
 				copy: [
 					{srcs: ["services/database/rls/rls.sql"], dst: "\(cluster.#InitdbDir)/\(cluster.#TenancyMigration)"},
+					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleStaged)"},
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
 					{srcs: ["services/airlock/graphile.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#GraphileMigration)"},
 					{srcs: ["services/airlock/airlock.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#AirlockMigration)"},

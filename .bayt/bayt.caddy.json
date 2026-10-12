@@ -17,11 +17,9 @@
     ],
     "environment": {
       "ELECTRIC_SECRET": "${ELECTRIC_SECRET:-dev-electric-secret}",
-      "ORIGIN": "${ORIGIN:-https://localhost:8443}"
+      "ORIGIN": "${ORIGIN:-http://localhost:${MECHA_DOOR_HOST_PORT}}"
     },
-    "ports": [
-      "8080:8080"
-    ],
+    "ports": [],
     "volumes": [],
     "depends_on": {},
     "networks": {
@@ -119,6 +117,15 @@
     "entrypoint": null,
     "incremental": false,
     "cmd": null
+  },
+  "expose": {
+    "door": {
+      "port": 8080,
+      "host": 8080,
+      "publish": {
+        "environment": "MECHA_DOOR_HOST_PORT"
+      }
+    }
   },
   "name": "caddy",
   "project": "libraries_mecha",

@@ -128,12 +128,17 @@ transport the only variable:
 | slowest shape | 20,027 ms | 142 ms |
 | a write from that screen | 445 ms | 43 ms |
 
-So the cluster publishes one port, `meta.door` (default
-`${CADDY_TLS_HOST_PORT:-0}:8443`), serving h2 over TLS. The plain `:8080`
-listener exists inside the container for the healthcheck and is deliberately
-not published, so there is no second transport to drift onto. mecha's own stack
-is the exception: its proxy serves plain HTTP on `8080:8080`, which its smoke
-suites and benchmark address.
+So the cluster publishes one port, `meta.door`, serving h2 over TLS on 8443.
+It binds the host at `${CADDY_TLS_HOST_PORT:-<n>}`, where `<n>` is the app's
+own port, hashed from its repo, project and `discriminator` (bayt's
+`#port.publish`): two apps on one machine each keep a stable origin, and two
+checkouts of one collide on the bind until one sets the variable. Only what a
+person brings up publishes it; integrate's closure keeps it private, its
+checkers reaching `https://caddy:8443` on the cluster network. The plain
+`:8080` listener exists inside the container for the healthcheck and is
+deliberately not published, so there is no second transport to drift onto.
+mecha's own stack is the exception: its proxy serves plain HTTP on host 8080,
+which its smoke suites and benchmark address.
 
 ## The certificate
 
@@ -167,13 +172,12 @@ holds it, so one image serves every deployment. Caddy's command refuses to
 start on a value that is not exactly an origin, since a template writes it into
 markup as it stands.
 
-Its default is `https://localhost:8443`, the door's name for a person's
-browser. The host port is the host's pick (`meta.door`), so where it is not
-8443 — `CADDY_TLS_HOST_PORT=0`, a random one — the canonical links a
-development stack writes name a port the browser is not on. Nothing else reads
-them in development, and reading the Host back would be the hole this closes.
-`WEBAUTHN_ORIGIN`'s default, `https://localhost:*`, admits any port of that
-door for the same reason.
+Its default is `https://localhost:${CADDY_TLS_HOST_PORT:-<n>}`, the door's
+name for a person's browser on the port it binds, so moving the port moves the
+origin with it; a deployment sets `ORIGIN` itself. Reading the Host back
+instead would be the hole this closes. `WEBAUTHN_ORIGIN`'s default,
+`https://localhost:*`, admits any port of that door, so a passkey ceremony
+also works where the browser reaches it some other way.
 
 ## Rejected
 

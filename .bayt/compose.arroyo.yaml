@@ -9,6 +9,9 @@ services:
       context: ..
       dockerfile: .bayt/Dockerfile.arroyo
       target: arroyo
+      tags:
+      - bayt-libraries_mecha-arroyo:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-arroyo:latest
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
@@ -25,7 +28,7 @@ services:
       - action: sync+restart
         path: ../services/arroyo/queries/
         target: /queries/
-    image: bayt-libraries_mecha-arroyo:${BAYT_IMAGE_TAG:-latest}
+    image: bayt-libraries_mecha-arroyo:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:
       default:
         aliases:

@@ -1,6 +1,8 @@
 # generated from bayt.cue — do not edit
 include:
-- path: ./compose.bayt.yaml
+- path:
+  - ./compose.bayt.yaml
+  - ./compose.bayt.ports.yaml
   required: false
 services:
   setup:

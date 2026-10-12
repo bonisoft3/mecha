@@ -7,6 +7,9 @@ services:
       context: ..
       dockerfile: .bayt/Dockerfile.caddy
       target: caddy
+      tags:
+      - bayt-libraries_mecha-caddy:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-caddy:latest
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
@@ -24,7 +27,7 @@ services:
         target: /certs
     environment:
       ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}
-      ORIGIN: ${ORIGIN:-https://localhost:8443}
+      ORIGIN: ${ORIGIN:-http://localhost:${MECHA_DOOR_HOST_PORT:-8080}}
     healthcheck:
       test:
       - CMD
@@ -35,13 +38,11 @@ services:
       retries: 30
       start_period: 10s
       start_interval: 500ms
-    image: bayt-libraries_mecha-caddy:${BAYT_IMAGE_TAG:-latest}
+    image: bayt-libraries_mecha-caddy:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:
       default:
         aliases:
         - caddy
-    ports:
-    - 8080:8080
   libraries_mecha-caddy_bayt:
     build:
       context: ..

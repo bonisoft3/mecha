@@ -8,6 +8,9 @@ services:
       context: ..
       dockerfile: .bayt/Dockerfile.migrate
       target: migrate
+      tags:
+      - bayt-libraries_mecha-migrate:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-migrate:latest
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
@@ -18,7 +21,8 @@ services:
     environment:
       DATABASE_URL: >-
         postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable
-    image: bayt-libraries_mecha-migrate:${BAYT_IMAGE_TAG:-latest}
+      REQUIRED_TABLES: schedule
+    image: bayt-libraries_mecha-migrate:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:
       default:
         aliases:

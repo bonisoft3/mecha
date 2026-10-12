@@ -1,0 +1,5 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-caddy:
+    ports:
+    - ${MECHA_DOOR_HOST_PORT:-8080}:8080

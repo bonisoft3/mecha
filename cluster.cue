@@ -81,6 +81,19 @@ _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 #GraphileMigration: "011_graphile_worker.sql"
 #AirlockMigration:  "012_airlock.sql"
 
+#AirlockUpgradeSql: """
+	SET LOCAL lock_timeout = '5s';
+	SET LOCAL statement_timeout = '60s';
+	LOCK TABLE airlock.external_effect_ledger IN ACCESS EXCLUSIVE MODE;
+	DO $upgrade$
+	BEGIN
+	  IF EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'airlock' AND table_name = 'external_effect_ledger' AND column_name = 'request') THEN
+	    ALTER TABLE airlock.external_effect_ledger RENAME COLUMN request TO input;
+	  END IF;
+	  PERFORM input FROM airlock.external_effect_ledger LIMIT 0;
+	END $upgrade$;
+	"""
+
 // What a sink may be: an https origin whose host is a DNS name of at least
 // two labels, the last opening with a letter. This is spelling only: a
 // single-label host (`database`) or an IP literal is refused here; a name that
@@ -227,6 +240,9 @@ _devElectricSecret: "dev-electric-secret"
 		// (#GraphileMigration, #AirlockMigration, the schedule table inside
 		// the latter).
 		effects: [...#Effect]
+		// Current claim triggers are refreshed with the ledger in one transaction.
+		if len(effects) > 0 {effectGuards: string & !=""}
+
 		// The bridges those effects reach through, each placed as
 		// bridge-<name> (#Bridge).
 		bridges: *[] | [...#Bridge]
@@ -315,6 +331,7 @@ _devElectricSecret: "dev-electric-secret"
 	_schemaReady: {
 		database: _healthy
 		if len(X.state.pgroll) > 0 {migrate: _completed}
+		if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
 	}
 
 	// The effects as every target reads them. A field's pattern is checked
@@ -507,6 +524,28 @@ _devElectricSecret: "dev-electric-secret"
 								// The schedule step is initdb's alone, so a volume older
 								// than the cluster's first schedule lacks its table.
 								if len(X.state.schedules) > 0 {REQUIRED_TABLES: "schedule"}
+							}
+						}
+					}
+				}
+				if len(X.state.effects) > 0 {
+					"airlock-upgrade": X._image & {
+						dockerfile: {
+							from: (_from & {in: X.meta.images.database}).out
+							entrypoint: ["psql"]
+							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/airlock-upgrade.sql"]
+							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\(#AirlockUpgradeSql)\n\(X.state.effectGuards)\nAIRLOCK"]
+						}
+						compose: {
+							depends_on: {
+								database: _healthy
+								if len(X.state.pgroll) > 0 {migrate: _completed}
+							}
+							environment: {
+								PGHOST:     "database"
+								PGUSER:     "${POSTGRES_USER:-postgres}"
+								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
 							}
 						}
 					}

@@ -52,6 +52,10 @@ const MIGRATIONS = [
   "tests/airlock/migrations/009_airlock_smoke.sql",
 ];
 
+const guardMigration = await Deno.readTextFile(`${FIXTURE}/migrations/009_airlock_smoke.sql`);
+const guards = [...guardMigration.matchAll(/CREATE FUNCTION[\s\S]*?END \$\$;/g)].map(([sql]) => sql.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION"));
+assert.equal(guards.length, 2);
+
 const BAYT_CUE = `package fixture
 
 import (
@@ -73,6 +77,7 @@ _cluster: cluster.#Cluster & {
 			{name: "probe", origin: "https://sink.mecha.test:8443", handler: "effects/probe.js", endpoint: "dapr/probe.yaml"},
 			{name: "confirm", bridge: "mail", handler: "effects/confirm.js", endpoint: "dapr/confirm.yaml", secrets: ["CONFIRM_SIGNING_KEY"]},
 		]
+		effectGuards: ${JSON.stringify(guards.join("\n\n"))}
 		bridges: [{name: "mail", kind: "mail", server: "smtp.mailpit.test:1025", tls: "none", domain: "airlock.test"}]
 	}
 	capabilities: auth: true

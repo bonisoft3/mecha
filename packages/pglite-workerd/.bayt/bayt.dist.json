@@ -9,8 +9,8 @@
     "add": [
       {
         "url": "https://github.com/electric-sql/pglite/archive/ae182ff8bd5ba4acb887d6c925d607a1498aa0b5.tar.gz",
-        "sha256": "10b24517c31d23bbe952fa8cf9810952cd69cc72e8527f842b23125967dbf72c",
         "dest": "/src/",
+        "sha256": "10b24517c31d23bbe952fa8cf9810952cd69cc72e8527f842b23125967dbf72c",
         "unpack": true
       }
     ],

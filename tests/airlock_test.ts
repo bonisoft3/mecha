@@ -30,7 +30,7 @@ const TAG = `airlock-${RUN}`;
 // The bayt project's name, which prefixes every service it lowers.
 const P = "mecha_airlock_smoke";
 // Commit to settled, with nothing poking the airlock: its worker hears the
-// guard's enqueue at the commit.
+// interpreter's enqueue at the commit.
 const SETTLE_MS = 3000;
 // Where the outbound networks stand: halves of TEST-NET-2, routed nowhere.
 const EGRESS = { "airlock-egress": "198.51.100.0/25", "bridge-mail-egress": "198.51.100.128/25" };
@@ -51,6 +51,10 @@ const MIGRATIONS = [
   "tests/airlock/migrations/005_publication.sql",
   "tests/airlock/migrations/009_airlock_smoke.sql",
 ];
+
+const interpreterMigration = await Deno.readTextFile(`${FIXTURE}/migrations/009_airlock_smoke.sql`);
+const interpreters = [...interpreterMigration.matchAll(/CREATE FUNCTION[\s\S]*?END \$\$;/g)].map(([sql]) => sql.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION"));
+assert.equal(interpreters.length, 2);
 
 const BAYT_CUE = `package fixture
 
@@ -73,6 +77,7 @@ _cluster: cluster.#Cluster & {
 			{name: "probe", origin: "https://sink.mecha.test:8443", handler: "effects/probe.js", endpoint: "dapr/probe.yaml"},
 			{name: "confirm", bridge: "mail", handler: "effects/confirm.js", endpoint: "dapr/confirm.yaml", secrets: ["CONFIRM_SIGNING_KEY"]},
 		]
+		effectInterpreters: ${JSON.stringify(interpreters.join("\n\n"))}
 		bridges: [{name: "mail", kind: "mail", server: "smtp.mailpit.test:1025", tls: "none", domain: "airlock.test"}]
 	}
 	capabilities: auth: true

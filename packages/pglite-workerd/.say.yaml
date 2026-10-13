@@ -9,7 +9,8 @@ say:
       mut flags = [--allow=fs.read=.. --allow=fs.write=../dist -f compose.yaml --set 'package.output=type=local,dest=../dist']
       for spec in ($env.CACHE_FROM? | default '' | lines | where ($it | is-not-empty)) { $flags = ($flags | append [--set $'*.cache-from=($spec)']) }
       for spec in ($env.CACHE_TO? | default '' | lines | where ($it | is-not-empty)) { $flags = ($flags | append [--set $'*.cache-to=($spec)']) }
-      with-env {BUILDX_BAKE_ENTITLEMENTS_FS: "0"} { ^docker buildx bake ...$flags package }
+      let bake_flags = $flags
+      with-env {BUILDX_BAKE_ENTITLEMENTS_FS: "0"} { ^docker buildx bake ...$bake_flags package }
   # Needs dist/ (build) and Docker (restore_test.ts, migrate_test.ts).
   test:
     do: mise exec -- deno test -A --frozen test/

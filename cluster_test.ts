@@ -17,11 +17,13 @@ type State = {
   schedules: string[];
   computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string }[];
   effects?: Effect[];
+  effectInterpreters?: string;
+  pgroll?: Record<string, { operations: unknown[] }>;
   bridges?: Bridge[];
 };
 
 const cluster = (state: Partial<State>, capabilities: Record<string, boolean>) => {
-  const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...state };
+  const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...(state.effects?.length ? { effectInterpreters: "SELECT 1;" } : {}), ...state };
   return `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
 };
 
@@ -180,7 +182,7 @@ Deno.test("a cluster given a pipeline refuses the change feed off", async () => 
   assert.match(got.stderr, /capabilities\.capture: conflicting values/);
 });
 
-const AIRLOCK = ["airlock", "airlock-mesh"];
+const AIRLOCK = ["airlock", "airlock-mesh", "airlock-upgrade"];
 const PROBE: Effect = { name: "probe", origin: "https://sink.example.test" };
 
 type Targets = Record<string, {
@@ -247,6 +249,28 @@ Deno.test("an effect places the airlock and its daprd, and the ticker and clock 
   assert.deepEqual(networks.value, { airlock: { internal: true }, "airlock-out": { internal: true }, "airlock-wake": { internal: true }, "airlock-egress": {} });
 });
 
+Deno.test("ledger upgrades require current interpreters and finish before schema readers start", async () => {
+  for (const effectInterpreters of [undefined, ""]) {
+    const refused = await evaluated(cluster({ effects: [PROBE], effectInterpreters }, {}));
+    assert.equal(refused.ok, false);
+    assert.match(refused.stderr, /effectInterpreters|airlock-upgrade/);
+  }
+  for (const pgroll of [{}, { "01_a": { operations: [] } }] as NonNullable<State["pgroll"]>[]) {
+    const got = await exported({ effects: [PROBE], pgroll }, "surface.targets", { auth: true, capture: true });
+    assert.equal(got.ok, true, got.stderr);
+    const t = got.value;
+    const upgrade = t["airlock-upgrade"];
+    assert.deepEqual(upgrade.dockerfile.entrypoint, ["psql"]);
+    assert.ok(upgrade.dockerfile.cmd.includes("--single-transaction"));
+    assert.ok(upgrade.dockerfile.cmd.includes("--set=ON_ERROR_STOP=1"));
+    assert.deepEqual(upgrade.compose.depends_on.database, { condition: "service_healthy" });
+    assert.deepEqual(upgrade.compose.depends_on.migrate, Object.keys(pgroll).length ? { condition: "service_completed_successfully" } : undefined);
+    for (const reader of ["crud", "electric", "auth", "conduit", "airlock"]) {
+      assert.deepEqual(t[reader].compose.depends_on["airlock-upgrade"], { condition: "service_completed_successfully" }, reader);
+    }
+  }
+});
+
 // Every other service stands on the default network, so none of the airlock's
 // may: one there could call the daprd's bindings API, which performs an effect
 // with no claim and no ledger row.
@@ -268,7 +292,7 @@ Deno.test("the airlock reaches the world only through its daprd, which goes out 
   assert.deepEqual(on("database"), { default: { aliases: ["database"] }, airlock: { aliases: ["database"] } });
   for (const n of ["crud", "caddy", "electric", "launch"]) assert.deepEqual(on(n), { default: { aliases: [n] } }, n);
   assert.deepEqual(joined("airlock-egress"), ["airlock-mesh"]);
-  assert.deepEqual(joined("default").filter((n) => n.startsWith("airlock")), []);
+  assert.deepEqual(joined("default").filter((n) => n.startsWith("airlock")), ["airlock-upgrade"]);
 });
 
 Deno.test("a step taking the airlock's digits is refused only where an effect is declared", async () => {

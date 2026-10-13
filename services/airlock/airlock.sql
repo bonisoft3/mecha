@@ -4,7 +4,7 @@
 -- which resolves the ledger and add_job only when it runs.
 
 -- A client that could write the ledger could forge an outcome, and one that
--- could read it would see every request sent outside. The tables live in a
+-- could read it would see every input sent outside. The tables live in a
 -- schema of their own so that no grant a caller makes over `public`, before or
 -- after this step, reaches them: `GRANT ... ON ALL TABLES IN SCHEMA public`
 -- names only `public`, and a role without USAGE here reaches nothing here
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS airlock.external_effect_ledger (
   key         TEXT PRIMARY KEY,       -- '<effect>:<key fields>'; the sink's idempotency key
   effect      TEXT NOT NULL,
   row         JSONB NOT NULL,         -- the invoking instance's primary key
-  request     JSONB NOT NULL,         -- frozen at the claim, never re-derived
+  input       JSONB NOT NULL,         -- frozen at the claim, never re-derived
   entered     INT NOT NULL DEFAULT 0, -- handler runs begun; past one, a run may have reached the sink
   outcome     JSONB,                  -- {target, kind, data, reconciled}, set once
   enqueued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),

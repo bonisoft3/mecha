@@ -128,12 +128,19 @@ A row with `due_at` in place of `cron` is owed once that instant has passed and
 its watermark has not reached it, and is owed again when its watermark is
 cleared. It is how a unit asks to be woken for work it already holds: the
 airlock's initdb step seeds one, named `airlock`, emitting into `airlock_wake`;
-a guard that enqueues an effect (pronto's) re-arms it in the transition's
+an interpreter that enqueues an effect (pronto's) re-arms it in the transition's
 commit, so the next sweep emits one tick, whatever the number of claims since
 the last, and wakes the airlock with it. The re-arm writes only a row not yet
 armed and waits on no lock, so claims never queue on the one row. Below cloud
 tier the airlock heard the enqueue itself, and the tick costs a row, which the
 airlock prunes after a day.
+
+Pronto's server machines use the same one-shot mechanism for `after`.
+Each state entry creates a distinct `machine:` schedule per delay. It emits
+into the private `machine_timer_tick` table, whose interpreter locks the owner
+and checks cancellation before applying the transition. Leaving the state
+deletes its schedules; retained ticks absorb duplicate delivery. The timing
+and migration contract is in [[../../../../plugins/pronto/SPEC|Pronto's spec]].
 
 ## What the mechanism guarantees
 

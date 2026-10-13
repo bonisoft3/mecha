@@ -15,8 +15,8 @@
     "add": [
       {
         "url": "https://github.com/electric-sql/postgres-pglite/archive/b133782cd759f08b3aeb263b80a963b39c7b7af1.tar.gz",
-        "sha256": "31b7d5c46a9501b653536cce2ba593739144981cb0aa25692b678d68505ad2cd",
         "dest": "/src/",
+        "sha256": "31b7d5c46a9501b653536cce2ba593739144981cb0aa25692b678d68505ad2cd",
         "unpack": true
       }
     ],

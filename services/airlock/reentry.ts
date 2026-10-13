@@ -7,7 +7,7 @@
 // Past one, an earlier run may have reached it and died before the outcome was
 // written, so the effect's declaration decides: an idempotent sink is called
 // again with the same key; otherwise its `reentry` says reconcile, give up as
-// unknown, or call again with the reason the program stated.
+// unknown, or repeat, the program's note saying why a duplicate is acceptable.
 
 import { endowable } from "../compute/language.ts";
 
@@ -21,7 +21,7 @@ export type Effect = {
   onError: string;
   row: string[];
   idempotent: boolean;
-  reentry?: "reconcile" | "unknown" | { repeat: string };
+  reentry?: "reconcile" | "unknown" | "repeat";
   attempts: number;
   handler: string;
   /** The environment variables whose values the handler is handed. */
@@ -96,8 +96,7 @@ export function parseManifest(text: string): Record<string, Effect> {
     if (e.idempotent && e.reentry !== undefined) bad("an idempotent sink declares no reentry");
     if (!e.idempotent) {
       const r = e.reentry;
-      const repeat = typeof r === "object" && r !== null && typeof r.repeat === "string" && r.repeat !== "";
-      if (r !== "reconcile" && r !== "unknown" && !repeat) bad("reentry is not reconcile, unknown or {repeat: reason}");
+      if (r !== "reconcile" && r !== "unknown" && r !== "repeat") bad("reentry is not reconcile, unknown or repeat");
     }
     if (!Number.isInteger(e.attempts) || e.attempts < 1) bad("attempts is not a positive integer");
     if (e.endowments !== undefined) endowable(e.endowments, `effects.json: effect ${name}`);

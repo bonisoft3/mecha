@@ -9,8 +9,8 @@
     "add": [
       {
         "url": "https://registry.npmjs.org/@electric-sql/pglite-icu-full/-/pglite-icu-full-0.0.2.tgz",
-        "sha256": "683455259b053abbc8e31bfea7e2957c44aba4bb5d56c22d5f4e91d5d2680626",
         "dest": "/src/",
+        "sha256": "683455259b053abbc8e31bfea7e2957c44aba4bb5d56c22d5f4e91d5d2680626",
         "unpack": true
       }
     ],

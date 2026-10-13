@@ -2,7 +2,7 @@
 // The worker an effect's handler runs in: compute's realm (../compute/realm.ts),
 // no permissions, and a Compartment holding the language and nothing of the
 // host. What the handler gets past the language is three arguments: the
-// request the guard froze into the ledger; a sink whose `fetch` takes a path,
+// input the interpreter froze into the ledger; a sink whose `fetch` takes a path,
 // which crosses here as a message so the host decides where it goes
 // (handler.ts); and the values of the secrets the effect declares, read by the
 // host and never written to the ledger. The sink's `key` is the ledger key,
@@ -13,8 +13,8 @@ import "../compute/realm.ts";
 import { compartment } from "../compute/compartment.ts";
 
 type Module = {
-  issue: (request: unknown, sink: unknown, secrets: unknown) => unknown;
-  reconcile?: (request: unknown, sink: unknown, secrets: unknown) => unknown;
+  issue: (input: unknown, sink: unknown, secrets: unknown) => unknown;
+  reconcile?: (input: unknown, sink: unknown, secrets: unknown) => unknown;
 };
 let module: Module;
 
@@ -40,7 +40,7 @@ function sink(key: string) {
 }
 
 // {source, file, endowments} loads the module and answers its exports' names; {call,
-// request, key, secrets} runs issue or reconcile and answers {result}; {id,
+// input, key, secrets} runs issue or reconcile and answers {result}; {id,
 // answer} and {id, failure} settle a fetch. A throw is answered as {error}.
 addEventListener("message", async (event) => {
   const { data } = event as MessageEvent;
@@ -60,7 +60,7 @@ addEventListener("message", async (event) => {
     } else {
       const fn = module[data.call as "issue" | "reconcile"];
       if (typeof fn !== "function") throw new TypeError(`the handler exports no ${data.call} function`);
-      postMessage({ result: await fn(harden(data.request), sink(data.key), harden(data.secrets)) });
+      postMessage({ result: await fn(harden(data.input), sink(data.key), harden(data.secrets)) });
     }
   } catch (e) {
     postMessage({ error: e instanceof Error ? e.stack ?? e.message : String(e) });

@@ -1,5 +1,6 @@
 // pronto's lint of an effect's handler, as it runs admit.ts.
 
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 
 const EFFECT = {
@@ -15,8 +16,8 @@ async function lint(handler: string, effect: Record<string, unknown> = EFFECT) {
     await Deno.writeTextFile(`${dir}/effects/charge.js`, handler);
     await Deno.writeTextFile(`${dir}/effects.json`, JSON.stringify({ effects: { charge: effect } }));
     const { code, stderr } = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "--config", new URL("deno.json", import.meta.url).pathname, "--frozen", "--unstable-worker-options",
-        "--allow-read", "--allow-env", new URL("admit.ts", import.meta.url).pathname, `${dir}/effects.json`, dir],
+      args: ["run", "--config", fileURLToPath(new URL("deno.json", import.meta.url)), "--frozen", "--unstable-worker-options",
+        "--allow-read", "--allow-env", fileURLToPath(new URL("admit.ts", import.meta.url)), `${dir}/effects.json`, dir],
       env: { NO_COLOR: "1" },
       stdout: "null",
     }).output();

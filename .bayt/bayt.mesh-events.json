@@ -112,7 +112,8 @@
           ".bayt/Dockerfile.mesh-events",
           ".bayt/bayt.mesh-events.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },
@@ -131,6 +132,10 @@
         "libraries/mecha/.bayt/compose.mesh-events.yaml",
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
         "libraries/mecha/.bayt/compose.redis.yaml"
       ]
     },
@@ -162,6 +167,10 @@
         "libraries/mecha/.bayt/compose.mesh-events.yaml",
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
         "libraries/mecha/.bayt/compose.redis.yaml"
       ]
     },
@@ -213,6 +222,10 @@
         "libraries/mecha/.bayt/compose.mesh-events.yaml",
         "libraries/mecha/.bayt/compose.mesh-image.yaml",
         "libraries/mecha/.bayt/compose.caddy.yaml",
+        "libraries/mecha/.bayt/compose.crud.yaml",
+        "libraries/mecha/.bayt/compose.database.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml",
+        "libraries/mecha/.bayt/compose.migrate.yaml",
         "libraries/mecha/.bayt/compose.redis.yaml"
       ]
     }
@@ -239,6 +252,10 @@
     "libraries/mecha/.bayt/compose.mesh-events.yaml",
     "libraries/mecha/.bayt/compose.mesh-image.yaml",
     "libraries/mecha/.bayt/compose.caddy.yaml",
+    "libraries/mecha/.bayt/compose.crud.yaml",
+    "libraries/mecha/.bayt/compose.database.yaml",
+    "libraries/mecha/.bayt/compose.database-image.yaml",
+    "libraries/mecha/.bayt/compose.migrate.yaml",
     "libraries/mecha/.bayt/compose.redis.yaml"
   ],
   "chainedDeps": [

@@ -121,7 +121,7 @@ export class Handler {
 
   /** One run of issue or reconcile against the sink, its answer checked, the
    * handler handed the values of the effect's secrets. */
-  async call(fn: "issue" | "reconcile", input: unknown, key: string, transport: Transport, secrets: Record<string, string> = {}, headers: Record<string, string> = {}): Promise<Answer> {
+  async call(fn: "issue" | "reconcile", request: unknown, key: string, transport: Transport, secrets: Record<string, string> = {}, headers: Record<string, string> = {}): Promise<Answer> {
     const worker = new Worker(new URL("./cage.ts", import.meta.url), NONE);
     const serve = async (data: Record<string, unknown>) => {
       const id = data.id;
@@ -139,7 +139,7 @@ export class Handler {
     });
     const run = async () => {
       await exchange(worker, { source: this.compiled, file: this.file, endowments: this.endowments }, serve);
-      return (await exchange(worker, { call: fn, input, key, secrets }, serve)).result;
+      return (await exchange(worker, { call: fn, request, key, secrets }, serve)).result;
     };
     try {
       return checked(this.name, fn, await Promise.race([run(), timeout]));

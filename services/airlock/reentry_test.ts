@@ -25,7 +25,7 @@ Deno.test("a later run follows the sink's declaration", () => {
   assertEquals(step(effect({ idempotent: true, reentry: undefined }), 2), "issue");
   assertEquals(step(effect({ reentry: "reconcile" }), 2), "reconcile");
   assertEquals(step(effect({ reentry: "unknown" }), 3), "unknown");
-  assertEquals(step(effect({ reentry: "repeat" }), 2), "issue");
+  assertEquals(step(effect({ reentry: { repeat: "the partner keeps the first and drops the rest" } }), 2), "issue");
 });
 
 Deno.test("a run the ledger did not count is a broken protocol, not a first run", () => {
@@ -51,9 +51,7 @@ Deno.test("a manifest the airlock would misread is refused", () => {
       [{ table: 'payment"; drop table x; --' }, "not an identifier"],
       [{ row: [] }, "row"],
       [{ idempotent: true }, "declares no reentry"],
-      // The reason for a repeat is the program's note, never a field on the wire.
-      [{ reentry: { repeat: "the partner keeps the first and drops the rest" } }, "reentry"],
-      [{ reentry: "again" }, "reentry"],
+      [{ reentry: { repeat: "" } }, "reentry"],
       [{ attempts: 0 }, "attempts"],
       [{}, "DNS label", "charge_card"],
     ] as [Record<string, unknown>, string, string?][]

@@ -111,7 +111,8 @@
           ".bayt/Dockerfile.smoke-cdc",
           ".bayt/bayt.smoke-cdc.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

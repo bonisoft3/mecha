@@ -49,9 +49,6 @@
     "from": {
       "name": "postgrest/postgrest:v12.2.3@sha256:0a46780309a604cdc8b56c776c6e5e15788ce58174d709e40459ab5a2d44d228"
     },
-    "cmd": [
-      "postgrest"
-    ],
     "healthcheck": {
       "test": [
         "CMD",
@@ -85,7 +82,43 @@
     ],
     "expose": [],
     "entrypoint": null,
-    "incremental": false
+    "incremental": false,
+    "cmd": null
+  },
+  "entrypoint": {
+    "do": "postgrest",
+    "shell": "exec",
+    "env": {
+      "PGRST_DB_URI": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",
+      "PGRST_DB_SCHEMA": "public",
+      "PGRST_DB_ANON_ROLE": "anon",
+      "PGRST_DB_PRE_REQUEST": "public.app_pre_request",
+      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
+      "PGRST_SERVER_HOST": "*",
+      "PGRST_SERVER_PORT": "3000",
+      "PGRST_ADMIN_SERVER_PORT": "3001"
+    },
+    "after": {
+      "database": "healthy"
+    },
+    "host": true
+  },
+  "expose": {
+    "http": {
+      "port": 3000
+    },
+    "admin": {
+      "port": 3001
+    }
+  },
+  "healthcheck": {
+    "template": "http",
+    "url": "http://127.0.0.1:3001/ready",
+    "interval": "5s",
+    "start_interval": "500ms",
+    "timeout": "5s",
+    "retries": 30,
+    "start_period": "30s"
   },
   "name": "crud",
   "project": "libraries_mecha",
@@ -119,7 +152,8 @@
           ".bayt/Dockerfile.crud",
           ".bayt/bayt.crud.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

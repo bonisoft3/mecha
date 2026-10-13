@@ -54,7 +54,8 @@
           ".bayt/bayt.build.json",
           ".bayt/Taskfile.yml",
           ".bayt/Taskfile.bayt.yml",
-          ".bayt/Taskfile.build.yaml"
+          ".bayt/Taskfile.build.yaml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

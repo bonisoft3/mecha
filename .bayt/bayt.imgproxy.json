@@ -91,7 +91,8 @@
           ".bayt/Dockerfile.imgproxy",
           ".bayt/bayt.imgproxy.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

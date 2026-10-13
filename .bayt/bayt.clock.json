@@ -76,7 +76,8 @@
           ".bayt/Dockerfile.clock",
           ".bayt/bayt.clock.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

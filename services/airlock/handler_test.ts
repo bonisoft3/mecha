@@ -41,12 +41,12 @@ function recording(answer: (c: Call) => { status: number; body: unknown }): { ca
 }
 
 const CHARGE = `
-export async function issue(input, sink) {
-  const r = await sink.fetch("/v1/charges", { method: "POST", body: { amount: input.amount, key: sink.key } });
+export async function issue(request, sink) {
+  const r = await sink.fetch("/v1/charges", { method: "POST", body: { amount: request.amount, key: sink.key } });
   if (r.status === 402) return { failed: r.body };
   return { done: r.body };
 }
-export async function reconcile(input, sink) {
+export async function reconcile(request, sink) {
   const r = await sink.fetch("/v1/charges?key=" + encodeURIComponent(sink.key));
   return r.status === 404 ? { absent: true } : { done: r.body };
 }
@@ -108,7 +108,7 @@ Deno.test("a handler is one file in the computation's language: no imports, no c
   assertEquals(await h.call("issue", {}, "k", transport), { done: "undefined,undefined,undefined,undefined" });
 });
 
-Deno.test("the input is frozen: a handler cannot rewrite what the ledger holds", async () => {
+Deno.test("the request is frozen: a handler cannot rewrite what the ledger holds", async () => {
   const h = await Handler.admit("charge", await file(`export const issue = async (r) => { r.amount = 0; return { done: r }; };`), idempotent);
   await assertRejects(() => h.call("issue", { amount: 5 }, "k", recording(() => ({ status: 200, body: null })).transport), Error, "amount");
 });
@@ -157,9 +157,9 @@ Deno.test("a sink method outside the HTTP verbs never reaches the transport", as
 Deno.test("a handler is handed its effect's secrets, and signs with them through Crypto", async () => {
   const h = await Handler.admit(
     "charge",
-    await file(`export const issue = async (input, sink, secrets) => {
+    await file(`export const issue = async (request, sink, secrets) => {
       const key = await Crypto.importKey("raw", new TextEncoder().encode(secrets.CAL_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-      const mac = new Uint8Array(await Crypto.sign("HMAC", key, new TextEncoder().encode(JSON.stringify(input))));
+      const mac = new Uint8Array(await Crypto.sign("HMAC", key, new TextEncoder().encode(JSON.stringify(request))));
       const signature = Array.from(mac, (b) => b.toString(16).padStart(2, "0")).join("");
       return { done: { signature, names: Object.keys(secrets), frozen: Object.isFrozen(secrets) } };
     };`),
@@ -173,8 +173,8 @@ Deno.test("a handler is handed its effect's secrets, and signs with them through
 });
 
 Deno.test("a credential's header reaches the transport on every call, and the handler never sees it", async () => {
-  const h = await Handler.admit("charge", await file(`export const issue = async (input, sink, secrets) => {
-    const r = await sink.fetch("/v1/charges", { method: "POST", body: input });
+  const h = await Handler.admit("charge", await file(`export const issue = async (request, sink, secrets) => {
+    const r = await sink.fetch("/v1/charges", { method: "POST", body: request });
     return { done: { secrets: Object.keys(secrets), sink: Object.keys(sink) } };
   };`), idempotent);
   const rec = recording(() => ({ status: 200, body: null }));

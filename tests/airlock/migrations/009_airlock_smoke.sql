@@ -14,7 +14,7 @@ DECLARE
   outcome jsonb;
 BEGIN
   IF OLD.status = 'pending' AND NEW.status = 'charging' THEN
-    INSERT INTO airlock.external_effect_ledger (key, effect, row, input)
+    INSERT INTO airlock.external_effect_ledger (key, effect, row, request)
     VALUES (k, 'probe', jsonb_build_object('id', NEW.id), jsonb_build_object('amount', NEW.amount))
     ON CONFLICT (key) DO NOTHING;
     IF NOT FOUND THEN RAISE EXCEPTION 'external effect % was already performed', k; END IF;
@@ -53,7 +53,7 @@ DECLARE
   outcome jsonb;
 BEGIN
   IF OLD.status = 'pending' AND NEW.status = 'sending' THEN
-    INSERT INTO airlock.external_effect_ledger (key, effect, row, input)
+    INSERT INTO airlock.external_effect_ledger (key, effect, row, request)
     VALUES (k, 'confirm', jsonb_build_object('id', NEW.id), jsonb_build_object('id', NEW.id))
     ON CONFLICT (key) DO NOTHING;
     IF NOT FOUND THEN RAISE EXCEPTION 'external effect % was already performed', k; END IF;

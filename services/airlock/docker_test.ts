@@ -60,15 +60,15 @@ function sink() {
 }
 
 const HANDLER = `
-export async function issue(input, sink) {
-  const r = await sink.fetch("/v1/charges", { method: "POST", body: input });
+export async function issue(request, sink) {
+  const r = await sink.fetch("/v1/charges", { method: "POST", body: request });
   if (r.status === 402) return { failed: r.body };
   if (r.status >= 300) throw new Error("sink answered " + r.status);
   return { done: r.body };
 }
 `;
 const RECONCILING = HANDLER + `
-export async function reconcile(input, sink) {
+export async function reconcile(request, sink) {
   const r = await sink.fetch("/v1/charges?key=" + encodeURIComponent(sink.key));
   return r.status === 404 ? { absent: true } : { done: r.body };
 }
@@ -83,7 +83,7 @@ DECLARE
   outcome jsonb;
 BEGIN
   IF OLD.status = 'pending' AND NEW.status = 'charging' THEN
-    INSERT INTO airlock.external_effect_ledger (key, effect, row, input)
+    INSERT INTO airlock.external_effect_ledger (key, effect, row, request)
     VALUES (k, TG_ARGV[0], jsonb_build_object('id', NEW.id), jsonb_build_object('amount', NEW.amount))
     ON CONFLICT (key) DO NOTHING;
     IF NOT FOUND THEN RAISE EXCEPTION 'external effect % was already performed', k; END IF;
@@ -367,7 +367,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       assertEquals(await settled("vaulted", "v1"), { status: "settled", entered: 1, kind: "done", reconciled: false });
       assertEquals(target.posts.filter((p) => p.key === "vaulted:v1").map((p) => p.authorization), ["Bearer vk-3f9a"]);
       assertEquals(target.posts.filter((p) => p.key === "charge:p1").map((p) => p.authorization), [undefined]);
-      const { rows } = await db!.query("SELECT input::text || outcome::text AS text FROM airlock.external_effect_ledger WHERE key = 'vaulted:v1'");
+      const { rows } = await db!.query("SELECT request::text || outcome::text AS text FROM airlock.external_effect_ledger WHERE key = 'vaulted:v1'");
       assertEquals(rows[0].text.includes("vk-3f9a"), false);
     });
 
@@ -456,7 +456,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       try {
         await client.query("BEGIN");
         await client.query("INSERT INTO pay_dead VALUES ('d2', 'charging', 1)");
-        await client.query(`INSERT INTO airlock.external_effect_ledger (key, effect, row, input, entered, outcome)
+        await client.query(`INSERT INTO airlock.external_effect_ledger (key, effect, row, request, entered, outcome)
           VALUES ('dead:d2', 'dead', '{"id": "d2"}', '{}', 1, '{"target": "settled", "kind": "done", "reconciled": false}'),
                  ('ghost:g1', 'ghost', '{"id": "g1"}', '{}', 0, NULL)`);
         for (const key of ["dead:d2", "ghost:g1"]) {

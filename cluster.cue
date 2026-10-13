@@ -62,14 +62,20 @@ _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 // the framework's (mecha's and pronto's) 800-899, and a caller's seed 900.
 // One file per prefix, so the framework keeps out of the range an app
 // numbers its steps in, and pronto refuses an app step in 8xx.
-_scheduleSql: _ @embed(file="services/ticker/schedule.sql", type=text)
-_machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text)
-#MachineTimersSql: _scheduleSql + "\n" + _machineTimersSql
-
 #ScheduleMigration: "800_schedule.sql"
 // Staged in the database image at 020 for compatibility with the published
 // bonitao/mecha-database:0.8.0 image, and placed in initdb at 800.
 #ScheduleStaged: "020_schedule.sql"
+
+// Canonical PostgreSQL options for both container and process-compose runtimes.
+#PostgresArgs: [
+	"-c", "wal_level=logical",
+	"-c", "fsync=off",
+	"-c", "synchronous_commit=off",
+	"-c", "full_page_writes=off",
+	"-c", "shared_buffers=32MB",
+	"-c", "max_connections=200",
+]
 
 // Graphile Worker's schema and the airlock's tables, placed where an effect
 // is declared, on the first digits after the steps a caller opens with
@@ -84,19 +90,6 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // these steps or after, reaches it.
 #GraphileMigration: "011_graphile_worker.sql"
 #AirlockMigration:  "012_airlock.sql"
-
-#AirlockUpgradeSql: """
-	SET LOCAL lock_timeout = '5s';
-	SET LOCAL statement_timeout = '60s';
-	LOCK TABLE airlock.external_effect_ledger IN ACCESS EXCLUSIVE MODE;
-	DO $upgrade$
-	BEGIN
-	  IF EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'airlock' AND table_name = 'external_effect_ledger' AND column_name = 'request') THEN
-	    ALTER TABLE airlock.external_effect_ledger RENAME COLUMN request TO input;
-	  END IF;
-	  PERFORM input FROM airlock.external_effect_ledger LIMIT 0;
-	END $upgrade$;
-	"""
 
 // What a sink may be: an https origin whose host is a DNS name of at least
 // two labels, the last opening with a letter. This is spelling only: a
@@ -238,18 +231,12 @@ _devElectricSecret: "dev-electric-secret"
 		// never what it says. One brings the ticker, its clock and the table
 		// they sweep (#ScheduleMigration); the caller's migrations seed it.
 		schedules: [...string]
-		// Timed machines share the ticker; their migrations install #MachineTimersSql.
-		timers: *[] | [...string]
-		if len(timers) > 0 {timerCheck: string & !=""}
 		// The external effects (services/airlock/README.md states the
 		// contract). One brings the airlock, the daprd it goes out through,
 		// the ticker and clock that wake it, and the tables they keep
 		// (#GraphileMigration, #AirlockMigration, the schedule table inside
 		// the latter).
 		effects: [...#Effect]
-		// Current claim triggers are refreshed with the ledger in one transaction.
-		if len(effects) > 0 {effectInterpreters: string & !=""}
-
 		// The bridges those effects reach through, each placed as
 		// bridge-<name> (#Bridge).
 		bridges: *[] | [...#Bridge]
@@ -338,8 +325,6 @@ _devElectricSecret: "dev-electric-secret"
 	_schemaReady: {
 		database: _healthy
 		if len(X.state.pgroll) > 0 {migrate: _completed}
-		if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
-		if len(X.state.timers) > 0 {"timer-check": _completed}
 	}
 
 	// The effects as every target reads them. A field's pattern is checked
@@ -375,9 +360,9 @@ _devElectricSecret: "dev-electric-secret"
 
 	// The steps the database image stages and this cluster places.
 	// A schedule or an effect is woken by the ticker: a declared schedule by
-	// its cadence, an effect by the one-shot row its interpreter re-arms, so a
+	// its cadence, an effect by the one-shot row its guard re-arms, so a
 	// cluster scaled to zero comes up for what was enqueued meanwhile.
-	_wakes: len(X.state.schedules) > 0 || len(X.state.effects) > 0 || len(X.state.timers) > 0
+	_wakes: len(X.state.schedules) > 0 || len(X.state.effects) > 0
 	// The ticker reads and writes through crud as `service`, the role PostgREST
 	// switches to on the token's claim and the one the schedule tables admit:
 	// crud verifies the service token wherever something wakes, with or without
@@ -460,6 +445,8 @@ _devElectricSecret: "dev-electric-secret"
 						start_interval: "100ms"
 						start_period:   "5m"
 					}
+					expose: pg: port: 5432
+					entrypoint: do: "docker-entrypoint.sh postgres \(strings.Join(#PostgresArgs, " "))"
 					srcs: globs: X.state.migrations
 					dockerfile: {
 						from: (_from & {in: X.meta.images.database}).out
@@ -536,51 +523,6 @@ _devElectricSecret: "dev-electric-secret"
 						}
 					}
 				}
-				if len(X.state.effects) > 0 {
-					"airlock-upgrade": X._image & {
-						dockerfile: {
-							from: (_from & {in: X.meta.images.database}).out
-							entrypoint: ["psql"]
-							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/airlock-upgrade.sql"]
-							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\(#AirlockUpgradeSql)\n\(X.state.effectInterpreters)\nAIRLOCK"]
-						}
-						compose: {
-							depends_on: {
-								database: _healthy
-								if len(X.state.pgroll) > 0 {migrate: _completed}
-							}
-							environment: {
-								PGHOST:     "database"
-								PGUSER:     "${POSTGRES_USER:-postgres}"
-								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
-								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
-							}
-						}
-					}
-				}
-				if len(X.state.timers) > 0 {
-					"timer-check": X._image & {
-						dockerfile: {
-							from: (_from & {in: X.meta.images.database}).out
-							entrypoint: ["psql"]
-							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/timer-check.sql"]
-							epilogue: ["COPY <<'TIMERS' /timer-check.sql\n\(X.state.timerCheck)\nTIMERS"]
-						}
-						compose: {
-							depends_on: {
-								database: _healthy
-								if len(X.state.pgroll) > 0 {migrate: _completed}
-								if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
-							}
-							environment: {
-								PGHOST: "database"
-								PGUSER: "${POSTGRES_USER:-postgres}"
-								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
-								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
-							}
-						}
-					}
-				}
 				crud: bayt.healthcheck.http & X._image & {
 					healthcheck: {
 						url:            "http://127.0.0.1:3001/ready"
@@ -590,7 +532,15 @@ _devElectricSecret: "dev-electric-secret"
 					}
 					dockerfile: {
 						from: name: "postgrest/postgrest:v12.2.3@sha256:0a46780309a604cdc8b56c776c6e5e15788ce58174d709e40459ab5a2d44d228"
-						cmd: ["postgrest"]
+					}
+					expose: {
+						http:  port: 3000
+						admin: port: 3001
+					}
+					entrypoint: {
+						do:  "postgrest"
+						env: compose.environment
+						after: database: "healthy"
 					}
 					compose: {
 						depends_on: X._schemaReady
@@ -620,6 +570,13 @@ _devElectricSecret: "dev-electric-secret"
 						// deno runs `main.ts` from the working directory, and bayt
 						// sets one per stage.
 						workdir: "/app"
+						epilogue: ["RUN mkdir -p /monorepo"]
+					}
+					expose: http: port: 9999
+					entrypoint: {
+						do:    "deno run --allow-net --allow-env main.ts"
+						env:   compose.environment
+						after: database: "healthy"
 					}
 					compose: {
 						depends_on: X._schemaReady
@@ -701,6 +658,18 @@ _devElectricSecret: "dev-electric-secret"
 					publish: environment: X.meta.door.env
 					if X.meta.door.host != _|_ {host: X.meta.door.host}
 				}
+				let validators = #"set -e -o pipefail; roots=$(caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\n' | grep -o '"root":"[^"]*"' | cut -d'"' -f4 | sort -u); if [ -n "$roots" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < "$f"); printf "$q%s$q" "${h%% *}" > "$f.etag"; done' sh '"' {} +; fi; "#
+				// An ORIGIN that is no origin stops the door as it starts: a
+				// template writes it into markup as it stands.
+				let admitted = #"case "${ORIGIN#http://}" in "$ORIGIN") h=${ORIGIN#https://};; *) h=${ORIGIN#http://};; esac; case "$h" in "$ORIGIN"|""|*[!A-Za-z0-9.:-]*) echo "ORIGIN '$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example" >&2; exit 1;; esac; "#
+				entrypoint: {
+					do: "\(admitted)\(validators)if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
+					shell: "sh"
+					env:   compose.environment
+					if X.capabilities.server {
+						after: crud: "healthy"
+					}
+				}
 				compose: {
 					build: additional_contexts: root: strings.TrimSuffix("../\(X.meta.root)", "/")
 					// The Caddyfile substitutes this into the electric route, which is
@@ -710,22 +679,6 @@ _devElectricSecret: "dev-electric-secret"
 						ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
 						ORIGIN:          origin
 					}
-
-					// Each served file's validator, `<file>.etag`, written as the door
-					// starts (docs/proxy.md) under every root the Caddyfile names, read
-					// off the config caddy adapts it to: whoever put a file in the
-					// image, the door that serves it reads its sidecar. Every name
-					// reaches sh as an argument, never as script, and the digest is
-					// read off stdin, which sha256sum spells the same whatever the
-					// name; `$$` is how compose is told a `$` is the shell's.
-					let validators = #"set -e -o pipefail; roots=$$(caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\n' | sed -n 's/^.*"root":"\([^"]*\)".*$$/\1/p' | sort -u); if [ -n "$$roots" ]; then find $$roots -type f ! -name '*.etag' -exec sh -c 'set -e; for f do h=$$(sha256sum < "$$f"); printf \"%s\" "$${h%% *}" > "$$f.etag"; done' sh {} +; fi; "#
-					// An ORIGIN that is no origin stops the door as it starts: a
-					// template writes it into markup as it stands.
-					let admitted = #"case "$${ORIGIN#http://}" in "$$ORIGIN") h=$${ORIGIN#https://};; *) h=$${ORIGIN#http://};; esac; case "$$h" in "$$ORIGIN"|""|*[!A-Za-z0-9.:-]*) echo "ORIGIN '$$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example" >&2; exit 1;; esac; "#
-					// The Caddyfile's door serves CADDY_TLS: the baked pair when the
-					// host issued one, Caddy's own CA otherwise, so the stack comes up
-					// before any mkcert step. The rest is the image's own command.
-					command: ["sh", "-c", "\(admitted)\(validators)if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
 					// Watch paths are from .bayt/ too, hence the ../ on each.
 					develop: watch: list.Concat([
 						[{action: "sync+restart", path: "../\(X.meta.caddyfile)", target: "/etc/caddy/Caddyfile"}],
@@ -742,7 +695,7 @@ _devElectricSecret: "dev-electric-secret"
 			if X.capabilities.server {
 				electric: X._image & {
 					dockerfile: {
-						from: name: "docker.io/electricsql/electric-temp:1.8.1@sha256:910d5ebeca68c87c930ccd1b35426c7bc94d79c099ccacc8f27547b74fb4353a"
+						from: name: "docker.io/electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
 						// Initialization must retain requests already waiting for the snapshot.
 						preamble: ["COPY <<'ELIXIR' /tmp/electric-patch.exs\n\(_electricPatch)\nELIXIR"]
 						epilogue: ["RUN DATABASE_URL=postgresql://compile:compile@localhost/compile ELECTRIC_SECRET=compile-only /app/bin/entrypoint eval 'Code.eval_file(\"/tmp/electric-patch.exs\")' && rm /tmp/electric-patch.exs"]
@@ -974,7 +927,7 @@ _devElectricSecret: "dev-electric-secret"
 					}
 				}
 			}
-			// A schedule, effect or machine timer requires a clock. A
+			// Only an app that declares a schedule or an effect gets a clock. A
 			// ticker with nothing to sweep is a container answering pokes nobody
 			// sends.
 			if X._wakes {
@@ -991,7 +944,7 @@ _devElectricSecret: "dev-electric-secret"
 							// The units a tick needs up, each asleep at cloud tier:
 							// mesh-events, never mesh, the daprd bundled with the WAL
 							// reader and the pipeline worker; and the airlock, for the
-							// job an interpreter enqueued.
+							// job a guard enqueued.
 							WAKE_URLS: strings.Join(list.Concat([
 								[if X.capabilities.capture {"http://mesh-events:3500/v1.0/healthz/outbound"}],
 								[if len(X.state.effects) > 0 {"http://airlock:9997/healthz"}],
@@ -1025,7 +978,7 @@ _devElectricSecret: "dev-electric-secret"
 			// bindings API alone (services/airlock/dapr.yaml), and its bindings
 			// are the program's declarations, so the only traffic leaving for the
 			// world is a call of a declared binding. Nothing pokes it: its
-			// worker hears an interpreter's enqueue at the interpreter's commit
+			// worker hears a guard's enqueue at the guard's commit
 			// (services/airlock/airlock.ts), and the instance is up whenever
 			// the cluster is.
 			if len(X.state.effects) > 0 {
@@ -1319,7 +1272,12 @@ _devElectricSecret: "dev-electric-secret"
 	// What a target waits on; a target that waits on nothing has no field.
 	_waits: W={
 		t: _
-		out: [if W.t.compose.depends_on != _|_ {W.t.compose.depends_on}, {}][0]
+		out: {
+			if W.t.compose != _|_ if W.t.compose.depends_on != _|_ {for k, v in W.t.compose.depends_on {(k): v}}
+			if W.t.entrypoint != _|_ if W.t.entrypoint.after != _|_ {
+				for k, _ in W.t.entrypoint.after {(k): _healthy}
+			}
+		}
 	}
 	_networks: N={
 		t: _

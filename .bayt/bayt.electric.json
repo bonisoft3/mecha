@@ -46,7 +46,7 @@
     ],
     "preambleCopyContexts": [],
     "from": {
-      "name": "docker.io/electricsql/electric-temp:1.8.1@sha256:910d5ebeca68c87c930ccd1b35426c7bc94d79c099ccacc8f27547b74fb4353a"
+      "name": "docker.io/electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
     },
     "epilogue": [
       "RUN DATABASE_URL=postgresql://compile:compile@localhost/compile ELECTRIC_SECRET=compile-only /app/bin/entrypoint eval 'Code.eval_file(\"/tmp/electric-patch.exs\")' && rm /tmp/electric-patch.exs"
@@ -94,7 +94,8 @@
           ".bayt/Dockerfile.electric",
           ".bayt/bayt.electric.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

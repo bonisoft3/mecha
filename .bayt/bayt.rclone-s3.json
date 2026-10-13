@@ -82,7 +82,8 @@
           ".bayt/Dockerfile.rclone-s3",
           ".bayt/bayt.rclone-s3.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

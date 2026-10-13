@@ -34,7 +34,7 @@ put both in one order. These steps are mecha's own, and their digits are taken:
   ([the airlock](../services/airlock/README.md#in-a-cluster)). The image
   stages them outside the initdb directory and the `database` target places
   them there, on the first digits after the steps a caller opens with
-  (pronto's 000-010, the machines last). An interpreter resolves
+  (pronto's 000-010, the machines last). A guard resolves
   `graphile_worker.add_job` and the ledger only when it runs, and every
   caller step that can write a row is numbered above them, so a row written
   into an invoking state, held seed included, finds both. A caller step on
@@ -49,7 +49,7 @@ put both in one order. These steps are mecha's own, and their digits are taken:
   ([the ticker](../services/ticker/README.md#one-table-of-mechas-and-the-apps-own)).
   Staged and placed the same way, after a caller's grants and before the
   seed the caller names after it. Where the cluster declares an effect the
-  same text opens `012_airlock.sql` instead, since the interpreter a caller's step
+  same text opens `012_airlock.sql` instead, since the guard a caller's step
   can fire re-arms a row of it; a cluster with both runs it twice, every
   statement holding.
 
@@ -138,15 +138,6 @@ its readers starting. crud, auth, electric and conduit wait on it completing,
 so a migration that fails stops them all rather than leaving them to serve the
 schema it did not reach. A cluster given none has no `migrate` target, and one
 without a database refuses them.
-
-Clusters with external effects also run `airlock-upgrade` after pgroll and before
-schema readers or the worker start. It renames a retained ledger's `request`
-column to `input` and refreshes `state.effectInterpreters` in one transaction, retaining
-pending claims and outcomes. Pronto supplies the current invoking machines' SQL;
-a native cluster supplies its current claim triggers. The upgrade is repeatable,
-and a failure rolls back both the column change and trigger refresh. Stop the
-previous application and worker before upgrading a retained volume; old worker
-binaries must not run against the new ledger contract.
 
 Each migration is written into the migrate image from the value, as a heredoc
 in its Dockerfile, so the image holds exactly what `cue vet` accepted. The

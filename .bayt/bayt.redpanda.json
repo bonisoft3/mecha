@@ -88,7 +88,8 @@
           ".bayt/Dockerfile.redpanda",
           ".bayt/bayt.redpanda.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

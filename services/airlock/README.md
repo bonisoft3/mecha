@@ -11,8 +11,8 @@ This file is the contract.
 
 | | |
 |---|---|
-| **ledger** | `airlock.external_effect_ledger` ([airlock.sql](airlock.sql)), in a schema only its owner may use: one row per effect performed, keyed `<effect>:<key fields>`, holding the instance's primary key, the input frozen at the claim, how many runs began, and the outcome. |
-| **claim** | The interpreter's insert of that row, in the transition's own commit, with the Graphile job enqueued beside it only if the insert added a row. |
+| **ledger** | `airlock.external_effect_ledger` ([airlock.sql](airlock.sql)), in a schema only its owner may use: one row per effect performed, keyed `<effect>:<key fields>`, holding the instance's primary key, the request frozen at the claim, how many runs began, and the outcome. |
+| **claim** | The guard's insert of that row, in the transition's own commit, with the Graphile job enqueued beside it only if the insert added a row. |
 | **run** | One handler call. It commits `entered + 1` before it calls the sink. |
 | **outcome** | `{target, kind, data, reconciled}`, `kind` being `done`, `failed` or `unknown`. Committed on its own, then the machine is moved to `target`; a crash between the two re-delivers the move alone. |
 
@@ -47,7 +47,7 @@ effects and boots the plane bayt lowers for it, below.
 ## Contract
 
 Nothing calls the airlock. Its worker listens on Graphile's `jobs:insert`, which
-`add_job` notifies when the interpreter's transaction commits, so an effect starts as its
+`add_job` notifies when the guard's transaction commits, so an effect starts as its
 transition commits, and a rolled-back transition wakes nothing. A retry follows
 Graphile's backoff. Port 9997 opens once every handler is admitted and the worker
 runs, for the cluster's healthcheck; it serves nothing. On SIGTERM Graphile returns
@@ -71,20 +71,20 @@ language (no clock, no `Math.random`, no host time zone or locale). It exports e
 `issue`, plus `reconcile` where its sink is not idempotent and reconciles:
 
 ```js
-export async function issue(input, sink, secrets) {
-  const r = await sink.fetch("/v1/charges", { method: "POST", body: input });
+export async function issue(request, sink, secrets) {
+  const r = await sink.fetch("/v1/charges", { method: "POST", body: request });
   if (r.status === 402) return { failed: r.body };     // the sink refused: onError, kind failed
   if (r.status >= 300) throw new Error(`${r.status}`); // no answer: retried, then unknown
   return { done: r.body };                             // onDone
 }
 
-export async function reconcile(input, sink) {
+export async function reconcile(request, sink) {
   const r = await sink.fetch(`/v1/charges?key=${encodeURIComponent(sink.key)}`);
   return r.status === 404 ? { absent: true } : { done: r.body };
 }
 ```
 
-- `input` is XState's word: the effect's `input`, frozen. `sink.key` is the ledger key, also sent as every request's
+- `request` is frozen. `sink.key` is the ledger key, also sent as every request's
   `Idempotency-Key`.
 - `sink.fetch(path, {method, body})` takes an absolute path in plain characters: no
   `%` before the query, no empty or dot segment. It answers `{status, body}`, the body
@@ -128,18 +128,18 @@ A run then reads the ledger:
 
 | the ledger shows | the run |
 |---|---|
-| an outcome | delivers it again; the interpreter ignores a machine that already left |
+| an outcome | delivers it again; the guard ignores a machine that already left |
 | `entered` = 1 after its own increment | calls `issue` |
 | more, and the sink is idempotent | calls `issue` again, with the same key |
 | more, `reentry: reconcile` | asks `reconcile`; calls `issue` only on `{absent: true}` |
 | more, `reentry: unknown` | settles `unknown` without calling |
-| more, `reentry: repeat` | calls `issue` again; the effect's `note` says why a duplicate is acceptable |
+| more, `reentry: {repeat}` | calls `issue` again, as the program stated it may |
 
 The ledger's `entered`, not Graphile's attempt count, is what runs out: Graphile counts
 a run when it locks the job and keeps that count across a crash and an unlock. A throw
 is retried with Graphile's backoff while `entered` is below the effect's `attempts`,
 and settles `unknown` on the last; a run the ledger counts past them settles `unknown`
-without calling. The interpreter gives Graphile the effect's attempts plus 25 as its own
+without calling. The guard gives Graphile the effect's attempts plus 25 as its own
 ceiling, so the queue never refuses a run the ledger still counts.
 
 ## In a cluster
@@ -155,7 +155,7 @@ the service token the ticker writes with:
 | `airlock` | This service, FROM mecha's `airlock-image`, with the program's `effects.json` and handlers copied to `/airlock` and watched. Its own `--allow-net` is the database, its daprd and port 9997, the healthcheck's and the ticker's wake (`GET /healthz`). |
 | `airlock-mesh` | Its daprd, holding one HTTP output binding per effect and nothing else: no Redis component and no resiliency policy, so a call is made once and `entered` counts every attempt. It runs under [dapr.yaml](dapr.yaml), the bindings API alone over HTTP and gRPC, and goes out on `airlock-egress`, a network nothing else joins. |
 | `bridge-<name>` | One per declared bridge (`state.bridges`): [mail.ts](mail.ts), mecha's mail bridge, taking HTTP from the daprd on `airlock-out` and speaking SMTP to its one declared server. Its `--allow-net` is its port and that server; its environment is the server, `tls` and the `Message-ID` domain, and the credentials' variables where declared. The daprd reaches it by name in plain HTTP, its effect's binding `url` being `http://bridge-<name>:8080`. |
-| `011_graphile_worker.sql`, `012_airlock.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`, staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its interpreter re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
+| `011_graphile_worker.sql`, `012_airlock.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`, staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its guard re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
 
 **The wall is the allowlist.** The airlock stands on the internal `airlock`
 network with the database and its daprd, so it reaches the world
@@ -187,7 +187,7 @@ promise.
 
 **The wake is the ticker's.** Inside a running cluster the airlock is
 reactive: it hears every enqueue at its commit. For a cluster scaled to zero,
-the interpreter that enqueues also re-arms the ticker's one-shot row named `airlock`
+the guard that enqueues also re-arms the ticker's one-shot row named `airlock`
 ([a one-shot row](../ticker/README.md#a-one-shot-row)); the next sweep emits a
 tick into `airlock_wake` and GETs this service's `/healthz`, which is what
 brings it up, and its first fetch finds what was enqueued meanwhile. An effect

@@ -138,7 +138,8 @@
           ".bayt/Dockerfile.arroyo",
           ".bayt/bayt.arroyo.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

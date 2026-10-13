@@ -103,7 +103,8 @@
           ".bayt/Dockerfile.transform",
           ".bayt/bayt.transform.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

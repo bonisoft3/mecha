@@ -90,7 +90,8 @@
           ".bayt/Dockerfile.mesh-image",
           ".bayt/bayt.mesh-image.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

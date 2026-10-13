@@ -76,7 +76,8 @@
           ".bayt/Dockerfile.ticker",
           ".bayt/bayt.ticker.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

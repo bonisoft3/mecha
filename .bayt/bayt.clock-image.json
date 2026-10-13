@@ -66,7 +66,8 @@
           ".bayt/Dockerfile.clock-image",
           ".bayt/bayt.clock-image.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

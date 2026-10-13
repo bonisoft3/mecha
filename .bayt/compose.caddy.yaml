@@ -3,6 +3,7 @@ services:
   libraries_mecha-caddy:
     build:
       additional_contexts:
+        libraries_mecha-crud: service:libraries_mecha-crud
         root: ../../..
       context: ..
       dockerfile: .bayt/Dockerfile.caddy
@@ -13,10 +14,10 @@ services:
       args:
         BUILDKIT_SYNTAX: >-
           docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
-    command:
-    - sh
-    - -c
-    - "case \"$${ORIGIN#http://}\" in \"$$ORIGIN\") h=$${ORIGIN#https://};; *) h=$${ORIGIN#http://};; esac; case \"$$h\" in \"$$ORIGIN\"|\"\"|*[!A-Za-z0-9.:-]*) echo \"ORIGIN '$$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example\" >&2; exit 1;; esac; set -e -o pipefail; roots=$$(caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\\n' | sed -n 's/^.*\"root\":\"\\([^\"]*\\)\".*$$/\\1/p' | sort -u); if [ -n \"$$roots\" ]; then find $$roots -type f ! -name '*.etag' -exec sh -c 'set -e; for f do h=$$(sha256sum < \"$$f\"); printf \\\"%s\\\" \"$${h%% *}\" > \"$$f.etag\"; done' sh {} +; fi; if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
+    depends_on:
+      libraries_mecha-crud:
+        condition: service_healthy
+        restart: true
     develop:
       watch:
       - action: sync+restart
@@ -45,6 +46,8 @@ services:
         - caddy
   libraries_mecha-caddy_bayt:
     build:
+      additional_contexts:
+        libraries_mecha-crud_bayt: service:libraries_mecha-crud_bayt
       context: ..
       dockerfile: .bayt/Dockerfile.caddy
       target: caddy_bayt

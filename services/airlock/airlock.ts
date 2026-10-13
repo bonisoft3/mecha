@@ -189,7 +189,7 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
     await recorded;
     const { key } = payload as { key: string };
     const { rows: [l] } = await a.db.query(
-      "SELECT effect, row, input, outcome FROM airlock.external_effect_ledger WHERE key = $1",
+      "SELECT effect, row, request, outcome FROM airlock.external_effect_ledger WHERE key = $1",
       [key],
     );
     if (l === undefined) throw new Error(`airlock.external_effect_ledger holds no ${key}`);
@@ -200,7 +200,7 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
         "UPDATE airlock.external_effect_ledger SET entered = entered + 1 WHERE key = $1 RETURNING entered",
         [key],
       );
-      settled = await perform(a, l.effect, effect, key, l.input, c.entered);
+      settled = await perform(a, l.effect, effect, key, l.request, c.entered);
     }
     await settle(a, key, l, effect, settled);
   };
@@ -216,17 +216,17 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
 /** The handler run the ledger's count calls for, as an outcome. A throw is no
  * answer: retried while the ledger counts fewer runs than the effect's
  * attempts, `unknown` on the last, and a run past them calls nothing. */
-async function perform(a: Airlock, name: string, effect: Effect, key: string, input: unknown, entered: number) {
+async function perform(a: Airlock, name: string, effect: Effect, key: string, request: unknown, entered: number) {
   const handler = a.handlers[name] ?? die(`no handler is admitted for ${name}`);
   if (entered > effect.attempts) return outcome(effect, "unknown", false);
   const next = step(effect, entered);
   if (next === "unknown") return outcome(effect, "unknown", false);
   try {
     if (next === "reconcile") {
-      const known = await handler.call("reconcile", input, key, a.transport, a.secrets[name], a.headers[name]);
+      const known = await handler.call("reconcile", request, key, a.transport, a.secrets[name], a.headers[name]);
       if (!("absent" in known)) return outcome(effect, known, true);
     }
-    return outcome(effect, await handler.call("issue", input, key, a.transport, a.secrets[name], a.headers[name]) as Answer, false);
+    return outcome(effect, await handler.call("issue", request, key, a.transport, a.secrets[name], a.headers[name]) as Answer, false);
   } catch (e) {
     if (entered < effect.attempts) throw e;
     console.error(`${key}: no answer after ${entered} runs, so unknown:`, e);

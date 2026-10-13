@@ -182,8 +182,7 @@ _mecha: bayt.#project & _where & {
 				epilogue: [
 					"RUN cat \(cluster.#StagedDir)/\(cluster.#ScheduleMigration) \(cluster.#StagedDir)/\(cluster.#AirlockMigration) > /tmp/airlock.sql && mv /tmp/airlock.sql \(cluster.#StagedDir)/\(cluster.#AirlockMigration)",
 				]
-				cmd: ["postgres", "-c", "wal_level=logical", "-c", "fsync=off", "-c", "synchronous_commit=off",
-					"-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
+				cmd: list.Concat([["postgres"], cluster.#PostgresArgs])
 			}
 		}
 		"mesh-image": _image & {

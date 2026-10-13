@@ -79,7 +79,8 @@
           ".bayt/Dockerfile.auth",
           ".bayt/bayt.auth.json",
           ".bayt/Taskfile.yml",
-          ".bayt/Taskfile.bayt.yml"
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
         ],
         "exclude": []
       },

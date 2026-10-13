@@ -38,7 +38,13 @@ Deno.test({ name: 'the edge cluster serves many subjects from one object', sanit
   }
   const idle = async () => { await delay(500); return (await (await fetch(at('/test/timers'))).json()) as { bornAt: string; timers: string[] } }
   try {
+    const loading = await fetch(at('/test/public'))
+    assert.equal(loading.status, 503)
+    assert.deepEqual(await loading.json(), { loading: true })
     await load(`${tmp}/pgdata`, (route, init) => fetch(at(`/import/${route}`), { ...init, headers: { authorization: 'Bearer test-import' } }), { log: () => {} })
+    const ready = await fetch(at('/test/public'))
+    assert.equal(ready.status, 200)
+    assert.deepEqual(await ready.json(), [{ title: 'Brasileirão 2026' }])
 
     const alice = await guest()
     const bob = await guest()
@@ -183,6 +189,9 @@ Deno.test({ name: 'the edge cluster serves many subjects from one object', sanit
       const loading = await fetch(at('/crud/board'), { headers: bearer(alice.token) })
       await loading.body?.cancel()
       assert.equal(loading.status, 503)
+      const publicLoading = await fetch(at('/test/public'))
+      assert.equal(publicLoading.status, 503)
+      assert.deepEqual(await publicLoading.json(), { loading: true })
       const done = await load(`${tmp}/pgdata`, send, { log: () => {} })
       assert.ok((done.chunksVerified ?? 0) > 0)
       assert.deepEqual((await crud(alice.token, 'board?select=title')).rows, [{ title: 'Brasileirão 2026' }])

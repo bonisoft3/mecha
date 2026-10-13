@@ -2,8 +2,8 @@
   "name": "pglite-workerd-test",
   "main": "worker.ts",
   "compatibility_date": "2026-09-01",
-  "durable_objects": { "bindings": [{ "name": "FIXTURE", "class_name": "Fixture" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fixture"] }],
+  "durable_objects": { "bindings": [{ "name": "FIXTURE", "class_name": "Fixture" }, { "name": "COMPRESSED", "class_name": "CompressedFixture" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fixture", "CompressedFixture"] }],
   "rules": [
     { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
     { "type": "Data", "globs": ["**/*.data", "**/*.tgz"], "fallthrough": false }

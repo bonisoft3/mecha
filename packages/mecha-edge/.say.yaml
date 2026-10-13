@@ -1,4 +1,4 @@
 say:
   # Needs ../pglite-workerd/dist (`just build` there).
   test:
-    do: mise exec -- deno test -A --frozen test/cluster_test.ts
+    do: mise exec -- deno test -A --frozen test/

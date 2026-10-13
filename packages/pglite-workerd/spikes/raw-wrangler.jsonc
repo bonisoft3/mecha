@@ -1,0 +1,49 @@
+{
+  "name": "golaberto-raw-spike",
+  "main": "compression-worker.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ARCHIVE",
+        "class_name": "CompressedArchive"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "CompressedArchive"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": [
+        "**/*.wasm"
+      ],
+      "fallthrough": false
+    },
+    {
+      "type": "Data",
+      "globs": [
+        "**/*.data",
+        "**/*.tgz"
+      ],
+      "fallthrough": false
+    }
+  ],
+  "alias": {
+    "@electric-sql/pglite": "../dist/index.js",
+    "@electric-sql/pglite/basefs": "../dist/fs/base.js"
+  },
+  "vars": {
+    "STORAGE_CODEC": "raw"
+  }
+}

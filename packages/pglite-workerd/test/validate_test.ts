@@ -12,22 +12,25 @@ import { load } from '../load.ts'
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 // wrangler's output streams outlive each restart's step.
-Deno.test({ name: 'PGlite serves a stored data directory in a Durable Object', sanitizeResources: false, sanitizeOps: false }, async (t) => {
+for (const codec of ['raw', 'deflate']) Deno.test({ name: `PGlite serves a ${codec} data directory in a Durable Object`, sanitizeResources: false, sanitizeOps: false }, async (t) => {
   Deno.statSync(new URL('../dist/pglite.wasm', import.meta.url))
   const tmp = await Deno.makeTempDir({ prefix: 'pglite-workerd-' })
   await seed(`${tmp}/seeded`, true)
   await seed(`${tmp}/empty`, false)
   const worker = await startWorker(new URL('wrangler.jsonc', import.meta.url), `${tmp}/state`)
   const call = async (path: string, name: string, init?: RequestInit) => {
-    const res = await fetch(`${worker.origin}${path}${path.includes('?') ? '&' : '?'}do=${name}`, init)
+    const res = await fetch(`${worker.origin}${path}${path.includes('?') ? '&' : '?'}do=${name}&codec=${codec}`, init)
     const text = await res.text()
     assert.ok(res.ok, `${path}: ${res.status} ${text}`)
     return JSON.parse(text)
   }
-  const send = (name: string) => (route: string, init?: RequestInit) => fetch(`${worker.origin}/import/${route}${route.includes('?') ? '&' : '?'}do=${name}`, init)
+  const send = (name: string) => (route: string, init?: RequestInit) => fetch(`${worker.origin}/import/${route}${route.includes('?') ? '&' : '?'}do=${name}&codec=${codec}`, init)
   const rows = (sql: string, name = 'seeded') => call('/sql', name, { method: 'POST', body: JSON.stringify({ sql }) })
   const idleTimers = async (name = 'seeded') => { await delay(1000); return (await call('/state', name)).timers }
   try {
+    await t.step('filesystem formats preserve partial and sparse writes', async () => {
+      assert.deepEqual(await call('/filesystem-cases', 'filesystem'), { ok: true })
+    })
     await load(`${tmp}/seeded`, send('seeded'), { log: () => {} })
     await load(`${tmp}/empty`, send('fresh'), { log: () => {} })
 
@@ -49,7 +52,7 @@ Deno.test({ name: 'PGlite serves a stored data directory in a Durable Object', s
       assert.deepEqual(await load(`${tmp}/seeded`, send('seeded'), { log: () => {} }), { skipped: 'complete' })
     })
     await t.step('an object with no complete directory does not open one', async () => {
-      const res = await fetch(`${worker.origin}/sql?do=unloaded`, { method: 'POST', body: JSON.stringify({ sql: 'SELECT 1' }) })
+      const res = await fetch(`${worker.origin}/sql?do=unloaded&codec=${codec}`, { method: 'POST', body: JSON.stringify({ sql: 'SELECT 1' }) })
       assert.equal(res.status, 500)
       assert.match(await res.text(), /no complete data directory/)
     })
@@ -80,6 +83,19 @@ Deno.test({ name: 'PGlite serves a stored data directory in a Durable Object', s
     await t.step('the root collation ignores accents and case', async () => {
       assert.deepEqual(await rows("SELECT name FROM team WHERE search_name = 'GREMIO-rs'"), [{ name: 'Grêmio-RS' }])
     })
+    await t.step('recovery preserves committed pages and excludes rolled-back updates', async () => {
+      await call('/exec', 'seeded', { method: 'POST', body: `
+        CREATE TABLE recovery_probe (id integer PRIMARY KEY, value text NOT NULL);
+        INSERT INTO recovery_probe SELECT n, md5(n::text) FROM generate_series(1, 5000) n;
+      ` })
+      await call('/exec', 'seeded', { method: 'POST', body: `
+        BEGIN;
+        UPDATE recovery_probe SET value = 'uncommitted';
+        ROLLBACK;
+      ` })
+      await worker.restart()
+      assert.deepEqual(await rows('SELECT count(*)::int AS n, bool_and(value = md5(id::text)) AS intact FROM recovery_probe'), [{ n: 5000, intact: true }])
+    })
     await t.step('no timer is pending once a request completes', async () => {
       await rows('SELECT count(*) FROM team a CROSS JOIN team b')
       assert.deepEqual(await idleTimers(), [])
@@ -93,7 +109,7 @@ Deno.test({ name: 'PGlite serves a stored data directory in a Durable Object', s
     })
     await t.step('/abort resets the object, and the next request boots it again', async () => {
       const before = (await call('/state', 'seeded')).bornAt
-      const res = await fetch(`${worker.origin}/abort?do=seeded`, { method: 'POST' })
+      const res = await fetch(`${worker.origin}/abort?do=seeded&codec=${codec}`, { method: 'POST' })
       await res.body?.cancel()
       assert.ok(!res.ok)
       const after = await call('/state', 'seeded')

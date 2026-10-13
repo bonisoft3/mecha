@@ -8,7 +8,9 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { PGlite } from '@electric-sql/pglite'
 import { type Assets, DataDirectory } from '../../pglite-workerd/src/data-directory.ts'
-import { createEdgeCluster, type EdgeCluster } from './cluster.ts'
+import type { StorageFormat } from '../../pglite-workerd/src/storage-block.ts'
+import { createEdgeCluster, type EdgeCluster, type EdgeClusterConfig } from './cluster.ts'
+import type { PublicSnapshot } from './public-snapshot.ts'
 
 export interface EdgeEnv {
   CLUSTER: DurableObjectNamespace
@@ -22,15 +24,20 @@ export interface EdgeOptions {
   assets: Assets
   /** Server tables that carry shapes, and the shell's schema (shell.json). */
   tables: string[]
-  schema?: Record<string, { durability?: string }>
+  schema?: EdgeClusterConfig['schema']
+  storageFormat?: StorageFormat
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 const CLUSTER_ROUTES = /^\/(auth|crud|electric)(\/|$)/
 
-export function edgeObject({ assets, tables, schema }: EdgeOptions) {
+export class DataDirectoryLoading extends Error {
+  constructor() { super('the data directory is loading') }
+}
+
+export function edgeObject({ assets, tables, schema, storageFormat }: EdgeOptions) {
   return class Cluster extends DurableObject<EdgeEnv> {
-    readonly #dir = new DataDirectory(this.ctx.storage)
+    readonly #dir = new DataDirectory(this.ctx.storage, storageFormat)
     #cluster: Promise<{ db: PGlite; cluster: EdgeCluster }> | null = null
 
     #boot() {
@@ -51,6 +58,12 @@ export function edgeObject({ assets, tables, schema }: EdgeOptions) {
       })
     }
 
+    protected async readPublic<T>(use: (snapshot: PublicSnapshot) => Promise<T>): Promise<T> {
+      if (!this.#dir.complete) throw new DataDirectoryLoading()
+      const { cluster } = await this.#boot()
+      return cluster.publicSnapshot(this.#dir.generation, use)
+    }
+
     async fetch(req: Request): Promise<Response> {
       const path = new URL(req.url).pathname
       // The Worker checked the import's token: an object keeps the version,
@@ -62,7 +75,16 @@ export function edgeObject({ assets, tables, schema }: EdgeOptions) {
         setTimeout(() => this.ctx.abort(new Error('the data directory was reset')), 0)
         return json({ reset: true })
       }
-      if (path.startsWith('/import/')) return this.#dir.importing(path.slice('/import/'.length), req)
+      if (path.startsWith('/import/')) {
+        if (req.headers.get('content-encoding') === 'gzip') {
+          if (!req.body) throw new Error('missing compressed import body')
+          const headers = new Headers(req.headers)
+          headers.delete('content-encoding')
+          headers.delete('content-length')
+          req = new Request(req, { headers, body: req.body.pipeThrough(new DecompressionStream('gzip')) })
+        }
+        return this.#dir.importing(path.slice('/import/'.length), req)
+      }
       // While a load is under way there is nothing to boot over.
       if (CLUSTER_ROUTES.test(path) && !this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
       if (CLUSTER_ROUTES.test(path)) return (await this.#boot()).cluster.handle(req)

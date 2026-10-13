@@ -4,7 +4,7 @@
 // chunk is verified; only then does open() start PGlite over it. Over a partial
 // or absent directory PGlite would run initdb and answer from an empty database.
 import { PGlite, type PGliteOptions } from '@electric-sql/pglite'
-import { SqliteFS } from './sqlite-fs.ts'
+import { SqliteFS, type StorageFormat } from './sqlite-fs.ts'
 
 /** What the package's dist/ holds, as a Worker imports it. */
 export interface Assets {
@@ -19,7 +19,7 @@ export interface Assets {
 // heap; measured with GolAberto's 5.2 GB archive (README.md).
 export const SETTINGS: Record<string, string> = {
   shared_buffers: '16MB',
-  work_mem: '1MB',
+  work_mem: '8MB',
   maintenance_work_mem: '8MB',
   temp_buffers: '1MB',
   wal_buffers: '256kB',
@@ -34,7 +34,7 @@ export class DataDirectory {
   #fs: SqliteFS | null = null
   #opened = false
 
-  constructor(storage: DurableObjectStorage) {
+  constructor(storage: DurableObjectStorage, private readonly format?: StorageFormat) {
     this.#storage = storage
     storage.sql.exec('CREATE TABLE IF NOT EXISTS data_directory (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
   }
@@ -43,8 +43,18 @@ export class DataDirectory {
     return this.#storage.sql.exec("SELECT 1 FROM data_directory WHERE key = 'complete'").toArray().length > 0
   }
 
+  /** Stable through eviction, replaced with the directory on reset. */
+  get generation(): string {
+    if (!this.complete) throw new Error('no complete data directory')
+    const [stored] = this.#storage.sql.exec<{ value: string }>("SELECT value FROM data_directory WHERE key = 'generation'").toArray()
+    if (stored) return stored.value
+    const generation = crypto.randomUUID()
+    this.#storage.sql.exec("INSERT INTO data_directory (key, value) VALUES ('generation', ?)", generation)
+    return generation
+  }
+
   get #dir() {
-    this.#fs ??= new SqliteFS(this.#storage.sql)
+    this.#fs ??= new SqliteFS(this.#storage.sql, this.format)
     return this.#fs
   }
 

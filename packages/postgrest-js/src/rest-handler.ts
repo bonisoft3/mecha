@@ -1,6 +1,6 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { validateIdentifier } from './validate.js'
-import { planRead, ReadQueryError, writeWhere } from './rest-read.js'
+import { planRead, ReadQueryError, writeWhere, type ReadSchema } from './rest-read.js'
 
 function parsePrefer(header: string | null): {
   returnRepresentation: boolean
@@ -20,6 +20,12 @@ function parsePrefer(header: string | null): {
 
 /** What the handlers reach for, so a transaction can stand in for the connection. */
 type Queryable = Pick<PGlite, 'query' | 'exec'>
+
+/** Reads within an existing transaction. Its owner supplies the role and scopes. */
+export function readRest(db: Queryable, req: Request, schema?: ReadSchema): Promise<Response> {
+  if (req.method !== 'GET') throw new Error('snapshot reads only accept GET')
+  return route(db, req, schema)
+}
 
 async function tableExists(db: Queryable, table: string): Promise<boolean> {
   const result = await db.query<{ count: string }>(
@@ -73,11 +79,12 @@ async function handleGet(
   table: string,
   url: URL,
   req: Request,
+  schema?: ReadSchema,
 ): Promise<Response> {
   const params = url.searchParams
   const prefer = parsePrefer(req.headers.get('Prefer'))
 
-  const plan = await planRead(db, table, params)
+  const plan = await planRead(db, table, params, schema)
   const result = await db.query<{ data: unknown }>(plan.sql, plan.params)
 
   const responseHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -287,6 +294,7 @@ function scopeSql(scopes: string[], role: string, local: boolean, claims?: Recor
 export function createRestHandler(
   db: PGlite,
   auth?: RestHandlerAuth,
+  schema?: ReadSchema,
 ): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     try {
@@ -299,14 +307,14 @@ export function createRestHandler(
         const claims = auth?.claims ? await auth.claims(req) : undefined
         const res = await db.transaction(async (tx) => {
           if (auth) await tx.exec(scopeSql(scopes!, auth.role ?? 'app_user', true, claims))
-          return await route(tx, req)
+          return await route(tx, req, schema)
         })
         // PGlite yields undefined for a transaction it rolled back without
         // throwing, and there is no response to send in that case.
         if (!res) throw new Error('request transaction rolled back')
         return res
       }
-      return await route(db, req)
+      return await route(db, req, schema)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const isValidationError = err instanceof ReadQueryError || message.startsWith('Invalid identifier:')
@@ -318,7 +326,7 @@ export function createRestHandler(
   }
 }
 
-async function route(db: Queryable, req: Request): Promise<Response> {
+async function route(db: Queryable, req: Request, schema?: ReadSchema): Promise<Response> {
   const url = new URL(req.url)
   // Extract first path segment as table name
   const segments = url.pathname.split('/').filter(Boolean)
@@ -355,7 +363,7 @@ async function route(db: Queryable, req: Request): Promise<Response> {
 
   switch (req.method.toUpperCase()) {
     case 'GET':
-      return await handleGet(db, table, url, req)
+      return await handleGet(db, table, url, req, schema)
     case 'POST':
       return await namingTransaction(db, await handlePost(db, table, req))
     case 'PATCH':

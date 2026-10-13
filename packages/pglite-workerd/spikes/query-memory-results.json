@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-13",
+  "accountPlan": "paid",
+  "query": "players in archive-queries.ts, identical SQL and verified rows",
+  "raw": {
+    "format": {
+      "blockSize": 8192,
+      "codec": "raw"
+    },
+    "runs": [
+      {
+        "workMem": "1MB",
+        "roundTripMs": 2304.5005840000003
+      },
+      {
+        "workMem": "8MB",
+        "roundTripMs": 481.1654169999997
+      },
+      {
+        "workMem": "8MB",
+        "roundTripMs": 569.9398329999999
+      },
+      {
+        "workMem": "1MB",
+        "roundTripMs": 890.1866670000004
+      }
+    ],
+    "tempReadBlocksAt8MB": 0,
+    "tempWrittenBlocksAt8MB": 0
+  },
+  "compressed": {
+    "format": {
+      "blockSize": 131072,
+      "codec": "deflate"
+    },
+    "decodedCacheBytes": 4194304,
+    "runs": [
+      {
+        "workMem": "1MB",
+        "roundTripMs": 5565.33825
+      },
+      {
+        "workMem": "8MB",
+        "roundTripMs": 650.4115000000002
+      },
+      {
+        "workMem": "8MB",
+        "roundTripMs": 649.9292909999995
+      },
+      {
+        "workMem": "1MB",
+        "roundTripMs": 2975.3626250000007
+      }
+    ],
+    "tempReadBlocksAt8MB": 0,
+    "tempWrittenBlocksAt8MB": 0
+  },
+  "limitations": [
+    "Round-trip latency includes the network, not CPU-only measurements.",
+    "Small exploratory sample, not a throughput or traffic-capacity benchmark.",
+    "The query projects selected columns; actual SSR pages issue additional queries.",
+    "Paid deployment does not verify Free plan enforcement."
+  ]
+}

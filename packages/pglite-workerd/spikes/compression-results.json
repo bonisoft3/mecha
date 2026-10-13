@@ -1,0 +1,130 @@
+{
+  "date": "2026-10-13",
+  "deployment": "golaberto-compression-spike",
+  "version": "54fa3803-130e-4d29-984c-e60e024bda9e",
+  "accountPlan": "paid",
+  "sourceBytes": 7341424680,
+  "sourceFiles": 1498,
+  "format": {
+    "version": 1,
+    "blockSize": 131072,
+    "codec": "deflate"
+  },
+  "import": {
+    "files": 1498,
+    "MiB": 7001.3,
+    "sentMiB": 7001.3,
+    "loadSeconds": 457.3,
+    "MiBps": 15.3,
+    "chunksVerified": 2937,
+    "verifySeconds": 51.3
+  },
+  "measurements": {
+    "before": {
+      "bytes": 1951252480,
+      "blocks": {
+        "count": 56995,
+        "payload": 1856118117
+      },
+      "format": {
+        "value": "{\"version\":1,\"blockSize\":131072,\"codec\":\"deflate\"}"
+      }
+    },
+    "after": {
+      "bytes": 1951252480,
+      "blocks": {
+        "count": 56996,
+        "payload": 1856118191
+      },
+      "format": {
+        "value": "{\"version\":1,\"blockSize\":131072,\"codec\":\"deflate\"}"
+      }
+    },
+    "runs": [
+      {
+        "phase": "cold",
+        "name": "players",
+        "roundTripMs": 4879.1775,
+        "rows": 40,
+        "cpuMs": 3926,
+        "objectWallMs": 4608
+      },
+      {
+        "phase": "cold",
+        "name": "flamengo",
+        "roundTripMs": 270.20550000000003,
+        "rows": 100,
+        "cpuMs": 103,
+        "objectWallMs": 110
+      },
+      {
+        "phase": "cold",
+        "name": "counts",
+        "roundTripMs": 444.52587500000027,
+        "rows": 1,
+        "cpuMs": 284,
+        "objectWallMs": 284
+      },
+      {
+        "phase": "warm",
+        "name": "players",
+        "roundTripMs": 4120.265625,
+        "rows": 40,
+        "cpuMs": 3212,
+        "objectWallMs": 3941
+      },
+      {
+        "phase": "warm",
+        "name": "flamengo",
+        "roundTripMs": 174.15312500000073,
+        "rows": 100,
+        "cpuMs": 5,
+        "objectWallMs": 5
+      },
+      {
+        "phase": "warm",
+        "name": "counts",
+        "roundTripMs": 547.2072079999998,
+        "rows": 1,
+        "cpuMs": 376,
+        "objectWallMs": 379
+      },
+      {
+        "phase": "recovered",
+        "name": "players",
+        "roundTripMs": 4629.593708,
+        "rows": 40,
+        "cpuMs": 3619,
+        "objectWallMs": 4411
+      },
+      {
+        "phase": "recovered",
+        "name": "flamengo",
+        "roundTripMs": 279.32287499999984,
+        "rows": 100,
+        "cpuMs": 118,
+        "objectWallMs": 121
+      },
+      {
+        "phase": "recovered",
+        "name": "counts",
+        "roundTripMs": 440.91529100000116,
+        "rows": 1,
+        "cpuMs": 284,
+        "objectWallMs": 290
+      }
+    ]
+  },
+  "validation": {
+    "sourceHashes": "all 2937 chunks matched before opening PostgreSQL",
+    "queryRows": "40 players, 100 Flamengo rating history rows, counts of 90867 players and 3426 teams matched the local source on all three passes",
+    "localTests": "codec corruption test, 30 workerd integration steps across raw/deflate, restore and migration tests passed"
+  },
+  "limitations": [
+    "No matched raw-format cloud query baseline; CPU cannot be attributed exclusively to compression.",
+    "Paid account does not verify Free enforcement. Free per-object size documentation is contradictory.",
+    "56995 initial block rows exclude metadata, index maintenance and subsequent PostgreSQL writes.",
+    "Cold players request includes PostgreSQL boot; cold Flamengo follows players in an already-open database.",
+    "Worker performance.now stayed fixed during synchronous database work; CPU and object wall times are platform trace measurements."
+  ]
+}

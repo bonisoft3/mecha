@@ -5,15 +5,16 @@
 // data directory's: nothing here migrates.
 // Routes: /auth/guest, /auth/whoami, /auth/shape, /crud/*, /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
-import { createRestHandler } from '@mecha/postgrest-js'
+import { createRestHandler, type ReadSchema } from '@mecha/postgrest-js'
 import { shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
+import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
 
 export interface EdgeClusterConfig {
   db: PGlite
   /** Server tables that carry shapes. */
   tables: string[]
-  schema?: Record<string, { durability?: string }>
+  schema?: ReadSchema & Record<string, { durability?: string }>
   /** The HS256 secret every token is signed with. */
   secret: string
   /** Where a request's failure is written before it is answered as a 500. */
@@ -24,6 +25,7 @@ export interface EdgeClusterConfig {
 
 export interface EdgeCluster {
   handle: (req: Request) => Promise<Response>
+  publicSnapshot<T>(generation: string, use: (snapshot: PublicSnapshot) => Promise<T>): Promise<T>
 }
 
 // The auth service's lifetimes (services/auth/main.ts).
@@ -47,7 +49,13 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     chain = p.catch(() => {})
     return p
   }
-  const shapes = await serialize(() => createShapes({ db, tables: cfg.tables, schema: cfg.schema, serialize, fail: cfg.fail }))
+  let shapes: Awaited<ReturnType<typeof createShapes>>
+  let shapesReady: Promise<void> | undefined
+  // Anonymous rendering needs no change stream. Install its triggers before
+  // the first API request can write, on the same chain as every snapshot.
+  const ensureShapes = () => shapesReady ??= serialize(async () => {
+    shapes = await createShapes({ db, tables: cfg.tables, schema: cfg.schema, serialize, fail: cfg.fail })
+  })
   // services/auth/main.ts's tableScope: scope_id generated as the literal
   // 'public:' on a plain table no other inherits from.
   const publicOnly = async (table: string) => (await db.query<{ p: boolean }>(
@@ -122,13 +130,14 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     u.pathname = u.pathname.replace(/^\/crud/, '')
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
     const inner = new Request(u, { method: req.method, headers: req.headers, body })
-    const rest = createRestHandler(db, { role: 'app_user', scopes: () => scopesOf(sub), claims: () => claims })
+    const rest = createRestHandler(db, { role: 'app_user', scopes: () => scopesOf(sub), claims: () => claims }, cfg.schema)
     return serialize(() => rest(inner))
   }
 
   async function handle(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname
     try {
+      await ensureShapes()
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)
@@ -141,5 +150,16 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     }
   }
 
-  return { handle }
+  let pendingSnapshots = 0
+  return {
+    handle,
+    async publicSnapshot(generation, use) {
+      // Admit before joining the database chain; the renderer's queue cannot
+      // see requests waiting here, and each snapshot also delays API writes.
+      if (pendingSnapshots >= 16) throw new PublicSnapshotCapacity('public snapshot queue full')
+      pendingSnapshots++
+      try { return await serialize(() => publicSnapshot(db, generation, use, cfg.schema)) }
+      finally { pendingSnapshots-- }
+    },
+  }
 }

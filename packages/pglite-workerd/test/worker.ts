@@ -11,6 +11,8 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { PGlite } from '@electric-sql/pglite'
 import { DataDirectory } from '../src/data-directory.ts'
+import type { StorageFormat } from '../src/storage-block.ts'
+import { filesystemCases } from './filesystem-cases.ts'
 import pgliteWasm from '../dist/pglite.wasm'
 import initdbWasm from '../dist/initdb.wasm'
 import pgliteData from '../dist/pglite.data'
@@ -31,11 +33,13 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 
 export class Fixture extends DurableObject {
   readonly #bornAt = new Date().toISOString()
-  readonly #dir = new DataDirectory(this.ctx.storage)
+  protected get storageFormat(): StorageFormat | undefined { return undefined }
+  readonly #dir = new DataDirectory(this.ctx.storage, this.storageFormat)
   #db: Promise<PGlite> | null = null
 
   async fetch(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname
+    if (path === '/filesystem-cases') { filesystemCases(this.ctx.storage.sql); return json({ ok: true }) }
     if (path.startsWith('/import/')) return this.#dir.importing(path.slice('/import/'.length), req)
     if (path === '/state') return json({ bornAt: this.#bornAt, open: this.#db !== null, timers: [...timers.values()] })
     if (path === '/abort') this.ctx.abort(new Error('aborted by /abort'))
@@ -53,8 +57,12 @@ export class Fixture extends DurableObject {
   }
 }
 
+export class CompressedFixture extends Fixture {
+  protected override get storageFormat(): StorageFormat { return { version: 1, blockSize: 131072, codec: 'deflate' } }
+}
+
 export default {
-  fetch(req: Request, env: { FIXTURE: DurableObjectNamespace<Fixture> }): Promise<Response> | Response {
+  fetch(req: Request, env: { FIXTURE: DurableObjectNamespace<Fixture>; COMPRESSED: DurableObjectNamespace<CompressedFixture> }): Promise<Response> | Response {
     const url = new URL(req.url)
     if (url.pathname === '/probe') {
       let compile: string
@@ -68,6 +76,7 @@ export default {
     }
     const name = url.searchParams.get('do')
     if (!name) return json({ error: 'no ?do=' }, 400)
-    return env.FIXTURE.get(env.FIXTURE.idFromName(name)).fetch(req)
+    const namespace = url.searchParams.get('codec') === 'deflate' ? env.COMPRESSED : env.FIXTURE
+    return namespace.get(namespace.idFromName(name)).fetch(req)
   },
 }

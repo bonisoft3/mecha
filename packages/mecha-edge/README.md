@@ -32,6 +32,43 @@ lifetimes ([its contract](../../services/auth/README.md)): a guest's session
 lasts 7 days, a shape token 900 s. Guests are the only sign-in; passkeys need
 the auth service's ceremonies, which run nowhere here.
 
+Read metadata includes the shell schema's field references. PostgreSQL views
+carry no foreign-key constraints, so their declared `ref` fields supply the
+relationships for embedded reads, using each target's actual primary key.
+Both snapshot and API joins still execute under the request's PostgreSQL role;
+unknown or ambiguous relationships fail.
+
+## Public snapshots for rendering
+
+An `edgeObject` subclass can use its protected `readPublic(use)` method to render
+public HTML. The callback receives `{ revision, read(path) }`; `read` accepts a
+PostgREST GET path such as `/board?select=title`. It runs under `app_user`, with
+only `public:` in `app.scopes` and no subject in `request.jwt.claims`. It creates
+no guest and uses the same read planner and row policies as CRUD.
+Shape metadata and change-notification triggers are initialized only on the
+first API request, before any API write; anonymous SSR does not pay that cost.
+An incomplete import raises `DataDirectoryLoading`; the HTTP renderer returns
+503 with `Retry-After` and `Cache-Control: no-store` until the directory is ready.
+
+The callback holds one read-only, repeatable-read transaction, serialized with
+the cluster's other database operations. It can pass the reader to another
+Durable Object over RPC and await rendering there. The reader is valid only during
+the callback; the owner drains pending reads and revokes the reader before closing
+the transaction. Any failed read rejects the snapshot, including
+a failure the callback caught. Writes wait while a render holds the snapshot.
+
+`revision` combines PostgreSQL's full `pg_current_snapshot()` value with the
+data directory's persistent generation. Ordinary committed writes invalidate it;
+resetting and importing even an older directory changes the generation. Read-only
+transactions do not advance it. Boot-time DDL and unrelated writes may invalidate
+it conservatively. This is a revision of MVCC data, not of clocks, randomness,
+external services or sequence state. A renderer must account for any such inputs
+separately, alongside its release, route, parameters and locale.
+
+Every saved-document lookup must first obtain a snapshot revision. `readPublic`
+does not change the existing HTTP routes or their caches. The native release
+renderer and experiments are described in [[../../../../plugins/omnishell/docs/native-worker-ssr]].
+
 ## The Worker's cache
 
 Reads the object answered are answered again from the colo's Cache API, with
@@ -96,3 +133,9 @@ timer, the Worker's cache (a public table's chunks shared, live never kept,
 a guest's read giving way to its own write, a new object's chunks replacing
 the old one's), the object resumed after `ctx.abort()` and after an
 eviction, and a reset of live data (503 while the new directory loads). It needs `../pglite-workerd/dist` (`just build` there).
+
+The same command also runs `test/public-snapshot_test.ts` against real PGlite:
+public-only access without a guest, joins and aggregates, direct-write revisions,
+concurrent writes, rollback, reader lifetime, and refusal of writes through a
+read. The directory generation is additionally exercised by the two-Worker
+experiment's reset and reimport check.

@@ -3,6 +3,8 @@ import { validateIdentifier } from './validate.js'
 
 type Queryable = Pick<PGlite, 'query'>
 
+export type ReadSchema = Record<string, { fields?: { name: string; ref?: string }[] }>
+
 export class ReadQueryError extends Error {}
 
 type Aggregate = 'sum' | 'avg' | 'min' | 'max' | 'count'
@@ -186,7 +188,7 @@ function pagination(search: URLSearchParams, key: string): number | null {
   return value
 }
 
-export async function planRead(db: Queryable, table: string, search: URLSearchParams): Promise<{
+export async function planRead(db: Queryable, table: string, search: URLSearchParams, schema?: ReadSchema): Promise<{
   sql: string
   countSql: string
   params: unknown[]
@@ -231,7 +233,24 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
              AND p.prokind = 'f' AND p.pronargs = 1 AND p.pronargdefaults = 0
              AND p.proargmodes IS NULL AND p.proretset AND p.prorows = 1
              AND p.provolatile IN ('s', 'i') AND NOT p.prosecdef`, [table])
-        relations = [...result.rows, ...computed.rows]
+        // Views have no pg_constraint rows. Their app-declared references still
+        // join under the caller's role, against the target's actual primary key.
+        const refs = Object.fromEntries((schema?.[table]?.fields ?? []).filter(field => field.ref).map(field => [field.name, field.ref]))
+        const declared = Object.keys(refs).length ? await db.query<ForeignKey>(`
+          SELECT 'foreign-key' AS kind, ref.key AS name, target.relname AS target,
+                 ARRAY[source_col.attname::text] AS columns, ARRAY[target_col.attname::text] AS referenced
+            FROM pg_catalog.pg_class source
+            JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
+            CROSS JOIN jsonb_each_text($2::jsonb) ref
+            JOIN pg_catalog.pg_attribute source_col ON source_col.attrelid = source.oid
+              AND source_col.attname = ref.key AND NOT source_col.attisdropped
+            JOIN pg_catalog.pg_class target ON target.relname = ref.value
+            JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
+            JOIN pg_catalog.pg_constraint pk ON pk.conrelid = target.oid AND pk.contype = 'p' AND cardinality(pk.conkey) = 1
+            JOIN pg_catalog.pg_attribute target_col ON target_col.attrelid = target.oid AND target_col.attnum = pk.conkey[1]
+           WHERE source_ns.nspname = 'public' AND target_ns.nspname = 'public'
+             AND source.relname = $1 AND source.relkind IN ('v', 'm')`, [table, JSON.stringify(refs)]) : { rows: [] }
+        relations = [...result.rows, ...declared.rows, ...computed.rows]
         metadata.set(table, relations)
       }
       const computed = relations.filter((relation) => relation.kind === 'computed' && relation.name === selection.name && !selection.hint)

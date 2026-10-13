@@ -2,11 +2,13 @@
 // path, a file's bytes as fixed blocks keyed by (file, index). Both PGlite's
 // filesystem calls and ctx.storage.sql are synchronous, so Postgres reads a
 // page from storage when it asks for it, as OpfsAhpFS reads from an OPFS
-// access handle; nothing of the data directory is held in the isolate but the
-// node table. The block is Postgres's page, so a page read or write is one row.
+// access handle. Decoded blocks have a bounded cache checked against storage.
+// The persisted format fixes block size and codec for the directory.
 import { BaseFilesystem, ERRNO_CODES, type FsStats } from '@electric-sql/pglite/basefs'
+import { checkFormat, encodeBlock, RAW_FORMAT, type StorageFormat } from './storage-block.ts'
+import { BlockDecoder } from './block-decoder.ts'
+export type { StorageFormat } from './storage-block.ts'
 
-export const BLOCK = 8192
 const DIR = 16384
 const FILE = 32768
 
@@ -21,16 +23,28 @@ class FsError extends Error {
 }
 
 export class SqliteFS extends BaseFilesystem {
+  readonly #format: StorageFormat
+  readonly #decoder: BlockDecoder
   readonly #sql: SqlStorage
   readonly #nodes = new Map<string, Node>()
   readonly #fds = new Map<number, string>()
   #nextFd = 1
   #nextId = 1
 
-  constructor(sql: SqlStorage) {
+  constructor(sql: SqlStorage, requested?: StorageFormat) {
     super('sqlite://')
     this.#sql = sql
+    if (requested) checkFormat(requested)
     SqliteFS.schema(sql)
+    const [saved] = sql.exec<{ value: string }>('SELECT value FROM fs_format WHERE id = 1').toArray()
+    const existing = sql.exec('SELECT 1 FROM fs_node LIMIT 1').toArray().length > 0
+    this.#format = Object.freeze(saved ? JSON.parse(saved.value) : existing ? { ...RAW_FORMAT } : { ...(requested ?? RAW_FORMAT) })
+    checkFormat(this.#format)
+    this.#decoder = new BlockDecoder(this.#format)
+    if (requested && (requested.version !== this.#format.version || requested.blockSize !== this.#format.blockSize || requested.codec !== this.#format.codec)) {
+      throw new Error('filesystem storage format differs; load a fresh directory to change it')
+    }
+    if (!saved) sql.exec('INSERT INTO fs_format (id, value) VALUES (1, ?)', JSON.stringify(this.#format))
     for (const r of sql.exec<{ path: string; mode: number; size: number; mtime: number; id: number | null }>('SELECT path, mode, size, mtime, id FROM fs_node')) {
       this.#nodes.set(r.path, { mode: r.mode, size: r.size, mtime: r.mtime, id: r.id })
       if (r.id !== null && r.id >= this.#nextId) this.#nextId = r.id + 1
@@ -39,12 +53,14 @@ export class SqliteFS extends BaseFilesystem {
   }
 
   static schema(sql: SqlStorage) {
+    sql.exec('CREATE TABLE IF NOT EXISTS fs_format (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)')
     sql.exec(`CREATE TABLE IF NOT EXISTS fs_node (path TEXT PRIMARY KEY, mode INTEGER NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL, id INTEGER UNIQUE)`)
     sql.exec(`CREATE TABLE IF NOT EXISTS fs_block (id INTEGER NOT NULL, idx INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (id, idx)) WITHOUT ROWID`)
   }
 
   /** Drops the stored directory; a SqliteFS over it must not be used again. */
   static drop(sql: SqlStorage) {
+    sql.exec('DROP TABLE IF EXISTS fs_format')
     sql.exec('DROP TABLE IF EXISTS fs_block')
     sql.exec('DROP TABLE IF EXISTS fs_node')
   }
@@ -83,11 +99,11 @@ export class SqliteFS extends BaseFilesystem {
 
   #block(id: number, idx: number): Uint8Array | null {
     const rows = this.#sql.exec<{ data: ArrayBuffer }>('SELECT data FROM fs_block WHERE id = ? AND idx = ?', id, idx).toArray()
-    return rows.length ? new Uint8Array(rows[0].data) : null
+    return rows.length ? this.#decoder.decode(`${id}:${idx}`, new Uint8Array(rows[0].data)) : null
   }
 
   #setBlock(id: number, idx: number, data: Uint8Array) {
-    this.#sql.exec('INSERT OR REPLACE INTO fs_block (id, idx, data) VALUES (?, ?, ?)', id, idx, data)
+    this.#sql.exec('INSERT OR REPLACE INTO fs_block (id, idx, data) VALUES (?, ?, ?)', id, idx, encodeBlock(data, this.#format))
   }
 
   /** Writes bytes at a position, block by block; a partial block is merged
@@ -96,11 +112,11 @@ export class SqliteFS extends BaseFilesystem {
     let done = 0
     while (done < src.length) {
       const at = position + done
-      const idx = Math.floor(at / BLOCK)
-      const within = at % BLOCK
-      const len = Math.min(BLOCK - within, src.length - done)
+      const idx = Math.floor(at / this.#format.blockSize)
+      const within = at % this.#format.blockSize
+      const len = Math.min(this.#format.blockSize - within, src.length - done)
       let block: Uint8Array
-      if (within === 0 && len === BLOCK) block = src.subarray(done, done + len)
+      if (within === 0 && len === this.#format.blockSize) block = src.subarray(done, done + len)
       else {
         const old = this.#block(n.id!, idx)
         block = new Uint8Array(Math.max(old?.length ?? 0, within + len))
@@ -114,11 +130,11 @@ export class SqliteFS extends BaseFilesystem {
 
   #resize(path: string, n: Node, size: number) {
     if (size < n.size) {
-      const keep = Math.ceil(size / BLOCK)
+      const keep = Math.ceil(size / this.#format.blockSize)
       this.#sql.exec('DELETE FROM fs_block WHERE id = ? AND idx >= ?', n.id, keep)
-      if (size % BLOCK) {
+      if (size % this.#format.blockSize) {
         const last = this.#block(n.id!, keep - 1)
-        if (last && last.length > size % BLOCK) this.#setBlock(n.id!, keep - 1, last.slice(0, size % BLOCK))
+        if (last && last.length > size % this.#format.blockSize) this.#setBlock(n.id!, keep - 1, last.slice(0, size % this.#format.blockSize))
       }
     }
     n.size = size
@@ -155,11 +171,11 @@ export class SqliteFS extends BaseFilesystem {
   readRange(path: string, position: number, length: number): Uint8Array {
     const n = this.#file(path)
     const out = new Uint8Array(Math.max(0, Math.min(length, n.size - position)))
-    const first = Math.floor(position / BLOCK)
-    const last = Math.floor((position + out.length - 1) / BLOCK)
+    const first = Math.floor(position / this.#format.blockSize)
+    const last = Math.floor((position + out.length - 1) / this.#format.blockSize)
     for (const r of this.#sql.exec<{ idx: number; data: ArrayBuffer }>('SELECT idx, data FROM fs_block WHERE id = ? AND idx BETWEEN ? AND ?', n.id, first, last)) {
-      const data = new Uint8Array(r.data)
-      const blockStart = r.idx * BLOCK
+      const data = this.#decoder.decode(`${n.id}:${r.idx}`, new Uint8Array(r.data))
+      const blockStart = r.idx * this.#format.blockSize
       const from = Math.max(position, blockStart)
       const to = Math.min(position + out.length, blockStart + data.length)
       if (to > from) out.set(data.subarray(from - blockStart, to - blockStart), from - position)
@@ -187,7 +203,7 @@ export class SqliteFS extends BaseFilesystem {
     const n = this.#node(path)
     return {
       dev: 0, ino: 0, mode: n.mode, nlink: 1, uid: 0, gid: 0, rdev: 0,
-      size: n.size, blksize: BLOCK, blocks: Math.ceil(n.size / BLOCK),
+      size: n.size, blksize: this.#format.blockSize, blocks: Math.ceil(n.size / this.#format.blockSize),
       atime: n.mtime, mtime: n.mtime, ctime: n.mtime,
     }
   }
@@ -235,13 +251,13 @@ export class SqliteFS extends BaseFilesystem {
     const n = this.#file(this.#path(fd))
     const end = Math.min(position + length, n.size)
     if (position >= end) return 0
-    const first = Math.floor(position / BLOCK)
-    const last = Math.floor((end - 1) / BLOCK)
+    const first = Math.floor(position / this.#format.blockSize)
+    const last = Math.floor((end - 1) / this.#format.blockSize)
     const dst = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, end - position)
     dst.fill(0)
     for (const r of this.#sql.exec<{ idx: number; data: ArrayBuffer }>('SELECT idx, data FROM fs_block WHERE id = ? AND idx BETWEEN ? AND ?', n.id, first, last)) {
-        const data = new Uint8Array(r.data)
-      const blockStart = r.idx * BLOCK
+      const data = this.#decoder.decode(`${n.id}:${r.idx}`, new Uint8Array(r.data))
+      const blockStart = r.idx * this.#format.blockSize
       const from = Math.max(position, blockStart)
       const to = Math.min(end, blockStart + data.length)
       if (to > from) dst.set(data.subarray(from - blockStart, to - blockStart), from - position)

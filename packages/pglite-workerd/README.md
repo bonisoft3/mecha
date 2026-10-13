@@ -47,13 +47,31 @@ included.
 
 ## The data directory
 
-[`SqliteFS`](src/sqlite-fs.ts) is PGlite's filesystem over two tables of the
-object's SQLite: a node per path, and a file's bytes as 8 KiB blocks keyed by
+[`SqliteFS`](src/sqlite-fs.ts) is PGlite's filesystem over the
+object's SQLite: a node per path, and a file's bytes as blocks keyed by
 (file, index). PGlite's filesystem calls and `ctx.storage.sql` are both
 synchronous, so Postgres reads a page from storage when it asks for it, as
 OpfsAhpFS reads from an OPFS access handle; the isolate holds only the node
 table, and the database is bounded by the object's storage, not its memory.
-A block is Postgres's page, so a page read or write is one row.
+The default format uses raw 8 KiB blocks, matching Postgres pages.
+
+`new DataDirectory(storage, { version: 1, blockSize: 131072, codec: 'deflate' })`
+selects lossless zlib level-1 compression for a new directory. Blocks that would
+grow are stored raw, with an encoding byte. Block sizes are powers of two from
+8 to 128 KiB. `fs_format` persists the choice; reopening without options uses
+that format, and conflicting options fail. Existing directories without format
+metadata retain raw 8 KiB storage. Changing format requires a fresh import.
+Inflation is bounded by the declared block size and damaged streams fail.
+
+Decoded compressed blocks use a 4 MiB LRU budget, including their encoded copies.
+Every lookup still reads authoritative SQLite bytes and compares them before
+reusing decoded data. Writes, rollback and ID reuse therefore cannot expose a
+stale decoded block; this cache saves inflation, not SQLite row reads.
+
+Larger blocks reduce SQLite allocation overhead but amplify isolated page reads
+and writes: updating one 8 KiB page can decompress and recompress 128 KiB.
+Compression preserves PostgreSQL indexes, transactions and query semantics;
+it does not require moving tables to another database engine.
 
 [`DataDirectory`](src/data-directory.ts) owns it in an object. `initdb`
 cannot run there, so a directory built on disk — by npm's PGlite, the same
@@ -100,17 +118,55 @@ page reads 1–2 ms warm and up to 175 ms cold, accent-insensitive search in
 checkpoint. Workers Paid holds such an archive; Free's 5 GB per account and
 100,000 row writes a day do not.
 
+The opt-in compression probe loaded a newer 7,341,424,680-byte archive into
+1,951,252,480 bytes of actual Cloudflare SQLite storage: 73.4% smaller, with
+56,995 block rows. All 2,937 source chunks verified before PostgreSQL opened.
+Players, Flamengo rating history and table counts matched the original archive
+on initial, warm and post-abort reads. [[spikes/compression-results.json]] records
+the original measurements. That build's warm players query used 3,212 ms CPU and
+3,941 ms object wall time; warm Flamengo rating history used 5 ms each.
+
+The matched follow-up in [[spikes/query-memory-results.json]] found that 1 MiB
+`work_mem` spilled 900 temporary pages. The current 8 MiB setting removed those
+spills for this query. Two warm round trips took 481–570 ms with raw storage and
+650 ms with compressed storage and the decoded-block cache. Results matched the
+source archive. These are small latency samples, not capacity guarantees, and
+`work_mem` applies per query operation, not as a total PostgreSQL memory cap.
+The probes run on Paid; fitting Free's account storage budget does not prove
+Free runtime quotas or its per-object size limit.
+
 ## Test
 
-`just test` runs [`test/validate_test.ts`](test/validate_test.ts) against
+`just test` runs codec corruption checks and [`test/validate_test.ts`](test/validate_test.ts) against
 [`test/worker.ts`](test/worker.ts) under `wrangler dev` at the `mise.toml` pin
-([`wrangler-dev.ts`](wrangler-dev.ts), which mecha-edge's test runs too): two
+([`wrangler-dev.ts`](wrangler-dev.ts), which mecha-edge's test runs too), for both
+raw 8 KiB and compressed 128 KiB storage: two
 directories seeded on disk and loaded, a second load that leaves the complete
 one alone, an object with none that refuses to open, then in the object the checks the build exists for — no runtime
 compilation, a PL/pgSQL trigger and DO block, the snowball dictionaries, the
 root collation, a schema applied in the object, and no pending timer after a
-boot, an eviction or `ctx.abort()`. [`test/restore_test.ts`](test/restore_test.ts)
+boot, an eviction or `ctx.abort()`. Filesystem checks cover partial and sparse
+writes, truncation, reopening and legacy formats; committed data and rolled-back
+updates are checked after a process restart without an explicit checkpoint.
+[`test/restore_test.ts`](test/restore_test.ts)
 restores a dump Postgres 18 (in Docker) took of a table with a policy, an ICU
 collation and a trigger; [`test/migrate_test.ts`](test/migrate_test.ts) gives
 a directory restored from a database pgroll migrated (mecha's pinned image)
 the set with one migration more.
+
+## Compression probe
+
+[[spikes/compression-wrangler.jsonc]] deploys an isolated, authenticated archive
+copy using compressed 128 KiB blocks. Set its `PROBE_TOKEN` secret before use.
+[[spikes/compression-load.ts]] takes the probe origin, a closed data directory,
+and a private token file. It compresses upload chunks in transit and uses the
+normal resumable import and complete-directory hash verification.
+
+[[spikes/compression-check.ts]] has two modes: `reference <pgdata-copy> <json>`
+records public player and rating queries from a disposable local archive copy;
+`remote <origin> <json> <token-file>` compares them with the deployed database
+cold, warm, and after an object abort. The probe exposes storage allocation;
+the checker measures client round trips. CPU and object wall time come from
+`wrangler tail --format json`: the in-Worker clock does not advance during
+synchronous database work. SQL requests run in read-only transactions. Use a separate
+namespace because the import operates on a complete PostgreSQL directory.

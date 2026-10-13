@@ -1,7 +1,6 @@
-// The edge cluster over the fixture's tables, for cluster_test.ts, with two
-// routes of the test's own: /test/abort (ctx.abort(), as an eviction) and
-// /test/timers (what is scheduled: a pending timer keeps an object awake).
-import { edgeObject, type EdgeEnv } from '../src/object.ts'
+// The fixture cluster exposes eviction, scheduled timers, and public reads
+// to cluster_test.ts. A pending timer keeps an object awake.
+import { edgeObject, DataDirectoryLoading, type EdgeEnv } from '../src/object.ts'
 import { edgeWorker } from '../src/worker.ts'
 import pgliteWasm from '../../pglite-workerd/dist/pglite.wasm'
 import initdbWasm from '../../pglite-workerd/dist/initdb.wasm'
@@ -26,6 +25,11 @@ export class Cluster extends Base {
     const path = new URL(req.url).pathname
     if (path === '/test/abort') this.ctx.abort(new Error('aborted by the test'))
     if (path === '/test/timers') return Promise.resolve(Response.json({ bornAt: this.bornAt, timers: [...timers.values()] }))
+    if (path === '/test/public') return this.readPublic(async snapshot => Response.json(await snapshot.read('/board?select=title')))
+      .catch(error => {
+        if (!(error instanceof DataDirectoryLoading)) throw error
+        return Response.json({ loading: true }, { status: 503 })
+      })
     return super.fetch(req)
   }
 }

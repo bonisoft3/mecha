@@ -61,6 +61,16 @@
         "exclude": []
       },
       {
+        "from": null,
+        "srcs": [
+          "services/database/electric_password.sh"
+        ],
+        "dst": "/usr/share/mecha/initdb/899_electric_password.sh",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
         "from": {
           "name": "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
         },
@@ -85,7 +95,8 @@
       }
     ],
     "epilogue": [
-      "RUN cat /usr/share/mecha/initdb/800_schedule.sql /usr/share/mecha/initdb/012_airlock.sql > /tmp/airlock.sql && mv /tmp/airlock.sql /usr/share/mecha/initdb/012_airlock.sql"
+      "RUN cat /usr/share/mecha/initdb/800_schedule.sql /usr/share/mecha/initdb/012_airlock.sql > /tmp/airlock.sql && mv /tmp/airlock.sql /usr/share/mecha/initdb/012_airlock.sql",
+      "RUN rm /var/lib/postgresql/data && install -d -o postgres -g postgres /var/lib/postgresql/data"
     ],
     "cmd": [
       "postgres",
@@ -118,6 +129,7 @@
   "srcs": {
     "globs": [
       "services/database/rls/rls.sql",
+      "services/database/electric_password.sh",
       "services/ticker/schedule.sql",
       "services/airlock/graphile.sql",
       "services/airlock/airlock.sql",
@@ -209,6 +221,7 @@
       "outs": {
         "globs": [
           "services/database/rls/rls.sql",
+          "services/database/electric_password.sh",
           "services/ticker/schedule.sql",
           "services/airlock/graphile.sql",
           "services/airlock/airlock.sql",

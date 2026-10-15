@@ -7,6 +7,7 @@
       "POSTGRES_USER": "${POSTGRES_USER:-postgres}",
       "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-postgres}",
       "POSTGRES_DB": "${POSTGRES_DB:-mecha}",
+      "ELECTRIC_PASSWORD": "${ELECTRIC_PASSWORD:-dev-electric-password}",
       "POSTGRES_INITDB_ARGS": "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
     },
     "ports": [
@@ -106,6 +107,19 @@
           "tests/008_validation_smoke.sql"
         ],
         "dst": "/docker-entrypoint-initdb.d/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": {
+          "ref": ":database-image",
+          "name": "libraries_mecha-database-image"
+        },
+        "srcs": [
+          "/usr/share/mecha/initdb/899_electric_password.sh"
+        ],
+        "dst": "/docker-entrypoint-initdb.d/899_electric_password.sh",
         "link": true,
         "parents": false,
         "exclude": []
@@ -287,6 +301,7 @@
           "services/database/007_identity.sql",
           "tests/008_validation_smoke.sql",
           "services/database/rls/rls.sql",
+          "services/database/electric_password.sh",
           "services/ticker/schedule.sql",
           "services/airlock/graphile.sql",
           "services/airlock/airlock.sql",
@@ -308,6 +323,7 @@
           "outs": {
             "globs": [
               "services/database/rls/rls.sql",
+              "services/database/electric_password.sh",
               "services/ticker/schedule.sql",
               "services/airlock/graphile.sql",
               "services/airlock/airlock.sql",

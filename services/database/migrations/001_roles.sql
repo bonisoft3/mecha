@@ -29,10 +29,9 @@ $$;
 -- A pipeline writes every tenant's rows, and electric reads every tenant's WAL:
 -- both reach across scopes by a role attribute the audit can see. Without it
 -- electric's current_scopes() is empty and every shape syncs empty, silently.
--- The password is a dev credential; cluster.cue, at the URL naming this role,
--- says what a deployment does with both.
+-- electric's password is the deployment's (cluster.cue's #ElectricPasswordStep).
 ALTER ROLE service BYPASSRLS;
-ALTER ROLE electric BYPASSRLS REPLICATION LOGIN PASSWORD 'electric';
+ALTER ROLE electric BYPASSRLS REPLICATION LOGIN;
 
 -- The pipelines and the ticker write as `service` through crud, into any
 -- table, as a caller's grants let them.

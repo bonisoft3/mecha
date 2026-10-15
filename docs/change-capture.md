@@ -49,6 +49,24 @@ writes (`meta collection = "Hello"`) and sees rows from every captured table. A
 delete has no after-image, and every shipped pipeline drops a record without an
 `id`.
 
+## Transaction traces
+
+The CloudEvent's `traceparent` is conduit's publish, not the write. Where a
+publication carries `mecha.txn_trace` (rls.sql), each writing transaction's
+first change on the bus is its marker, `__table: txn_trace`, holding the
+writer's traceparent or `''`. Every stream the transform runs loads
+[`cdc-trace.yaml`](../services/transform/cdc-trace.yaml) by `-r`: its
+`cdc_trace_join`, among a stream's input processors, drops each marker into a
+per-stream cache entry and stamps every later row's `@traceparent`. Calls send
+it as the `traceparent` header, so PostgREST's `mark_txn` marks the derived
+write's transaction with the same trace and the chain continues through it. A
+call that coalesces a batch (a drain, compute's invalidation) sends the first
+traced transaction's (`cdc_trace_batch`).
+
+The join is ordered for free: Connect runs input processors on one goroutine,
+so a stream's pipeline threads stay parallel. A process that restarts mid-
+transaction knows no trace for that transaction's remaining rows.
+
 ## Routing
 
 Two pipelines read the stream in separate groups, so each acknowledges on its

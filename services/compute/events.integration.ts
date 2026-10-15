@@ -95,7 +95,7 @@ Deno.test("Redis delivery waits for publication, recovers on consumer replacemen
           "http.enabled=false",
           "-s",
           `output.switch.cases.1.output.broker.outputs.0.fallback.0.retry.output.http_client.url=http://127.0.0.1:${server.addr.port}/invalidate`,
-          "events.yaml",
+          "-r", "../transform/cdc-trace.yaml", "events.yaml",
         ],
         cwd: new URL(".", import.meta.url),
         env: {
@@ -194,7 +194,7 @@ Deno.test("Redis delivery crashes once a refused invalidation outlasts its retri
           "-s", `${retry}.output.http_client.url=http://127.0.0.1:${server.addr.port}/invalidate`,
           "-s", `${retry}.backoff.initial_interval=100ms`,
           "-s", `${retry}.max_retries=2`,
-          "events.yaml",
+          "-r", "../transform/cdc-trace.yaml", "events.yaml",
         ],
         cwd: new URL(".", import.meta.url),
         env: { REDIS_URL: `redis://127.0.0.1:${port}`, COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
@@ -269,7 +269,7 @@ for (const refusedOnce of [false, true]) {
           "run", "--disable-telemetry", "-s", "http.enabled=false",
           "-s", `${retry}.output.http_client.url=http://127.0.0.1:${server.addr.port}/invalidate`,
           "-s", `${retry}.backoff.initial_interval=100ms`,
-          "events.yaml",
+          "-r", "../transform/cdc-trace.yaml", "events.yaml",
         ],
         cwd: new URL(".", import.meta.url),
         env: { REDIS_URL: `redis://127.0.0.1:${port}`, COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
@@ -303,3 +303,56 @@ for (const refusedOnce of [false, true]) {
     }
   });
 }
+
+// Each transaction's first change on the bus is its marker (cdc-trace.yaml).
+// The marker is no table, so it must never reach compute as an invalidation of
+// `txn_trace`; and a run continues the trace of the first traced transaction
+// it answers, while an untraced one carries none.
+Deno.test("Redis delivery joins transaction markers into the invalidation's traceparent", async () => {
+  const container = await redis();
+  const cli = (...args: string[]) => command("docker", "exec", container, "redis-cli", "--json", ...args);
+  const seen: { tables: string[]; traceparent: string | null }[] = [];
+  const server = Deno.serve({ port: 0, hostname: "127.0.0.1", onListen() {} }, async (req) => {
+    seen.push({ tables: (await req.json()).tables, traceparent: req.headers.get("traceparent") });
+    return new Response(null, { status: 204 });
+  });
+  let consumer: Deno.ChildProcess | undefined;
+  try {
+    const port = (await command("docker", "port", container, "6379/tcp")).split(":").at(-1);
+    const event = (row: Record<string, unknown>) => JSON.stringify({ data: JSON.stringify(row) });
+    const marker = (txid: number, traceparent: string) => event({ __table: "txn_trace", txid, traceparent, at: "2026-10-14 00:00:00+00" });
+    const T1 = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    const T2 = "00-1af7651916cd43dd8448eb211c80319c-c7ad6b7169203331-01";
+    const at = (...events: string[]) =>
+      cli("EVAL", "for i = 1, #ARGV do redis.call('XADD', 'cdc-events', '*', 'data', ARGV[i]) end", "0", ...events);
+    const retry = "output.switch.cases.1.output.broker.outputs.0.fallback.0.retry";
+    consumer = new Deno.Command("redpanda-connect", {
+      args: [
+        "run", "--disable-telemetry", "-s", "http.enabled=false",
+        "-s", `${retry}.output.http_client.url=http://127.0.0.1:${server.addr.port}/invalidate`,
+        "-r", "../transform/cdc-trace.yaml", "events.yaml",
+      ],
+      cwd: new URL(".", import.meta.url),
+      env: { REDIS_URL: `redis://127.0.0.1:${port}`, COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    // The rows a delete reaches the bus as carry their last writer's txid.
+    await at(marker(10, T1), event({ __table: "source", txid: 10 }), event({ __table: "derived_input", txid: 3 }));
+    await until(async () => seen.length === 1);
+    await at(marker(11, ""), event({ __table: "source", txid: 11 }));
+    await until(async () => seen.length === 2);
+    await at(marker(12, T1), event({ __table: "source", txid: 12 }), marker(13, T2), event({ __table: "source", txid: 13 }));
+    await until(async () => seen.length === 3);
+    assertEquals(seen, [
+      { tables: ["source", "derived_input"], traceparent: T1 },
+      { tables: ["source"], traceparent: null },
+      { tables: ["source"], traceparent: T1 },
+    ]);
+  } finally {
+    consumer?.kill("SIGKILL");
+    await consumer?.status;
+    await server.shutdown();
+    await command("docker", "rm", "-f", container);
+  }
+});

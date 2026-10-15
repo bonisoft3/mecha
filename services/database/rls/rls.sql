@@ -364,3 +364,58 @@ INSERT INTO mecha.rls_exempt VALUES
   ('mecha.rls_exempt', 'the exemption list: readable by all, writable by none'),
   ('mecha.shape_key', 'the shape edges: readable by all, writable by none')
   ON CONFLICT DO NOTHING;
+
+-- The request a transaction serves, carried through CDC: the change feed's
+-- rows carry no session state, so the W3C traceparent of whoever wrote them
+-- is written into the WAL as a row of its own. The generator of a feed's
+-- publication puts this table in it, and a statement trigger calling
+-- mark_txn() on every table it publishes; pgoutput's protocol 1 sends a
+-- transaction whole, so the marker reaches a consumer immediately before the
+-- transaction's first change. A transaction with no trace still gets one, so
+-- a consumer can tell where each transaction starts. bigint and not xid8: the
+-- WAL reader resolves no xid8 field type.
+--
+-- Append-only, about 120 bytes per writing transaction with its key: a delete
+-- would reach the feed as a change every consumer must filter. Partitioning
+-- by time and dropping old partitions bounds it without a word on the feed.
+--
+-- It lives here because this is the one step the image restates ahead of any
+-- caller step, and the publication naming it is a caller step.
+CREATE TABLE IF NOT EXISTS mecha.txn_trace (
+  txid        bigint PRIMARY KEY,
+  traceparent text NOT NULL,
+  at          timestamptz NOT NULL DEFAULT now()
+);
+
+-- A writer outside PostgREST states its trace by SET LOCAL mecha.traceparent;
+-- PostgREST's own request headers answer otherwise. A value that is not a
+-- version-00-shaped traceparent is no trace, as W3C Trace Context says a
+-- receiver treats one: the header is the client's to send.
+CREATE OR REPLACE FUNCTION mecha.traceparent() RETURNS text
+  LANGUAGE sql STABLE
+  SET search_path = pg_catalog
+  AS $$
+    SELECT coalesce(substring(
+      coalesce(nullif(current_setting('mecha.traceparent', true), ''),
+               nullif(current_setting('request.headers', true), '')::json->>'traceparent')
+      FROM '^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'), '')
+  $$;
+
+-- BEFORE and per statement, so the marker precedes the transaction's rows in
+-- the WAL and costs one probe per statement rather than one per row. SECURITY
+-- DEFINER because no app role holds a grant on the table, and the owner (the
+-- migration superuser) is outside the floor.
+CREATE OR REPLACE FUNCTION mecha.mark_txn() RETURNS trigger
+  LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = pg_catalog
+  AS $$
+BEGIN
+  INSERT INTO mecha.txn_trace (txid, traceparent)
+    VALUES (pg_current_xact_id()::text::bigint, mecha.traceparent())
+    ON CONFLICT (txid) DO NOTHING;
+  RETURN NULL;
+END $$;
+
+INSERT INTO mecha.rls_exempt VALUES
+  ('mecha.txn_trace', 'transaction markers: no role holds a grant; written by mecha.mark_txn() as its owner')
+  ON CONFLICT DO NOTHING;

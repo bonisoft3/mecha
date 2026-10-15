@@ -30,6 +30,7 @@ import (
 
 _electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
 _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
+_cdcTrace:      _ @embed(file="services/transform/cdc-trace.yaml", type=text)
 
 // Where postgres applies what an image carries, in name order, on a fresh data
 // directory.
@@ -70,6 +71,12 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // Staged in the database image at 020 for compatibility with the published
 // bonitao/mecha-database:0.8.0 image, and placed in initdb at 800.
 #ScheduleStaged: "020_schedule.sql"
+
+// Sets the electric role's password from the database's ELECTRIC_PASSWORD,
+// placed where a server is: the schema grants electric LOGIN and leaves its
+// password to the deployment. A framework prefix past every step that could
+// create the role.
+#ElectricPasswordStep: "899_electric_password.sh"
 
 // Canonical PostgreSQL options for both container and process-compose runtimes.
 #PostgresArgs: [
@@ -230,6 +237,7 @@ _devJwtSecret: "mecha-dev-secret-please-override-32ch"
 // The query parameter caddy adds after the gate and electric checks; one
 // literal, so the two cannot be given different ones by a slip.
 _devElectricSecret: "dev-electric-secret"
+_devElectricPassword: "dev-electric-password"
 
 #Cluster: X={
 	state: {
@@ -314,7 +322,7 @@ _devElectricSecret: "dev-electric-secret"
 
 	// Every step postgres runs at initdb, keyed by the three digits its name
 	// opens with: the image's floor, the steps the cluster places for a
-	// schedule and for effects, and the caller's migrations. Postgres globs
+	// server, a schedule and effects, and the caller's migrations. Postgres globs
 	// the directory in its locale's order and a replay sorts it by byte;
 	// digits no other step holds, then `_`, put both in one order. The database copies the caller's
 	// steps out of this, so a name it refuses fails the cluster where it is
@@ -322,6 +330,9 @@ _devElectricSecret: "dev-electric-secret"
 	_initdb: [K=string]: =~"(^|/)[0-9]{3}_[^/]*$" & =~"(^|/)\(K)_[^/]*$"
 	_initdb: {
 		(strings.SliceRunes(#TenancyMigration, 0, 3)): #TenancyMigration
+		if X.capabilities.server {
+			(strings.SliceRunes(#ElectricPasswordStep, 0, 3)): #ElectricPasswordStep
+		}
 		if len(X.state.schedules) > 0 {
 			(strings.SliceRunes(#ScheduleMigration, 0, 3)): #ScheduleMigration
 		}
@@ -397,12 +408,16 @@ _devElectricSecret: "dev-electric-secret"
 	// The schedule table reaches an effect's cluster inside the airlock's
 	// step (bayt.cue), ahead of any caller step.
 	_staged: list.Concat([
+		[if X.capabilities.server {{src: #ElectricPasswordStep, dst: #ElectricPasswordStep}}],
 		[if len(X.state.schedules) > 0 {{src: #ScheduleStaged, dst: #ScheduleMigration}}],
 		[if len(X.state.effects) > 0 for m in [#GraphileMigration, #AirlockMigration] {{src: m, dst: m}}],
 	])
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 	let jwtSecret = "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
+	// The role's password and the userinfo of electric's DATABASE_URL at once,
+	// so it must need no percent-encoding.
+	let electricPassword = "${ELECTRIC_PASSWORD:-\(_devElectricPassword)}"
 	// The scheme and host a reader reaches the door at, stated by the
 	// deployment and never read off a request: the door answers any Host. Its
 	// default is the door's own name for a person's browser (the Caddyfile's)
@@ -498,6 +513,7 @@ _devElectricSecret: "dev-electric-secret"
 							POSTGRES_USER:        "${POSTGRES_USER:-postgres}"
 							POSTGRES_PASSWORD:    "${POSTGRES_PASSWORD:-postgres}"
 							POSTGRES_DB:          "${POSTGRES_DB:-\(X.meta.app)}"
+							ELECTRIC_PASSWORD:    electricPassword
 							// ORDER BY on text reaches a reader, so it sorts the way a
 							// dictionary does, not by byte: bytes put every accent past all
 							// of ASCII and split the alphabet by case, so "ana" follows "Zoe".
@@ -644,7 +660,7 @@ _devElectricSecret: "dev-electric-secret"
 					}
 					expose: http: port: 9999
 					entrypoint: {
-						do:    "deno run --allow-net --allow-env main.ts"
+						do:    "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts"
 						env:   compose.environment
 						after: database: "healthy"
 					}
@@ -775,11 +791,10 @@ _devElectricSecret: "dev-electric-secret"
 						environment: {
 							// Its own role, holding BYPASSRLS as a stated attribute: without it
 							// current_scopes() is empty and every shape syncs empty, silently.
-							// The role's password is the roles migration's literal, and the
-							// database trusts every password here (initdb --auth=trust); a
-							// deployment sets the role's password and this URL together,
-							// outside this file.
-							DATABASE_URL: "postgresql://electric:electric@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
+							// Its password is the one the database's initdb step sets
+							// (#ElectricPasswordStep): another container's connection
+							// authenticates by scram, as initdb trusts only loopback.
+							DATABASE_URL: "postgresql://electric:\(electricPassword)@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
 							// The proxy is the only way in: caddy runs forward_auth against the
 							// gatekeeper and then adds this, so a request that reaches electric
 							// without passing the gate has no secret to present.
@@ -907,10 +922,11 @@ _devElectricSecret: "dev-electric-secret"
 					dockerfile: {
 						from: name: "redpandadata/connect:4.112.0@sha256:5b70cd14fd2bbb8fe02a80358ed1510169596218d0d46cd7768659b1d1cf8420"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
-						if len(X.state.computations) > 0 {
-							epilogue: ["COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"]
-						}
-						cmd: list.Concat([["streams", "--no-api"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 {"/compute-events.yaml"}]])
+						epilogue: list.Concat([
+							["COPY <<'CDCTRACE' /cdc-trace.yaml\n\(_cdcTrace)\nCDCTRACE"],
+							[if len(X.state.computations) > 0 {"COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"}],
+						])
+						cmd: list.Concat([["streams", "--no-api", "-r", "/cdc-trace.yaml"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 {"/compute-events.yaml"}]])
 					}
 					compose: {
 						depends_on: {redis: _healthy, crud: _healthy}

@@ -2,6 +2,7 @@
 FROM libraries_mecha-database-image AS database
 WORKDIR /monorepo/libraries/mecha
 COPY services/database/migrations/000_extensions.sql services/database/migrations/001_roles.sql services/database/migrations/002_grants.sql services/database/migrations/004_create_tables.sql services/database/migrations/005_electric_publication.sql services/database/migrations/006_conduit_publication.sql services/database/007_identity.sql tests/008_validation_smoke.sql /docker-entrypoint-initdb.d/
+COPY --from=libraries_mecha-database-image /usr/share/mecha/initdb/899_electric_password.sh /docker-entrypoint-initdb.d/899_electric_password.sh
 COPY --from=libraries_mecha-database-image /usr/share/mecha/initdb/020_schedule.sql /docker-entrypoint-initdb.d/800_schedule.sql
 COPY --parents services/database/migrations/000_extensions.sql services/database/migrations/001_roles.sql services/database/migrations/002_grants.sql services/database/migrations/004_create_tables.sql services/database/migrations/005_electric_publication.sql services/database/migrations/006_conduit_publication.sql services/database/007_identity.sql tests/008_validation_smoke.sql ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.database.json ./.bayt/

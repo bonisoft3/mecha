@@ -50,7 +50,7 @@
     "cmd": null
   },
   "entrypoint": {
-    "do": "deno run --allow-net --allow-env main.ts",
+    "do": "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts",
     "shell": "exec",
     "env": {
       "DATABASE_URL": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",

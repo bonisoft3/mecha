@@ -76,7 +76,9 @@ processes:
     - run
     - --allow-net
     - --allow-env
-    - main.ts
+    - --config
+    - /app/deno.json
+    - /app/main.ts
     availability:
       exit_on_skipped: true
     environment:

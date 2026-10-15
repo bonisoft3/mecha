@@ -9,12 +9,18 @@ input:
     auto_replay_nacks: true
     # A backlog is read in large steps so one batch below drains much of it.
     limit: 1000
+  # The transform's -r cdc-trace.yaml consumes the transaction markers and
+  # stamps each row's @traceparent.
+  processors:
+    - mutation: meta cdc_consumer = env("COMPUTE_GROUP")
+    - resource: cdc_trace_join
 pipeline:
   threads: 1
   processors:
     - mapping: |
         let table = this.data.parse_json().__table
         root.tables = [if $table.type() == "string" && $table != "" { $table } else { throw("CDC event has no table") }]
+        root.trace = @traceparent.or("")
 output:
   switch:
     cases:
@@ -43,6 +49,7 @@ output:
               processors:
                 - archive:
                     format: json_array
+                - resource: cdc_trace_batch
                 - mapping: root.tables = this.map_each(m -> m.tables).flatten().unique()
             outputs:
               - fallback:
@@ -62,6 +69,8 @@ output:
                           headers:
                             Content-Type: application/json
                             Authorization: Bearer ${SERVICE_JWT:}
+                          metadata:
+                            include_patterns: ["^traceparent$"]
                   - drop: {}
                     processors:
                       - crash: 'compute refused an invalidation through every retry: ${! @fallback_error }'

@@ -136,7 +136,7 @@ _mecha: bayt.#project & _where & {
 		// ---- The images -------------------------------------------------
 
 		"database-image": _image & {
-			srcs: globs: ["services/database/rls/rls.sql", "services/ticker/schedule.sql", "services/airlock/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
+			srcs: globs: ["services/database/rls/rls.sql", "services/database/electric_password.sh", "services/ticker/schedule.sql", "services/airlock/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
 			dockerfile: {
 				from: name: _postgres
 				// plv8 hosts a Jessie validation inside the write's transaction.
@@ -171,6 +171,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
 					{srcs: ["services/airlock/graphile.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#GraphileMigration)"},
 					{srcs: ["services/airlock/airlock.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#AirlockMigration)"},
+					{srcs: ["services/database/electric_password.sh"], dst: "\(cluster.#StagedDir)/\(cluster.#ElectricPasswordStep)"},
 					{from: {name: _pgroll}, srcs: ["/usr/bin/pgroll"], dst: "/usr/local/bin/pgroll"},
 					{srcs: ["services/migrate/migrate.sh"], dst: "/migrate.sh", chmod: "755"},
 				]
@@ -179,8 +180,12 @@ _mecha: bayt.#project & _where & {
 				// caller step that could write a row into an invoking state; a
 				// cluster that also declares a schedule runs the same text again
 				// at 020, where every statement holds.
+				// postgres 18 makes /var/lib/postgresql/data a symlink to its parent;
+				// CloudNativePG mounts its volume there, and runc cannot mount onto
+				// a symlink, so it is a plain directory the postgres user owns.
 				epilogue: [
 					"RUN cat \(cluster.#StagedDir)/\(cluster.#ScheduleMigration) \(cluster.#StagedDir)/\(cluster.#AirlockMigration) > /tmp/airlock.sql && mv /tmp/airlock.sql \(cluster.#StagedDir)/\(cluster.#AirlockMigration)",
+					"RUN rm /var/lib/postgresql/data && install -d -o postgres -g postgres /var/lib/postgresql/data",
 				]
 				cmd: list.Concat([["postgres"], cluster.#PostgresArgs])
 			}

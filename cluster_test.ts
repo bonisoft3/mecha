@@ -66,6 +66,8 @@ Deno.test("a computation alone gets a durable CDC consumer without a clock", asy
   assert.deepEqual(got.value.transform.dockerfile.cmd, [
     "streams",
     "--no-api",
+    "-r",
+    "/cdc-trace.yaml",
     "/compute-events.yaml",
   ]);
   assert.equal(
@@ -80,8 +82,9 @@ Deno.test("a computation alone gets a durable CDC consumer without a clock", asy
   );
   assert.equal(got.value.launch.compose.depends_on.compute.condition, "service_healthy");
   assert.deepEqual(got.value.compute.compose.healthcheck.test, ["CMD", "portcheck", "--port", "9997"]);
+  assert.match(got.value.transform.dockerfile.epilogue[0], /label: cdc_trace_join/);
   assert.match(
-    got.value.transform.dockerfile.epilogue[0],
+    got.value.transform.dockerfile.epilogue[1],
     /client_id: compute/,
   );
   assert.equal(
@@ -242,6 +245,7 @@ Deno.test("an effect places the airlock and its daprd, and the ticker and clock 
   const staged = (t.database.dockerfile.copy ?? []).filter((c) => c.from !== undefined);
   // The schedule table rides inside 012 (bayt.cue), ahead of a caller's steps.
   assert.deepEqual(staged.map((c) => [c.srcs, c.dst]), [
+    [["/usr/share/mecha/initdb/899_electric_password.sh"], "/docker-entrypoint-initdb.d/899_electric_password.sh"],
     [["/usr/share/mecha/initdb/011_graphile_worker.sql"], "/docker-entrypoint-initdb.d/011_graphile_worker.sql"],
     [["/usr/share/mecha/initdb/012_airlock.sql"], "/docker-entrypoint-initdb.d/012_airlock.sql"],
   ]);
@@ -423,6 +427,30 @@ Deno.test("electric runs with no feature flags", async () => {
   assert.equal(got.ok, true, got.stderr);
   assert.equal("ELECTRIC_FEATURE_FLAGS" in got.value, false);
   assert.equal(typeof got.value.ELECTRIC_SECRET, "string");
+});
+
+// electric's password is the deployment's: the schema leaves it unset, so a
+// Kubernetes operator's secret is not overwritten when migrations run, and the
+// database's initdb sets it from the variable electric's URL carries. initdb
+// trusts only loopback, so a password the two disagreed on would refuse
+// electric's connection.
+Deno.test("electric's password reaches the role and its URL from one variable", async () => {
+  const got = await exported({}, "surface.targets", { server: true });
+  assert.equal(got.ok, true, got.stderr);
+  const password = got.value.database.compose.environment.ELECTRIC_PASSWORD;
+  assert.match(password, /^\$\{ELECTRIC_PASSWORD:-/);
+  assert.equal(
+    got.value.electric.compose.environment.DATABASE_URL,
+    `postgresql://electric:${password}@database:5432/\${POSTGRES_DB:-t}?sslmode=disable`,
+  );
+  const placed = got.value.database.dockerfile.copy.filter((c: { dst: string }) => c.dst.endsWith("/899_electric_password.sh"));
+  assert.deepEqual(placed.map((c: { srcs: string[] }) => c.srcs), [["/usr/share/mecha/initdb/899_electric_password.sh"]]);
+});
+
+Deno.test("a caller step on the electric password's digits is refused", async () => {
+  const got = await exported({ migrations: ["m/899_late.sql"] }, "surface.targets.database", { server: true });
+  assert.equal(got.ok, false);
+  assert.match(got.stderr, /_initdb\."899": conflicting values/);
 });
 
 // An app that takes mecha's images by name builds on these pins in every

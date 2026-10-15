@@ -43,6 +43,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-mecha}
+      ELECTRIC_PASSWORD: ${ELECTRIC_PASSWORD:-dev-electric-password}
       POSTGRES_INITDB_ARGS: >-
         --no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und
         --locale=C

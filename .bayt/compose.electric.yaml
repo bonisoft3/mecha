@@ -22,7 +22,7 @@ services:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: >-
-        postgresql://electric:electric@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable
+        postgresql://electric:${ELECTRIC_PASSWORD:-dev-electric-password}@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable
       ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}
       ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
     healthcheck:

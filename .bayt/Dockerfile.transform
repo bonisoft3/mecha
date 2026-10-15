@@ -4,7 +4,79 @@ WORKDIR /monorepo/libraries/mecha
 COPY services/transform/passthrough.yaml /pipelines/passthrough.yaml
 COPY --parents services/transform/passthrough.yaml ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.transform.json ./.bayt/
-CMD ["streams", "--no-api", "/pipelines/passthrough.yaml"]
+CMD ["streams", "--no-api", "-r", "/cdc-trace.yaml", "/pipelines/passthrough.yaml"]
+COPY <<'CDCTRACE' /cdc-trace.yaml
+# The change feed's transaction trace, joined onto every row: shared by every
+# stream reading cdc-events through the transform's `-r`, since streams mode
+# refuses resources in a stream's own file.
+#
+# A writing transaction's first change on the bus is its marker
+# (mecha.txn_trace, rls.sql), and conduit does not interleave transactions, so
+# the marker last read is the transaction of every row after it. A row's own
+# txid cannot answer instead: the bus spells a delete as its before-image,
+# indistinguishable from an insert, and that image's txid is its last writer's.
+#
+# A stream runs this among its INPUT processors, which Connect runs on one
+# goroutine whatever the pipeline's threads, after stamping @cdc_consumer with
+# a name no other stream uses: the cache is one per process, and each stream
+# reads the bus at its own position. The marker is consumed and dropped; a
+# row leaves with @traceparent set to its transaction's trace, or unset when
+# the transaction had none or began before this process read its marker.
+cache_resources:
+  - label: cdc_trace
+    memory:
+      # One entry per stream, replaced by every marker: the TTL bounds nothing
+      # and only has to outlast the longest transaction's rows (the default
+      # is 5m).
+      default_ttl: 24h
+
+processor_resources:
+  - label: cdc_trace_join
+    # A batch runs each processor over every message before the next, so a
+    # marker mid-batch would reach the rows after it only once the batch had
+    # already read the cache; for_each runs the batch a message at a time.
+    for_each:
+      - switch:
+          - check: '@cdc_consumer.or("") == ""'
+            processors:
+              - crash: a cdc-events stream ran cdc_trace_join without stamping @cdc_consumer
+          - check: this.catch({}).data.or("").catch("").parse_json().catch({}).__table.or("") == "txn_trace"
+            processors:
+              # A marker without its NOT NULL trace keeps the error and stays
+              # on the stream, where the consumer refuses it as it would any
+              # malformed row.
+              - try:
+                  - mapping: |
+                      let trace = this.data.parse_json().traceparent
+                      root = if $trace.type() == "string" { $trace } else { throw("txn_trace marker has no traceparent") }
+                  - cache:
+                      resource: cdc_trace
+                      operator: set
+                      key: ${! @cdc_consumer }
+                      value: ${! content() }
+                  - mapping: root = deleted()
+          - processors:
+              - branch:
+                  request_map: root = ""
+                  processors:
+                    - cache:
+                        resource: cdc_trace
+                        operator: get
+                        key: ${! @cdc_consumer }
+                    # No marker read yet: the transaction's trace is unknown.
+                    - catch:
+                        - mapping: root = ""
+                  result_map: meta traceparent = if content().string() != "" { content().string() } else { deleted() }
+
+  # A coalesced call's @traceparent, over a batch archived as a JSON array whose
+  # elements carry their row's @traceparent as `trace` (archive keeps no
+  # metadata): the first transaction's trace, the one that set the call off.
+  - label: cdc_trace_batch
+    mutation: |
+      let traces = this.map_each(m -> m.trace).filter(t -> t != "")
+      meta traceparent = if $traces.length() > 0 { $traces.index(0) } else { deleted() }
+
+CDCTRACE
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS transform_ctxs
 WORKDIR /monorepo/libraries/mecha

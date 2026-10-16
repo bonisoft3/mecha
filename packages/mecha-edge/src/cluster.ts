@@ -5,7 +5,7 @@
 // data directory's: nothing here migrates.
 // Routes: /auth/guest, /auth/whoami, /auth/shape, /crud/*, /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
-import { createRestHandler, type ReadSchema } from '@mecha/postgrest-js'
+import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
 import { shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
@@ -56,19 +56,44 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   const ensureShapes = () => shapesReady ??= serialize(async () => {
     shapes = await createShapes({ db, tables: cfg.tables, schema: cfg.schema, serialize, fail: cfg.fail })
   })
-  // services/auth/main.ts's tableScope: scope_id generated as the literal
-  // 'public:' on a plain table no other inherits from.
-  const publicOnly = async (table: string) => (await db.query<{ p: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
-      JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-      WHERE a.attrelid = to_regclass($1) AND a.attname = 'scope_id'
-        AND a.attnotnull AND NOT a.attisdropped AND a.attgenerated = 's'
-        AND c.relkind = 'r'
-        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = a.attrelid)
-        AND pg_catalog.pg_get_expr(d.adbin, d.adrelid) = $2) AS p`,
-    [`public.${table}`, "'public:'::text"],
-  )).rows[0].p
+  const publicCache = new Map<string, boolean>()
+  // services/auth/main.ts's tableScope: every base table the relation reaches
+  // has scope_id generated as the literal 'public:' with no inheriting child.
+  const publicOnly = async (table: string) => {
+    const hit = publicCache.get(table)
+    if (hit !== undefined) return hit
+    const p = (await db.query<{ p: boolean }>(
+      `WITH RECURSIVE deps(oid) AS (
+        SELECT to_regclass($1)::oid
+        UNION
+        SELECT d.refobjid
+        FROM deps
+        JOIN pg_catalog.pg_rewrite r ON r.ev_class = deps.oid
+        JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass
+          AND d.objid = r.oid
+          AND d.refclassid = 'pg_catalog.pg_class'::regclass
+          AND d.refobjid <> deps.oid
+      )
+      SELECT EXISTS (SELECT 1 FROM deps WHERE oid IS NOT NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM deps
+          LEFT JOIN pg_catalog.pg_class c ON c.oid = deps.oid
+          WHERE c.oid IS NULL
+             OR c.relkind NOT IN ('r', 'v')
+             OR (c.relkind = 'r' AND NOT EXISTS (
+               SELECT 1 FROM pg_catalog.pg_attribute a
+               JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+               WHERE a.attrelid = c.oid AND a.attname = 'scope_id'
+                 AND a.attnotnull AND NOT a.attisdropped AND a.attgenerated = 's'
+                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid)
+                 AND pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) = $2
+             ))
+        ) AS p`,
+      [`public.${table}`, "'public:'::text"],
+    )).rows[0].p
+    publicCache.set(table, p)
+    return p
+  }
   const scopesOf = async (sub: string) => (await db.query<{ s: string[] }>('SELECT subject_scopes($1) AS s', [sub])).rows[0].s
 
   async function bearer(req: Request): Promise<Claims | null> {
@@ -122,16 +147,40 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     return shapes.serve(req, () => serialize(() => scopesOf(claims.sub as string)))
   }
 
+  async function isPublicRead(table: string, search: URLSearchParams): Promise<boolean> {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table) || !(await publicOnly(table))) return false
+    if (!(search.get('select') ?? '').includes('(')) return true
+    try {
+      const plan = await planRead(db, table, search, cfg.schema)
+      return !plan.computed && (await Promise.all(plan.tables.map(publicOnly))).every(Boolean)
+    } catch (e) {
+      if (e instanceof ReadQueryError) return false
+      throw e
+    }
+  }
+
   async function crud(req: Request): Promise<Response> {
     const claims = await session(req)
     if (!claims) return json(401, { error: 'invalid token' })
     const sub = claims.sub as string
     const u = new URL(req.url)
     u.pathname = u.pathname.replace(/^\/crud/, '')
+    const table = u.pathname.split('/').filter(Boolean)[0] ?? ''
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
     const inner = new Request(u, { method: req.method, headers: req.headers, body })
-    const rest = createRestHandler(db, { role: 'app_user', scopes: () => scopesOf(sub), claims: () => claims }, cfg.schema)
-    return serialize(() => rest(inner))
+    return serialize(async () => {
+      const shared = (req.method === 'GET' || req.method === 'HEAD') && await isPublicRead(table, u.searchParams)
+      const rest = createRestHandler(
+        db,
+        shared
+          ? { role: 'app_user', scopes: () => ['public:'], claims: () => ({ role: 'app_user' }) }
+          : { role: 'app_user', scopes: () => scopesOf(sub), claims: () => claims },
+        cfg.schema,
+      )
+      const res = await rest(inner)
+      if (shared && res.status === 200) res.headers.set('x-mecha-scope', 'public')
+      return res
+    })
   }
 
   async function handle(req: Request): Promise<Response> {

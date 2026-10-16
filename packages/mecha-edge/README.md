@@ -85,8 +85,11 @@ Reads the object answered are answered again from the colo's Cache API, with
   `where`. A table whose every row is public by construction (`scope_id`
   generated as `'public:'`) is minted a `where` naming `public:` alone, as the
   auth service mints it, so its chunks are every guest's.
-- **A guest's `GET /crud`** is kept 5 s, keyed by its URL, its subject and the
-  time of that subject's last write, recorded before the write is answered.
+- **A guest's `GET /crud`** is kept 5 s, keyed by its URL and last write:
+  a public-only read (every base table it reaches has `scope_id` generated as
+  `'public:'`, executed under the `public:` scope alone) is shared across
+  guests, while any other read is keyed by the guest's `sub`; writes advance
+  both write markers.
 - **Never** a live request, a write, a 4xx or 5xx, or a session other than a
   guest's.
 - **The browser** keeps a shape response that is not live under Electric

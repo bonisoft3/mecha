@@ -13,8 +13,10 @@
 //   is cached only behind a token the Worker verified for that table and
 //   where; a public-only table's where names `public:` alone, so its chunks
 //   are every guest's.
-// - A guest's GET /crud is kept seconds, keyed by its URL, its subject, and
-//   the time of that subject's last write, so a guest reads its own writes.
+// - A guest's GET /crud is kept seconds, keyed by its URL and last write:
+//   a public-only read (marked `x-mecha-scope: public` by the cluster) is
+//   shared across guests, while a subject-scoped read is keyed by the guest's
+//   `sub`; writes advance both keys.
 // - Nothing live, no write, no 4xx or 5xx, and no session but a guest's.
 // - The browser keeps a shape response that is not live as Electric's server
 //   would let it, and nothing else.
@@ -58,7 +60,7 @@ const electricCache = (p: URLSearchParams) => p.get('offset') === '-1'
   : 'public, max-age=60, stale-while-revalidate=300'
 
 const navigation = (req: Request) =>
-  req.method === 'GET' && (req.headers.get('sec-fetch-mode') === 'navigate' || (req.headers.get('accept') ?? '').includes('text/html'))
+  (req.method === 'GET' || req.method === 'HEAD') && (req.headers.get('sec-fetch-mode') === 'navigate' || (req.headers.get('accept') ?? '').includes('text/html'))
 
 const epochOf = (handle: string | null) => handle?.slice(handle.lastIndexOf('-') + 1) ?? null
 
@@ -85,7 +87,8 @@ export const edgeWorker = {
       if (res.status !== 404 || !navigation(req)) return res
       // A route is the page's: the document answers a navigation to any path,
       // and nothing else, so a missing asset is a 404 and not the whole page.
-      return env.ASSETS.fetch(new Request(new URL('/', req.url), req))
+      const root = await env.ASSETS.fetch(new Request(new URL('/', req.url), req))
+      return req.method === 'HEAD' ? new Response(null, root) : root
     }
     const version = env.CF_VERSION_METADATA.id
     const auth = req.headers.get('authorization')
@@ -111,18 +114,38 @@ export const edgeWorker = {
       return cached(keyOf(version, epoch, ...params.flat()), async () => learn(await object().fetch(req)), SHAPE_TTL_S, ctx, browser)
     }
 
-    const guest = claims?.role === 'app_user' && claims.guest === true && typeof claims.sub === 'string'
-    if (path.startsWith('/crud/') && guest) {
+    const session = claims?.role === 'app_user' && typeof claims.sub === 'string'
+    const guest = session && claims.guest === true
+    if (path.startsWith('/crud/') && session) {
       const reset = (await (await cache.match(keyOf(version, 'reset')))?.text()) ?? '0'
       const writesKey = keyOf(version, reset, 'writes', claims.sub as string)
-      if (req.method === 'GET') {
+      const publicWritesKey = keyOf(version, reset, 'writes', 'public')
+      if (req.method === 'GET' && guest) {
+        const lastPublicWrite = (await (await cache.match(publicWritesKey))?.text()) ?? '0'
+        const publicKey = keyOf(version, reset, 'crud', 'public', lastPublicWrite, url.pathname + url.search)
+        const publicHit = await cache.match(publicKey)
+        if (publicHit) return marked(publicHit, 'hit')
         const lastWrite = (await (await cache.match(writesKey))?.text()) ?? '0'
-        return cached(keyOf(version, reset, 'crud', claims.sub as string, lastWrite, url.pathname + url.search), () => object().fetch(req), CRUD_TTL_S, ctx)
+        const subjectKey = keyOf(version, reset, 'crud', claims.sub as string, lastWrite, url.pathname + url.search)
+        const subjectHit = await cache.match(subjectKey)
+        if (subjectHit) return marked(subjectHit, 'hit')
+        const res = await object().fetch(req)
+        if (res.status !== 200) return marked(res, 'miss')
+        const isPublic = res.headers.get('x-mecha-scope') === 'public'
+        const stored = new Response(res.body, res)
+        stored.headers.delete('x-mecha-scope')
+        stored.headers.set('cache-control', `max-age=${CRUD_TTL_S}`)
+        ctx.waitUntil(cache.put(isPublic ? publicKey : subjectKey, stored.clone()))
+        return marked(stored, 'miss')
       }
-      const res = await object().fetch(req)
-      // Before answering, so the guest's next read cannot find the old key.
-      await cache.put(writesKey, new Response(String(Date.now()), { headers: { 'cache-control': `max-age=${CRUD_TTL_S}` } }))
-      return res
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        const res = await object().fetch(req)
+        const now = String(Date.now())
+        // Before answering, so the next read cannot find the old key.
+        await cache.put(writesKey, new Response(now, { headers: { 'cache-control': `max-age=${CRUD_TTL_S}` } }))
+        await cache.put(publicWritesKey, new Response(now, { headers: { 'cache-control': 'max-age=86400' } }))
+        return res
+      }
     }
     return object().fetch(req)
   },

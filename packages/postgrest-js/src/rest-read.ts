@@ -193,13 +193,18 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
   countSql: string
   params: unknown[]
   offset: number
+  tables: string[]
+  computed: boolean
 }> {
   for (const key of ['select', 'order']) {
     if (search.getAll(key).length > 1) throw new ReadQueryError(`Duplicate ${key}`)
   }
   const metadata = new Map<string, Relation[]>()
+  const tables = new Set<string>()
+  let hasComputed = false
   let nextAlias = 0
   async function resolve(table: string, selections: Selection[]): Promise<Node> {
+    tables.add(table)
     const node: Node = { table, alias: `r${nextAlias++}`, selections, children: new Map(), filters: [] }
     for (const selection of selections) {
       if (!selection.children) continue
@@ -261,6 +266,7 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
       })
       if (candidates.length !== 1) throw new ReadQueryError(`${candidates.length ? 'Ambiguous' : 'Unknown'} to-one relation: ${table}.${selection.name}`)
       const relation = candidates[0]
+      if (relation.kind === 'computed') hasComputed = true
       node.children.set(selection.key, { node: await resolve(relation.target, selection.children), relation, inner: selection.inner })
     }
     return node
@@ -327,5 +333,6 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
   return {
     sql: base + order + (limit === null ? '' : ` LIMIT ${limit}`) + (offset === null ? '' : ` OFFSET ${offset}`),
     countSql: `SELECT COUNT(*) AS count FROM (${base}) AS counted`, params, offset: offset ?? 0,
+    tables: [...tables], computed: hasComputed,
   }
 }

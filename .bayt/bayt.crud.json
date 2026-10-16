@@ -114,6 +114,8 @@
   "healthcheck": {
     "template": "http",
     "url": "http://127.0.0.1:3001/ready",
+    "authorization": null,
+    "headers": [],
     "interval": "5s",
     "start_interval": "500ms",
     "timeout": "5s",

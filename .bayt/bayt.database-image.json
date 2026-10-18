@@ -63,9 +63,9 @@
       {
         "from": null,
         "srcs": [
-          "services/database/electric_password.sh"
+          "services/database/role_passwords.sh"
         ],
-        "dst": "/usr/share/mecha/initdb/899_electric_password.sh",
+        "dst": "/usr/share/mecha/initdb/899_role_passwords.sh",
         "link": true,
         "parents": false,
         "exclude": []
@@ -129,7 +129,7 @@
   "srcs": {
     "globs": [
       "services/database/rls/rls.sql",
-      "services/database/electric_password.sh",
+      "services/database/role_passwords.sh",
       "services/ticker/schedule.sql",
       "services/airlock/graphile.sql",
       "services/airlock/airlock.sql",
@@ -221,7 +221,7 @@
       "outs": {
         "globs": [
           "services/database/rls/rls.sql",
-          "services/database/electric_password.sh",
+          "services/database/role_passwords.sh",
           "services/ticker/schedule.sql",
           "services/airlock/graphile.sql",
           "services/airlock/airlock.sql",

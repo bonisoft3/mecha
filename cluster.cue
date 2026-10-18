@@ -72,11 +72,11 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // bonitao/mecha-database:0.8.0 image, and placed in initdb at 800.
 #ScheduleStaged: "020_schedule.sql"
 
-// Sets the electric role's password from the database's ELECTRIC_PASSWORD,
-// placed where a server is: the schema grants electric LOGIN and leaves its
-// password to the deployment. A framework prefix past every step that could
-// create the role.
-#ElectricPasswordStep: "899_electric_password.sh"
+// Sets the electric and authenticator roles' passwords from the database's
+// ELECTRIC_PASSWORD and AUTHENTICATOR_PASSWORD, placed where a server is: the
+// schema grants both LOGIN and leaves their passwords to the deployment. A
+// framework prefix past every step that could create the roles.
+#RolePasswordsStep: "899_role_passwords.sh"
 
 // Canonical PostgreSQL options for both container and process-compose runtimes.
 #PostgresArgs: [
@@ -238,6 +238,7 @@ _devJwtSecret: "mecha-dev-secret-please-override-32ch"
 // literal, so the two cannot be given different ones by a slip.
 _devElectricSecret: "dev-electric-secret"
 _devElectricPassword: "dev-electric-password"
+_devAuthenticatorPassword: "dev-authenticator-password"
 
 #Cluster: X={
 	state: {
@@ -331,7 +332,7 @@ _devElectricPassword: "dev-electric-password"
 	_initdb: {
 		(strings.SliceRunes(#TenancyMigration, 0, 3)): #TenancyMigration
 		if X.capabilities.server {
-			(strings.SliceRunes(#ElectricPasswordStep, 0, 3)): #ElectricPasswordStep
+			(strings.SliceRunes(#RolePasswordsStep, 0, 3)): #RolePasswordsStep
 		}
 		if len(X.state.schedules) > 0 {
 			(strings.SliceRunes(#ScheduleMigration, 0, 3)): #ScheduleMigration
@@ -408,7 +409,7 @@ _devElectricPassword: "dev-electric-password"
 	// The schedule table reaches an effect's cluster inside the airlock's
 	// step (bayt.cue), ahead of any caller step.
 	_staged: list.Concat([
-		[if X.capabilities.server {{src: #ElectricPasswordStep, dst: #ElectricPasswordStep}}],
+		[if X.capabilities.server {{src: #RolePasswordsStep, dst: #RolePasswordsStep}}],
 		[if len(X.state.schedules) > 0 {{src: #ScheduleStaged, dst: #ScheduleMigration}}],
 		[if len(X.state.effects) > 0 for m in [#GraphileMigration, #AirlockMigration] {{src: m, dst: m}}],
 	])
@@ -418,6 +419,8 @@ _devElectricPassword: "dev-electric-password"
 	// The role's password and the userinfo of electric's DATABASE_URL at once,
 	// so it must need no percent-encoding.
 	let electricPassword = "${ELECTRIC_PASSWORD:-\(_devElectricPassword)}"
+	// PostgREST's, likewise.
+	let authenticatorPassword = "${AUTHENTICATOR_PASSWORD:-\(_devAuthenticatorPassword)}"
 	// The scheme and host a reader reaches the door at, stated by the
 	// deployment and never read off a request: the door answers any Host. Its
 	// default is the door's own name for a person's browser (the Caddyfile's)
@@ -513,7 +516,8 @@ _devElectricPassword: "dev-electric-password"
 							POSTGRES_USER:        "${POSTGRES_USER:-postgres}"
 							POSTGRES_PASSWORD:    "${POSTGRES_PASSWORD:-postgres}"
 							POSTGRES_DB:          "${POSTGRES_DB:-\(X.meta.app)}"
-							ELECTRIC_PASSWORD:    electricPassword
+							ELECTRIC_PASSWORD:      electricPassword
+							AUTHENTICATOR_PASSWORD: authenticatorPassword
 							// ORDER BY on text reaches a reader, so it sorts the way a
 							// dictionary does, not by byte: bytes put every accent past all
 							// of ASCII and split the alphabet by case, so "ana" follows "Zoe".
@@ -631,7 +635,9 @@ _devElectricPassword: "dev-electric-password"
 					compose: {
 						depends_on: X._schemaReady
 						environment: {
-							PGRST_DB_URI:       databaseUrl
+							// Not postgres: PostgREST applies a token role's settings (its
+							// statement_timeout among them) only to roles granted to its login.
+							PGRST_DB_URI:       "postgres://authenticator:\(authenticatorPassword)@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							PGRST_DB_SCHEMA:    "public"
 							PGRST_DB_ANON_ROLE: "anon"
 							// Called once per request, in the request's transaction, after the
@@ -667,9 +673,10 @@ _devElectricPassword: "dev-electric-password"
 					compose: {
 						depends_on: X._schemaReady
 						environment: {
-							DATABASE_URL:     databaseUrl
-							PGRST_JWT_SECRET: jwtSecret
-							WEBAUTHN_RP_ID:   "${WEBAUTHN_RP_ID:-localhost}"
+							DATABASE_URL:              databaseUrl
+							AUTH_STATEMENT_TIMEOUT_MS: "\(X.meta.bounds.authStatementMs)"
+							PGRST_JWT_SECRET:          jwtSecret
+							WEBAUTHN_RP_ID:            "${WEBAUTHN_RP_ID:-localhost}"
 							// The door's port is the host's pick; auth reads this
 							// default as whichever port the request came through.
 							WEBAUTHN_ORIGIN: "${WEBAUTHN_ORIGIN:-https://localhost:*}"
@@ -792,7 +799,7 @@ _devElectricPassword: "dev-electric-password"
 							// Its own role, holding BYPASSRLS as a stated attribute: without it
 							// current_scopes() is empty and every shape syncs empty, silently.
 							// Its password is the one the database's initdb step sets
-							// (#ElectricPasswordStep): another container's connection
+							// (#RolePasswordsStep): another container's connection
 							// authenticates by scram, as initdb trusts only loopback.
 							DATABASE_URL: "postgresql://electric:\(electricPassword)@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
 							// The proxy is the only way in: caddy runs forward_auth against the
@@ -1026,7 +1033,8 @@ _devElectricPassword: "dev-electric-password"
 						depends_on: crud: _healthy
 						environment: {
 							// Straight to PostgREST, like the pipelines above.
-							CRUD_URL: "http://crud:3000"
+							CRUD_URL:        "http://crud:3000"
+							CALL_TIMEOUT_MS: "\(X.meta.bounds.tickerCallMs)"
 							// The units a tick needs up, each asleep at cloud tier:
 							// mesh-events, never mesh, the daprd bundled with the WAL
 							// reader and the pipeline worker; and the airlock, for the
@@ -1317,6 +1325,11 @@ _devElectricPassword: "dev-electric-password"
 		// The program's effects.json (services/airlock/README.md), relative to
 		// the app dir.
 		airlock: *"services/airlock/effects.json" | string
+		// The consumer's bounds on the clients mecha's services hold, in
+		// milliseconds: auth's statements, which run as the owner and so under
+		// no role's setting, and each ticker call to crud, which has to outlast
+		// the service role's statement or the next tick repeats a write.
+		bounds: {authStatementMs: int & >0, tickerCallMs: int & >0}
 		// The proxy's config, relative to the app dir.
 		caddyfile: *"docker/Caddyfile" | string
 		// The one published door: the port the proxy listens on, the scheme

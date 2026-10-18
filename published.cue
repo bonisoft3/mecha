@@ -8,6 +8,11 @@ import "strings"
 // against #Published.
 #Images: ["database", "mesh", "conduit", "auth", "ticker", "clock", "compute", "airlock"]
 
+// Those built from mecha's sources, which a consumer that builds them from a
+// checkout carries as each target's srcs view (bayt.cue holds this to the
+// targets).
+#Sourced: ["database", "mesh", "auth", "ticker", "clock", "compute", "airlock"]
+
 // A pin is an image a release pushed to Docker Hub, by version and digest. The
 // compose service and fragment an app builds from in the monorepo follow from
 // the key (libraries_mecha-<service>-image).

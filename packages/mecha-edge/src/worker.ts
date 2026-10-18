@@ -13,10 +13,15 @@
 //   is cached only behind a token the Worker verified for that table and
 //   where; a public-only table's where names `public:` alone, so its chunks
 //   are every guest's.
-// - A guest's GET /crud is kept seconds, keyed by its URL and last write:
-//   a public-only read (marked `x-mecha-scope: public` by the cluster) is
-//   shared across guests, while a subject-scoped read is keyed by the guest's
-//   `sub`; writes advance both keys.
+// - A guest's GET /crud is keyed by its URL and last write: a public-only
+//   read (marked `x-mecha-scope: public` by the cluster) is shared across
+//   guests, while a subject-scoped read is keyed by the guest's `sub`; writes
+//   advance both keys. A subject-scoped read is kept seconds. A public one is
+//   fresh as long, and after that served stale while one refresh per colo
+//   replaces it, for a day: a read the object takes long to answer is paid by
+//   the refresh, not a guest. A write through this colo moves the key; one
+//   made elsewhere (another colo, the object itself) is seen as before, once
+//   the entry is past its seconds, after one stale answer.
 // - Nothing live, no write, no 4xx or 5xx, and no session but a guest's.
 // - The browser keeps a shape response that is not live as Electric's server
 //   would let it, and nothing else.
@@ -25,6 +30,11 @@ import type { EdgeEnv } from './object.ts'
 
 const SHAPE_TTL_S = 300
 const CRUD_TTL_S = 5
+const PUBLIC_CRUD_FRESH_MS = CRUD_TTL_S * 1000
+const PUBLIC_CRUD_KEEP_S = 86_400
+const STORED_AT = 'x-edge-stored-at'
+// One refresh per stale key per isolate, as edge-ssr.ts's renders.
+const refreshing = new Map<string, Promise<void>>()
 const CLUSTER_ROUTES = /^\/(auth|crud|electric)(\/|$)/
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 // Cache API keys are URLs; none of these is ever fetched.
@@ -50,6 +60,7 @@ function marked(res: Response, state: string, browser = 'no-store'): Response {
   const out = new Response(res.body, res)
   out.headers.set('cache-control', res.status === 200 ? browser : 'no-store')
   out.headers.set('x-edge-cache', state)
+  out.headers.delete(STORED_AT)
   return out
 }
 
@@ -58,6 +69,15 @@ function marked(res: Response, state: string, browser = 'no-store'): Response {
 const electricCache = (p: URLSearchParams) => p.get('offset') === '-1'
   ? 'public, max-age=604800, s-maxage=3600, stale-while-revalidate=2629746'
   : 'public, max-age=60, stale-while-revalidate=300'
+
+/** A public read as the colo keeps it: a day, stamped with when it was read. */
+function storedPublic(res: Response): Response {
+  const stored = new Response(res.body, res)
+  stored.headers.delete('x-mecha-scope')
+  stored.headers.set('cache-control', `max-age=${PUBLIC_CRUD_KEEP_S}`)
+  stored.headers.set(STORED_AT, String(Date.now()))
+  return stored
+}
 
 const navigation = (req: Request) =>
   (req.method === 'GET' || req.method === 'HEAD') && (req.headers.get('sec-fetch-mode') === 'navigate' || (req.headers.get('accept') ?? '').includes('text/html'))
@@ -124,7 +144,22 @@ export const edgeWorker = {
         const lastPublicWrite = (await (await cache.match(publicWritesKey))?.text()) ?? '0'
         const publicKey = keyOf(version, reset, 'crud', 'public', lastPublicWrite, url.pathname + url.search)
         const publicHit = await cache.match(publicKey)
-        if (publicHit) return marked(publicHit, 'hit')
+        if (publicHit) {
+          if (Date.now() - Number(publicHit.headers.get(STORED_AT)) <= PUBLIC_CRUD_FRESH_MS) return marked(publicHit, 'hit')
+          if (!refreshing.has(publicKey.url)) {
+            const refresh = (async () => {
+              const res = await object().fetch(new Request(req.url, { headers: req.headers }))
+              if (res.status !== 200 || res.headers.get('x-mecha-scope') !== 'public') {
+                await cache.delete(publicKey)
+                throw new Error(`refreshing ${url.pathname}${url.search} answered ${res.status} ${res.headers.get('x-mecha-scope') ?? 'unscoped'}: its stale entry is dropped`)
+              }
+              await cache.put(publicKey, storedPublic(res))
+            })().finally(() => refreshing.delete(publicKey.url))
+            refreshing.set(publicKey.url, refresh)
+            ctx.waitUntil(refresh)
+          }
+          return marked(publicHit, 'stale')
+        }
         const lastWrite = (await (await cache.match(writesKey))?.text()) ?? '0'
         const subjectKey = keyOf(version, reset, 'crud', claims.sub as string, lastWrite, url.pathname + url.search)
         const subjectHit = await cache.match(subjectKey)
@@ -132,9 +167,8 @@ export const edgeWorker = {
         const res = await object().fetch(req)
         if (res.status !== 200) return marked(res, 'miss')
         const isPublic = res.headers.get('x-mecha-scope') === 'public'
-        const stored = new Response(res.body, res)
-        stored.headers.delete('x-mecha-scope')
-        stored.headers.set('cache-control', `max-age=${CRUD_TTL_S}`)
+        const stored = isPublic ? storedPublic(res) : new Response(res.body, res)
+        if (!isPublic) stored.headers.set('cache-control', `max-age=${CRUD_TTL_S}`)
         ctx.waitUntil(cache.put(isPublic ? publicKey : subjectKey, stored.clone()))
         return marked(stored, 'miss')
       }

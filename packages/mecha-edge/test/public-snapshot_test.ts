@@ -162,7 +162,7 @@ Deno.test('public view embeds use declared references and preserve target RLS in
     assert.deepEqual(await cluster.publicSnapshot('generation', s => s.read(path)), expected)
     await assert.rejects(cluster.publicSnapshot('generation', s => s.read('/feed?select=board(title)')), /Ambiguous/)
     await assert.rejects(cluster.publicSnapshot('generation', s => s.read('/feed?select=absent(title)')), /Unknown/)
-    const guest = await (await cluster.handle(new Request('https://test/auth/guest', { method: 'POST' }))).json()
+    const guest = await (await cluster.handle(new Request('https://test/auth/guest', { method: 'POST' }))).json() as { token: string }
     const response = await cluster.handle(new Request('https://test/crud' + path, { headers: { authorization: 'Bearer ' + guest.token } }))
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), expected)

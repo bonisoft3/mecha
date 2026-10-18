@@ -108,6 +108,29 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
     const aliceNotesCached = await edgeWorker.fetch(new Request('https://app.example/crud/note?select=body', { headers: { authorization: `Bearer ${alice.token}` } }), env, ctx)
     assert.equal(aliceNotesCached.headers.get('x-edge-cache'), 'hit')
     assert.deepEqual(await aliceNotesCached.json(), [{ body: 'segredo da Alice' }])
+
+    // A public read past its freshness is still answered at once, and its slow
+    // read paid once by the colo: a five-second expiry made every guest visit
+    // to a heavy public directory wait out the object's whole query.
+    const swrPath = '/crud/board?select=title,id'
+    const swr = (g: { token: string }) => edgeWorker.fetch(new Request(`https://app.example${swrPath}`, { headers: { authorization: `Bearer ${g.token}` } }), env, ctx)
+    assert.equal((await swr(alice)).headers.get('x-edge-cache'), 'miss')
+    await flush()
+    const [publicKey, entry] = [...cacheStore].find(([k]) => k.includes(encodeURIComponent(swrPath)))!
+    const aged = new Response(entry.body, entry)
+    aged.headers.set('x-edge-stored-at', String(Date.now() - 61_000))
+    cacheStore.set(publicKey, aged)
+    const before = fetches
+    const stale = await Promise.all([alice, bob].map(swr))
+    for (const r of stale) {
+      assert.equal(r.headers.get('x-edge-cache'), 'stale')
+      assert.equal(r.headers.get('x-edge-stored-at'), null)
+      assert.equal((await r.json() as unknown[]).length, 1)
+    }
+    await flush()
+    assert.equal(fetches, before + 1, 'two stale hits refresh once')
+    assert.equal((await swr(bob)).headers.get('x-edge-cache'), 'hit')
+    assert.equal(fetches, before + 1)
   } finally {
     await db.close()
     if (savedCaches) Object.defineProperty(globalThis, 'caches', savedCaches)

@@ -69,6 +69,7 @@ _cluster: cluster.#Cluster & {
 		images: {${["database", "mesh", "conduit", "auth", "ticker", "clock", "compute", "airlock"].map((k) => `"${k}": ref: "libraries_mecha:${k}-image"`).join(", ")}}
 		airlock:   "effects.json"
 		caddyfile: "Caddyfile"
+		bounds: {authStatementMs: 5000, tickerCallMs: 35000}
 	}
 	state: {
 		migrations: [${MIGRATIONS.map((m) => `"migrations/${m.split("/").pop()}"`).join(", ")}]

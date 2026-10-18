@@ -6,5 +6,10 @@
     "../postgrest-js/src/rest-handler.js": "../postgrest-js/src/rest-handler.ts",
     "../postgrest-js/src/rest-read.js": "../postgrest-js/src/rest-read.ts",
     "../postgrest-js/src/validate.js": "../postgrest-js/src/validate.ts"
+  },
+  "compilerOptions": {
+    "types": [
+      "npm:@cloudflare/workers-types@5.20261015.1"
+    ]
   }
 }

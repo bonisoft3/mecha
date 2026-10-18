@@ -74,6 +74,9 @@ _stack: cluster.#Cluster & {
 		door: {port: 8080, scheme: "http", env: "MECHA_DOOR_HOST_PORT", host: 8080}
 		conduitTemplate: "services/cdc/pipelines/cdc-to-dapr.yaml"
 		statics: []
+		// services/database/migrations/001_roles.sql's: the client and service
+		// statement bounds, the ticker's calls just past the service's.
+		bounds: {authStatementMs: 5000, tickerCallMs: 35000}
 	}
 	state: {
 		// mecha's own schema, the identity table its auth plane keeps, then the
@@ -136,7 +139,7 @@ _mecha: bayt.#project & _where & {
 		// ---- The images -------------------------------------------------
 
 		"database-image": _image & {
-			srcs: globs: ["services/database/rls/rls.sql", "services/database/electric_password.sh", "services/ticker/schedule.sql", "services/airlock/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
+			srcs: globs: ["services/database/rls/rls.sql", "services/database/role_passwords.sh", "services/ticker/schedule.sql", "services/airlock/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
 			dockerfile: {
 				from: name: _postgres
 				// plv8 hosts a Jessie validation inside the write's transaction.
@@ -171,7 +174,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
 					{srcs: ["services/airlock/graphile.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#GraphileMigration)"},
 					{srcs: ["services/airlock/airlock.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#AirlockMigration)"},
-					{srcs: ["services/database/electric_password.sh"], dst: "\(cluster.#StagedDir)/\(cluster.#ElectricPasswordStep)"},
+					{srcs: ["services/database/role_passwords.sh"], dst: "\(cluster.#StagedDir)/\(cluster.#RolePasswordsStep)"},
 					{from: {name: _pgroll}, srcs: ["/usr/bin/pgroll"], dst: "/usr/local/bin/pgroll"},
 					{srcs: ["services/migrate/migrate.sh"], dst: "/migrate.sh", chmod: "755"},
 				]
@@ -205,7 +208,7 @@ _mecha: bayt.#project & _where & {
 		}
 		"conduit-image": _image & {
 			dockerfile: {
-				from: name: "ghcr.io/conduitio/conduit:v0.14.0@sha256:dffc83f78caddac8fda0bf71b2b34212174e4a8cbe74ee5e1784a97a78b77e60"
+				from: name: "ghcr.io/conduitio/conduit:v0.20.4@sha256:0301dff5cce57e2e5edf128c1e0d85c7852d5e54e93c7498215bf1969447cdc4"
 				// conduit's standalone plugin registry searches <cwd>/connectors.
 				workdir: "/app"
 				preamble: [
@@ -472,3 +475,6 @@ _mecha: bayt.#project & _where & {
 }
 
 project: _mecha
+
+// cluster.#Sourced names exactly the images whose targets copy sources.
+_sourced: [for s in cluster.#Images if len(_mecha.targets["\(s)-image"].srcs.globs) > 0 {s}] & cluster.#Sourced

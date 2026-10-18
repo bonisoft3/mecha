@@ -14,7 +14,8 @@ COPY <<'CDCTRACE' /cdc-trace.yaml
 # (mecha.txn_trace, rls.sql), and conduit does not interleave transactions, so
 # the marker last read is the transaction of every row after it. A row's own
 # txid cannot answer instead: the bus spells a delete as its before-image,
-# indistinguishable from an insert, and that image's txid is its last writer's.
+# indistinguishable from an insert, and that image's txid, where it carries
+# more than its key, is its last writer's.
 #
 # A stream runs this among its INPUT processors, which Connect runs on one
 # goroutine whatever the pipeline's threads, after stamping @cdc_consumer with

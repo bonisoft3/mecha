@@ -37,12 +37,12 @@ export class Fixture extends DurableObject {
   readonly #dir = new DataDirectory(this.ctx.storage, this.storageFormat)
   #db: Promise<PGlite> | null = null
 
-  async fetch(req: Request): Promise<Response> {
+  override async fetch(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname
     if (path === '/filesystem-cases') { filesystemCases(this.ctx.storage.sql); return json({ ok: true }) }
     if (path.startsWith('/import/')) return this.#dir.importing(path.slice('/import/'.length), req)
     if (path === '/state') return json({ bornAt: this.#bornAt, open: this.#db !== null, timers: [...timers.values()] })
-    if (path === '/abort') this.ctx.abort(new Error('aborted by /abort'))
+    if (path === '/abort') this.ctx.abort('aborted by /abort')
     this.#db ??= this.#dir.open({ pgliteWasm, initdbWasm, pgliteData, icu })
     const db = await this.#db
     if (path === '/sql') {

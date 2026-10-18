@@ -4,7 +4,7 @@
     "up": false,
     "manual": false,
     "environment": {
-      "PGRST_DB_URI": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",
+      "PGRST_DB_URI": "postgres://authenticator:${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}@database:5432/${POSTGRES_DB:-mecha}",
       "PGRST_DB_SCHEMA": "public",
       "PGRST_DB_ANON_ROLE": "anon",
       "PGRST_DB_PRE_REQUEST": "public.app_pre_request",
@@ -89,7 +89,7 @@
     "do": "postgrest",
     "shell": "exec",
     "env": {
-      "PGRST_DB_URI": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",
+      "PGRST_DB_URI": "postgres://authenticator:${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}@database:5432/${POSTGRES_DB:-mecha}",
       "PGRST_DB_SCHEMA": "public",
       "PGRST_DB_ANON_ROLE": "anon",
       "PGRST_DB_PRE_REQUEST": "public.app_pre_request",

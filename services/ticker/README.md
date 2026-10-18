@@ -165,8 +165,11 @@ coarse clock produce exact instants.
 one poke emits for a schedule; the watermark moves by what was resolved, so a backlog
 drains across pokes instead of running past the caller's deadline and repeating
 forever. `WALK_CAP = 512` in `due.ts` guards a pathological expression.
-`CALL_TIMEOUT_MS = 10_000` means a hung upstream fails the poke rather than
-holding the pass open until something else kills it mid-write.
+Each call to crud is bounded by `CALL_TIMEOUT_MS`, which the cluster sets past
+the service role's statement bound (pronto's resilience `tickerCall`), so a
+call given up on is not one the database then commits; each wake ping by
+`WAKE_TIMEOUT_MS = 10_000` in `main.ts`, a health read needing none of that.
+A hung upstream fails the poke rather than holding the pass open.
 
 ## Time, decided once
 

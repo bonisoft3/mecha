@@ -7,7 +7,7 @@
     ],
     "preambleCopyContexts": [],
     "from": {
-      "name": "ghcr.io/conduitio/conduit:v0.14.0@sha256:dffc83f78caddac8fda0bf71b2b34212174e4a8cbe74ee5e1784a97a78b77e60"
+      "name": "ghcr.io/conduitio/conduit:v0.20.4@sha256:0301dff5cce57e2e5edf128c1e0d85c7852d5e54e93c7498215bf1969447cdc4"
     },
     "workdir": "/app",
     "add": [],

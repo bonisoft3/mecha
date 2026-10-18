@@ -24,7 +24,7 @@ type State = {
 
 const cluster = (state: Partial<State>, capabilities: Record<string, boolean>) => {
   const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...(state.effects?.length ? { effectInterpreters: "SELECT 1;" } : {}), ...state };
-  return `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
+  return `#Cluster & {meta: {app: "t", images: [string]: name: "img", bounds: {authStatementMs: 5000, tickerCallMs: 35000}}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
 };
 
 /** `field` of a cluster given `state` and `capabilities`, as `cue export` answers it. */
@@ -245,7 +245,7 @@ Deno.test("an effect places the airlock and its daprd, and the ticker and clock 
   const staged = (t.database.dockerfile.copy ?? []).filter((c) => c.from !== undefined);
   // The schedule table rides inside 012 (bayt.cue), ahead of a caller's steps.
   assert.deepEqual(staged.map((c) => [c.srcs, c.dst]), [
-    [["/usr/share/mecha/initdb/899_electric_password.sh"], "/docker-entrypoint-initdb.d/899_electric_password.sh"],
+    [["/usr/share/mecha/initdb/899_role_passwords.sh"], "/docker-entrypoint-initdb.d/899_role_passwords.sh"],
     [["/usr/share/mecha/initdb/011_graphile_worker.sql"], "/docker-entrypoint-initdb.d/011_graphile_worker.sql"],
     [["/usr/share/mecha/initdb/012_airlock.sql"], "/docker-entrypoint-initdb.d/012_airlock.sql"],
   ]);
@@ -443,8 +443,17 @@ Deno.test("electric's password reaches the role and its URL from one variable", 
     got.value.electric.compose.environment.DATABASE_URL,
     `postgresql://electric:${password}@database:5432/\${POSTGRES_DB:-t}?sslmode=disable`,
   );
-  const placed = got.value.database.dockerfile.copy.filter((c: { dst: string }) => c.dst.endsWith("/899_electric_password.sh"));
-  assert.deepEqual(placed.map((c: { srcs: string[] }) => c.srcs), [["/usr/share/mecha/initdb/899_electric_password.sh"]]);
+  const placed = got.value.database.dockerfile.copy.filter((c: { dst: string }) => c.dst.endsWith("/899_role_passwords.sh"));
+  assert.deepEqual(placed.map((c: { srcs: string[] }) => c.srcs), [["/usr/share/mecha/initdb/899_role_passwords.sh"]]);
+  // PostgREST's login, set by the same step: one variable for the role and the
+  // URL, or crud's first connection is refused. It is not postgres, whose
+  // login would apply no token role's statement_timeout.
+  const authenticator = got.value.database.compose.environment.AUTHENTICATOR_PASSWORD;
+  assert.match(authenticator, /^\$\{AUTHENTICATOR_PASSWORD:-/);
+  assert.equal(
+    got.value.crud.compose.environment.PGRST_DB_URI,
+    `postgres://authenticator:${authenticator}@database:5432/\${POSTGRES_DB:-t}`,
+  );
 });
 
 Deno.test("a caller step on the electric password's digits is refused", async () => {
@@ -519,7 +528,7 @@ Deno.test("the release builds exactly the published images", async () => {
 // The migration runner is the database image run as a runner: pgroll and the
 // script ship there, so one image serves both and one pin names it.
 Deno.test("the migrate runner takes the database image", async () => {
-  const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: {migrations: [], pipelines: [], schedules: [], pgroll: {"01_a": {operations: []}}}}`;
+  const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img", bounds: {authStatementMs: 5000, tickerCallMs: 35000}}, state: {migrations: [], pipelines: [], schedules: [], pgroll: {"01_a": {operations: []}}}}`;
   const out = await new Deno.Command("cue", {
     args: ["export", ".:cluster", "-e", `{from: (${cluster}).surface.targets.migrate.dockerfile.from, entrypoint: (${cluster}).surface.targets.migrate.dockerfile.entrypoint}`],
     cwd: MECHA, stdout: "piped", stderr: "piped",
@@ -532,7 +541,7 @@ Deno.test("the migrate runner takes the database image", async () => {
 // first schedule lacks it, and the runner is told to refuse that volume.
 Deno.test("a schedule makes the migrate runner require its table", async () => {
   const env = async (schedules: string[]) => {
-    const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img"}, state: {migrations: [], pipelines: [], schedules: ${JSON.stringify(schedules)}, pgroll: {"01_a": {operations: []}}}}`;
+    const cluster = `#Cluster & {meta: {app: "t", images: [string]: name: "img", bounds: {authStatementMs: 5000, tickerCallMs: 35000}}, state: {migrations: [], pipelines: [], schedules: ${JSON.stringify(schedules)}, pgroll: {"01_a": {operations: []}}}}`;
     const out = await new Deno.Command("cue", {
       args: ["export", ".:cluster", "-e", `(${cluster}).surface.targets.migrate.compose.environment`],
       cwd: MECHA, stdout: "piped", stderr: "piped",

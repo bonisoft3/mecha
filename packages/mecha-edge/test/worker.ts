@@ -23,7 +23,7 @@ export class Cluster extends Base {
   readonly bornAt = new Date().toISOString()
   override fetch(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname
-    if (path === '/test/abort') this.ctx.abort(new Error('aborted by the test'))
+    if (path === '/test/abort') this.ctx.abort('aborted by the test')
     if (path === '/test/timers') return Promise.resolve(Response.json({ bornAt: this.bornAt, timers: [...timers.values()] }))
     if (path === '/test/public') return this.readPublic(async snapshot => Response.json(await snapshot.read('/board?select=title')))
       .catch(error => {

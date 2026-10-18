@@ -3,5 +3,10 @@
   "imports": {
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
     "@electric-sql/pglite-icu-full": "npm:@electric-sql/pglite-icu-full@0.0.2"
+  },
+  "compilerOptions": {
+    "types": [
+      "npm:@cloudflare/workers-types@5.20261015.1"
+    ]
   }
 }

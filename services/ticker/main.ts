@@ -353,18 +353,15 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-/** Nothing this service does is worth waiting on longer than this. A hung
- * upstream must fail the poke, not hold the pass open until the caller's own
- * deadline kills it mid-write. */
-const CALL_TIMEOUT_MS = 10_000;
-
 /** The real transport. PostgREST answers a write with rows only when asked,
- * and answers a delete with no body at all. */
-export function httpCrud(base: string, serviceJwt: string): Crud {
+ * and answers a delete with no body at all. Each call is bounded past the
+ * service role's statement: a call given up on first commits anyway, and the
+ * next tick makes it again. */
+export function httpCrud(base: string, serviceJwt: string, timeoutMs: number): Crud {
   return async (method, path, opts = {}) => {
     const res = await fetch(`${base}${path}`, {
       method,
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         "content-type": "application/json",
         "authorization": `Bearer ${serviceJwt}`,
@@ -378,15 +375,19 @@ export function httpCrud(base: string, serviceJwt: string): Crud {
   };
 }
 
+/** A wake is a health read, answered at once by a unit that is up; it needs
+ * none of the time a call to crud can take. */
+const WAKE_TIMEOUT_MS = 10_000;
+
 /** One GET to each unit that must exist for a tick to be read: daprd's own
  * readiness (`/v1.0/healthz/outbound`, which it answers 204 without consulting
  * the app channel — unlike `/v1.0/healthz`, which answers 500 until daprd's
  * initialization, blocked on the app channel accepting a connection, is done)
  * and the airlock's `/healthz`. Every one must answer, or the wake failed. */
-export function httpPoke(urls: string[]): Poke {
+export function httpPoke(urls: string[], timeoutMs = WAKE_TIMEOUT_MS): Poke {
   return async () => {
     for (const url of urls) {
-      const res = await fetch(url, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
       await res.body?.cancel();
       if (!res.ok) throw new Error(`poke ${url}: ${res.status}`);
     }
@@ -400,10 +401,12 @@ if (import.meta.main) {
   if (!SERVICE_JWT) throw new Error("SERVICE_JWT is required");
   const WAKE_URLS = Deno.env.get("WAKE_URLS");
   if (!WAKE_URLS) throw new Error("WAKE_URLS is required");
+  const CALL_TIMEOUT_MS = Number(Deno.env.get("CALL_TIMEOUT_MS"));
+  if (!(CALL_TIMEOUT_MS > 0)) throw new Error(`CALL_TIMEOUT_MS is ${Deno.env.get("CALL_TIMEOUT_MS")}, not milliseconds`);
   Deno.serve(
     { port: 9998 },
     handler(
-      httpCrud(CRUD_URL, SERVICE_JWT),
+      httpCrud(CRUD_URL, SERVICE_JWT, CALL_TIMEOUT_MS),
       httpPoke(WAKE_URLS.split(",")),
       SERVICE_JWT,
       () => new Date(),

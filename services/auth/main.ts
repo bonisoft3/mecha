@@ -30,6 +30,10 @@ function required(name: string): string {
   return value;
 }
 const DATABASE_URL = required("DATABASE_URL");
+// auth runs as the owner, which no role setting bounds: its connection carries
+// the clients' statement bound itself.
+const STATEMENT_TIMEOUT_MS = Number(required("AUTH_STATEMENT_TIMEOUT_MS"));
+if (!(STATEMENT_TIMEOUT_MS > 0)) throw new Error(`AUTH_STATEMENT_TIMEOUT_MS is ${STATEMENT_TIMEOUT_MS}, not milliseconds`);
 const JWT_SECRET = required("PGRST_JWT_SECRET");
 /** The dev cluster's door: localhost, on whatever port the host published. */
 const DEV_DOOR = "https://localhost:*";
@@ -88,7 +92,7 @@ const USER_TOKEN_TTL_S = 7 * 24 * 3600;
 const SHAPE_TOKEN_TTL_S = 900;
 const STATE_TTL_S = 300;
 
-export const sql = postgres(DATABASE_URL);
+export const sql = postgres(DATABASE_URL, { connection: { statement_timeout: STATEMENT_TIMEOUT_MS } });
 
 export async function migrate(): Promise<void> {
   await sql`CREATE TABLE IF NOT EXISTS webauthn_credential (

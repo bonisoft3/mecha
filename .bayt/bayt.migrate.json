@@ -144,7 +144,7 @@
       "outs": {
         "globs": [
           "services/database/rls/rls.sql",
-          "services/database/electric_password.sh",
+          "services/database/role_passwords.sh",
           "services/ticker/schedule.sql",
           "services/airlock/graphile.sql",
           "services/airlock/airlock.sql",
@@ -167,7 +167,7 @@
           "outs": {
             "globs": [
               "services/database/rls/rls.sql",
-              "services/database/electric_password.sh",
+              "services/database/role_passwords.sh",
               "services/ticker/schedule.sql",
               "services/airlock/graphile.sql",
               "services/airlock/airlock.sql",

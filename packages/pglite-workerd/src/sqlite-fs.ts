@@ -168,7 +168,7 @@ export class SqliteFS extends BaseFilesystem {
   }
 
   /** Bytes of a file as stored, for checking an import against its source. */
-  readRange(path: string, position: number, length: number): Uint8Array {
+  readRange(path: string, position: number, length: number): Uint8Array<ArrayBuffer> {
     const n = this.#file(path)
     const out = new Uint8Array(Math.max(0, Math.min(length, n.size - position)))
     const first = Math.floor(position / this.#format.blockSize)

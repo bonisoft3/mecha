@@ -33,7 +33,7 @@ Deno.test({ name: 'the edge cluster serves many subjects from one object', sanit
   const shapeOf = async (token: string, table: string) => {
     const res = await fetch(at('/auth/shape'), { method: 'POST', headers: bearer(token), body: JSON.stringify({ table }) })
     assert.ok(res.ok, `/auth/shape: ${res.status}`)
-    const { token: shape, where } = await res.json()
+    const { token: shape, where } = await res.json() as { token: string; where: string }
     return (params: string, init: RequestInit = {}) => fetch(at(`/electric/v1/shape?table=${table}&where=${encodeURIComponent(where)}&${params}`), { ...init, headers: bearer(shape) })
   }
   const idle = async () => { await delay(500); return (await (await fetch(at('/test/timers'))).json()) as { bornAt: string; timers: string[] } }

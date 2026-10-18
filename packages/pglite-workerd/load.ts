@@ -53,14 +53,17 @@ const RESUMES = 5
 
 export async function load(dir: string, send: Send, { reset = false, concurrency = 4, log = console.log }: LoadOptions = {}) {
   const call = async (route: string, init?: RequestInit) => {
+    // A connection the object's restart cuts fails the request or its body,
+    // whichever was in flight.
     let res: Response
+    let text: string
     try {
       res = await send(route, init)
+      text = await res.text()
     } catch (e) {
       if (e instanceof TypeError) throw new Interrupted(`/import/${route}: ${e.message}`)
       throw e
     }
-    const text = await res.text()
     if (res.status >= 500 || res.status === 401) throw new Interrupted(`/import/${route}: ${res.status} ${text}`)
     if (!res.ok) throw new Error(`/import/${route}: ${res.status} ${text}`)
     return JSON.parse(text)

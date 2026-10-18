@@ -47,7 +47,7 @@ export function edgeObject({ assets, tables, schema, storageFormat }: EdgeOption
           db, tables, schema, secret: this.env.JWT_SECRET, log: console.error,
           // A hole in a shape log is answered by a fresh object: a new log,
           // under new handles every client refetches from.
-          fail: (e) => this.ctx.abort(e),
+          fail: (e) => this.ctx.abort(String(e)),
         })
         return { db, cluster }
       })().catch((e) => {
@@ -64,7 +64,7 @@ export function edgeObject({ assets, tables, schema, storageFormat }: EdgeOption
       return cluster.publicSnapshot(this.#dir.generation, use)
     }
 
-    async fetch(req: Request): Promise<Response> {
+    override async fetch(req: Request): Promise<Response> {
       const path = new URL(req.url).pathname
       // The Worker checked the import's token: an object keeps the version,
       // and so the secrets, it started on while requests keep it awake.
@@ -72,7 +72,7 @@ export function edgeObject({ assets, tables, schema, storageFormat }: EdgeOption
         // A release replacing live data: the directory goes now, the object
         // and its PGlite once this answer is out.
         this.#dir.reset()
-        setTimeout(() => this.ctx.abort(new Error('the data directory was reset')), 0)
+        setTimeout(() => this.ctx.abort('the data directory was reset'), 0)
         return json({ reset: true })
       }
       if (path.startsWith('/import/')) {

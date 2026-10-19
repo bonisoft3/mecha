@@ -162,38 +162,40 @@ is inserted. Membership and initial private projections commit with the spawn.
 schema refuses undeclared targets, missing initializers and browser-owned
 send events. These actions are also available to native entity machines.
 
-### Admission and session ports
+### The surface and its ports
 
-The machine's `ports` describe its public admission, join and synchronization
-operations. The compiler emits their PostgreSQL implementation after all actor
-schemas; no app-owned PL/pgSQL wrapper is needed. See
+A reader reaches a bounded machine only through rows: the live entities the
+app declares beside it (Pronto's `mecha-surface.ts` checks them) and the
+triggers the compiler attaches to them. The seat table holds each member's
+private view, written by the machine at every accepted step; a command row's
+insert dispatches it and stamps the receipt on the row; an open row's insert
+runs the admission or the join; a public table holds what the rules publish;
+a lease row's writes admit and renew, and its delete leaves. A reader can
+write only its own command, open and lease rows, never a seat, a receipt or a
+listing. The machine's `ports` describe the operations behind those rows. See
 [[../../../apps/truco/machines/admission.cue|Truco's declarations]].
 
 - `admission` declares parameters, an instance identity, initializer input,
-  memberships, preparation locks and ordered preconditions. A private receipt
-  binds that identity to its creator and exact request. Concurrent first calls
-  serialize on the receipt; accepted retries return the current private view
-  or the stored receipt, while refused retries preserve the refusal. Exceptions
-  roll back the reservation, so the same request can retry after repair.
-- `join` locks the instance, returns an existing member's view on retry, admits
-  the declared seat only in the allowed phases, then sends a Mecha event. Seat
+  memberships, preparation locks and ordered preconditions. An open row calls
+  it with the instance its row names and the other parameters from its input.
+  A private receipt binds that identity to its creator and exact request.
+  Concurrent first calls serialize on the receipt; retries return the stored
+  outcome. Exceptions roll back the reservation, so the same request can retry
+  after repair.
+- `join` locks the instance, accepts an existing member again, admits the
+  declared seat only in the allowed phases, then sends a Mecha event. Seat
   uniqueness and all-or-nothing delivery are PostgreSQL constraints.
-- `wake` declares eligible phases, a deadline field and a Mecha event. It reads
-  the deadline again under the instance lock. `sync` checks membership before
-  invoking it and returns only the caller's private view.
-- `session` composes private initialization, explicitly routed admission/command
-  calls, conditional lease renewal, member-scoped wake sweeps and a relational
-  projection. `leave` delivers the declared cleanup event. These are synchronous
-  Mecha operations; they do not install a separate worker or queue.
-- `reads` declares private SQL queries used by relational preconditions or
-  discovery. SQL expressions remain trusted authored code, not a proof of
-  authorization or concurrency correctness. Public session projections must
-  explicitly restrict private data to the authenticated `current_actor`.
+- `wake` declares eligible phases, a deadline field and a Mecha event. Every
+  settled step arms the ticker's one-shot schedule for the phase's deadline,
+  and the tick rereads the deadline under the instance lock before delivering.
+- `lease` names the events a lease row's writes and delete deliver. Its
+  machine is admitted by a parameterless admission keyed by the reader.
+- `reads` declares private SQL queries used by relational preconditions.
+  SQL expressions remain trusted authored code, not a proof of authorization
+  or concurrency correctness.
 
-Admission locks precede receipt locks and instance creation. Session routes
-run before taking the session's own instance lock, so a participant operation
-can acquire its declared locks in order. Wakes reread state under the target
-lock. Lock declarations still need a consistent order across all participating
+Admission locks precede receipt locks and instance creation. Wakes reread
+state under the target lock. Lock declarations still need a consistent order across all participating
 operations; the compiler does not prove global deadlock freedom.
 
 Composition reuses existing execution paths: a relational action can update

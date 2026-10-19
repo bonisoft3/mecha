@@ -95,6 +95,7 @@
       }
     ],
     "epilogue": [
+      "RUN for step in /usr/share/mecha/initdb/*.sh; do bash -n \"$step\"; done",
       "RUN cat /usr/share/mecha/initdb/800_schedule.sql /usr/share/mecha/initdb/012_airlock.sql > /tmp/airlock.sql && mv /tmp/airlock.sql /usr/share/mecha/initdb/012_airlock.sql",
       "RUN rm /var/lib/postgresql/data && install -d -o postgres -g postgres /var/lib/postgresql/data"
     ],

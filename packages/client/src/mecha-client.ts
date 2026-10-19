@@ -899,9 +899,14 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     storage: createStorageAdapter(),
     jitter: true,
     leaderElection: leader,
+    // A queued write replays only under the subject that made it: another
+    // account's, or one made before its database was recreated, is refused by
+    // row security, and replaying it as this reader's would be wrong anyway.
+    // A write queued before subjects were recorded names none, and is dropped.
     beforeRetry: (txs: any[]) => {
       const cutoff = Date.now() - maxAge
-      return txs.filter((tx) => tx.createdAt.getTime() > cutoff)
+      const subject = identity() ?? null
+      return txs.filter((tx) => tx.createdAt.getTime() > cutoff && tx.metadata?.subject === subject)
     },
   })
 
@@ -932,7 +937,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     for (const phaseKey of phaseKeys) setPhase(phaseKey, "queued")
     // autoCommit off: mutate() would otherwise self-commit and race the
     // explicit commit below into "no longer pending".
-    const tx = executor.createOfflineTransaction({ mutationFnName, autoCommit: false })
+    const tx = executor.createOfflineTransaction({ mutationFnName, autoCommit: false, metadata: { subject: identity() ?? null } })
     tx.mutate(mutate)
     return tx.commit().then(() => undefined)
   }

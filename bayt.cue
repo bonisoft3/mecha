@@ -186,7 +186,10 @@ _mecha: bayt.#project & _where & {
 				// postgres 18 makes /var/lib/postgresql/data a symlink to its parent;
 				// CloudNativePG mounts its volume there, and runc cannot mount onto
 				// a symlink, so it is a plain directory the postgres user owns.
+				// A staged shell step is sourced at a database's first start;
+				// parsed here, a quoting slip fails the image, not that start.
 				epilogue: [
+					"RUN for step in \(cluster.#StagedDir)/*.sh; do bash -n \"$step\"; done",
 					"RUN cat \(cluster.#StagedDir)/\(cluster.#ScheduleMigration) \(cluster.#StagedDir)/\(cluster.#AirlockMigration) > /tmp/airlock.sql && mv /tmp/airlock.sql \(cluster.#StagedDir)/\(cluster.#AirlockMigration)",
 					"RUN rm /var/lib/postgresql/data && install -d -o postgres -g postgres /var/lib/postgresql/data",
 				]

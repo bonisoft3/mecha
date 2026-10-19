@@ -47,3 +47,16 @@ BEGIN
   END LOOP;
 END
 $$;
+
+-- The ticker's own grant, stated here rather than inherited: a caller step
+-- that revoked its default privileges before this table exists (as one
+-- closing its passkey table must) has taken back the grant it would otherwise
+-- be born with. The ticker reads the list and advances each row's watermark,
+-- and nothing more.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service') THEN
+    GRANT SELECT, UPDATE ON schedule TO service;
+  END IF;
+END
+$$;

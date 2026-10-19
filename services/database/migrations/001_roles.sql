@@ -26,9 +26,11 @@ END
 $$;
 
 -- PostgREST logs in as authenticator and switches to the role a request's
--- token names, whose settings below it applies only to roles granted to its
--- login. On Kubernetes the operator may have created the role first.
-ALTER ROLE authenticator LOGIN;
+-- token names; it applies that role's settings (timeouts, isolation) only to
+-- roles its login is granted, so the grant is what makes them hold, and the
+-- login inherits none of their privileges. On Kubernetes the operator may
+-- have created the role first.
+ALTER ROLE authenticator NOINHERIT LOGIN;
 GRANT anon, app_user, service TO authenticator;
 
 -- A pipeline writes every tenant's rows, and electric reads every tenant's WAL:

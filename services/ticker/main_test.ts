@@ -6,6 +6,8 @@
 
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1.0.8";
 import {
+  wakeUrls,
+  httpCrud,
   type Crud,
   handler,
   type Poke,
@@ -588,4 +590,36 @@ Deno.test("nothing but POST /poke exists", async () => {
 Deno.test("an unreachable crud fails the poke rather than reporting a quiet success", async () => {
   const down: Crud = () => Promise.reject(new Error("crud GET /schedule: 503"));
   await assertRejects(() => sweep(NOON, null, down, fakePoke()), Error, "503");
+});
+
+// Regression: an empty list was refused, so a stack whose ticks wake nothing
+// could not start; reading it as empty then dropped a typo's empty entry too.
+Deno.test("WAKE_URLS empty is no wake, and an empty entry in a list is refused", () => {
+  assertEquals(wakeUrls(""), []);
+  assertEquals(wakeUrls("http://a/healthz,http://b/healthz"), ["http://a/healthz", "http://b/healthz"]);
+  for (const typo of ["http://a/healthz,,http://b/healthz", "http://a/healthz,"]) {
+    let refused = false;
+    try { wakeUrls(typo); } catch { refused = true; }
+    assert(refused, `${typo} was taken`);
+  }
+});
+
+// The gateway reports a serialization conflict as a 500 naming 40001 and no
+// longer runs the transaction again; a tick is idempotent by its id, so the
+// ticker sends it again, a bounded number of times.
+Deno.test("a tick a serialization conflict aborted is sent again, and a conflict that persists fails", async () => {
+  const conflict = () => new Response(JSON.stringify({ code: "40001", message: "could not serialize access" }), { status: 500 });
+  const real = globalThis.fetch;
+  try {
+    let calls = 0;
+    globalThis.fetch = (() => Promise.resolve(++calls < 3 ? conflict() : new Response("[]", { status: 201 }))) as typeof fetch;
+    assertEquals(await httpCrud("http://crud", "jwt", 1000)("POST", "/tick", { body: [] }), []);
+    assertEquals(calls, 3);
+    calls = 0;
+    globalThis.fetch = (() => Promise.resolve((calls++, conflict()))) as typeof fetch;
+    await assertRejects(() => httpCrud("http://crud", "jwt", 1000)("POST", "/tick", { body: [] }), Error, "40001");
+    assertEquals(calls, 5);
+  } finally {
+    globalThis.fetch = real;
+  }
 });

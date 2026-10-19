@@ -59,7 +59,7 @@ into a service that looks healthy and does half its job:
 |---|---|
 | `CRUD_URL` | PostgREST directly, not the proxy: the proxy's client-facing `Prefer` injection would clobber the resolution below. |
 | `SERVICE_JWT` | Both the incoming poke's credential and the outgoing writes'. |
-| `WAKE_URLS` | The units a tick needs up, comma-separated, each answering a GET: `mesh-events`'s `/v1.0/healthz/outbound` where the change feed is on, the airlock's `/healthz` where an effect is declared. See **The wake**. |
+| `WAKE_URLS` | The units a tick needs up, comma-separated, each answering a GET: `mesh-events`'s `/v1.0/healthz/outbound` where the change feed is on, the airlock's `/healthz` where an effect is declared. Empty where neither is: a machine timer fires in the database its tick is written to. See **The wake**. |
 
 ## One table of mecha's, and the app's own
 

@@ -353,25 +353,39 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+/** How often a call a serialization conflict aborted is sent, and the first
+ * pause between sends, doubling. crud reports the conflict as a 500 naming
+ * 40001 and leaves running the transaction again to the caller; every call
+ * here is idempotent by its key, so sending it again is safe. */
+const CONFLICT_SENDS = 5;
+const CONFLICT_FIRST_MS = 25;
+
 /** The real transport. PostgREST answers a write with rows only when asked,
  * and answers a delete with no body at all. Each call is bounded past the
  * service role's statement: a call given up on first commits anyway, and the
  * next tick makes it again. */
 export function httpCrud(base: string, serviceJwt: string, timeoutMs: number): Crud {
   return async (method, path, opts = {}) => {
-    const res = await fetch(`${base}${path}`, {
-      method,
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: {
-        "content-type": "application/json",
-        "authorization": `Bearer ${serviceJwt}`,
-        ...(opts.prefer === undefined ? {} : { prefer: opts.prefer }),
-      },
-      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`crud ${method} ${path}: ${res.status} ${text}`);
-    return text === "" ? [] : JSON.parse(text);
+    for (let sent = 1; ; sent++) {
+      const res = await fetch(`${base}${path}`, {
+        method,
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: {
+          "content-type": "application/json",
+          "authorization": `Bearer ${serviceJwt}`,
+          ...(opts.prefer === undefined ? {} : { prefer: opts.prefer }),
+        },
+        body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      });
+      const text = await res.text();
+      const conflicted = res.status === 500 && text.includes('"code":"40001"');
+      if (conflicted && sent < CONFLICT_SENDS) {
+        await new Promise((resolve) => setTimeout(resolve, CONFLICT_FIRST_MS * 2 ** (sent - 1)));
+        continue;
+      }
+      if (!res.ok) throw new Error(`crud ${method} ${path}: ${res.status} ${text}`);
+      return text === "" ? [] : JSON.parse(text);
+    }
   };
 }
 
@@ -394,20 +408,30 @@ export function httpPoke(urls: string[], timeoutMs = WAKE_TIMEOUT_MS): Poke {
   };
 }
 
+/** The units a tick wakes, comma-separated. Empty where a tick needs nothing
+ * up — a machine timer fires in the database the tick is written to; an empty
+ * entry in a list is a typo, refused. */
+export function wakeUrls(raw: string): string[] {
+  if (raw === "") return [];
+  const urls = raw.split(",");
+  if (urls.some((url) => url === "")) throw new Error(`WAKE_URLS has an empty entry: "${raw}"`);
+  return urls;
+}
+
 if (import.meta.main) {
   const CRUD_URL = Deno.env.get("CRUD_URL");
   if (!CRUD_URL) throw new Error("CRUD_URL is required");
   const SERVICE_JWT = Deno.env.get("SERVICE_JWT");
   if (!SERVICE_JWT) throw new Error("SERVICE_JWT is required");
   const WAKE_URLS = Deno.env.get("WAKE_URLS");
-  if (!WAKE_URLS) throw new Error("WAKE_URLS is required");
+  if (WAKE_URLS === undefined) throw new Error("WAKE_URLS is required");
   const CALL_TIMEOUT_MS = Number(Deno.env.get("CALL_TIMEOUT_MS"));
   if (!(CALL_TIMEOUT_MS > 0)) throw new Error(`CALL_TIMEOUT_MS is ${Deno.env.get("CALL_TIMEOUT_MS")}, not milliseconds`);
   Deno.serve(
     { port: 9998 },
     handler(
       httpCrud(CRUD_URL, SERVICE_JWT, CALL_TIMEOUT_MS),
-      httpPoke(WAKE_URLS.split(",")),
+      httpPoke(wakeUrls(WAKE_URLS)),
       SERVICE_JWT,
       () => new Date(),
     ),

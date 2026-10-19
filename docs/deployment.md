@@ -53,8 +53,9 @@ it, and daprd's app channel points back at caddy. The wake comes from the
 ticker instead ([its contract](../services/ticker/README.md#the-wake)). After
 a sweep emits a tick, the ticker GETs each of `WAKE_URLS`: `mesh-events`'s
 `/v1.0/healthz/outbound`, never another daprd's, where the change feed is on,
-and the airlock's `/healthz` where an effect is declared. It advances no
-watermark until every one lands. A clock outside the unit
+and the airlock's `/healthz` where an effect is declared; empty where neither
+is, since a machine timer fires in the database the tick is written to. It
+advances no watermark until every one lands. A clock outside the unit
 ([clocks](../services/ticker/README.md#clocks)) pokes the ticker. On a single
 machine that clock is the `clock` service, an rpk `generate` input that posts
 every `POKE_INTERVAL` (60 s by default). The cloud clock is among the ticker's

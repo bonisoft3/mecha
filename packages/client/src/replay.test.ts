@@ -105,3 +105,45 @@ it("confirms a delete replayed after a reload without holding the next page's wr
 
   expect(nextMethods).toEqual(["DELETE", "POST"])
 }, 10_000)
+
+// Regression: an outbox outlives its session. A guest's write still queued when
+// the database was recreated, or another account's on the same browser, was
+// replayed under the next subject's token, refused by row security as an
+// expired session, and the page re-gated itself on every load.
+it("replays a queued write only under the subject that made it", async () => {
+  const crud = (methods: string[], status: number, electric: ReturnType<typeof fakeElectric>) =>
+    (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input))
+      if (!url.pathname.startsWith("/crud/")) return electric.fetcher(input, init)
+      methods.push(`${init?.method} ${JSON.parse(String(init?.body)).id}`)
+      if (status !== 201) return new Response("unavailable", { status })
+      const row = { ...JSON.parse(String(init?.body)), txid: "2" }
+      electric.push("task", { operation: "insert", value: row, txid: 2 })
+      return Response.json([row], { status: 201, headers: { "x-txid": "2" } })
+    }) as typeof fetch
+  const page = (subject: string, methods: string[], status: number, electric: ReturnType<typeof fakeElectric>) =>
+    createMechaClient({
+      tables: [{ id: "task", table: "task", sync: "on-demand" }],
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+      subject: () => subject,
+      fetcher: crud(methods, status, electric),
+    })
+
+  // The first subject leaves with its write unsent.
+  const firstMethods: string[] = []
+  const first = page("g1", firstMethods, 503, fakeElectric({ schema }))
+  await first.ready
+  void first.insert("task", [{ id: "theirs", title: "g1's" }]).catch(() => {})
+  await vi.waitFor(() => expect(firstMethods).toContain("POST theirs"))
+  window.dispatchEvent(new Event("pagehide"))
+  await first.collections.task.cleanup()
+
+  const nextMethods: string[] = []
+  const next = page("g2", nextMethods, 201, fakeElectric({ schema }))
+  await next.ready
+  await next.insert("task", [{ id: "mine", title: "g2's" }])
+
+  expect(nextMethods).toEqual(["POST mine"])
+}, 10_000)

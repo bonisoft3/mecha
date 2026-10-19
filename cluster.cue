@@ -621,7 +621,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						start_period:   "30s"
 					}
 					dockerfile: {
-						from: name: "postgrest/postgrest:v12.2.3@sha256:0a46780309a604cdc8b56c776c6e5e15788ce58174d709e40459ab5a2d44d228"
+						from: name: "postgrest/postgrest:v16.4@sha256:d155c6718ed9a9f990d159a2ab7c0a3f16944dbb6d0a0344557421042acfe0df"
 					}
 					expose: {
 						http:  port: 3000
@@ -705,8 +705,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// directory.
 				srcs: globs: list.Concat([
 					[X.meta.caddyfile],
-					[for s in X.meta.statics if !strings.HasPrefix(s.file, X.meta.runtime) {s.file}],
+					[if X.meta.served == _|_ for s in X.meta.statics if !strings.HasPrefix(s.file, X.meta.runtime) {s.file}],
 				])
+				if X.meta.served != _|_ {deps: ["\(X.meta.served.ref):outs"]}
 				dockerfile: {
 					// The root an app static's target mirrors its path under, or "".
 					let _under = [for s in X.meta.statics {[
@@ -726,10 +727,18 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// what makes it optional: a context without .certs copies
 						// nothing, and the door then serves Caddy's own CA.
 						[{srcs: [".cert[s]"], dst: "/certs/"}],
+						// A release's tree: its runtime half where the terminal is
+						// served from, the rest under /srv, and the scripts the
+						// policy names beside the config.
+						[if X.meta.served != _|_ for c in [
+							{srcs: ["\(X.meta.served.tree)/omnishell/"], dst: "/omnishell/"},
+							{srcs: ["\(X.meta.served.tree)/"], dst: "/srv/"},
+							{srcs: [X.meta.served.scripts], dst: "/etc/caddy/release-scripts"},
+						] {c & {from: ref: X.meta.served.ref}}],
 						// One COPY, so one image layer, per run: the image stays
 						// under the overlay depth limit however many statics an
 						// app serves, and runs keep their order for overwrites.
-						[for i, s in X.meta.statics if _end["\(i)"] != _|_ {[
+						[if X.meta.served == _|_ for i, s in X.meta.statics if _end["\(i)"] != _|_ {[
 							if strings.HasPrefix(s.file, X.meta.runtime) {
 								{from: {name: "root"}, srcs: [strings.TrimPrefix(s.file, X.meta.root)], dst: s.target}
 							},
@@ -755,8 +764,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// An ORIGIN that is no origin stops the door as it starts: a
 				// template writes it into markup as it stands.
 				let admitted = #"case "${ORIGIN#http://}" in "$ORIGIN") h=${ORIGIN#https://};; *) h=${ORIGIN#http://};; esac; case "$h" in "$ORIGIN"|""|*[!A-Za-z0-9.:-]*) echo "ORIGIN '$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example" >&2; exit 1;; esac; "#
+				let scripts = [if X.meta.served != _|_ {"PRONTO_RELEASE_SCRIPTS=$(cat /etc/caddy/release-scripts); export PRONTO_RELEASE_SCRIPTS; "}, ""][0]
 				entrypoint: {
-					do: "\(admitted)\(validators)if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
+					do: "\(admitted)\(validators)\(scripts)if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
 					shell: "sh"
 					env:   compose.environment
 					if X.capabilities.server {
@@ -781,7 +791,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// Honoured, not assumed: a static that says it is not watched is
 						// one whose edit is a rebuild — a generated file, or a vendored
 						// unit whose megabytes would restart the proxy on every launch.
-						[for s in X.meta.statics if s.watch {action: "sync+restart", path: "../\(s.file)", target: s.target}],
+						// A release is rebuilt whole, since every entry names it.
+						[for s in X.meta.statics if s.watch {
+							path:   "../\(s.file)"
+							target: s.target
+							action: [if X.meta.served == _|_ {"sync+restart"}, "rebuild"][0]
+						}],
 					])
 				}
 			}
@@ -1345,6 +1360,16 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// The conduit pipeline, an envsubst template, relative to the app dir.
 		conduitTemplate: *"docker/conduit-pipeline.yaml" | string
 		statics: [...#Static]
+		// Where the door's tree is built as a release rather than copied file
+		// by file: a target of the consumer's whose image holds the statics,
+		// each at its URL's path under `tree`, and the inline scripts their
+		// documents run in `scripts`, which the door's policy names as
+		// $PRONTO_RELEASE_SCRIPTS.
+		served?: {
+			ref:     string
+			tree:    string
+			scripts: string
+		}
 		// The workspace root and the runtime's directory, as paths from the
 		// app dir: the monorepo's unless the app states its own layout.
 		root:    *"../../" | string
@@ -1386,7 +1411,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for n, t in R._live {
 			(n): {
 				for f, v in t if f != "compose" && f != "deps" {(f): v}
-				deps: [for k, _ in (R._waits & {"t": t}).out {":\(k):outs"}]
+				// What it waits on, and an image it copies from (a `from.ref`
+				// copy, which bayt does not read as a dependency).
+				deps: list.Concat([[for k, _ in (R._waits & {"t": t}).out {":\(k):outs"}], [if t.deps != _|_ for d in t.deps {d}]])
 				compose: {
 					for f, v in t.compose if f != "depends_on" && f != "networks" {(f): v}
 					depends_on: {for k, v in (R._waits & {"t": t}).out {("\(R.project)-\(k)"): v}}

@@ -134,11 +134,18 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
   let worker: { stop: () => Promise<void> } | undefined;
   try {
     await run("docker", ["run", "-d", "--rm", "--name", pgName, "-e", "POSTGRES_PASSWORD=pw", "-p", "127.0.0.1::5432", POSTGRES]);
+    // Copied in, not bind-mounted: a mount names a path on the daemon's host,
+    // which is not this one when the daemon runs in another container (dind).
     await run("docker", [
-      "run", "-d", "--rm", "--name", daprName, "--add-host=host.docker.internal:host-gateway", "-p", "127.0.0.1::3500", "-p", "127.0.0.1::50001",
-      "-v", `${components}:/components:ro`, "-v", `${new URL("./dapr.yaml", import.meta.url).pathname}:/dapr.yaml:ro`, DAPRD,
+      "create", "--rm", "--name", daprName, "--add-host=host.docker.internal:host-gateway", "-p", "127.0.0.1::3500", "-p", "127.0.0.1::50001", DAPRD,
       "./daprd", "--app-id", "airlock", "--resources-path", "/components", "--config", "/dapr.yaml", "--dapr-http-port", "3500", "--dapr-grpc-port", "50001", "--mode", "standalone",
     ]);
+    // The copy lands owned by root with the temp dir's 0700, which shuts out
+    // daprd's nonroot user.
+    await Deno.chmod(components, 0o755);
+    await run("docker", ["cp", `${components}/.`, `${daprName}:/components`]);
+    await run("docker", ["cp", new URL("./dapr.yaml", import.meta.url).pathname, `${daprName}:/dapr.yaml`]);
+    await run("docker", ["start", daprName]);
     const pgPort = (await run("docker", ["port", pgName, "5432"])).split(":").pop();
     const mesh = `http://127.0.0.1:${(await run("docker", ["port", daprName, "3500"])).split(":").pop()}`;
     const meshGrpc = `127.0.0.1:${(await run("docker", ["port", daprName, "50001"])).split(":").pop()}`;

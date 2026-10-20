@@ -85,6 +85,7 @@ processes:
     - AUTH_STATEMENT_TIMEOUT_MS=5000
     - >-
       DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@127.0.0.1:5432/${POSTGRES_DB:-mecha}
+    - OIDC_PROVIDERS=
     - PGRST_JWT_SECRET=${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}
     - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-https://localhost:*}
     - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}

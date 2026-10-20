@@ -1,8 +1,8 @@
 # generated from bayt.cue — do not edit
 FROM denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432 AS auth-image
 WORKDIR /app
-COPY services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts /app/
-COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts ./
+COPY services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts services/auth/oidc.ts /app/
+COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts services/auth/oidc.ts ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.auth-image.json ./.bayt/
 EXPOSE 9999
 CMD ["run", "--allow-net", "--allow-env", "main.ts"]
@@ -10,7 +10,7 @@ RUN deno cache main.ts
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS auth-image_ctxs
 WORKDIR /monorepo/libraries/mecha
-COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts ./
+COPY --parents services/auth/deno.json services/auth/deno.lock services/auth/jwt.ts services/auth/main.ts services/auth/oidc.ts ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
 RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi

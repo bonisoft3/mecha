@@ -9,12 +9,12 @@ const enc = new TextEncoder();
 // JWS's unpadded base64url over the btoa and atob every runtime that runs this
 // file has: the auth service's Deno, the page, and workerd, whose bundler
 // resolves no jsr: specifier.
-function encodeBase64Url(bytes: Uint8Array): string {
+export function encodeBase64Url(bytes: Uint8Array): string {
   let s = "";
   for (const b of bytes) s += String.fromCharCode(b);
   return btoa(s).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
-function decodeBase64Url(text: string): Uint8Array<ArrayBuffer> {
+export function decodeBase64Url(text: string): Uint8Array<ArrayBuffer> {
   const s = atob(text.replaceAll("-", "+").replaceAll("_", "/"));
   return Uint8Array.from(s, (c) => c.charCodeAt(0));
 }

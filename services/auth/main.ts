@@ -1,9 +1,11 @@
-// Auth service: WebAuthn passkey ceremonies plus a guest mint. The token
+// Auth service: WebAuthn passkey ceremonies, provider sign-in (oidc.ts) and a
+// guest mint. The token
 // contract three components share is README.md; endpoints are mounted WITH
 // the /auth prefix (Caddy strips nothing). Stateless: the
 // WebAuthn challenge travels in a short-lived HS256 `state` JWT instead of
 // server-side sessions. app_user is a program entity created by the database
-// migrations; this service only self-migrates webauthn_credential.
+// migrations; this service only self-migrates webauthn_credential and
+// identity_link.
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -22,6 +24,7 @@ import {
   subsetParams,
   verifyJwt as verify,
 } from "./jwt.ts";
+import { type Links, oidc, type Profile, providersFrom } from "./oidc.ts";
 export { shapeWhere };
 
 function required(name: string): string {
@@ -72,6 +75,7 @@ export function admittedOrigin(rpId: string, origin: string): string {
 
 const RP_ID = required("WEBAUTHN_RP_ID");
 const ORIGIN = admittedOrigin(RP_ID, required("WEBAUTHN_ORIGIN"));
+const OIDC_PROVIDERS = providersFrom((name) => Deno.env.get(name));
 
 /**
  * The origin a ceremony must have been made on. A configured origin is exact.
@@ -105,6 +109,34 @@ export async function migrate(): Promise<void> {
   // it, and the audit is told so rather than left to report it.
   await sql`INSERT INTO mecha.rls_exempt VALUES
     ('public.webauthn_credential', 'the auth service''s own table: read by it alone, on its own connection')
+    ON CONFLICT DO NOTHING`;
+  await sql.begin(async (tx) => {
+    await tx`CREATE TABLE IF NOT EXISTS identity_link (
+      provider text not null,
+      issuer text not null,
+      sub text not null,
+      user_id uuid not null unique references app_user(id) on delete cascade,
+      created_at timestamptz not null default now(),
+      primary key (provider, issuer, sub)
+    )`;
+    await tx`ALTER TABLE identity_link ADD COLUMN IF NOT EXISTS issuer text,
+      ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text`;
+    // A legacy provider label may have named any issuer. Its owner must supply
+    // that issuer before these accounts can safely accept another sign-in.
+    const [legacy] = await tx`SELECT EXISTS (SELECT 1 FROM identity_link WHERE issuer IS NULL) AS unassigned`;
+    if (legacy.unassigned) throw new Error("identity_link has unassigned issuers: add and populate its issuer column from the original identity provider before starting auth");
+    await tx`ALTER TABLE identity_link ALTER COLUMN issuer SET NOT NULL`;
+    await tx`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+        WHERE c.conrelid = 'identity_link'::regclass AND c.contype = 'p' AND a.attname = 'issuer') THEN
+        ALTER TABLE identity_link DROP CONSTRAINT identity_link_pkey;
+        ALTER TABLE identity_link ADD PRIMARY KEY (provider, issuer, sub);
+      END IF;
+    END $$`;
+  });
+  await sql`INSERT INTO mecha.rls_exempt VALUES
+    ('public.identity_link', 'the auth service''s own table: read by it alone, on its own connection')
     ON CONFLICT DO NOTHING`;
 }
 
@@ -603,9 +635,55 @@ async function whoami(req: Request): Promise<Response> {
   return json(200, { id: claims.sub, handle: claims.handle });
 }
 
+export const links: Links = {
+  userFor(p: Profile) {
+    return sql.begin(async (tx) => {
+      // One sign-in at a time per subject, so two tabs signing in at once make
+      // one person, not two.
+      await tx`select pg_advisory_xact_lock(hashtext(${JSON.stringify([p.provider, p.issuer, p.sub])}))`;
+      const [link] = await tx`update identity_link set name = ${p.name}, picture = ${p.picture}
+        where provider = ${p.provider} and issuer = ${p.issuer} and sub = ${p.sub} returning user_id`;
+      if (link) {
+        const [u] = await tx`select handle from app_user where id = ${link.user_id}`;
+        return { id: link.user_id as string, handle: u.handle as string };
+      }
+      const id = crypto.randomUUID();
+      // Generated handles can collide; regenerate and retry — never a user error.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const handle = generateHandle();
+        try {
+          await tx.savepoint((sp) => sp`insert into app_user (id, handle) values (${id}, ${handle})`);
+        } catch (e) {
+          if ((e as { code?: string }).code === "23505") continue;
+          throw e;
+        }
+        await tx`insert into identity_link (provider, issuer, sub, user_id, name, picture)
+          values (${p.provider}, ${p.issuer}, ${p.sub}, ${id}, ${p.name}, ${p.picture})`;
+        return { id, handle };
+      }
+      throw new Error("could not allocate identity");
+    });
+  },
+  async handleOf(provider: string, issuer: string, id: string) {
+    const [u] = await sql`select u.handle from app_user u
+      where u.id = ${id} and exists (select 1 from identity_link l where l.user_id = u.id and l.provider = ${provider} and l.issuer = ${issuer})`;
+    return u ? (u.handle as string) : null;
+  },
+};
+
+const providerSignIn = oidc({
+  secret: JWT_SECRET,
+  origin: (req) => ceremonyOrigin(ORIGIN, req.headers.get("host")),
+  providers: OIDC_PROVIDERS,
+  links,
+  issue: (user) => issueUserToken(user.id, user.handle),
+});
+
 export async function handler(req: Request): Promise<Response> {
   const path = new URL(req.url).pathname;
   try {
+    const signedIn = providerSignIn(req);
+    if (signedIn !== null) return await signedIn;
     if (req.method === "POST" && path === "/auth/register/start") {
       return await registerStart(req);
     }

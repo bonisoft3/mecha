@@ -8,7 +8,8 @@
       "AUTH_STATEMENT_TIMEOUT_MS": "5000",
       "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "WEBAUTHN_RP_ID": "${WEBAUTHN_RP_ID:-localhost}",
-      "WEBAUTHN_ORIGIN": "${WEBAUTHN_ORIGIN:-https://localhost:*}"
+      "WEBAUTHN_ORIGIN": "${WEBAUTHN_ORIGIN:-https://localhost:*}",
+      "OIDC_PROVIDERS": ""
     },
     "ports": [],
     "volumes": [],
@@ -58,7 +59,8 @@
       "AUTH_STATEMENT_TIMEOUT_MS": "5000",
       "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "WEBAUTHN_RP_ID": "${WEBAUTHN_RP_ID:-localhost}",
-      "WEBAUTHN_ORIGIN": "${WEBAUTHN_ORIGIN:-https://localhost:*}"
+      "WEBAUTHN_ORIGIN": "${WEBAUTHN_ORIGIN:-https://localhost:*}",
+      "OIDC_PROVIDERS": ""
     },
     "after": {
       "database": "healthy"
@@ -172,7 +174,8 @@
           "services/auth/deno.json",
           "services/auth/deno.lock",
           "services/auth/jwt.ts",
-          "services/auth/main.ts"
+          "services/auth/main.ts",
+          "services/auth/oidc.ts"
         ],
         "exclude": []
       },
@@ -194,7 +197,8 @@
               "services/auth/deno.json",
               "services/auth/deno.lock",
               "services/auth/jwt.ts",
-              "services/auth/main.ts"
+              "services/auth/main.ts",
+              "services/auth/oidc.ts"
             ],
             "exclude": []
           }

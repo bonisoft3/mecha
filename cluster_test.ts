@@ -22,13 +22,13 @@ type State = {
   bridges?: Bridge[];
 };
 
-const cluster = (state: Partial<State>, capabilities: Record<string, boolean>) => {
+const cluster = (state: Partial<State>, capabilities: Record<string, unknown>) => {
   const given: State = { migrations: [], pipelines: [], schedules: [], computations: [], ...(state.effects?.length ? { effectInterpreters: "SELECT 1;" } : {}), ...state };
   return `#Cluster & {meta: {app: "t", images: [string]: name: "img", bounds: {authStatementMs: 5000, tickerCallMs: 35000}}, state: ${JSON.stringify(given)}, capabilities: ${JSON.stringify(capabilities)}}`;
 };
 
 /** `field` of a cluster given `state` and `capabilities`, as `cue export` answers it. */
-async function exported(state: Partial<State>, field: string, capabilities: Record<string, boolean> = {}) {
+async function exported(state: Partial<State>, field: string, capabilities: Record<string, unknown> = {}) {
   return await evaluated(`(${cluster(state, capabilities)}).${field}`);
 }
 
@@ -571,4 +571,40 @@ Deno.test("a cluster takes the published images and no others", async () => {
   const { images, published } = JSON.parse(new TextDecoder().decode(out.stdout));
   assert.deepEqual([...images].sort(), [...published].sort());
   assert.deepEqual([...published].sort(), ["airlock", "auth", "clock", "compute", "conduit", "database", "mesh", "ticker"]);
+});
+
+// A provider's settings are the deployment's, over defaults the program may
+// give: a compose run inside a container that is handed no environment still
+// starts, and a provider whose client nobody gives fails at compose, before the
+// auth service boots with nothing to sign in through.
+Deno.test("a sign-in provider turns auth on and reaches it as a required client, and an unknown one is refused", async () => {
+  const on = await exported({}, "surface.targets.auth.compose.environment", { signIn: { google: {} } });
+  assert.equal(on.ok, true, on.stderr);
+  assert.equal(on.value.OIDC_PROVIDERS, "google");
+  assert.equal(on.value.OIDC_GOOGLE_CLIENT_ID, "${OIDC_GOOGLE_CLIENT_ID:?OIDC_GOOGLE_CLIENT_ID is required: the cluster signs in through google}");
+  // The rest are the deployment's to set or leave, an issuer in Google's place among them.
+  assert.equal(on.value.OIDC_GOOGLE_ISSUER, "${OIDC_GOOGLE_ISSUER:-}");
+  assert.equal(on.value.OIDC_GOOGLE_AUTHORIZE_PARAMS, "${OIDC_GOOGLE_AUTHORIZE_PARAMS:-}");
+  const off = await exported({}, "surface.targets.auth.compose.environment", { auth: true });
+  assert.equal(off.ok, true, off.stderr);
+  assert.equal(off.value.OIDC_PROVIDERS, "");
+  assert.equal("OIDC_GOOGLE_CLIENT_ID" in off.value, false);
+  assert.equal((await exported({}, "capabilities", { signIn: { google: {} }, auth: false })).ok, false);
+  assert.equal((await exported({}, "capabilities", { signIn: { myspace: {} } })).ok, false);
+});
+
+Deno.test("a provider's program defaults stand until the deployment sets its own, and a secret is never one", async () => {
+  const google = { issuer: "http://localhost:28443", internal: "http://host.docker.internal:28443", client: "origin", scope: "openid", params: "provider=google" };
+  const env = await exported({}, "surface.targets.auth.compose.environment", { signIn: { google } });
+  assert.equal(env.ok, true, env.stderr);
+  assert.equal(env.value.OIDC_GOOGLE_CLIENT_ID, "${OIDC_GOOGLE_CLIENT_ID:-origin}");
+  assert.equal(env.value.OIDC_GOOGLE_ISSUER, "${OIDC_GOOGLE_ISSUER:-http://localhost:28443}");
+  assert.equal(env.value.OIDC_GOOGLE_INTERNAL, "${OIDC_GOOGLE_INTERNAL:-http://host.docker.internal:28443}");
+  assert.equal(env.value.OIDC_GOOGLE_SCOPE, "${OIDC_GOOGLE_SCOPE:-openid}");
+  assert.equal(env.value.OIDC_GOOGLE_AUTHORIZE_PARAMS, "${OIDC_GOOGLE_AUTHORIZE_PARAMS:-provider=google}");
+  assert.equal(env.value.OIDC_GOOGLE_CLIENT_SECRET, "${OIDC_GOOGLE_CLIENT_SECRET:-}");
+  // compose would read a `$` or `}` in a default as its own syntax.
+  for (const bad of [{ secret: "shh" }, { scope: "openid ${HOME}" }, { params: "a=}" }]) {
+    assert.equal((await exported({}, "capabilities", { signIn: { google: bad } })).ok, false, JSON.stringify(bad));
+  }
 });

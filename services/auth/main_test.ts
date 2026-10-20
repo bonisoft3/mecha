@@ -6,11 +6,12 @@ import { fileURLToPath } from "node:url";
 import {
   assert,
   assertEquals,
+  assertRejects,
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@1.0.13";
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from "@simplewebauthn/server/helpers";
-import { admittedOrigin, ceremonyOrigin, handler, issueUserToken, migrate, signJwt, sql, verifyJwt } from "./main.ts";
+import { admittedOrigin, ceremonyOrigin, handler, issueUserToken, links, migrate, signJwt, sql, verifyJwt } from "./main.ts";
 
 await sql`CREATE TABLE IF NOT EXISTS app_user (
   id uuid primary key,
@@ -98,6 +99,7 @@ await sql`INSERT INTO mecha.shape_key VALUES
   ON CONFLICT DO NOTHING`;
 await migrate();
 await sql`delete from webauthn_credential`;
+await sql`delete from identity_link`;
 await sql`delete from app_user`;
 
 function post(path: string, body: unknown, token?: string): Request {
@@ -990,6 +992,75 @@ Deno.test("a configured origin is exact, and only localhost stands for the dev d
   assertEquals(ceremonyOrigin("https://localhost:*", "localhost:54321"), "https://localhost:54321");
   assert(ceremonyOrigin("https://localhost:*", "evil.example:54321") !== "https://evil.example:54321");
   assert(ceremonyOrigin("https://localhost:*", null).endsWith("*"));
+});
+
+const alice = { provider: "google", issuer: "https://accounts.google.com", sub: "g-alice", name: "Alice", picture: null };
+
+Deno.test({
+  name: "a provider's subject is one person, however many sign-ins race to make it",
+  ...opts,
+  fn: async () => {
+    // Connections opened first: a sign-in on the one already open commits
+    // before the others have connected, and nothing races.
+    await Promise.all(Array.from({ length: 8 }, () => sql`select pg_sleep(0.05)`));
+    for (const sub of ["g-race-1", "g-race-2", "g-race-3"]) {
+      const racers = await Promise.all(Array.from({ length: 8 }, () => links.userFor({ ...alice, sub })));
+      assertEquals(new Set(racers.map((u) => u.id)).size, 1, sub);
+    }
+    const users = [await links.userFor(alice)];
+    const [link] = await sql`select user_id from identity_link where provider = 'google' and sub = 'g-alice'`;
+    assertEquals(link.user_id, users[0].id);
+    await links.userFor({ ...alice, name: "Alice B." });
+    assertEquals((await sql`select name from identity_link where sub = 'g-alice'`)[0].name, "Alice B.");
+    assertEquals(await links.handleOf("google", alice.issuer, users[0].id), users[0].handle);
+  },
+});
+
+Deno.test({
+  name: "a session is only a provider's while its link is there",
+  ...opts,
+  fn: async () => {
+    const guest = (await (await handler(post("/auth/guest", {}))).json()).user;
+    assertEquals(await links.handleOf("google", alice.issuer, guest.id), null);
+    const u = await links.userFor({ ...alice, sub: "g-revoked" });
+    await sql`delete from identity_link where sub = 'g-revoked'`;
+    assertEquals(await links.handleOf("google", alice.issuer, u.id), null);
+  },
+});
+
+Deno.test({
+  name: "legacy links require their original issuer before migration can admit sign-in",
+  ...opts,
+  fn: async () => {
+    // The shape its auth service made, with a row signed in through the broker.
+    await sql`drop table identity_link`;
+    await sql`create table identity_link (
+      provider text not null, sub text not null,
+      user_id uuid not null unique references app_user(id) on delete cascade,
+      created_at timestamptz not null default now(), primary key (provider, sub))`;
+    const guest = (await (await handler(post("/auth/guest", {}))).json()).user;
+    await sql`insert into identity_link (provider, sub, user_id) values ('google', 'pairwise-1', ${guest.id})`;
+    await assertRejects(() => migrate(), Error, "identity_link has unassigned issuers");
+    await sql`alter table identity_link add column issuer text`;
+    await sql`update identity_link set issuer = ${alice.issuer}`;
+    await migrate();
+    assertEquals((await links.userFor({ ...alice, sub: "pairwise-1", name: null, picture: null })).id, guest.id);
+    const replacement = await links.userFor({ ...alice, issuer: "https://broker.test", sub: "pairwise-1" });
+    assert(replacement.id !== guest.id);
+    assertEquals(await links.handleOf("google", "https://broker.test", guest.id), null);
+    assertEquals(await links.handleOf("google", alice.issuer, guest.id), guest.handle);
+  },
+});
+
+Deno.test("a provider named without its client is refused at startup", async () => {
+  const { success, stderr } = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--frozen", fileURLToPath(new URL("./main.ts", import.meta.url))],
+    env: { OIDC_PROVIDERS: "google" },
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  assert(!success);
+  assertStringIncludes(new TextDecoder().decode(stderr), "OIDC_GOOGLE_CLIENT_ID is required");
 });
 
 // Last, and it has to be: Deno runs tests in source order, and this closes the

@@ -54,9 +54,16 @@ tasks:
       - task: test:ticker
       - task: test:compute
       - task: test:airlock
+      - task: test:auth
       - task: test:pgroll
       - task: test:cluster
       - task: test:browser
+
+  test:auth:
+    desc: "OIDC authorization, issuer isolation and browser sessions"
+    dir: services/auth
+    cmds:
+      - mise x -- deno test --frozen oidc_test.ts
 
   test:browser:
     desc: "browser PostgREST reads under their request scopes"

@@ -44,7 +44,7 @@ The routes are mecha's own Caddyfile's; a consumer's differs
 | Bus | Redis Streams | [change capture](docs/change-capture.md#retries), [its rejected alternatives](docs/change-capture.md#rejected) |
 | Transform | Redpanda Connect: YAML and bloblang | [change capture](docs/change-capture.md#routing) |
 | Kafka broker, stream processing | Redpanda, Arroyo | [streaming joins](docs/streaming-joins.md) |
-| Auth | the auth service's WebAuthn and tokens | [its contract](services/auth/README.md) |
+| Auth | the auth service's WebAuthn, provider sign-in and tokens | [its contract](services/auth/README.md) |
 | Object storage, images | rclone-s3, imgproxy | [the blob plane](docs/capabilities.md#the-blob-plane) |
 | Periodic wake | ticker, clock | [its contract](services/ticker/README.md), [the first request](docs/deployment.md#the-first-request) |
 | External effects | airlock, on Graphile Worker; its daprd (airlock-mesh), allowed the bindings API alone; a bridge per declared bridge | [its contract](services/airlock/README.md#in-a-cluster), [pronto's record](../../plugins/pronto/docs/decisions/2026-10-03-external-effects.md) |

@@ -62,6 +62,41 @@ Deno.test('public snapshots over real PGlite', async t => {
         assert.deepEqual(await s.read('/score?select=points,board(title)'), [{ points: 7, board: { title: 'Restored' } }])
         assert.deepEqual(await s.read('/score?select=total:points.sum()'), [{ total: 7 }])
       })
+      await assert.rejects(snapshot(s => s.read('/score?select=points,absent(title)')), /Unknown/)
+      const originalTransaction = db.transaction.bind(db)
+      let execCalls = 0
+      let queryCalls = 0
+      db.transaction = (async fn => originalTransaction(async tx => {
+        const origExec = tx.exec.bind(tx)
+        const origQuery = tx.query.bind(tx)
+        tx.exec = ((...args: Parameters<typeof tx.exec>) => { execCalls++; return origExec(...args) }) as typeof tx.exec
+        tx.query = ((...args: Parameters<typeof tx.query>) => { queryCalls++; return origQuery(...args) }) as typeof tx.query
+        return await fn(tx)
+      })) as typeof db.transaction
+      try {
+        assert.deepEqual(await snapshot(s => s.read('/score?select=points,board(title)')), [{ points: 7, board: { title: 'Restored' } }])
+        // Once a table and its relations are known on the generation, a snapshot
+        // read needs only one preamble exec and one data query, even after a
+        // rejected relation query on the same table.
+        assert.equal(execCalls, 1)
+        assert.equal(queryCalls, 1)
+      } finally {
+        db.transaction = originalTransaction
+      }
+      await db.exec('CREATE TABLE ungranted (id int PRIMARY KEY)')
+      await assert.rejects(snapshot(s => s.read('/ungranted')), /snapshot read 404/)
+      await db.exec(`
+        CREATE TABLE archive_board (id int PRIMARY KEY, title text);
+        GRANT SELECT ON archive_board TO app_user;
+        INSERT INTO archive_board VALUES (1, 'Archived');
+        ALTER TABLE score DROP CONSTRAINT score_board_id_fkey, ADD CONSTRAINT score_board_id_fkey FOREIGN KEY (board_id) REFERENCES archive_board(id);
+      `)
+      await assert.rejects(snapshot(s => s.read('/score?select=points,board(title)')), /Unknown to-one relation: score\.board/)
+      assert.deepEqual(await snapshot(s => s.read('/score?select=points,archive_board(title)')), [{ points: 7, archive_board: { title: 'Archived' } }])
+      await db.exec(`
+        ALTER TABLE score DROP CONSTRAINT score_board_id_fkey, ADD CONSTRAINT score_board_id_fkey FOREIGN KEY (board_id) REFERENCES board(id);
+        DROP TABLE archive_board;
+      `)
     })
     await t.step('a writer arriving during the snapshot waits; subsequent reader sees its commit', async () => {
       const started = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>()

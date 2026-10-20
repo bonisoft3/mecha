@@ -1,6 +1,6 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { validateIdentifier } from './validate.js'
-import { planRead, ReadQueryError, writeWhere, type ReadSchema } from './rest-read.js'
+import { metadataCache, planRead, ReadQueryError, writeWhere, type ReadSchema } from './rest-read.js'
 
 function parsePrefer(header: string | null): {
   returnRepresentation: boolean
@@ -22,17 +22,27 @@ function parsePrefer(header: string | null): {
 type Queryable = Pick<PGlite, 'query' | 'exec'>
 
 /** Reads within an existing transaction. Its owner supplies the role and scopes. */
-export function readRest(db: Queryable, req: Request, schema?: ReadSchema): Promise<Response> {
+export function readRest(db: Queryable, req: Request, schema?: ReadSchema, cacheOwner: object = db): Promise<Response> {
   if (req.method !== 'GET') throw new Error('snapshot reads only accept GET')
-  return route(db, req, schema)
+  return route(db, req, schema, cacheOwner, cacheOwner === db ? undefined : 'app_user')
 }
 
-async function tableExists(db: Queryable, table: string): Promise<boolean> {
-  const result = await db.query<{ count: string }>(
-    `SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+async function tableExists(db: Queryable, table: string, cacheOwner: object, role?: string): Promise<boolean> {
+  const cache = metadataCache(cacheOwner)
+  const key = role ? `${role}\0${table}` : undefined
+  if (key && cache.tables.has(key)) return true
+  const result = await db.query(
+    `SELECT 1 FROM pg_catalog.pg_class c
+       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+        AND (pg_has_role(c.relowner, 'USAGE')
+          OR has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+          OR has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))`,
     [table],
   )
-  return parseInt(result.rows[0]?.count ?? '0', 10) > 0
+  const exists = result.rows.length > 0
+  if (exists && key) cache.tables.add(key)
+  return exists
 }
 
 /**
@@ -44,7 +54,10 @@ async function tableExists(db: Queryable, table: string): Promise<boolean> {
  * json or jsonb column, or a domain over one, stores the value sent: a string
  * is a JSON string.
  */
-async function writtenAsJson(db: Queryable, table: string): Promise<Map<string, (p: string) => string>> {
+async function writtenAsJson(db: Queryable, table: string, cacheOwner: object): Promise<Map<string, (p: string) => string>> {
+  const cache = metadataCache(cacheOwner)
+  const cached = cache.asJson.get(table)
+  if (cached) return cached
   const res = await db.query<{ col: string; fn: string | null; type: string }>(
     `SELECT a.attname AS col, quote_ident(n.nspname) || '.' || quote_ident(p.proname) AS fn,
             format_type(a.atttypid, a.atttypmod) AS type
@@ -60,7 +73,9 @@ async function writtenAsJson(db: Queryable, table: string): Promise<Map<string, 
           SELECT FROM base WHERE oid IN ('json'::regtype, 'jsonb'::regtype)))`,
     [table],
   )
-  return new Map(res.rows.map((r) => [r.col, r.fn === null ? (p) => `${p}::${r.type}` : (p) => `${r.fn}(${p}::json)`]))
+  const asJson = new Map<string, (p: string) => string>(res.rows.map((r) => [r.col, r.fn === null ? (p) => `${p}::${r.type}` : (p) => `${r.fn}(${p}::json)`]))
+  cache.asJson.set(table, asJson)
+  return asJson
 }
 
 /** The placeholder a written value takes, as JSON where its column takes it so. */
@@ -79,12 +94,13 @@ async function handleGet(
   table: string,
   url: URL,
   req: Request,
-  schema?: ReadSchema,
+  schema: ReadSchema | undefined,
+  cacheOwner: object,
 ): Promise<Response> {
   const params = url.searchParams
   const prefer = parsePrefer(req.headers.get('Prefer'))
 
-  const plan = await planRead(db, table, params, schema)
+  const plan = await planRead(db, table, params, schema, cacheOwner)
   const result = await db.query<{ data: unknown }>(plan.sql, plan.params)
 
   const responseHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -108,6 +124,7 @@ async function handlePost(
   db: Queryable,
   table: string,
   req: Request,
+  cacheOwner: object,
 ): Promise<Response> {
   const prefer = parsePrefer(req.headers.get('Prefer'))
   const rawBody = await req.json()
@@ -127,7 +144,7 @@ async function handlePost(
   const quotedCols = cols.map((c) => `"${validateIdentifier(c)}"`).join(', ')
 
   // Build multi-row VALUES clause
-  const asJson = await writtenAsJson(db, table)
+  const asJson = await writtenAsJson(db, table, cacheOwner)
   const bindParams: unknown[] = []
   const valueClauses = rows.map((row) => {
     const placeholders = cols.map((c) => bindWritten(asJson, c, row[c], bindParams))
@@ -166,11 +183,12 @@ async function handlePatch(
   table: string,
   url: URL,
   req: Request,
+  cacheOwner: object,
 ): Promise<Response> {
   const prefer = parsePrefer(req.headers.get('Prefer'))
   const body = (await req.json()) as Record<string, unknown>
 
-  const asJson = await writtenAsJson(db, table)
+  const asJson = await writtenAsJson(db, table, cacheOwner)
   const bindParams: unknown[] = []
   const setCols = Object.keys(body)
   const setClause = setCols
@@ -305,16 +323,17 @@ export function createRestHandler(
       if (auth || req.method.toUpperCase() !== 'GET') {
         const scopes = auth ? await auth.scopes(req) : undefined
         const claims = auth?.claims ? await auth.claims(req) : undefined
+        const role = auth ? (auth.role ?? 'app_user') : undefined
         const res = await db.transaction(async (tx) => {
-          if (auth) await tx.exec(scopeSql(scopes!, auth.role ?? 'app_user', true, claims))
-          return await route(tx, req, schema)
+          if (auth) await tx.exec(scopeSql(scopes!, role!, true, claims))
+          return await route(tx, req, schema, db, role)
         })
         // PGlite yields undefined for a transaction it rolled back without
         // throwing, and there is no response to send in that case.
         if (!res) throw new Error('request transaction rolled back')
         return res
       }
-      return await route(db, req, schema)
+      return await route(db, req, schema, db)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const isValidationError = err instanceof ReadQueryError || message.startsWith('Invalid identifier:')
@@ -326,7 +345,7 @@ export function createRestHandler(
   }
 }
 
-async function route(db: Queryable, req: Request, schema?: ReadSchema): Promise<Response> {
+async function route(db: Queryable, req: Request, schema?: ReadSchema, cacheOwner: object = db, role?: string): Promise<Response> {
   const url = new URL(req.url)
   // Extract first path segment as table name
   const segments = url.pathname.split('/').filter(Boolean)
@@ -350,7 +369,7 @@ async function route(db: Queryable, req: Request, schema?: ReadSchema): Promise<
   }
 
   // Validate table exists
-  const exists = await tableExists(db, table)
+  const exists = await tableExists(db, table, cacheOwner, role)
   if (!exists) {
     return new Response(
       JSON.stringify({ error: `Table "${table}" not found` }),
@@ -363,11 +382,11 @@ async function route(db: Queryable, req: Request, schema?: ReadSchema): Promise<
 
   switch (req.method.toUpperCase()) {
     case 'GET':
-      return await handleGet(db, table, url, req, schema)
+      return await handleGet(db, table, url, req, schema, cacheOwner)
     case 'POST':
-      return await namingTransaction(db, await handlePost(db, table, req))
+      return await namingTransaction(db, await handlePost(db, table, req, cacheOwner))
     case 'PATCH':
-      return await namingTransaction(db, await handlePatch(db, table, url, req))
+      return await namingTransaction(db, await handlePatch(db, table, url, req, cacheOwner))
     case 'DELETE':
       return await namingTransaction(db, await handleDelete(db, table, url, req))
     default:

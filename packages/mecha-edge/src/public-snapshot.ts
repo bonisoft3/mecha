@@ -8,6 +8,8 @@ export interface PublicSnapshot {
   read(path: string): Promise<unknown[]>
 }
 
+const revisions = new WeakMap<PGlite, { revision: string; owner: object }>()
+
 /** PGlite has one connection. Its owner must serialize this with every other use.
  * Generation changes when the data directory is replaced, even by an older copy. */
 export async function publicSnapshot<T>(
@@ -18,19 +20,28 @@ export async function publicSnapshot<T>(
 ): Promise<T> {
   if (!generation) throw new Error('snapshot requires a database generation')
   const result = await db.transaction(async tx => {
-    await tx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
-    const { rows } = await tx.query<{ revision: string }>('SELECT pg_current_snapshot()::text AS revision')
     // No subject and no session lookup: policies see exactly the public scope.
-    await tx.exec(`SELECT set_config('request.jwt.claims', '{"role":"app_user"}', true);
-      SELECT set_config('app.scopes', 'public:', true);
-      SET LOCAL ROLE app_user;`)
+    const [, { rows }] = await tx.exec(`
+      SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY;
+      SELECT pg_current_snapshot()::text AS revision,
+             set_config('request.jwt.claims', '{"role":"app_user"}', true),
+             set_config('app.scopes', 'public:', true);
+      SET LOCAL ROLE app_user;
+    `) as [unknown, { rows: { revision: string }[] }]
+    const revision = JSON.stringify([generation, rows[0].revision])
+    let cached = revisions.get(db)
+    if (cached?.revision !== revision) {
+      cached = { revision, owner: {} }
+      revisions.set(db, cached)
+    }
+    const cacheOwner = cached.owner
     let active = true
     const reads: Promise<{ error: unknown } | undefined>[] = []
     const read = (path: string): Promise<unknown[]> => {
       if (!active) throw new Error('snapshot is closed')
       if (!/^\/[A-Za-z_][A-Za-z0-9_]*(\?|$)/.test(path)) throw new Error('invalid snapshot read path')
       const pending = (async () => {
-        const response = await readRest(tx, new Request('https://snapshot.invalid' + path), schema)
+        const response = await readRest(tx, new Request('https://snapshot.invalid' + path), schema, cacheOwner)
         if (!response.ok) throw new Error(`snapshot read ${response.status}: ${await response.text()}`)
         return await response.json() as unknown[]
       })()
@@ -39,7 +50,7 @@ export async function publicSnapshot<T>(
       return pending
     }
     try {
-      return { value: await use({ revision: JSON.stringify([generation, rows[0].revision]), read }) }
+      return { value: await use({ revision, read }) }
     } finally {
       active = false
       // A detached failed read must roll back rather than let the transaction commit.

@@ -34,6 +34,119 @@ interface ComputedRelation {
 
 type Relation = ForeignKey | ComputedRelation
 
+export interface MetadataCache {
+  tables: Set<string>
+  relations: Map<string, Relation[]>
+  asJson: Map<string, Map<string, (p: string) => string>>
+}
+
+const caches = new WeakMap<object, MetadataCache>()
+const DDL_STATEMENT = /\b(?:CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)\b/i
+
+function clearMetadataCache(cache: MetadataCache): void {
+  cache.tables.clear()
+  cache.relations.clear()
+  cache.asJson.clear()
+}
+
+function hookDdlInvalidation(
+  target: { exec?: (...args: unknown[]) => unknown; query?: (...args: unknown[]) => unknown; transaction?: (fn: (tx: unknown) => unknown) => unknown },
+  cache: MetadataCache,
+): void {
+  if (typeof target.exec === 'function') {
+    const origExec = target.exec.bind(target)
+    target.exec = (...args: unknown[]) => {
+      if (typeof args[0] === 'string' && DDL_STATEMENT.test(args[0])) clearMetadataCache(cache)
+      return origExec(...args)
+    }
+  }
+  if (typeof target.query === 'function') {
+    const origQuery = target.query.bind(target)
+    target.query = (...args: unknown[]) => {
+      if (typeof args[0] === 'string' && DDL_STATEMENT.test(args[0])) clearMetadataCache(cache)
+      return origQuery(...args)
+    }
+  }
+  if (typeof target.transaction === 'function') {
+    const origTx = target.transaction.bind(target)
+    target.transaction = (fn: (tx: unknown) => unknown) =>
+      origTx((tx: unknown) => {
+        if (tx && typeof tx === 'object') hookDdlInvalidation(tx as typeof target, cache)
+        return fn(tx)
+      })
+  }
+}
+
+export function metadataCache(owner: object): MetadataCache {
+  let cache = caches.get(owner)
+  if (!cache) {
+    cache = { tables: new Set(), relations: new Map(), asJson: new Map() }
+    caches.set(owner, cache)
+    hookDdlInvalidation(owner as { exec?: (...args: unknown[]) => unknown; query?: (...args: unknown[]) => unknown; transaction?: (fn: (tx: unknown) => unknown) => unknown }, cache)
+  }
+  return cache
+}
+
+async function queryRelations(db: Queryable, table: string, refs: Record<string, string | undefined>): Promise<Relation[]> {
+  // Views have no pg_constraint rows. Their app-declared references still
+  // join under the caller's role, against the target's actual primary key.
+  const hasRefs = Object.keys(refs).length > 0
+  const declaredSql = hasRefs ? `
+    UNION ALL
+    SELECT 'foreign-key' AS kind, ref.key AS name, target.relname AS target,
+           ARRAY[source_col.attname::text] AS columns, ARRAY[target_col.attname::text] AS referenced
+      FROM pg_catalog.pg_class source
+      JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
+      CROSS JOIN jsonb_each_text($2::jsonb) ref
+      JOIN pg_catalog.pg_attribute source_col ON source_col.attrelid = source.oid
+        AND source_col.attname = ref.key AND NOT source_col.attisdropped
+      JOIN pg_catalog.pg_class target ON target.relname = ref.value
+      JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
+      JOIN pg_catalog.pg_constraint pk ON pk.conrelid = target.oid AND pk.contype = 'p' AND cardinality(pk.conkey) = 1
+      JOIN pg_catalog.pg_attribute target_col ON target_col.attrelid = target.oid AND target_col.attnum = pk.conkey[1]
+     WHERE source_ns.nspname = 'public' AND target_ns.nspname = 'public'
+       AND source.relname = $1 AND source.relkind IN ('v', 'm')` : ''
+  const result = await db.query<Relation>(`
+    SELECT 'foreign-key' AS kind, c.conname AS name, target.relname AS target,
+           array_agg(source_col.attname::text ORDER BY cols.ordinality) AS columns,
+           array_agg(target_col.attname::text ORDER BY cols.ordinality) AS referenced
+      FROM pg_catalog.pg_constraint c
+      JOIN pg_catalog.pg_class source ON source.oid = c.conrelid
+      JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
+      JOIN pg_catalog.pg_class target ON target.oid = c.confrelid
+      JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
+      CROSS JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS cols(source_num, target_num, ordinality)
+      JOIN pg_catalog.pg_attribute source_col ON source_col.attrelid = source.oid AND source_col.attnum = cols.source_num
+      JOIN pg_catalog.pg_attribute target_col ON target_col.attrelid = target.oid AND target_col.attnum = cols.target_num
+     WHERE c.contype = 'f' AND source_ns.nspname = 'public' AND target_ns.nspname = 'public' AND source.relname = $1
+     GROUP BY c.oid, c.conname, target.relname${declaredSql}
+    UNION ALL
+    SELECT 'computed' AS kind, p.proname AS name, target.relname AS target,
+           NULL::text[] AS columns, NULL::text[] AS referenced
+      FROM pg_catalog.pg_proc p
+      JOIN pg_catalog.pg_namespace function_ns ON function_ns.oid = p.pronamespace
+      JOIN pg_catalog.pg_class source ON source.reltype = p.proargtypes[0]
+      JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
+      JOIN pg_catalog.pg_class target ON target.reltype = p.prorettype
+      JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
+     WHERE function_ns.nspname = 'public' AND source_ns.nspname = 'public'
+       AND target_ns.nspname = 'public' AND source.relname = $1
+       AND target.relkind IN ('r', 'p', 'v', 'm', 'f')
+       AND p.prokind = 'f' AND p.pronargs = 1 AND p.pronargdefaults = 0
+       AND p.proargmodes IS NULL AND p.proretset AND p.prorows = 1
+       AND p.provolatile IN ('s', 'i') AND NOT p.prosecdef`, hasRefs ? [table, JSON.stringify(refs)] : [table])
+  return result.rows
+}
+
+function matchRelation(relations: Relation[], selection: Selection): Relation[] {
+  const computed = relations.filter((relation) => relation.kind === 'computed' && relation.name === selection.name && !selection.hint)
+  return computed.length ? computed : relations.filter((fk) => {
+    if (fk.kind !== 'foreign-key') return false
+    const matches = fk.target === selection.name || fk.name === selection.name || (fk.columns.length === 1 && fk.columns[0] === selection.name)
+    return matches && (!selection.hint || fk.name === selection.hint || (fk.columns.length === 1 && fk.columns[0] === selection.hint))
+  })
+}
+
 interface Node {
   table: string
   alias: string
@@ -188,7 +301,7 @@ function pagination(search: URLSearchParams, key: string): number | null {
   return value
 }
 
-export async function planRead(db: Queryable, table: string, search: URLSearchParams, schema?: ReadSchema): Promise<{
+export async function planRead(db: Queryable, table: string, search: URLSearchParams, schema?: ReadSchema, cacheOwner: object = db): Promise<{
   sql: string
   countSql: string
   params: unknown[]
@@ -199,6 +312,7 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
   for (const key of ['select', 'order']) {
     if (search.getAll(key).length > 1) throw new ReadQueryError(`Duplicate ${key}`)
   }
+  const cache = metadataCache(cacheOwner)
   const metadata = new Map<string, Relation[]>()
   const tables = new Set<string>()
   let hasComputed = false
@@ -208,63 +322,18 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
     const node: Node = { table, alias: `r${nextAlias++}`, selections, children: new Map(), filters: [] }
     for (const selection of selections) {
       if (!selection.children) continue
-      let relations = metadata.get(table)
+      const refs = Object.fromEntries((schema?.[table]?.fields ?? []).filter(field => field.ref).map(field => [field.name, field.ref]))
+      const cacheKey = `${table}\0${JSON.stringify(refs)}`
+      let relations = metadata.get(table) ?? cache.relations.get(cacheKey)
       if (!relations) {
-        const result = await db.query<ForeignKey>(`
-          SELECT 'foreign-key' AS kind, c.conname AS name, target.relname AS target,
-                 array_agg(source_col.attname::text ORDER BY cols.ordinality) AS columns,
-                 array_agg(target_col.attname::text ORDER BY cols.ordinality) AS referenced
-            FROM pg_catalog.pg_constraint c
-            JOIN pg_catalog.pg_class source ON source.oid = c.conrelid
-            JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
-            JOIN pg_catalog.pg_class target ON target.oid = c.confrelid
-            JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
-            CROSS JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS cols(source_num, target_num, ordinality)
-            JOIN pg_catalog.pg_attribute source_col ON source_col.attrelid = source.oid AND source_col.attnum = cols.source_num
-            JOIN pg_catalog.pg_attribute target_col ON target_col.attrelid = target.oid AND target_col.attnum = cols.target_num
-           WHERE c.contype = 'f' AND source_ns.nspname = 'public' AND target_ns.nspname = 'public' AND source.relname = $1
-           GROUP BY c.oid, c.conname, target.relname`, [table])
-        const computed = await db.query<ComputedRelation>(`
-          SELECT 'computed' AS kind, p.proname AS name, target.relname AS target
-            FROM pg_catalog.pg_proc p
-            JOIN pg_catalog.pg_namespace function_ns ON function_ns.oid = p.pronamespace
-            JOIN pg_catalog.pg_class source ON source.reltype = p.proargtypes[0]
-            JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
-            JOIN pg_catalog.pg_class target ON target.reltype = p.prorettype
-            JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
-           WHERE function_ns.nspname = 'public' AND source_ns.nspname = 'public'
-             AND target_ns.nspname = 'public' AND source.relname = $1
-             AND target.relkind IN ('r', 'p', 'v', 'm', 'f')
-             AND p.prokind = 'f' AND p.pronargs = 1 AND p.pronargdefaults = 0
-             AND p.proargmodes IS NULL AND p.proretset AND p.prorows = 1
-             AND p.provolatile IN ('s', 'i') AND NOT p.prosecdef`, [table])
-        // Views have no pg_constraint rows. Their app-declared references still
-        // join under the caller's role, against the target's actual primary key.
-        const refs = Object.fromEntries((schema?.[table]?.fields ?? []).filter(field => field.ref).map(field => [field.name, field.ref]))
-        const declared = Object.keys(refs).length ? await db.query<ForeignKey>(`
-          SELECT 'foreign-key' AS kind, ref.key AS name, target.relname AS target,
-                 ARRAY[source_col.attname::text] AS columns, ARRAY[target_col.attname::text] AS referenced
-            FROM pg_catalog.pg_class source
-            JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
-            CROSS JOIN jsonb_each_text($2::jsonb) ref
-            JOIN pg_catalog.pg_attribute source_col ON source_col.attrelid = source.oid
-              AND source_col.attname = ref.key AND NOT source_col.attisdropped
-            JOIN pg_catalog.pg_class target ON target.relname = ref.value
-            JOIN pg_catalog.pg_namespace target_ns ON target_ns.oid = target.relnamespace
-            JOIN pg_catalog.pg_constraint pk ON pk.conrelid = target.oid AND pk.contype = 'p' AND cardinality(pk.conkey) = 1
-            JOIN pg_catalog.pg_attribute target_col ON target_col.attrelid = target.oid AND target_col.attnum = pk.conkey[1]
-           WHERE source_ns.nspname = 'public' AND target_ns.nspname = 'public'
-             AND source.relname = $1 AND source.relkind IN ('v', 'm')`, [table, JSON.stringify(refs)]) : { rows: [] }
-        relations = [...result.rows, ...declared.rows, ...computed.rows]
+        relations = await queryRelations(db, table, refs)
         metadata.set(table, relations)
       }
-      const computed = relations.filter((relation) => relation.kind === 'computed' && relation.name === selection.name && !selection.hint)
-      const candidates = computed.length ? computed : relations.filter((fk) => {
-        if (fk.kind !== 'foreign-key') return false
-        const matches = fk.target === selection.name || fk.name === selection.name || (fk.columns.length === 1 && fk.columns[0] === selection.name)
-        return matches && (!selection.hint || fk.name === selection.hint || (fk.columns.length === 1 && fk.columns[0] === selection.hint))
-      })
-      if (candidates.length !== 1) throw new ReadQueryError(`${candidates.length ? 'Ambiguous' : 'Unknown'} to-one relation: ${table}.${selection.name}`)
+      const candidates = matchRelation(relations, selection)
+      if (candidates.length !== 1) {
+        throw new ReadQueryError(`${candidates.length ? 'Ambiguous' : 'Unknown'} to-one relation: ${table}.${selection.name}`)
+      }
+      cache.relations.set(cacheKey, relations)
       const relation = candidates[0]
       if (relation.kind === 'computed') hasComputed = true
       node.children.set(selection.key, { node: await resolve(relation.target, selection.children), relation, inner: selection.inner })

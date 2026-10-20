@@ -291,6 +291,19 @@ _devElectricPassword: "dev-electric-password"
 		if auth {
 			server: true
 		}
+		// The providers a person may sign in through besides a passkey
+		// (services/auth/oidc.ts), each with the settings the program gives it.
+		// The deployment's OIDC_<NAME>_<SETTING> wins over each, so the program
+		// may name another issuer in the provider's place and an environment
+		// another still; a provider whose client neither gives refuses to start.
+		// A secret is the deployment's alone. A provider signs a person in, so
+		// it presupposes `auth`.
+		signIn: [("google")]: {
+			[("issuer" | "internal" | "client" | "scope" | "params")]: string & !="" & !~"[$}]"
+		}
+		if len(signIn) > 0 {
+			auth: true
+		}
 
 		// The change feed: conduit reading the WAL onto the bus (redis, behind
 		// the mesh-events sidecar) and transform running the pipelines off it.
@@ -673,6 +686,17 @@ _devElectricPassword: "dev-electric-password"
 							// The door's port is the host's pick; auth reads this
 							// default as whichever port the request came through.
 							WEBAUTHN_ORIGIN: "${WEBAUTHN_ORIGIN:-https://localhost:*}"
+							OIDC_PROVIDERS:  strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
+							for p, d in X.capabilities.signIn {
+								let k = "OIDC_\(strings.ToUpper(p))_CLIENT_ID"
+								if d.client == _|_ {
+									(k): "${\(k):?\(k) is required: the cluster signs in through \(p)}"
+								}
+								for o, v in {client: "CLIENT_ID", issuer: "ISSUER", internal: "INTERNAL", secret: "CLIENT_SECRET", scope: "SCOPE", params: "AUTHORIZE_PARAMS"} if o != "client" || d.client != _|_ {
+									let e = "OIDC_\(strings.ToUpper(p))_\(v)"
+									(e): "${\(e):-\(*d[o] | "")}"
+								}
+							}
 						}
 					}
 				}

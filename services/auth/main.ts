@@ -24,6 +24,7 @@ import {
   subsetParams,
   verifyJwt as verify,
 } from "./jwt.ts";
+import { generateHandle } from "./handle.ts";
 import { type Links, oidc, type Profile, providersFrom } from "./oidc.ts";
 export { shapeWhere };
 
@@ -431,14 +432,6 @@ async function readState(
   const st = await verifyJwt(body.state);
   if (!st || st.purpose !== purpose) return null;
   return st;
-}
-
-const ADJECTIVES = ["amber", "brisk", "calm", "dusk", "ember", "fern", "gold", "hazel", "ivory", "jade", "kind", "lunar", "mellow", "noble", "ochre", "pale", "quiet", "rustic", "sage", "tidal"];
-const NOUNS = ["fox", "wren", "otter", "pine", "reed", "moth", "lark", "moss", "dune", "cove", "elk", "finch", "heron", "ibis", "kite", "lynx", "newt", "orca", "quail", "seal"];
-function generateHandle(): string {
-  const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const n = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-  return `${a}-${n}-${10 + Math.floor(Math.random() * 90)}`;
 }
 
 async function registerStart(req: Request): Promise<Response> {

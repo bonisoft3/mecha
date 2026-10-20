@@ -1,12 +1,17 @@
 // mecha's cluster for many subjects on one PGlite connection: guests minted
 // with HS256 tokens, each request's role, scopes and claims set inside its own
 // transaction (postgrest-js), and Electric's shape protocol answered for the
-// subject a shape token names (mecha-browser's shapes.ts). The schema is the
-// data directory's: nothing here migrates.
-// Routes: /auth/guest, /auth/whoami, /auth/shape, /crud/*, /electric/v1/shape.
+// subject a shape token names (mecha-browser's shapes.ts), and people signed
+// in through the providers the environment names (the auth service's oidc.ts,
+// over this connection). The schema is the data directory's: nothing here
+// migrates but identity_link, which the auth service makes for itself too.
+// Routes: /auth/guest, /auth/whoami, /auth/shape, /auth/oidc/*, /crud/*,
+// /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
+import { generateHandle } from '../../../services/auth/handle.ts'
 import { shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
+import { type Links, oidc, type Profile, type Provider } from '../../../services/auth/oidc.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
 
@@ -17,6 +22,9 @@ export interface EdgeClusterConfig {
   schema?: ReadSchema & Record<string, { durability?: string }>
   /** The HS256 secret every token is signed with. */
   secret: string
+  /** The providers a person may sign in through (oidc.ts's providersFrom),
+   * none by default. */
+  providers?: Record<string, Provider>
   /** Where a request's failure is written before it is answered as a 500. */
   log: (line: string) => void
   /** A change whose row could not be read back: the shape log has a hole. */
@@ -114,6 +122,77 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     return json(200, { token, user: { id, handle, guest: true } })
   }
 
+  // As the auth service makes it (services/auth/main.ts's migrate), once,
+  // before the first sign-in reads it.
+  let linksReady: Promise<void> | undefined
+  const ensureLinks = () => linksReady ??= serialize(async () => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS identity_link (
+      provider text not null,
+      sub text not null,
+      user_id uuid not null unique references app_user(id) on delete cascade,
+      created_at timestamptz not null default now(),
+      name text,
+      picture text,
+      primary key (provider, sub)
+    );
+    INSERT INTO mecha.rls_exempt VALUES
+      ('public.identity_link', 'the auth service''s own table: read by it alone, on its own connection')
+      ON CONFLICT DO NOTHING;`)
+  })
+  // The auth service's links (main.ts) on the one connection: the chain is
+  // the lock that keeps two sign-ins of one subject from making two people.
+  const links: Links = {
+    userFor: async (p: Profile) => {
+      await ensureLinks()
+      return serialize(() => db.transaction(async (tx) => {
+        const [link] = (await tx.query<{ user_id: string }>(
+          'UPDATE identity_link SET name = $3, picture = $4 WHERE provider = $1 AND sub = $2 RETURNING user_id',
+          [p.provider, p.sub, p.name, p.picture],
+        )).rows
+        if (link) {
+          const [u] = (await tx.query<{ handle: string }>('SELECT handle FROM app_user WHERE id = $1', [link.user_id])).rows
+          return { id: link.user_id, handle: u.handle }
+        }
+        const id = crypto.randomUUID()
+        // Generated handles can collide; regenerate and retry — never a user error.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const handle = generateHandle()
+          await tx.exec('SAVEPOINT handle')
+          try {
+            await tx.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, handle])
+          } catch (e) {
+            if ((e as { code?: string }).code !== '23505') throw e
+            await tx.exec('ROLLBACK TO SAVEPOINT handle')
+            continue
+          }
+          await tx.query(
+            'INSERT INTO identity_link (provider, sub, user_id, name, picture) VALUES ($1, $2, $3, $4, $5)',
+            [p.provider, p.sub, id, p.name, p.picture],
+          )
+          return { id, handle }
+        }
+        throw new Error('could not allocate identity')
+      }))
+    },
+    handleOf: async (provider: string, id: string) => {
+      await ensureLinks()
+      const [u] = (await serialize(() => db.query<{ handle: string }>(
+        `SELECT u.handle FROM app_user u
+          WHERE u.id = $1 AND EXISTS (SELECT 1 FROM identity_link l WHERE l.user_id = u.id AND l.provider = $2)`,
+        [id, provider],
+      ))).rows
+      return u ? u.handle : null
+    },
+  }
+  // The door is the Worker's, whose request the object is handed whole.
+  const providerSignIn = oidc({
+    secret,
+    origin: (req) => new URL(req.url).origin,
+    providers: cfg.providers ?? {},
+    links,
+    issue: (user) => signJwt(secret, { role: 'app_user', sub: user.id, handle: user.handle, guest: false, exp: now() + USER_TOKEN_TTL_S }),
+  })
+
   async function whoami(req: Request): Promise<Response> {
     const claims = await session(req)
     if (!claims) return json(401, { error: 'invalid token' })
@@ -187,6 +266,8 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const path = new URL(req.url).pathname
     try {
       await ensureShapes()
+      const signedIn = providerSignIn(req)
+      if (signedIn !== null) return await signedIn
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)

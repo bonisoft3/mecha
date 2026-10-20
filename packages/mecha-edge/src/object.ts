@@ -4,11 +4,14 @@
 // answers the cluster's routes (cluster.ts); worker.ts is the Worker in front.
 // The environment: CLUSTER, the object's namespace; JWT_SECRET, the tokens'
 // secret; IMPORT_TOKEN, the bearer /import/* takes; CF_VERSION_METADATA, the
-// Worker's version; ASSETS, the static files, where it has any.
+// Worker's version; ASSETS, the static files, where it has any; OIDC_*, the
+// providers a person may sign in through, as the auth service reads them
+// (services/auth/README.md#provider-sign-in), a client secret as a secret.
 import { DurableObject } from 'cloudflare:workers'
 import type { PGlite } from '@electric-sql/pglite'
 import { type Assets, DataDirectory } from '../../pglite-workerd/src/data-directory.ts'
 import type { StorageFormat } from '../../pglite-workerd/src/storage-block.ts'
+import { providersFrom } from '../../../services/auth/oidc.ts'
 import { createEdgeCluster, type EdgeCluster, type EdgeClusterConfig } from './cluster.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
 
@@ -18,6 +21,7 @@ export interface EdgeEnv {
   IMPORT_TOKEN: string
   CF_VERSION_METADATA: { id: string }
   ASSETS?: Fetcher
+  [setting: `OIDC_${string}`]: string | undefined
 }
 
 export interface EdgeOptions {
@@ -42,9 +46,12 @@ export function edgeObject({ assets, tables, schema, storageFormat }: EdgeOption
 
     #boot() {
       return this.#cluster ??= (async () => {
+        // A provider that cannot be signed in through refuses the boot, as it
+        // refuses the auth service's start.
+        const providers = providersFrom((name) => this.env[name as `OIDC_${string}`])
         const db = await this.#dir.open(assets)
         const cluster = await createEdgeCluster({
-          db, tables, schema, secret: this.env.JWT_SECRET, log: console.error,
+          db, tables, schema, secret: this.env.JWT_SECRET, providers, log: console.error,
           // A hole in a shape log is answered by a fresh object: a new log,
           // under new handles every client refetches from.
           fail: (e) => this.ctx.abort(e),

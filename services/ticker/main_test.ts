@@ -14,9 +14,8 @@ import {
   type Report,
   type ScheduleRow,
   sweep,
-  tickId,
-  uuid5,
 } from "./main.ts";
+import { tickId, uuid5 } from "./tick-id.ts";
 
 type Row = Record<string, unknown>;
 

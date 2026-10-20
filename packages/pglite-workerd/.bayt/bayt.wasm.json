@@ -38,7 +38,8 @@
   "srcs": {
     "globs": [
       "wasm.nu",
-      "patches/postgres-pglite.patch"
+      "patches/postgres-pglite.patch",
+      "modules/**"
     ],
     "exclude": []
   },
@@ -131,7 +132,8 @@
       "outs": {
         "globs": [
           "wasm.nu",
-          "patches/postgres-pglite.patch"
+          "patches/postgres-pglite.patch",
+          "modules/**"
         ],
         "exclude": []
       },
@@ -166,7 +168,8 @@
       "srcs": {
         "globs": [
           "wasm.nu",
-          "patches/postgres-pglite.patch"
+          "patches/postgres-pglite.patch",
+          "modules/**"
         ],
         "exclude": [],
         "defaultGlobs": null,

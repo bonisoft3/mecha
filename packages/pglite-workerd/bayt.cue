@@ -55,7 +55,7 @@ _build: bayt.#project & {
 		// pglite.{js,wasm,data} linked for workerd, and the initdb its
 		// package carries.
 		"wasm": {
-			srcs: globs: ["wasm.nu", "patches/postgres-pglite.patch"]
+			srcs: globs: ["wasm.nu", "patches/postgres-pglite.patch", "modules/**"]
 			outs: globs: ["release/**"]
 			env: PGLITE_VERSION: "0.5.8"
 			dockerfile: {

@@ -23,6 +23,21 @@ export class Cluster extends Base {
   readonly bornAt = new Date().toISOString()
   override fetch(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname
+    if (path === '/test/clock-start') return (async () => {
+      const db = await this.booted()
+      const future = new Date(Date.now() + 2_000).toISOString()
+      await db.query(`INSERT INTO schedule (name, due_at, emits_entity) VALUES
+        ('broken', now() - interval '1 second', 'missing'), ('healthy', $1, 'tick')`, [future])
+      await this.rearm()
+      return Response.json({ future })
+    })()
+    if (path === '/test/clock-state') return (async () => {
+      const db = await this.booted()
+      return Response.json({ alarm: await this.ctx.storage.getAlarm(), ticks: (await db.query('SELECT schedule FROM tick')).rows })
+    })()
+    if (path === '/test/alarm') return this.alarm().then(() => Response.json({ ok: true }))
+    if (path === '/test/alarm-state') return this.ctx.storage.getAlarm().then(alarm => Response.json({ alarm }))
+    if (path === '/test/set-alarm') return this.ctx.storage.setAlarm(Date.now() + 60_000).then(() => Response.json({ ok: true }))
     if (path === '/test/abort') this.ctx.abort('aborted by the test')
     if (path === '/test/timers') return Promise.resolve(Response.json({ bornAt: this.bornAt, timers: [...timers.values()] }))
     if (path === '/test/public') return this.readPublic(async snapshot => Response.json(await snapshot.read('/board?select=title')))

@@ -149,7 +149,9 @@
           "services/ticker/deno.json",
           "services/ticker/deno.lock",
           "services/ticker/due.ts",
-          "services/ticker/main.ts"
+          "services/ticker/main.ts",
+          "services/ticker/tick-id.ts",
+          "services/ticker/crud.ts"
         ],
         "exclude": []
       },
@@ -170,7 +172,9 @@
               "services/ticker/deno.json",
               "services/ticker/deno.lock",
               "services/ticker/due.ts",
-              "services/ticker/main.ts"
+              "services/ticker/main.ts",
+              "services/ticker/tick-id.ts",
+              "services/ticker/crud.ts"
             ],
             "exclude": []
           }

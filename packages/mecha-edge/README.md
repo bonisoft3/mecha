@@ -69,6 +69,48 @@ Every saved-document lookup must first obtain a snapshot revision. `readPublic`
 does not change the existing HTTP routes or their caches. The native release
 renderer and experiments are described in [[../../../../plugins/omnishell/docs/native-worker-ssr]].
 
+## Machines
+
+An app's machines (pronto's hybrid machines,
+emitted by pronto's `mecha-reducer.ts`) step in the object. Their migration
+declares each `hybrid_<name>.step` over a `hybrid_<name>.engine` it leaves to
+the tier: PostgreSQL's is plv8, inside the migration's `-- tier: container`
+fence; the object's is `pgl_step`, [PGlite for workerd](../pglite-workerd/README.md)'s
+host import, which calls the step installed under `globalThis.__pgliteStep`
+([`machines.ts`](src/machines.ts)). `edgeObject` takes the machines by name,
+each an `execute` over the same rules and runtime PostgreSQL would run, which
+pronto's `edge.ts` renders into the release as `src/machines.js`; the first
+boot over a data directory creates `public.pgl_step` and each machine's engine
+over it. A step's failure crosses back as a value `pgl_step` raises, so the
+command's transaction aborts as it would under plv8, and a step that spends its
+fuel is one such failure. Every step evaluates fresh rules and charges initialization
+and the final fuel check, as plv8 does.
+
+## The clock
+
+A deadline a machine arms is a one-shot `schedule` row (`arm()` in pronto's
+`mecha-ports.ts`), which the container tier's [ticker](../../services/ticker/README.md)
+sweeps. Here it is the object's alarm ([`clock.ts`](src/clock.ts)): the alarm
+stands at the earliest unconsumed `due_at`, set at boot and after successful
+CRUD writes, and when
+it fires the object writes the tick rows the deadlines owe through `/crud` as
+the `service` role, as the ticker writes them, and the machine's `fire` trigger
+takes the schedule and wakes the instance in that same transaction. Every
+request's transaction runs serializable, the level a machine's `serial()`
+demands: one connection, so the level costs no conflict. A cron schedule is
+refused at boot; the edge runs no ticker.
+
+A completed tick advances `last_tick_at` even when its trigger retains the
+schedule. Completion uses the tick key’s millisecond resolution; rescheduling
+within that same tick does not create another delivery. A failed schedule does
+not stop the rest of the sweep. After reporting aggregate failures, the object
+retains an alarm: overdue failures retry after 30 seconds, while earlier future
+deadlines keep their wake time. This prevents one broken schedule from
+stranding later work after the platform exhausts automatic retries.
+
+Alarms do not boot an incomplete data directory. Reset deletes the alarm before
+replacing the directory.
+
 ## The Worker's cache
 
 Reads the object answered are answered again from the colo's Cache API, with
@@ -108,8 +150,8 @@ Reads the object answered are answered again from the colo's Cache API, with
   single machine.
 - **Nothing migrates here.** The object boots over the data directory a
   release loaded, rls.sql and the app's migrations already applied; it adds
-  only the shape triggers ([`shapes.ts`](../mecha-browser/shapes.ts)), on every
-  boot.
+  the shape triggers ([`shapes.ts`](../mecha-browser/shapes.ts)) on every
+  boot, and the machines' engines on the first.
 - **Live sync holds requests open.** A live shape request waits up to 20 s on
   the object, which keeps it awake while a tab is open. Once none is waiting no
   timer is pending, and the platform may evict it.

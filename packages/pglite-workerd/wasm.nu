@@ -16,7 +16,7 @@
 
 const TREE = '/work/postgres-pglite'
 const STATIC = '/work/static'
-const MODULES = [[name dir]; [plpgsql src/pl/plpgsql/src] [dict_snowball src/backend/snowball]]
+const MODULES = [[name dir]; [plpgsql src/pl/plpgsql/src] [dict_snowball src/backend/snowball] [pgl_step contrib/pgl_step]]
 # What the TypeScript side calls; nothing else is kept alive.
 const EXPORTS = [
   _main _malloc _free _fopen _fclose _fflush _pclose ___errno_location _strerror
@@ -147,6 +147,8 @@ def main [src: path, out: path] {
   cd $TREE
   ^git apply $patch
   let built = upstream
+  # The package's own modules, placed in the tree beside contrib's.
+  cp -r ($env.FILE_PWD | path join modules pgl_step) ($TREE | path join contrib pgl_step)
   link (modules) $built.cflags $built.prefix
   mkdir $out
   cp src/backend/pglite.js src/backend/pglite.wasm src/backend/pglite.data ($built.prefix | path join bin initdb.js) ($built.prefix | path join bin initdb.wasm) $out

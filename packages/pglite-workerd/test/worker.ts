@@ -18,6 +18,11 @@ import initdbWasm from '../dist/initdb.wasm'
 import pgliteData from '../dist/pglite.data'
 import icu from '../dist/icu-root.tgz'
 
+// The host step pgl_step calls (modules/pgl_step): here, an echo that says it
+// ran, and a failure for the machine named `failing`, for host-step_test.ts.
+;(globalThis as { __pgliteStep?: (name: string, json: string) => string }).__pgliteStep = (name, json) =>
+  name === 'failing' ? `!the host refused ${JSON.parse(json).why}` : JSON.stringify({ machine: name, input: JSON.parse(json), ran: 'host' })
+
 // A pending timer keeps an object awake; these record where each was set.
 const timers = new Map<unknown, string>()
 const realSetTimeout = globalThis.setTimeout
@@ -47,7 +52,11 @@ export class Fixture extends DurableObject {
     const db = await this.#db
     if (path === '/sql') {
       const { sql } = (await req.json()) as { sql: string }
-      return json((await db.query(sql)).rows)
+      try {
+        return json((await db.query(sql)).rows)
+      } catch (e) {
+        return json({ error: e instanceof Error ? e.message : String(e) }, 500)
+      }
     }
     if (path === '/exec') {
       await db.exec(await req.text())

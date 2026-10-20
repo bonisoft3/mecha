@@ -19,7 +19,7 @@ substrate, and with it what the change path can promise.
 | Single machine | Docker Compose: [`cluster.cue`](../cluster.cue), lowered by bayt | Built. Every consumer develops here |
 | k8s | A Deployment per service, scaling from zero, with a CronJob as the clock | Not built |
 | Cloud | Managed services that scale to zero | Runs on GCP through a consumer's overlay ([as built](#clouds-as-built)); mecha emits no cloud artifact of its own |
-| Edge | The cluster in a serverless isolate on Cloudflare, over Cloudflare's SQLite-backed storage | Built for guests: the database, auth, CRUD and shapes in one Durable Object ([`packages/mecha-edge`](../packages/mecha-edge/README.md)), PGlite over a data directory in the object's SQLite ([`packages/pglite-workerd`](../packages/pglite-workerd/README.md)). No change path, clock or blob plane |
+| Edge | The cluster in a serverless isolate on Cloudflare, over Cloudflare's SQLite-backed storage | Built for guests: the database, auth, CRUD and shapes in one Durable Object ([`packages/mecha-edge`](../packages/mecha-edge/README.md)), PGlite over a data directory in the object's SQLite ([`packages/pglite-workerd`](../packages/pglite-workerd/README.md)), the app's machines stepping through PGlite's host import and their deadlines on the object's alarm. No change path, cron or blob plane |
 
 Where a WAL reader runs, the change path is at-least-once end to end
 ([change capture](change-capture.md)).

@@ -25,6 +25,9 @@ export interface EdgeClusterConfig {
 
 export interface EdgeCluster {
   handle: (req: Request) => Promise<Response>
+  /** A /crud/* request as the service role, for the object's own clock:
+   * what the ticker writes on the container tier. Never routed. */
+  service: (req: Request) => Promise<Response>
   publicSnapshot<T>(generation: string, use: (snapshot: PublicSnapshot) => Promise<T>): Promise<T>
 }
 
@@ -167,7 +170,12 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     u.pathname = u.pathname.replace(/^\/crud/, '')
     const table = u.pathname.split('/').filter(Boolean)[0] ?? ''
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
-    const inner = new Request(u, { method: req.method, headers: req.headers, body })
+    const headers = new Headers(req.headers)
+    // As the container tier's proxy sets it (services/proxy/Caddyfile): a
+    // POST repeating a primary key is absorbed, not refused, so at-least-once
+    // delivery is safe at this boundary.
+    if (req.method === 'POST') headers.set('prefer', 'return=representation,resolution=ignore-duplicates')
+    const inner = new Request(u, { method: req.method, headers, body })
     return serialize(async () => {
       const shared = (req.method === 'GET' || req.method === 'HEAD') && await isPublicRead(table, u.searchParams)
       const rest = createRestHandler(
@@ -181,6 +189,15 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       if (shared && res.status === 200) res.headers.set('x-mecha-scope', 'public')
       return res
     })
+  }
+
+  async function service(req: Request): Promise<Response> {
+    await ensureShapes()
+    const u = new URL(req.url)
+    u.pathname = u.pathname.replace(/^\/crud/, '')
+    const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
+    const inner = new Request(u, { method: req.method, headers: req.headers, body })
+    return serialize(() => createRestHandler(db, { role: 'service', scopes: () => [], claims: () => ({ role: 'service' }) }, cfg.schema)(inner))
   }
 
   async function handle(req: Request): Promise<Response> {
@@ -202,6 +219,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   let pendingSnapshots = 0
   return {
     handle,
+    service,
     async publicSnapshot(generation, use) {
       // Admit before joining the database chain; the renderer's queue cannot
       // see requests waiting here, and each snapshot also delays API writes.

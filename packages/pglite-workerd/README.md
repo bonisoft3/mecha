@@ -45,6 +45,19 @@ locale opens that locale's `coll/*.res` too, and fails without it.
 (`--no-cache`) gave byte-identical trees, `pglite.wasm` and `initdb.wasm`
 included.
 
+[`modules/`](modules) holds this package's own PostgreSQL modules, placed
+beside contrib's and linked into the backend by `wasm.nu`'s module table, never
+loaded at runtime (workerd compiles no WebAssembly then). `pgl_step` is a
+machine's step as a host import: `pgl_step(name text, input jsonb)` hands the
+host the machine's name and the step's input as JSON text and returns what it
+answers, or raises the message the host answers after `!`, since a throw across
+the import would unwind PostgreSQL's frames without their cleanup. The host
+sets the step as `Module.pglStep` or `globalThis.__pgliteStep`
+([mecha-edge](../mecha-edge/README.md#machines) does); a function over it is
+`CREATE FUNCTION … LANGUAGE c AS '$libdir/pgl_step', 'pgl_step'`, resolved
+through the static module table. 1,000 SQL→host→SQL round trips take 13 ms
+([`test/host-step_test.ts`](test/host-step_test.ts)).
+
 ## The data directory
 
 [`SqliteFS`](src/sqlite-fs.ts) is PGlite's filesystem over the

@@ -35,6 +35,7 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
   })
 
   let fetches = 0
+  let refreshGate: Promise<void> | undefined
   const env: EdgeEnv = {
     JWT_SECRET: secret,
     IMPORT_TOKEN: 'import-secret',
@@ -42,8 +43,9 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
     CLUSTER: {
       idFromName: () => ({ toString: () => 'cluster' } as any),
       get: () => ({
-        fetch(req: Request) {
+        async fetch(req: Request) {
           fetches++
+          if (refreshGate) await refreshGate
           return cluster.handle(req)
         },
       }) as any,
@@ -121,7 +123,11 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
     aged.headers.set('x-edge-stored-at', String(Date.now() - 61_000))
     cacheStore.set(publicKey, aged)
     const before = fetches
+    let releaseRefresh!: () => void
+    refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve })
     const stale = await Promise.all([alice, bob].map(swr))
+    releaseRefresh()
+    refreshGate = undefined
     for (const r of stale) {
       assert.equal(r.headers.get('x-edge-cache'), 'stale')
       assert.equal(r.headers.get('x-edge-stored-at'), null)

@@ -233,11 +233,11 @@ _mecha: bayt.#project & _where & {
 			}
 		}
 		"ticker-image": _image & {
-			srcs: globs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts"]
+			srcs: globs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts", "services/ticker/tick-id.ts", "services/ticker/crud.ts"]
 			dockerfile: {
 				from: name: _deno
 				workdir: "/app"
-				copy: [{srcs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts"], dst: "/app/"}]
+				copy: [{srcs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/main.ts", "services/ticker/tick-id.ts", "services/ticker/crud.ts"], dst: "/app/"}]
 				epilogue: ["RUN deno cache main.ts"]
 				cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
 			}

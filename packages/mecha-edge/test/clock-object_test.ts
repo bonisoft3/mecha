@@ -40,3 +40,31 @@ Deno.test({ name: 'a failing deadline retries later while a future healthy deadl
     await Deno.remove(tmp, { recursive: true })
   }
 })
+
+Deno.test({ name: 'a frozen archive preserves active cron history and clears standing alarms', sanitizeResources: false, sanitizeOps: false }, async () => {
+  const tmp = await Deno.makeTempDir({ prefix: 'mecha-edge-archive-' })
+  await seed(`${tmp}/pgdata`)
+  const db = await PGlite.create({ dataDir: `${tmp}/pgdata` })
+  try {
+    await db.exec(`CREATE TABLE schedule (name text PRIMARY KEY, cron text, suspended boolean NOT NULL);
+      INSERT INTO schedule VALUES ('archived-day', '0 0 * * *', false); CHECKPOINT;`)
+  } finally {
+    await db.close()
+  }
+  const worker = await startWorker(new URL('archive-wrangler.jsonc', import.meta.url), `${tmp}/state`)
+  try {
+    const at = (path: string) => `${worker.origin}${path}`
+    await load(`${tmp}/pgdata`, (route, init) => fetch(at(`/import/${route}`), { ...init, headers: { authorization: 'Bearer test-import' } }), { log: () => {} })
+    assert.equal((await fetch(at('/test/set-alarm'))).status, 200)
+    const state = await fetch(at('/test/state'))
+    assert.equal(state.status, 200)
+    assert.deepEqual(await state.json(), { alarm: null, schedules: [{ name: 'archived-day', cron: '0 0 * * *', suspended: false }] })
+    assert.equal((await fetch(at('/test/set-alarm'))).status, 200)
+    assert.deepEqual(await (await fetch(at('/test/alarm'))).json(), { alarm: null })
+    assert.equal((await fetch(at('/test/set-alarm'))).status, 200)
+    assert.deepEqual(await (await fetch(at('/test/rearm'))).json(), { alarm: null })
+  } finally {
+    await worker.stop()
+    await Deno.remove(tmp, { recursive: true })
+  }
+})

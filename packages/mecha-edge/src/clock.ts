@@ -28,7 +28,7 @@ export function serviceCrud(service: (req: Request) => Promise<Response>): Servi
 export async function hasSchedules(db: PGlite): Promise<boolean> {
   const { rows } = await db.query<{ present: boolean }>(`SELECT to_regclass('public.schedule') IS NOT NULL AS present`)
   if (!rows[0].present) return false
-  const cron = await db.query<{ name: string }>(`SELECT name FROM public.schedule WHERE cron IS NOT NULL LIMIT 1`)
+  const cron = await db.query<{ name: string }>(`SELECT name FROM public.schedule WHERE NOT suspended AND cron IS NOT NULL LIMIT 1`)
   if (cron.rows.length) throw new Error(`the edge clock serves deadlines alone; schedule ${cron.rows[0].name} is cron`)
   return true
 }

@@ -97,8 +97,11 @@ it fires the object writes the tick rows the deadlines owe through `/crud` as
 the `service` role, as the ticker writes them, and the machine's `fire` trigger
 takes the schedule and wakes the instance in that same transaction. Every
 request's transaction runs serializable, the level a machine's `serial()`
-demands: one connection, so the level costs no conflict. A cron schedule is
-refused at boot; the edge runs no ticker.
+demands: one connection, so the level costs no conflict. An active cron schedule is
+refused at boot; the edge runs no ticker. Suspended cron history is retained.
+For a frozen archive, `edgeObject({ clock: 'disabled', ... })` explicitly
+disables scheduling: boot and alarm delivery clear any standing alarm without
+changing schedule rows. The default is `clock: 'deadlines'`.
 
 A completed tick advances `last_tick_at` even when its trigger retains the
 schedule. Completion uses the tick key’s millisecond resolution; rescheduling

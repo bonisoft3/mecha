@@ -32,6 +32,8 @@ export interface EdgeOptions {
   storageFormat?: StorageFormat
   /** The app's machines by name, each the step its migration declares. */
   machines?: EdgeMachines
+  /** Frozen archives retain schedule history without running it. */
+  clock?: 'deadlines' | 'disabled'
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -41,7 +43,7 @@ export class DataDirectoryLoading extends Error {
   constructor() { super('the data directory is loading') }
 }
 
-export function edgeObject({ assets, tables, schema, storageFormat, machines = {} }: EdgeOptions) {
+export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, clock: clockMode = 'deadlines' }: EdgeOptions) {
   // pgl_step reaches the step through the isolate: one set of machines per Worker.
   installHostStep(machines)
   return class Cluster extends DurableObject<EdgeEnv> {
@@ -62,8 +64,9 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
           // under new handles every client refetches from.
           fail: (e) => this.ctx.abort(String(e)),
         })
-        const clock = await hasSchedules(db)
+        const clock = clockMode === 'deadlines' && await hasSchedules(db)
         if (clock) await this.#arm(db)
+        else if (clockMode === 'disabled') await this.ctx.storage.deleteAlarm()
         return { db, cluster, clock }
       })().catch((e) => {
         // A boot that failed leaves nothing to answer with; the next request
@@ -75,6 +78,10 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
 
     /** A retry replaces any earlier alarm left by the failed pass. */
     async #arm(db: PGlite, retry?: DeadlineRetry) {
+      if (clockMode === 'disabled') {
+        await this.ctx.storage.deleteAlarm()
+        return
+      }
       const due = await nextDue(db, retry)
       if (due === null) return
       const standing = await this.ctx.storage.getAlarm()
@@ -82,6 +89,10 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     }
 
     override async alarm(): Promise<void> {
+      if (clockMode === 'disabled') {
+        await this.ctx.storage.deleteAlarm()
+        return
+      }
       if (!this.#dir.complete) return
       const { db, cluster, clock } = await this.#boot()
       if (!clock) return

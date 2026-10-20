@@ -1,0 +1,54 @@
+{
+  "name": "mecha-edge-archive-test",
+  "main": "archive-worker.ts",
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  "compatibility_date": "2026-09-01",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CLUSTER",
+        "class_name": "Cluster"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Cluster"
+      ]
+    }
+  ],
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
+  "vars": {
+    "JWT_SECRET": "test-secret",
+    "IMPORT_TOKEN": "test-import"
+  },
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": [
+        "**/*.wasm"
+      ],
+      "fallthrough": false
+    },
+    {
+      "type": "Data",
+      "globs": [
+        "**/*.data",
+        "**/*.tgz"
+      ],
+      "fallthrough": false
+    }
+  ],
+  "alias": {
+    "@electric-sql/pglite": "../../pglite-workerd/dist/index.js",
+    "@electric-sql/pglite/basefs": "../../pglite-workerd/dist/fs/base.js",
+    "@mecha/postgrest-js": "../../postgrest-js/src/index.ts"
+  }
+}

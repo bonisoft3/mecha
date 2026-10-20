@@ -89,3 +89,17 @@ Deno.test('edge deadlines persist their watermark, isolate failures, and safely 
     await db.close()
   }
 })
+
+Deno.test('edge clock permits suspended cron history but rejects active cron schedules', async () => {
+  const db = await PGlite.create()
+  try {
+    assert.equal(await hasSchedules(db), false)
+    await db.exec(`CREATE TABLE schedule (name text PRIMARY KEY, cron text, suspended boolean NOT NULL);
+      INSERT INTO schedule VALUES ('archived-day', '0 0 * * *', true)`)
+    assert.equal(await hasSchedules(db), true)
+    await db.exec("UPDATE schedule SET suspended = false")
+    await assert.rejects(() => hasSchedules(db), /schedule archived-day is cron/)
+  } finally {
+    await db.close()
+  }
+})

@@ -1,17 +1,11 @@
-// Auth service: WebAuthn passkey ceremonies, provider sign-in (oidc.ts) and a
-// guest mint. The token
+// Auth service: WebAuthn passkey ceremonies (passkey.ts), provider sign-in
+// (oidc.ts) and a guest mint. The token
 // contract three components share is README.md; endpoints are mounted WITH
 // the /auth prefix (Caddy strips nothing). Stateless: the
 // WebAuthn challenge travels in a short-lived HS256 `state` JWT instead of
 // server-side sessions. app_user is a program entity created by the database
 // migrations; this service only self-migrates webauthn_credential and
 // identity_link.
-import {
-  generateAuthenticationOptions,
-  generateRegistrationOptions,
-  verifyAuthenticationResponse,
-  verifyRegistrationResponse,
-} from "@simplewebauthn/server";
 import postgres from "postgres";
 import {
   isSubsetWhere,
@@ -24,7 +18,9 @@ import {
   subsetParams,
   verifyJwt as verify,
 } from "./jwt.ts";
+import { generateHandle } from "./handle.ts";
 import { type Links, oidc, type Profile, providersFrom } from "./oidc.ts";
+import { type Credentials, passkey } from "./passkey.ts";
 export { shapeWhere };
 
 function required(name: string): string {
@@ -90,7 +86,6 @@ const USER_TOKEN_TTL_S = 7 * 24 * 3600;
 // request open for 300s, so a token shorter than that expires mid-stream, and a
 // long one is a scope set that cannot be revoked.
 const SHAPE_TOKEN_TTL_S = 900;
-const STATE_TTL_S = 300;
 
 export const sql = postgres(DATABASE_URL);
 
@@ -125,8 +120,6 @@ export async function migrate(): Promise<void> {
 }
 
 // --- HS256 JWT via WebCrypto, under this service's secret ---
-
-const enc = new TextEncoder();
 
 export const signJwt = (claims: Record<string, unknown>) => sign(JWT_SECRET, claims);
 export const verifyJwt = (token: string) => verify(JWT_SECRET, token);
@@ -423,174 +416,6 @@ async function readBody(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
-async function readState(
-  body: Record<string, unknown>,
-  purpose: string,
-): Promise<Record<string, unknown> | null> {
-  if (typeof body.state !== "string") return null;
-  const st = await verifyJwt(body.state);
-  if (!st || st.purpose !== purpose) return null;
-  return st;
-}
-
-const ADJECTIVES = ["amber", "brisk", "calm", "dusk", "ember", "fern", "gold", "hazel", "ivory", "jade", "kind", "lunar", "mellow", "noble", "ochre", "pale", "quiet", "rustic", "sage", "tidal"];
-const NOUNS = ["fox", "wren", "otter", "pine", "reed", "moth", "lark", "moss", "dune", "cove", "elk", "finch", "heron", "ibis", "kite", "lynx", "newt", "orca", "quail", "seal"];
-function generateHandle(): string {
-  const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const n = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-  return `${a}-${n}-${10 + Math.floor(Math.random() * 90)}`;
-}
-
-async function registerStart(req: Request): Promise<Response> {
-  const subject = await subjectOf(req);
-  if (subject === "refused") return jsonError(401, "invalid token");
-  const claims = subject.claims;
-  // Only a guest is promoted, keeping its handle and every row it wrote: a
-  // passkey added to an account on the strength of a bearer token would
-  // outlive the token and its sign-out. With no session, a new identity —
-  // usernameless by doctrine: no identifier is ever collected.
-  if (claims !== null && claims.guest !== true) return jsonError(409, "already an account");
-  const promote = claims !== null;
-  const handle = claims ? claims.handle as string : generateHandle();
-  const userId = claims ? claims.sub as string : crypto.randomUUID();
-  const options = await generateRegistrationOptions({
-    rpName: RP_ID,
-    rpID: RP_ID,
-    userName: handle,
-    userID: enc.encode(userId),
-    authenticatorSelection: {
-      residentKey: "required",
-      userVerification: "preferred",
-    },
-  });
-  const state = await signJwt({
-    purpose: "register",
-    handle,
-    userId,
-    promote,
-    challenge: options.challenge,
-    exp: Math.floor(Date.now() / 1000) + STATE_TTL_S,
-  });
-  return json(200, { ...options, state });
-}
-
-async function registerVerify(req: Request): Promise<Response> {
-  const body = await readBody(req);
-  if (!body) return jsonError(400, "invalid json body");
-  const st = await readState(body, "register");
-  if (!st) return jsonError(401, "invalid state");
-  let verification;
-  try {
-    verification = await verifyRegistrationResponse({
-      // deno-lint-ignore no-explicit-any
-      response: body.response as any,
-      expectedChallenge: st.challenge as string,
-      expectedOrigin: ceremonyOrigin(ORIGIN, req.headers.get("host")),
-      expectedRPID: RP_ID,
-      requireUserVerification: false,
-    });
-  } catch {
-    return jsonError(401, "registration verification failed");
-  }
-  if (!verification.verified || !verification.registrationInfo) {
-    return jsonError(401, "registration verification failed");
-  }
-  const { credentialID, credentialPublicKey, counter } =
-    verification.registrationInfo;
-  const userId = st.userId as string;
-  if (st.promote === true) {
-    // The guest becomes an account once: a guest token that outlives its
-    // promotion is still a guest's, and adds no second way in.
-    const added = await sql`insert into webauthn_credential (id, user_id, public_key, counter)
-      select ${credentialID}, ${userId}, ${credentialPublicKey}, ${counter}
-      where not exists (select 1 from webauthn_credential where user_id = ${userId})`;
-    if (added.count === 0) return jsonError(409, "already an account");
-    const token = await issueUserToken(userId, st.handle as string);
-    return json(200, { token, user: { id: userId, handle: st.handle } });
-  }
-  // Generated handles can collide; regenerate and retry — never a user error.
-  let handle = st.handle as string;
-  let inserted = false;
-  for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
-    try {
-      await sql.begin(async (tx) => {
-        await tx`insert into app_user (id, handle) values (${userId}, ${handle})`;
-        await tx`insert into webauthn_credential (id, user_id, public_key, counter)
-          values (${credentialID}, ${userId}, ${credentialPublicKey}, ${counter})`;
-      });
-      inserted = true;
-    } catch (e) {
-      if ((e as { code?: string }).code === "23505") handle = generateHandle();
-      else throw e;
-    }
-  }
-  if (!inserted) return jsonError(500, "could not allocate identity");
-  const token = await issueUserToken(userId, handle);
-  return json(200, { token, user: { id: userId, handle } });
-}
-
-async function loginStart(_req: Request): Promise<Response> {
-  // Discoverable credentials: the authenticator offers the resident passkey.
-  const options = await generateAuthenticationOptions({
-    rpID: RP_ID,
-    allowCredentials: [],
-  });
-  const state = await signJwt({
-    purpose: "login",
-    challenge: options.challenge,
-    exp: Math.floor(Date.now() / 1000) + STATE_TTL_S,
-  });
-  return json(200, { ...options, state });
-}
-
-async function loginVerify(req: Request): Promise<Response> {
-  const body = await readBody(req);
-  if (!body) return jsonError(400, "invalid json body");
-  const st = await readState(body, "login");
-  if (!st) return jsonError(401, "invalid state");
-  const response = body.response as { id?: string } | undefined;
-  if (!response || typeof response.id !== "string") {
-    return jsonError(401, "authentication verification failed");
-  }
-  // The credential identifies the user (resident key).
-  const creds = await sql`
-    select c.id, c.public_key, c.counter, c.user_id, u.handle
-    from webauthn_credential c join app_user u on u.id = c.user_id
-    where c.id = ${response.id}`;
-  if (creds.length === 0) {
-    return jsonError(401, "authentication verification failed");
-  }
-  const cred = creds[0];
-  let verification;
-  try {
-    verification = await verifyAuthenticationResponse({
-      // deno-lint-ignore no-explicit-any
-      response: body.response as any,
-      expectedChallenge: st.challenge as string,
-      expectedOrigin: ceremonyOrigin(ORIGIN, req.headers.get("host")),
-      expectedRPID: RP_ID,
-      requireUserVerification: false,
-      authenticator: {
-        credentialID: cred.id as string,
-        credentialPublicKey: new Uint8Array(cred.public_key as Uint8Array),
-        counter: Number(cred.counter),
-      },
-    });
-  } catch {
-    return jsonError(401, "authentication verification failed");
-  }
-  if (!verification.verified) {
-    return jsonError(401, "authentication verification failed");
-  }
-  await sql`update webauthn_credential
-    set counter = ${verification.authenticationInfo.newCounter}
-    where id = ${cred.id as string}`;
-  const userId = cred.user_id as string;
-  const handle = cred.handle as string;
-  const token = await issueUserToken(userId, handle);
-  return json(200, { token, user: { id: userId, handle } });
-}
-
 async function guest(_req: Request): Promise<Response> {
   // Origin-independent by terminal doctrine: no WebAuthn, no origin check —
   // this door must open from any origin the cluster is reachable on.
@@ -655,6 +480,49 @@ export const links: Links = {
   },
 };
 
+export const credentials: Credentials = {
+  async create(user, c) {
+    try {
+      await sql.begin(async (tx) => {
+        await tx`insert into app_user (id, handle) values (${user.id}, ${user.handle})`;
+        await tx`insert into webauthn_credential (id, user_id, public_key, counter)
+          values (${c.id}, ${user.id}, ${c.publicKey}, ${c.counter})`;
+      });
+      return true;
+    } catch (e) {
+      if ((e as { code?: string }).code === "23505") return false;
+      throw e;
+    }
+  },
+  async promote(userId, c) {
+    const added = await sql`insert into webauthn_credential (id, user_id, public_key, counter)
+      select ${c.id}, ${userId}, ${c.publicKey}, ${c.counter}
+      where not exists (select 1 from webauthn_credential where user_id = ${userId})`;
+    return added.count > 0;
+  },
+  async find(id) {
+    const [c] = await sql`
+      select c.id, c.public_key, c.counter, c.user_id, u.handle
+      from webauthn_credential c join app_user u on u.id = c.user_id
+      where c.id = ${id}`;
+    return c
+      ? { id: c.id as string, publicKey: new Uint8Array(c.public_key as Uint8Array), counter: Number(c.counter), userId: c.user_id as string, handle: c.handle as string }
+      : null;
+  },
+  async count(id, counter) {
+    await sql`update webauthn_credential set counter = ${counter} where id = ${id}`;
+  },
+};
+
+const passkeys = passkey({
+  secret: JWT_SECRET,
+  rpId: RP_ID,
+  origin: (req) => ceremonyOrigin(ORIGIN, req.headers.get("host")),
+  credentials,
+  handle: generateHandle,
+  issue: (user) => issueUserToken(user.id, user.handle),
+});
+
 const providerSignIn = oidc({
   secret: JWT_SECRET,
   origin: (req) => ceremonyOrigin(ORIGIN, req.headers.get("host")),
@@ -668,18 +536,8 @@ export async function handler(req: Request): Promise<Response> {
   try {
     const signedIn = providerSignIn(req);
     if (signedIn !== null) return await signedIn;
-    if (req.method === "POST" && path === "/auth/register/start") {
-      return await registerStart(req);
-    }
-    if (req.method === "POST" && path === "/auth/register/verify") {
-      return await registerVerify(req);
-    }
-    if (req.method === "POST" && path === "/auth/login/start") {
-      return await loginStart(req);
-    }
-    if (req.method === "POST" && path === "/auth/login/verify") {
-      return await loginVerify(req);
-    }
+    const ceremony = passkeys(req);
+    if (ceremony !== null) return await ceremony;
     if (req.method === "POST" && path === "/auth/guest") {
       return await guest(req);
     }

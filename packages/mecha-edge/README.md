@@ -1,7 +1,7 @@
 ---
 type: reference
 title: The edge cluster
-description: "mecha's cluster in one Cloudflare Durable Object over PGlite: signed guest sessions, row policy per request, Electric's shape protocol held open, and the Worker that routes to the object."
+description: "mecha's cluster in one Cloudflare Durable Object over PGlite: signed guest, passkey and provider sessions, row policy per request, Electric's shape protocol held open, and the Worker that routes to the object."
 ---
 
 # The edge cluster
@@ -22,6 +22,8 @@ class, given PGlite's assets and the tables that carry shapes:
 |---|---|---|
 | `POST /auth/guest` | a new `app_user` row and its session token | nothing |
 | `GET /auth/whoami` | the session's subject | a session |
+| `POST /auth/register/*`, `POST /auth/login/*` | the passkey ceremonies, the auth service's own ([`passkey.ts`](../../services/auth/passkey.ts)) | nothing, or a guest's session to promote |
+| `/auth/oidc/*` | provider sign-in, the auth service's own routes ([its README](../../services/auth/README.md#provider-sign-in)) | a provider `OIDC_PROVIDERS` names |
 | `POST /auth/shape` | a shape token naming the table and the `where` the client must send | a session |
 | `/crud/*` | postgrest-js, in a transaction carrying the subject's role, `app.scopes` and `request.jwt.claims` | a session |
 | `GET /electric/v1/shape` | Electric's shape protocol ([`shapes.ts`](../mecha-browser/shapes.ts)) | a shape token whose `table` and `where` the request repeats |
@@ -29,8 +31,18 @@ class, given PGlite's assets and the tables that carry shapes:
 
 Tokens are HS256 under `JWT_SECRET`, with the auth service's claims and
 lifetimes ([its contract](../../services/auth/README.md)): a guest's session
-lasts 7 days, a shape token 900 s. Guests are the only sign-in; passkeys need
-the auth service's ceremonies, which run nowhere here.
+lasts 7 days, a shape token 900 s. A person signs in as a guest, or through
+a provider the Worker's environment names as the auth service's does
+(`OIDC_PROVIDERS` and each one's `OIDC_<NAME>_*`, a client secret as a
+Worker secret): the object runs the auth service's `oidc.ts`, links the
+provider's subject to its own `app_user` in `identity_link`, which it creates
+on the first sign-in, and gives the handle the auth service would. A provider
+that cannot be signed in through refuses the object's boot. A passkey
+registers and signs in as the auth service's do, its credential in
+`webauthn_credential`, made on the first ceremony: the relying party is the
+Worker's door, the request's hostname and origin, unless `WEBAUTHN_RP_ID` and
+`WEBAUTHN_ORIGIN` name another. `@simplewebauthn/server` is bundled from this
+package's `node_modules` (`npm ci` here; a release aliases it).
 
 Read metadata includes the shell schema's field references. PostgreSQL views
 carry no foreign-key constraints, so their declared `ref` fields supply the

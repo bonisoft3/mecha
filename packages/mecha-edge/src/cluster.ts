@@ -1,12 +1,19 @@
 // mecha's cluster for many subjects on one PGlite connection: guests minted
 // with HS256 tokens, each request's role, scopes and claims set inside its own
 // transaction (postgrest-js), and Electric's shape protocol answered for the
-// subject a shape token names (mecha-browser's shapes.ts). The schema is the
-// data directory's: nothing here migrates.
-// Routes: /auth/guest, /auth/whoami, /auth/shape, /crud/*, /electric/v1/shape.
+// subject a shape token names (mecha-browser's shapes.ts), and people signed
+// in by a passkey (the auth service's passkey.ts) or through the providers the
+// environment names (its oidc.ts), over this connection. The schema is the data
+// directory's: nothing here migrates but webauthn_credential and identity_link,
+// which the auth service makes for itself too.
+// Routes: /auth/guest, /auth/whoami, /auth/shape, /auth/register/*,
+// /auth/login/*, /auth/oidc/*, /crud/*, /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
+import { generateHandle } from '../../../services/auth/handle.ts'
 import { shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
+import { type Links, oidc, type Profile, type Provider } from '../../../services/auth/oidc.ts'
+import { type Credentials, passkey } from '../../../services/auth/passkey.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
 
@@ -17,6 +24,13 @@ export interface EdgeClusterConfig {
   schema?: ReadSchema & Record<string, { durability?: string }>
   /** The HS256 secret every token is signed with. */
   secret: string
+  /** The providers a person may sign in through (oidc.ts's providersFrom),
+   * none by default. */
+  providers?: Record<string, Provider>
+  /** The relying party passkeys belong to and the origin their ceremonies are
+   * made on: by default the Worker's door, the hostname and origin of the
+   * request the object is handed. */
+  webauthn?: { rpId?: string; origin?: string }
   /** Where a request's failure is written before it is answered as a 500. */
   log: (line: string) => void
   /** A change whose row could not be read back: the shape log has a hole. */
@@ -106,13 +120,160 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     return claims && claims.role === 'app_user' && typeof claims.sub === 'string' ? claims : null
   }
 
+  // The auth service's guest (main.ts): a handle like an account's, since a
+  // passkey promotes the guest and keeps it.
   async function guest(): Promise<Response> {
     const id = crypto.randomUUID()
-    const handle = `guest-${id.slice(0, 8)}`
-    await serialize(() => db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, handle]))
+    let handle = ''
+    for (let attempt = 0; attempt < 3 && !handle; attempt++) {
+      const tried = generateHandle()
+      try {
+        await serialize(() => db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, tried]))
+        handle = tried
+      } catch (e) {
+        if ((e as { code?: string }).code !== '23505') throw e
+      }
+    }
+    if (!handle) return json(500, { error: 'could not allocate identity' })
     const token = await signJwt(secret, { role: 'app_user', sub: id, handle, guest: true, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id, handle, guest: true } })
   }
+
+  // As the auth service makes it (services/auth/main.ts's migrate), once,
+  // before the first sign-in reads it.
+  let linksReady: Promise<void> | undefined
+  const ensureLinks = () => linksReady ??= serialize(async () => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS identity_link (
+      provider text not null,
+      sub text not null,
+      user_id uuid not null unique references app_user(id) on delete cascade,
+      created_at timestamptz not null default now(),
+      name text,
+      picture text,
+      primary key (provider, sub)
+    );
+    INSERT INTO mecha.rls_exempt VALUES
+      ('public.identity_link', 'the auth service''s own table: read by it alone, on its own connection')
+      ON CONFLICT DO NOTHING;`)
+  })
+  // As the auth service makes it (main.ts's migrate), once, before the first
+  // ceremony reads it.
+  let credentialsReady: Promise<void> | undefined
+  const ensureCredentials = () => credentialsReady ??= serialize(async () => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS webauthn_credential (
+      id text primary key,
+      user_id uuid not null references app_user(id) on delete cascade,
+      public_key bytea not null,
+      counter bigint not null default 0
+    );
+    INSERT INTO mecha.rls_exempt VALUES
+      ('public.webauthn_credential', 'the auth service''s own table: read by it alone, on its own connection')
+      ON CONFLICT DO NOTHING;`)
+  })
+  // The auth service's credentials (main.ts) on the one connection.
+  const credentials: Credentials = {
+    create: async (user, c) => {
+      await ensureCredentials()
+      return serialize(async () => {
+        try {
+          await db.transaction(async (tx) => {
+            await tx.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [user.id, user.handle])
+            await tx.query('INSERT INTO webauthn_credential (id, user_id, public_key, counter) VALUES ($1, $2, $3, $4)', [c.id, user.id, c.publicKey, c.counter])
+          })
+          return true
+        } catch (e) {
+          if ((e as { code?: string }).code === '23505') return false
+          throw e
+        }
+      })
+    },
+    promote: async (userId, c) => {
+      await ensureCredentials()
+      const added = await serialize(() => db.query(
+        `INSERT INTO webauthn_credential (id, user_id, public_key, counter)
+          SELECT $1, $2, $3, $4 WHERE NOT EXISTS (SELECT 1 FROM webauthn_credential WHERE user_id = $2)`,
+        [c.id, userId, c.publicKey, c.counter],
+      ))
+      return (added.affectedRows ?? 0) > 0
+    },
+    find: async (id) => {
+      await ensureCredentials()
+      const [c] = (await serialize(() => db.query<{ id: string; public_key: Uint8Array; counter: string | number; user_id: string; handle: string }>(
+        `SELECT c.id, c.public_key, c.counter, c.user_id, u.handle
+          FROM webauthn_credential c JOIN app_user u ON u.id = c.user_id WHERE c.id = $1`,
+        [id],
+      ))).rows
+      return c ? { id: c.id, publicKey: new Uint8Array(c.public_key), counter: Number(c.counter), userId: c.user_id, handle: c.handle } : null
+    },
+    count: async (id, counter) => {
+      await ensureCredentials()
+      await serialize(() => db.query('UPDATE webauthn_credential SET counter = $2 WHERE id = $1', [id, counter]))
+    },
+  }
+  const issue = (user: { id: string; handle: string }) =>
+    signJwt(secret, { role: 'app_user', sub: user.id, handle: user.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
+  // The door is the Worker's, whose request the object is handed whole.
+  const passkeys = (req: Request) => passkey({
+    secret,
+    rpId: cfg.webauthn?.rpId ?? new URL(req.url).hostname,
+    origin: () => cfg.webauthn?.origin ?? new URL(req.url).origin,
+    credentials,
+    handle: generateHandle,
+    issue,
+  })(req)
+
+  // The auth service's links (main.ts) on the one connection: the chain is
+  // the lock that keeps two sign-ins of one subject from making two people.
+  const links: Links = {
+    userFor: async (p: Profile) => {
+      await ensureLinks()
+      return serialize(() => db.transaction(async (tx) => {
+        const [link] = (await tx.query<{ user_id: string }>(
+          'UPDATE identity_link SET name = $3, picture = $4 WHERE provider = $1 AND sub = $2 RETURNING user_id',
+          [p.provider, p.sub, p.name, p.picture],
+        )).rows
+        if (link) {
+          const [u] = (await tx.query<{ handle: string }>('SELECT handle FROM app_user WHERE id = $1', [link.user_id])).rows
+          return { id: link.user_id, handle: u.handle }
+        }
+        const id = crypto.randomUUID()
+        // Generated handles can collide; regenerate and retry — never a user error.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const handle = generateHandle()
+          await tx.exec('SAVEPOINT handle')
+          try {
+            await tx.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, handle])
+          } catch (e) {
+            if ((e as { code?: string }).code !== '23505') throw e
+            await tx.exec('ROLLBACK TO SAVEPOINT handle')
+            continue
+          }
+          await tx.query(
+            'INSERT INTO identity_link (provider, sub, user_id, name, picture) VALUES ($1, $2, $3, $4, $5)',
+            [p.provider, p.sub, id, p.name, p.picture],
+          )
+          return { id, handle }
+        }
+        throw new Error('could not allocate identity')
+      }))
+    },
+    handleOf: async (provider: string, id: string) => {
+      await ensureLinks()
+      const [u] = (await serialize(() => db.query<{ handle: string }>(
+        `SELECT u.handle FROM app_user u
+          WHERE u.id = $1 AND EXISTS (SELECT 1 FROM identity_link l WHERE l.user_id = u.id AND l.provider = $2)`,
+        [id, provider],
+      ))).rows
+      return u ? u.handle : null
+    },
+  }
+  const providerSignIn = oidc({
+    secret,
+    origin: (req) => new URL(req.url).origin,
+    providers: cfg.providers ?? {},
+    links,
+    issue,
+  })
 
   async function whoami(req: Request): Promise<Response> {
     const claims = await session(req)
@@ -187,6 +348,10 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const path = new URL(req.url).pathname
     try {
       await ensureShapes()
+      const signedIn = providerSignIn(req)
+      if (signedIn !== null) return await signedIn
+      const ceremony = passkeys(req)
+      if (ceremony !== null) return await ceremony
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)

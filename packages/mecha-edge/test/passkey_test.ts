@@ -70,6 +70,8 @@ Deno.test({ name: "a person signs in at the edge with a passkey for the Worker's
       const promoted = await register(key, guest.token)
       assert.equal(promoted.status, 200, JSON.stringify(promoted.body))
       assert.equal(promoted.body.user.id, guest.user.id)
+      assert.match(guest.user.handle, /^[a-z]+-[a-z]+-\d\d$/)
+      assert.equal(promoted.body.user.handle, guest.user.handle)
       const signedIn = await login(key)
       assert.equal(signedIn.body.user.id, guest.user.id)
       assert.deepEqual((await crud(signedIn.body.token, 'note')).map((n: { body: string }) => n.body), ['do convidado'])

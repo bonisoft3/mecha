@@ -120,10 +120,21 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     return claims && claims.role === 'app_user' && typeof claims.sub === 'string' ? claims : null
   }
 
+  // The auth service's guest (main.ts): a handle like an account's, since a
+  // passkey promotes the guest and keeps it.
   async function guest(): Promise<Response> {
     const id = crypto.randomUUID()
-    const handle = `guest-${id.slice(0, 8)}`
-    await serialize(() => db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, handle]))
+    let handle = ''
+    for (let attempt = 0; attempt < 3 && !handle; attempt++) {
+      const tried = generateHandle()
+      try {
+        await serialize(() => db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, tried]))
+        handle = tried
+      } catch (e) {
+        if ((e as { code?: string }).code !== '23505') throw e
+      }
+    }
+    if (!handle) return json(500, { error: 'could not allocate identity' })
     const token = await signJwt(secret, { role: 'app_user', sub: id, handle, guest: true, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id, handle, guest: true } })
   }

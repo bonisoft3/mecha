@@ -13,14 +13,14 @@ aqua.slsa = false
 aqua.minisign = false
 
 [tools]
-"github:bufbuild/buf" = "1.66.1"
+"github:bufbuild/buf" = "1.74.0"
 "github:cue-lang/cue" = "0.16.1"
 "github:hairyhenderson/gomplate" = "5.0.0"
 "github:denoland/deno" = "v2.9.7"
-"github:go-task/task" = "v3.49.1"
+"github:go-task/task" = "v3.54.0"
 "github:dapr/dapr" = "1.17.3"
 "github:dapr/cli" = "1.17.0"
-"github:redpanda-data/connect" = "4.112.0"
+"github:redpanda-data/connect" = "4.114.0"
 # The JS estate here is node's: vitest over the packages, and a dev server
 # written to the Web fetch shape over node:http. pnpm is the repository's
 # package manager, and pnpm-workspace.yaml lists every member here.

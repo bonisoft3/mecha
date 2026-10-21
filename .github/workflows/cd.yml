@@ -56,9 +56,7 @@ jobs:
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
-          # Mirrored too: the runner's daemon pulls this before buildkitd exists,
-          # so the registry mirror cannot cover it.
-          driver-opts: image=mirror.gcr.io/moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f
+          driver-opts: image=moby/buildkit:v0.30.0@sha256:0168606be2315b7c807a03b3d8aa79beefdb31c98740cebdffdfeebf31190c9f
 
       - name: Login to Docker Hub
         if: startsWith(github.ref, 'refs/tags/')

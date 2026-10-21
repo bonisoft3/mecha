@@ -743,7 +743,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					let _prev = list.Concat([[null], _under])
 					let _starts = [for i, u in _under if u == "" || _prev[i] != u {i}]
 					let _end = {for r, i in _starts {"\(i)": [if r+1 < len(_starts) {_starts[r+1]}, len(_under)][0]}}
-					from: name: "caddy:2.9-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0"
+					from: name: "caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
 					copy: list.Concat([
 						[{srcs: [X.meta.caddyfile], dst: "/etc/caddy/Caddyfile"}],
 						// mkcert's pair, where `sayt setup` issued one on this host;
@@ -966,7 +966,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				transform: X._image & {
 					srcs: globs: [for p in X.state.pipelines {p.file}]
 					dockerfile: {
-						from: name: "redpandadata/connect:4.112.0@sha256:5b70cd14fd2bbb8fe02a80358ed1510169596218d0d46cd7768659b1d1cf8420"
+						from: name: "redpandadata/connect:4.114.0@sha256:481e8df48ed733f080623ae67f0dccc82d29ae509dfb3f957347a9e900e74910"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
 						epilogue: list.Concat([
 							["COPY <<'CDCTRACE' /cdc-trace.yaml\n\(_cdcTrace)\nCDCTRACE"],

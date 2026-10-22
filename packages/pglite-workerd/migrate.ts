@@ -6,6 +6,7 @@
 // tier fence, as the page's migrations do.
 import type { PGlite } from '@electric-sql/pglite'
 import { browserTier } from '../mecha-browser/fence.ts'
+import { pgrollSql } from './scripts.ts'
 
 export interface Migration { operations: Record<string, unknown>[] }
 
@@ -26,12 +27,7 @@ export async function migrate(db: PGlite, migrations: Record<string, Migration>,
     // A fresh volume applies it before `latest`, and this one would after.
     if (name < latest) throw new Error(`${name} sorts before ${latest}, which this directory already applied`)
     const ops = migrations[name].operations
-    const sql = ops.map((op) => {
-      const raw = op.sql as { up?: string } | undefined
-      if (Object.keys(op).length !== 1 || typeof raw?.up !== 'string') throw new Error(`${name}: ${Object.keys(op)[0]} is pgroll's to run, and pgroll does not run here`)
-      return browserTier(raw.up)
-    })
-    for (const s of sql) await db.exec(s)
+    await db.exec(browserTier(pgrollSql(name, migrations[name])))
     // The row `pgroll start --complete` leaves: its parent is the schema's
     // latest migration of any kind, which keeps the history linear.
     await db.query(

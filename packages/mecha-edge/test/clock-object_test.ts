@@ -51,7 +51,8 @@ Deno.test({ name: 'the Cron Trigger and a publish poke the object, which sweeps 
     assert.equal(triggered.status, 200, await triggered.text())
     const before = Date.now()
     const state = await (await fetch(at('/test/clock-state'))).json() as { alarm: number | null; ticks: { schedule: string; caller: string }[] }
-    assert.ok(state.ticks.length >= 1 && state.ticks.every((t) => t.schedule === 'minutely' && t.caller === 'cron-trigger'), JSON.stringify(state.ticks))
+    // The alarm may mint the next minute's tick before this read.
+    assert.ok(state.ticks.some((t) => t.caller === 'cron-trigger') && state.ticks.every((t) => t.schedule === 'minutely' && ['cron-trigger', 'alarm'].includes(t.caller)), JSON.stringify(state.ticks))
     assert.ok(state.alarm !== null && state.alarm > before - 60_000 && state.alarm <= before + 60_000, `the alarm stands at the next minute: ${state.alarm}`)
 
     const unauthorized = await fetch(at('/poke?caller=publish'), { method: 'POST' })

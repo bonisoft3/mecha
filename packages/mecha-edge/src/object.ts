@@ -15,6 +15,7 @@ import type { StorageFormat } from '../../pglite-workerd/src/storage-block.ts'
 import { createEdgeCluster, type EdgeCluster, type EdgeClusterConfig } from './cluster.ts'
 import { hasSchedules, nextDue, type Report, serviceCrud, sweepDue, type SweepRetry } from './clock.ts'
 import { type EdgeMachines, installEngines, installHostStep } from './machines.ts'
+import { applyScripts, ChangedScript, NoLedger, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
 
 export interface EdgeEnv {
@@ -152,6 +153,29 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         this.#dir.reset()
         setTimeout(() => this.ctx.abort('the data directory was reset'), 0)
         return json({ reset: true })
+      }
+      // A release's migrations over a directory kept: what the ledger lacks
+      // is applied while nothing else runs, and the object ends once the
+      // answer is out, so the next request boots on the new schema, under
+      // new shape handles, as after a reset.
+      if (path === '/import/migrate') {
+        if (req.method !== 'POST') return json({ error: 'migrate is a POST' }, 405)
+        if (!this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
+        const scripts = await req.json() as Script[]
+        const applied = await this.ctx.blockConcurrencyWhile(async (): Promise<string[] | NoLedger | ChangedScript | UnrunnableScript> => {
+          const { db } = await this.#boot()
+          try {
+            const names = await applyScripts(db, scripts, console.error)
+            if (names.length) await db.exec('CHECKPOINT')
+            return names
+          } catch (error) {
+            if (error instanceof NoLedger || error instanceof ChangedScript || error instanceof UnrunnableScript) return error
+            throw error
+          }
+        })
+        if (applied instanceof Error) return json({ error: applied.message }, 409)
+        if (applied.length) setTimeout(() => this.ctx.abort('the data directory was migrated'), 0)
+        return json({ applied })
       }
       if (path.startsWith('/import/')) {
         if (req.headers.get('content-encoding') === 'gzip') {

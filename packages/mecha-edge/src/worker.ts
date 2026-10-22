@@ -98,7 +98,10 @@ export const edgeWorker = {
     if (path.startsWith('/import/')) {
       if (req.headers.get('authorization') !== `Bearer ${env.IMPORT_TOKEN}`) return json({ error: 'unauthorized' }, 401)
       const res = await object().fetch(req)
-      if (path === '/import/reset' && res.ok) {
+      // A reset, or a migration that changed the schema, moves every key a
+      // read of the old data was kept under.
+      const moved = res.ok && (path === '/import/reset' || (path === '/import/migrate' && ((await res.clone().json()) as { applied: string[] }).applied.length > 0))
+      if (moved) {
         await cache.put(keyOf(env.CF_VERSION_METADATA.id, 'reset'), new Response(String(Date.now()), { headers: { 'cache-control': 'max-age=86400' } }))
         await cache.delete(keyOf(env.CF_VERSION_METADATA.id, 'epoch'))
       }

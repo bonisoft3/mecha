@@ -25,7 +25,7 @@ class, given PGlite's assets and the tables that carry shapes:
 | `POST /auth/shape` | a shape token naming the table and the `where` the client must send | a session |
 | `/crud/*` | postgrest-js, in a transaction carrying the subject's role, `app.scopes` and `request.jwt.claims` | a session |
 | `GET /electric/v1/shape` | Electric's shape protocol ([`shapes.ts`](../mecha-browser/shapes.ts)) | a shape token whose `table` and `where` the request repeats |
-| `/import/*` | [`DataDirectory.importing`](../pglite-workerd/src/data-directory.ts), before PGlite opens | `IMPORT_TOKEN`, checked by the Worker: an object kept awake keeps the secrets of the version it started on |
+| `/import/*` | [`DataDirectory.importing`](../pglite-workerd/src/data-directory.ts), before PGlite opens; `/import/migrate`, the release's scripts over a directory kept ([`scripts.ts`](../pglite-workerd/scripts.ts)), while nothing else runs | `IMPORT_TOKEN`, checked by the Worker: an object kept awake keeps the secrets of the version it started on |
 
 Tokens are HS256 under `JWT_SECRET`, with the auth service's claims and
 lifetimes ([its contract](../../services/auth/README.md)): a guest's session
@@ -201,6 +201,12 @@ Reads the object answered are answered again from the colo's Cache API, with
 - **A reset replaces live data.** `/import/reset` on an open object drops its
   directory and ends the object once the answer is out; the load that follows
   is a release's like any other.
+- **A migration keeps it.** `POST /import/migrate` with a release's scripts
+  applies the ones the directory's ledger lacks, checkpoints, answers their
+  names, and ends the object as a reset does, so the next request boots on
+  the new schema under new shape handles; the Worker moves its cache keys as
+  after a reset. A directory without the ledger, or one that applied a
+  script the release has changed, answers 409 naming it.
 
 ## Test
 

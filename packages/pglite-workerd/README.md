@@ -120,6 +120,12 @@ as the cluster's migrate step (`services/migrate/migrate.sh`) would: in name
 order, refusing one that sorts before the latest applied, each recorded as
 `pgroll start --complete` records it. pgroll does not run in PGlite, so only
 migrations of raw SQL apply, their `up` past the tier fence.
+[`scripts.ts`](scripts.ts) is the other ledger, the docker appliance's
+`_pronto_migrations` with a digest per script: what a directory being built
+applied, by name, and what a release later hands a directory the object
+kept — its files and its pgroll set as raw SQL — applied in name order past
+the tier fence, seeds never; a recorded script with other text, or a
+directory without the ledger, is refused by name.
 
 ## Measured
 

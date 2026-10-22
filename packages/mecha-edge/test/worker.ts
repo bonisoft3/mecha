@@ -36,6 +36,10 @@ export class Cluster extends Base {
       await db.query(`INSERT INTO schedule (name, cron, emits_entity) VALUES ('minutely', '* * * * *', 'tick')`)
       return Response.json({ ok: true })
     })()
+    if (path === '/test/tables') return (async () => {
+      const db = await this.booted()
+      return Response.json((await db.query<{ tablename: string }>(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).rows.map((r) => r.tablename))
+    })()
     if (path === '/test/clock-state') return (async () => {
       const db = await this.booted()
       return Response.json({ alarm: await this.ctx.storage.getAlarm(), ticks: (await db.query('SELECT schedule, caller FROM tick')).rows })

@@ -90,8 +90,8 @@ jobs:
           sbom: false
           outputs: ${{ startsWith(github.ref, 'refs/tags/') && 'type=registry,rewrite-timestamp=true' || 'type=cacheonly' }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: type=gha,version=2,scope=${{ matrix.service }}
+          cache-to: type=gha,version=2,mode=max,scope=${{ matrix.service }}
 
       - name: Pin
         if: startsWith(github.ref, 'refs/tags/')

@@ -31,6 +31,15 @@ processes:
     - max_connections=200
     availability:
       exit_on_skipped: true
+    environment:
+    - AUTHENTICATOR_PASSWORD=${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}
+    - ELECTRIC_PASSWORD=${ELECTRIC_PASSWORD:-dev-electric-password}
+    - POSTGRES_DB=${POSTGRES_DB:-mecha}
+    - >-
+      POSTGRES_INITDB_ARGS=--no-sync --encoding=UTF8 --auth=trust
+      --locale-provider=icu --icu-locale=und --locale=C
+    - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    - POSTGRES_USER=${POSTGRES_USER:-postgres}
     readiness_probe:
       exec:
         command: >-

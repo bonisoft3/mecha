@@ -502,7 +502,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						start_period:   "5m"
 					}
 					expose: pg: port: 5432
-					entrypoint: do: "docker-entrypoint.sh postgres \(strings.Join(#PostgresArgs, " "))"
+					entrypoint: {
+						do:  "docker-entrypoint.sh postgres \(strings.Join(#PostgresArgs, " "))"
+						env: compose.environment
+					}
 					srcs: globs: X.state.migrations
 					dockerfile: {
 						from: (_from & {in: X.meta.images.database}).out

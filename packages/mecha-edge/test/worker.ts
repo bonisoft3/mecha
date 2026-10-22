@@ -31,9 +31,14 @@ export class Cluster extends Base {
       await this.rearm()
       return Response.json({ future })
     })()
+    if (path === '/test/cron-start') return (async () => {
+      const db = await this.booted()
+      await db.query(`INSERT INTO schedule (name, cron, emits_entity) VALUES ('minutely', '* * * * *', 'tick')`)
+      return Response.json({ ok: true })
+    })()
     if (path === '/test/clock-state') return (async () => {
       const db = await this.booted()
-      return Response.json({ alarm: await this.ctx.storage.getAlarm(), ticks: (await db.query('SELECT schedule FROM tick')).rows })
+      return Response.json({ alarm: await this.ctx.storage.getAlarm(), ticks: (await db.query('SELECT schedule, caller FROM tick')).rows })
     })()
     if (path === '/test/alarm') return this.alarm().then(() => Response.json({ ok: true }))
     if (path === '/test/alarm-state') return this.ctx.storage.getAlarm().then(alarm => Response.json({ alarm }))
@@ -54,4 +59,5 @@ export default {
     if (new URL(req.url).pathname.startsWith('/test/')) return env.CLUSTER.get(env.CLUSTER.idFromName('cluster')).fetch(req)
     return edgeWorker.fetch(req, env, ctx)
   },
+  scheduled: edgeWorker.scheduled,
 }

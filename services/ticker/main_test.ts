@@ -5,16 +5,9 @@
 // every guarantee in this file is a claim about how PostgREST answers.
 
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1.0.8";
-import {
-  wakeUrls,
-  httpCrud,
-  type Crud,
-  handler,
-  type Poke,
-  type Report,
-  type ScheduleRow,
-  sweep,
-} from "./main.ts";
+import { handler, httpCrud, wakeUrls } from "./main.ts";
+import { type Poke, type Report, type ScheduleRow, sweep } from "./sweep.ts";
+import type { Crud } from "./crud.ts";
 import { tickId, uuid5 } from "./tick-id.ts";
 
 type Row = Record<string, unknown>;

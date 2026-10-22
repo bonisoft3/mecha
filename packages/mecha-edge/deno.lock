@@ -2,7 +2,8 @@
   "version": "5",
   "specifiers": {
     "npm:@cloudflare/workers-types@5.20261015.1": "5.20261015.1",
-    "npm:@electric-sql/pglite@0.5.8": "0.5.8"
+    "npm:@electric-sql/pglite@0.5.8": "0.5.8",
+    "npm:croner@9.0.0": "9.0.0"
   },
   "npm": {
     "@cloudflare/workers-types@5.20261015.1": {
@@ -10,12 +11,16 @@
     },
     "@electric-sql/pglite@0.5.8": {
       "integrity": "sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q=="
+    },
+    "croner@9.0.0": {
+      "integrity": "sha512-onMB0OkDjkXunhdW9htFjEhqrD54+M94i6ackoUkjHKbRnXdyEyKRelp4nJ1kAz32+s27jP1FsebpJCVl0BsvA=="
     }
   },
   "workspace": {
     "dependencies": [
       "npm:@cloudflare/workers-types@5.20261015.1",
-      "npm:@electric-sql/pglite@0.5.8"
+      "npm:@electric-sql/pglite@0.5.8",
+      "npm:croner@9.0.0"
     ]
   }
 }

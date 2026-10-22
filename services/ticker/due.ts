@@ -160,6 +160,39 @@ export function due(s: Schedule, now: Date, cap: number = WALK_CAP): Tick[] {
 }
 
 /**
+ * The next instant a schedule owes a runnable tick: a one-shot's `due_at`
+ * while its watermark has not reached it; a cron's first occurrence after its
+ * watermark, or after its lateness horizon where the watermark is behind it,
+ * that the calendar has. An occurrence behind the horizon is not owed here:
+ * due() records one per call and runs none, so a sweep that runs for any
+ * other reason records it. The edge object's alarm; at or before `now` means
+ * owed now.
+ */
+export function nextOwed(s: Schedule, now: Date): Date | null {
+  if (s.cron === null) {
+    if (s.due_at === null || s.due_at === undefined) throw new Error(`${s.name}: a schedule states a cron or a due_at`);
+    const at = new Date(s.due_at);
+    return s.last_tick_at !== null && new Date(s.last_tick_at) >= at ? null : at;
+  }
+  const fields = s.cron.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    throw new Error(`${s.name}: five-field cron required, got "${s.cron}"`);
+  }
+  const [minute, hour] = fields;
+  const horizon = new Date(now.getTime() - s.max_lateness_seconds * 1000);
+  const mark = s.last_tick_at === null ? null : new Date(s.last_tick_at);
+  const cron = new Cron(s.cron, { timezone: s.time_zone });
+  let cursor = mark !== null && mark >= horizon ? mark : horizon;
+  for (let i = 0; i < WALK_CAP; i++) {
+    const next = cron.nextRun(cursor);
+    if (next === null) return null;
+    if (onTheWallClock(minute, hour, next, s.time_zone)) return next;
+    cursor = next;
+  }
+  throw new Error(`${s.name}: no occurrence the calendar has within ${WALK_CAP} steps of "${s.cron}"`);
+}
+
+/**
  * The watermark a sweep leaves behind after resolving `resolved`.
  *
  * A late tick still advances it: it was decided, and leaving it behind would

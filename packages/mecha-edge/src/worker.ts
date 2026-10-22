@@ -1,7 +1,9 @@
-// The Worker in front of the cluster's one object: /auth, /crud, /electric and
-// /import go to the object, the rest to the static assets (the document for a
-// navigation to any other path), and reads the object answered once are
-// answered again from the colo's Cache API.
+// The Worker in front of the cluster's one object: /auth, /crud, /electric,
+// /import and /poke go to the object, the rest to the static assets (the
+// document for a navigation to any other path), and reads the object answered
+// once are answered again from the colo's Cache API. The Cron Trigger is the
+// ticker's clock outside the object (object.ts, clock.ts): `scheduled` pokes
+// it, and /poke under the import's token is the same poke from a publish.
 //
 // - A shape response that is not live is a prefix of the log under its
 //   handle: replayed later it is still true, and the client reads on from the
@@ -27,6 +29,7 @@
 //   would let it, and nothing else.
 import { verifyJwt } from '../../../services/auth/jwt.ts'
 import type { EdgeEnv } from './object.ts'
+import { pokeCluster } from './clock.ts'
 
 const SHAPE_TTL_S = 300
 const CRUD_TTL_S = 5
@@ -100,6 +103,11 @@ export const edgeWorker = {
         await cache.delete(keyOf(env.CF_VERSION_METADATA.id, 'epoch'))
       }
       return res
+    }
+    if (path === '/poke') {
+      if (req.method !== 'POST') return json({ error: 'poke is a POST' }, 405)
+      if (req.headers.get('authorization') !== `Bearer ${env.IMPORT_TOKEN}`) return json({ error: 'unauthorized' }, 401)
+      return object().fetch(req)
     }
     if (!CLUSTER_ROUTES.test(path)) {
       if (!env.ASSETS) return json({ error: `no route for ${path}` }, 404)
@@ -182,5 +190,9 @@ export const edgeWorker = {
       }
     }
     return object().fetch(req)
+  },
+
+  scheduled(_controller: ScheduledController, env: EdgeEnv): Promise<void> {
+    return pokeCluster(env)
   },
 }

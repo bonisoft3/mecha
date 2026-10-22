@@ -108,6 +108,9 @@ Deno.test('PostgREST browser reads preserve projection, filter, pagination and R
       assert.deepEqual(await rows('select=id&name=eq.' + encodeURIComponent("' OR true --"), 'team'), [])
       assert.deepEqual(await rows('select=id&id=in.()'), [])
       assert.deepEqual(await rows('select=id&id=not.in.()&order=id.asc'), [{ id: 1 }, { id: 2 }, { id: 3 }])
+      // One level of or/and, as the ticker's watermark guard asks (rest-read.ts).
+      assert.deepEqual(await rows('select=id&or=(id.eq.1,id.eq.2)&order=id.asc'), [{ id: 1 }, { id: 2 }])
+      assert.deepEqual(await rows('select=id&and=(id.gte.2,id.lte.2)'), [{ id: 2 }])
     })
 
     await test.step('hostile or unsupported grammar fails before widening a read', async () => {
@@ -118,7 +121,7 @@ Deno.test('PostgREST browser reads preserve projection, filter, pagination and R
         'select=id&order=id.asc.nullslast.garbage', 'select=id&id=bogus.1',
         'select=id&id=not.bogus.1', 'select=id&id=toString.1', 'select=id&id=1',
         'select=id&played=is.arbitrary', 'select=id&id=in.1,2',
-        'select=id&id=in.(1,(SELECT 1))', 'select=id&or=(id.eq.1,id.eq.2)',
+        'select=id&id=in.(1,(SELECT 1))', 'select=id&or=id.eq.1', 'select=id&or=(id.eq.1,and(id.eq.2))',
         'select=id&unselected.id=eq.1', 'select=id&limit=-1', 'select=id&offset=nope',
         'select=id&limit=9007199254740992', 'select=id&limit=1&limit=2',
         'select=id&select=scope_id', 'select=id&order=id.asc&order=id.desc',

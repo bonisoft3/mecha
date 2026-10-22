@@ -88,31 +88,64 @@ and the final fuel check, as plv8 does.
 
 ## The clock
 
-A deadline a machine arms is a one-shot `schedule` row (`arm()` in pronto's
-`mecha-ports.ts`), which the container tier's [ticker](../../services/ticker/README.md)
-sweeps. Here it is the object's alarm ([`clock.ts`](src/clock.ts)): the alarm
-stands at the earliest unconsumed `due_at`, set at boot and after successful
-CRUD writes, and when
-it fires the object writes the tick rows the deadlines owe through `/crud` as
-the `service` role, as the ticker writes them, and the machine's `fire` trigger
-takes the schedule and wakes the instance in that same transaction. Every
-request's transaction runs serializable, the level a machine's `serial()`
-demands: one connection, so the level costs no conflict. An active cron schedule is
-refused at boot; the edge runs no ticker. Suspended cron history is retained.
-For a frozen archive, `edgeObject({ clock: 'disabled', ... })` explicitly
-disables scheduling: boot and alarm delivery clear any standing alarm without
-changing schedule rows. The default is `clock: 'deadlines'`.
+The object runs [the ticker's](../../services/ticker/README.md) sweep
+(`services/ticker/sweep.ts`) over mecha's `schedule` table — a cron schedule
+the cluster declares, or the one-shot deadline a machine arms (`arm()` in
+pronto's `mecha-ports.ts`) — through `/crud` as the `service` role, as the
+ticker writes it: the same keys, lateness rule, `Forbid` and watermark. What
+differs is the clock, [`clock.ts`](src/clock.ts), and that nothing is woken
+past the row: there is no change-capture unit here, the row is in the
+database the sweep wrote it to, where a machine's `fire` trigger takes the
+schedule and wakes the instance in that same transaction. Every request's
+transaction runs serializable, the level a machine's `serial()` demands: one
+connection, so the level costs no conflict.
+
+Two clocks, as the ticker asks of every tier, and each tick's `caller` says
+which minted it:
+
+- **The alarm** stands at the next instant any unsuspended schedule owes a
+  runnable tick (`nextOwed` in the ticker's `due.ts`: a deadline's `due_at`,
+  a cron's first calendar occurrence after its watermark or, behind its
+  lateness horizon, after that horizon) — set at boot, after a successful
+  CRUD write (a machine's settle arms a deadline) and after every sweep.
+  After a sweep, what is still owed at the sweep's own instant — a `Forbid`
+  hold, a failed schedule, a backlog past the sweep's cap — is owed 30
+  seconds later, never at once, or the alarm would sweep, decline and re-arm
+  in a loop, and each sweep in a row that leaves it owed doubles the wait up
+  to the Cron Trigger's hour; the occurrences a lost span left behind are
+  recorded by whatever sweep runs next, never chased one wake at a time.
+  With nothing owed the alarm is cleared, so a cancelled deadline boots
+  nothing; a schedule row the ticker's `due.ts` refuses arms nothing and is
+  reported by name on every sweep. The object
+  sleeps between occurrences: a daily schedule costs one wake a day, which
+  is what keeps an app with a schedule inside the Workers Free plan's
+  duration budget (13,000 GB-s a day), where a minutely poke booting the
+  object would hold it awake.
+- **The Cron Trigger**, the clock outside the object. The Worker's
+  `scheduled` handler (`worker.ts`) pokes `POST /poke?caller=cron-trigger` on
+  the object, which answers the ticker's report; an app's release declares it
+  where anything can owe a tick, a cron schedule or a machine's deadline. Its cadence is not the clock's
+  resolution, which is the alarm's, but the bound on how late a tick can be
+  where an alarm was lost — a sweep that failed is retried by the platform
+  six times and then dropped, and a reset deletes the alarm — so it is
+  hourly, a day of it costing 24 wakes and 24 of the Free plan's 100,000
+  daily requests. A publish pokes once with the import's token
+  (`POST /poke` on the Worker), so the clock starts at publish rather than at
+  the first visitor.
 
 A completed tick advances `last_tick_at` even when its trigger retains the
-schedule. Completion uses the tick key’s millisecond resolution; rescheduling
-within that same tick does not create another delivery. A failed schedule does
-not stop the rest of the sweep. After reporting aggregate failures, the object
-retains an alarm: overdue failures retry after 30 seconds, while earlier future
-deadlines keep their wake time. This prevents one broken schedule from
-stranding later work after the platform exhausts automatic retries.
+schedule; ticks and watermarks are kept to the millisecond, so a deadline
+re-armed within the same millisecond is not delivered again. A failed
+schedule does not stop the rest of the sweep: the report names it in the
+object's log, earlier future deadlines keep their wake time, and the retry
+above is the whole retry — a thrown alarm would add the platform's six rapid
+reruns to it.
 
-Alarms do not boot an incomplete data directory. Reset deletes the alarm before
-replacing the directory.
+For a frozen archive, `edgeObject({ clock: 'disabled', ... })` runs no
+clock: boot and alarm delivery clear any standing alarm, a poke is refused
+(409), and the schedule rows are kept as they were. The default is
+`clock: 'ticker'`. Alarms do not boot an incomplete data directory. Reset
+deletes the alarm before replacing the directory.
 
 ## The Worker's cache
 
@@ -180,7 +213,14 @@ held-open request answering with a write confirmed by its `x-txid`, no pending
 timer, the Worker's cache (a public table's chunks shared, live never kept,
 a guest's read giving way to its own write, a new object's chunks replacing
 the old one's), the object resumed after `ctx.abort()` and after an
-eviction, and a reset of live data (503 while the new directory loads). It needs `../pglite-workerd/dist` (`just build` there).
+eviction, and a reset of live data (503 while the new directory loads). It needs `../pglite-workerd/dist` (`just build` there); the harness installs
+the ticker's `node_modules`, where wrangler's bundler finds the cron reader. [`test/clock_test.ts`](test/clock_test.ts) runs the
+clock over real PGlite: deadlines, a cron schedule's occurrences and late
+span, watermarks, retries; [`test/clock-object_test.ts`](test/clock-object_test.ts)
+runs it in the object under `wrangler dev`: a failed deadline retrying while a
+healthy one fires without requests, the Cron Trigger (`/__scheduled`) and a
+publish's poke sweeping a cron schedule, and a frozen archive clearing its
+alarms.
 
 The same command also runs `test/public-snapshot_test.ts` against real PGlite:
 public-only access without a guest, joins and aggregates, direct-write revisions,

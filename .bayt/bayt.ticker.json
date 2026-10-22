@@ -149,6 +149,7 @@
           "services/ticker/deno.json",
           "services/ticker/deno.lock",
           "services/ticker/due.ts",
+          "services/ticker/sweep.ts",
           "services/ticker/main.ts",
           "services/ticker/tick-id.ts",
           "services/ticker/crud.ts"
@@ -172,6 +173,7 @@
               "services/ticker/deno.json",
               "services/ticker/deno.lock",
               "services/ticker/due.ts",
+              "services/ticker/sweep.ts",
               "services/ticker/main.ts",
               "services/ticker/tick-id.ts",
               "services/ticker/crud.ts"

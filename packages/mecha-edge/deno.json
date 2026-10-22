@@ -2,6 +2,7 @@
   "nodeModulesDir": "none",
   "imports": {
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
+    "croner": "npm:croner@9.0.0",
     "@mecha/postgrest-js": "../postgrest-js/src/index.ts",
     "../postgrest-js/src/rest-handler.js": "../postgrest-js/src/rest-handler.ts",
     "../postgrest-js/src/rest-read.js": "../postgrest-js/src/rest-read.ts",

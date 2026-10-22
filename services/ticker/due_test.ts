@@ -3,7 +3,7 @@
 // than left to the library's defaults.
 
 import { assertEquals, assertThrows } from "jsr:@std/assert@1.0.8";
-import { due, type Schedule, watermark } from "./due.ts";
+import { due, nextOwed, type Schedule, watermark } from "./due.ts";
 
 const base: Schedule = {
   name: "keepalive",
@@ -294,4 +294,29 @@ Deno.test("a one-shot row is owed once its instant has passed, once, and again w
   assertEquals(due({ ...once, last_tick_at: "2026-10-10T12:00:00.000Z" }, new Date("2026-10-11T00:00:00Z")), []);
   assertEquals(due({ ...once, due_at: "2026-10-11T08:00:00.000Z", last_tick_at: "2026-10-10T12:00:00.000Z" }, new Date("2026-10-11T09:00:00Z")).length, 1);
   assertEquals(due({ ...once, last_tick_at: null }, new Date("2026-10-11T00:00:00Z")).length, 1);
+});
+
+const owing = (over: Partial<Schedule>): Schedule => ({
+  name: "s", cron: "0 * * * *", time_zone: "UTC", max_lateness_seconds: 300, last_tick_at: null, ...over,
+});
+
+Deno.test("nextOwed: a one-shot owes its instant until its watermark reaches it", () => {
+  const s = owing({ cron: null, due_at: "2026-09-06T12:00:00Z" });
+  assertEquals(nextOwed(s, at("2026-09-06T12:00:30Z")), at("2026-09-06T12:00:00Z"));
+  assertEquals(nextOwed({ ...s, last_tick_at: "2026-09-06T12:00:00Z" }, at("2026-09-06T12:00:30Z")), null);
+});
+
+Deno.test("nextOwed: a cron owes its first occurrence after the watermark, or after the horizon where it is behind", () => {
+  const now = at("2026-09-06T12:00:30Z");
+  assertEquals(nextOwed(owing({ last_tick_at: "2026-09-06T11:00:00Z" }), now), at("2026-09-06T12:00:00Z"));
+  // Days behind: the missed occurrences are recorded by a sweep, never owed to the alarm.
+  assertEquals(nextOwed(owing({ last_tick_at: "2026-09-01T11:00:00Z" }), now), at("2026-09-06T12:00:00Z"));
+  assertEquals(nextOwed(owing({ last_tick_at: "2026-09-06T12:00:00Z" }), now), at("2026-09-06T13:00:00Z"));
+});
+
+Deno.test("nextOwed skips the instant a DST gap shifts onto, as due() refuses it", () => {
+  // New York springs forward 2026-03-08 02:00 → 03:00: croner lands `30 2`
+  // on 03:30 that morning, which the expression does not name.
+  const s = owing({ cron: "30 2 * * *", time_zone: "America/New_York", max_lateness_seconds: 86400, last_tick_at: "2026-03-08T06:00:00Z" });
+  assertEquals(nextOwed(s, at("2026-03-08T16:00:00Z")), at("2026-03-09T06:30:00Z"));
 });

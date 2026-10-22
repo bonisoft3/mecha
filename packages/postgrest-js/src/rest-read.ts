@@ -155,12 +155,17 @@ interface Node {
   filters: Filter[]
 }
 
-interface Filter {
+type Comparison = {
   column: string
   operator: string
   value: string
   negate: boolean
 }
+/** PostgREST's `or=(a.eq.1,b.is.null)` and `and=(…)`, one level deep: the
+ * ticker's monotonic watermark guard, which the edge clock sends here. */
+type Logical = { logical: 'or' | 'and'; terms: Comparison[] }
+type Filter = Comparison | Logical
+const logicals = new Set(['or', 'and'])
 
 const operators: Record<string, string> = {
   eq: '=', neq: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=', like: 'LIKE', ilike: 'ILIKE',
@@ -239,7 +244,17 @@ function parseSelect(raw: string, depth = 0): Selection[] {
   return selections
 }
 
-function parseFilter(column: string, raw: string): Filter {
+function parseLogical(op: string, raw: string): Logical {
+  if (!raw.startsWith('(') || !raw.endsWith(')')) throw new ReadQueryError(`${op} requires a parenthesized list`)
+  const terms = splitList(raw.slice(1, -1)).map((term) => {
+    const dot = term.indexOf('.')
+    if (dot < 0 || /^(not\.)?(and|or)\(/.test(term)) throw new ReadQueryError(`Unsupported ${op} term: ${term}`)
+    return parseFilter(term.slice(0, dot), term.slice(dot + 1))
+  })
+  return { logical: op as 'or' | 'and', terms }
+}
+
+function parseFilter(column: string, raw: string): Comparison {
   validateIdentifier(column)
   const negate = raw.startsWith('not.')
   const expression = negate ? raw.slice(4) : raw
@@ -251,7 +266,9 @@ function parseFilter(column: string, raw: string): Filter {
   return { column, operator, value: expression.slice(dot + 1), negate }
 }
 
-function filterSql(filter: Filter, column: string, params: unknown[]): string {
+function filterSql(filter: Filter, qualify: (column: string) => string, params: unknown[]): string {
+  if ('logical' in filter) return `(${filter.terms.map((term) => filterSql(term, qualify, params)).join(filter.logical === 'or' ? ' OR ' : ' AND ')})`
+  const column = qualify(filter.column)
   const bind = (value: unknown) => {
     params.push(value)
     return `$${params.length}`
@@ -288,7 +305,7 @@ export function writeWhere(search: URLSearchParams, params: unknown[]): string {
   const clauses: string[] = []
   for (const [key, value] of search) {
     if (controls.has(key)) continue
-    clauses.push(filterSql(parseFilter(key, value), quote(key), params))
+    clauses.push(filterSql(logicals.has(key) ? parseLogical(key, value) : parseFilter(key, value), quote, params))
   }
   return clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''
 }
@@ -343,6 +360,10 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
   const root = await resolve(table, parseSelect(search.get('select') ?? '*'))
   for (const [key, value] of search) {
     if (controls.has(key)) continue
+    if (logicals.has(key)) {
+      root.filters.push(parseLogical(key, value))
+      continue
+    }
     const path = key.split('.')
     let node = root
     for (const part of path.slice(0, -1)) {
@@ -355,7 +376,7 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
   }
   const params: unknown[] = []
   function compile(node: Node): { json: string; conditions: string[] } {
-    const conditions = node.filters.map((filter) => filterSql(filter, `${quote(node.alias)}.${quote(filter.column)}`, params))
+    const conditions = node.filters.map((filter) => filterSql(filter, (column) => `${quote(node.alias)}.${quote(column)}`, params))
     const fields: string[] = []
     for (const selection of node.selections) {
       if (selection.name === '*' && !selection.aggregate) continue

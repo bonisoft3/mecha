@@ -24,8 +24,15 @@ answer.
 
 - `due.ts` — the pure core: what a schedule owes at an instant. No clock of its
   own, no network. Its header lists the hard cases it decides.
-- `main.ts` — the shell. Reads schedules from crud, writes the rows, advances
-  the watermark, wakes the unit that reads the WAL.
+- `sweep.ts` — the sweep over a crud and a wake. Reads schedules, writes the
+  rows, wakes the unit that reads the WAL, advances the watermark, in that
+  order. The edge object runs this same file on its alarm.
+- `main.ts` — the container tier's shell: the poke's credential, crud over
+  HTTP, the wake as a GET to each unit.
+
+`deno.json` keeps `node_modules` beside these (`deno install`): the edge
+release bundles `due.ts` with wrangler, whose bundler resolves croner there
+and nowhere Deno's cache is.
 
 ```sh
 task test          # from libraries/mecha; runs these alongside cue vet + buf lint
@@ -350,6 +357,7 @@ about it.
 | k8s | one cluster-wide CronJob | 60s | not written |
 | host (process-compose) | the same container | 60s | not written |
 | cloud | Cloud Scheduler | 60s | not written |
+| edge (Cloudflare) | the object's alarm at the next owed instant, and an hourly Cron Trigger → POST from outside it | ms | wired ([the edge cluster](../../packages/mecha-edge/README.md#the-clock)) |
 | browser (wasm) | `setInterval` | ms | needs a different shell |
 
 The binding floor is 60s, from Cloud Scheduler and CronJob. Local and compose
@@ -470,8 +478,8 @@ Rejected:
   the ticker end to end.
 - **The k8s and host clocks**, when a tier needs one. Both run the same
   container as compose; only `?caller=` differs.
-- **The browser tier.** `due.ts` ports unchanged; `main.ts` does not — no Deno,
-  no daprd to wake, and crud is
+- **The browser tier.** `due.ts` and `sweep.ts` port unchanged, as the edge
+  proves; `main.ts` does not — no Deno, no daprd to wake, and crud is
   [the wasm PostgREST subset](../../docs/browser.md#what-stands-in-for-what). That subset answers
   `resolution=ignore-duplicates` with a bare `ON CONFLICT DO NOTHING`, so the
   derived key holds there too.

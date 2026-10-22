@@ -78,6 +78,29 @@ describe('createRestHandler', () => {
     expect(body[0]).not.toHaveProperty('message')
   })
 
+  it('handles GET and PATCH with or=(…): the ticker watermark guard', async () => {
+    const read = await handler(new Request('http://localhost/hello?or=(id.eq.1,message.is.null)&select=id', { method: 'GET' }))
+    expect(read.status).toBe(200)
+    expect(await read.json()).toEqual([{ id: '1' }])
+    const none = await handler(new Request('http://localhost/hello?or=(id.eq.none,message.is.null)&select=id', { method: 'GET' }))
+    expect(await none.json()).toEqual([])
+    const nested = await handler(new Request('http://localhost/hello?or=(id.eq.1,and(message.is.null))', { method: 'GET' }))
+    expect(nested.status).toBe(400)
+    const patch = await handler(new Request('http://localhost/hello?id=eq.1&or=(message.is.null,message.lt.zzz)', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify({ message: 'guarded' }),
+    }))
+    expect(patch.status).toBe(200)
+    expect((await patch.json())[0].message).toBe('guarded')
+    const held = await handler(new Request('http://localhost/hello?id=eq.1&or=(message.is.null,message.lt.a)', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify({ message: 'overwritten' }),
+    }))
+    expect(await held.json()).toEqual([])
+  })
+
   it('handles PATCH (update)', async () => {
     const req = new Request('http://localhost/hello?id=eq.1', {
       method: 'PATCH',

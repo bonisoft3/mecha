@@ -43,7 +43,7 @@ export interface MetadataCache {
 const caches = new WeakMap<object, MetadataCache>()
 const DDL_STATEMENT = /\b(?:CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)\b/i
 
-function clearMetadataCache(cache: MetadataCache): void {
+export function clearMetadataCache(cache: MetadataCache): void {
   cache.tables.clear()
   cache.relations.clear()
   cache.asJson.clear()
@@ -292,6 +292,10 @@ function filterSql(filter: Filter, qualify: (column: string) => string, params: 
       })
       sql = `${column} IN (${values.map(bind).join(', ')})`
     }
+  } else if (!filter.negate && (filter.operator === 'like' || filter.operator === 'ilike') && /^[*%]+$/.test(filter.value)) {
+    // Unentered search inputs bind `*` into `like.*{q}*` / `ilike.*{q}*`; bound as
+    // a parameter, they pull joins off their ordered index scan.
+    sql = `${column} IS NOT NULL`
   } else {
     const value = filter.operator === 'like' || filter.operator === 'ilike' ? filter.value.replace(/\*/g, '%') : filter.value
     sql = `${column} ${operators[filter.operator]} ${bind(value)}`

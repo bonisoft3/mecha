@@ -136,10 +136,10 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     protected async booted(): Promise<PGlite> { return (await this.#boot()).db }
     protected async rearm(): Promise<void> { await this.#arm(await this.booted()) }
 
-    protected async readPublic<T>(use: (snapshot: PublicSnapshot) => Promise<T>): Promise<T> {
+    protected async readPublic<T>(use: (snapshot: PublicSnapshot) => Promise<T>, priority: 'high' | 'low' = 'high'): Promise<T> {
       if (!this.#dir.complete) throw new DataDirectoryLoading()
       const { cluster } = await this.#boot()
-      return cluster.publicSnapshot(this.#dir.generation, use)
+      return cluster.publicSnapshot(this.#dir.generation, use, priority)
     }
 
     override async fetch(req: Request): Promise<Response> {

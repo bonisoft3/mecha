@@ -28,7 +28,7 @@ export interface EdgeCluster {
   /** A /crud/* request as the service role, for the object's own clock:
    * what the ticker writes on the container tier. Never routed. */
   service: (req: Request) => Promise<Response>
-  publicSnapshot<T>(generation: string, use: (snapshot: PublicSnapshot) => Promise<T>): Promise<T>
+  publicSnapshot<T>(generation: string, use: (snapshot: PublicSnapshot) => Promise<T>, priority?: 'high' | 'low'): Promise<T>
 }
 
 // The auth service's lifetimes (services/auth/main.ts).
@@ -45,31 +45,50 @@ const now = () => Math.floor(Date.now() / 1000)
 
 export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeCluster> {
   const { db, secret, log } = cfg
-  // PGlite is one connection: every use of it is one link of this chain.
-  let chain: Promise<unknown> = Promise.resolve()
-  function serialize<T>(fn: () => Promise<T>): Promise<T> {
-    const p = chain.then(fn, fn)
-    chain = p.catch(() => {})
-    return p
+  // PGlite is one connection: interactive renders and API reads/writes take
+  // the high lane ahead of background shape tokens, subset snapshots, and
+  // prefetches, with 1 low turn after every 4 consecutive high turns.
+  let running = false
+  let highStreak = 0
+  const high: Array<() => void> = []
+  const low: Array<() => void> = []
+  function pump() {
+    if (running) return
+    const takeLow = low.length > 0 && (high.length === 0 || highStreak >= 4)
+    const next = takeLow ? low.shift() : high.shift()
+    if (!next) return
+    highStreak = takeLow ? 0 : highStreak + 1
+    running = true
+    next()
   }
+  function serialize<T>(fn: () => Promise<T>, priority: 'high' | 'low' = 'high'): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      ;(priority === 'high' ? high : low).push(() => {
+        Promise.resolve().then(fn).then(resolve, reject).finally(() => {
+          running = false
+          pump()
+        })
+      })
+      pump()
+    })
+  }
+  const serializeLow = <T>(fn: () => Promise<T>): Promise<T> => serialize(fn, 'low')
   let shapes: Awaited<ReturnType<typeof createShapes>>
   let shapesReady: Promise<void> | undefined
-  // Anonymous rendering needs no change stream. Install its triggers before
-  // the first API request can write, on the same chain as every snapshot.
-  const ensureShapes = () => shapesReady ??= serialize(async () => {
-    shapes = await createShapes({ db, tables: cfg.tables, schema: cfg.schema, serialize, fail: cfg.fail })
-  })
   const publicCache = new Map<string, boolean>()
   // services/auth/main.ts's tableScope: every base table the relation reaches
   // has scope_id generated as the literal 'public:' with no inheriting child.
-  const publicOnly = async (table: string) => {
-    const hit = publicCache.get(table)
-    if (hit !== undefined) return hit
-    const p = (await db.query<{ p: boolean }>(
-      `WITH RECURSIVE deps(oid) AS (
-        SELECT to_regclass($1)::oid
+  const warmPublicCache = async (tables: string[]) => {
+    if (tables.length === 0) return
+    const { rows } = await db.query<{ name: string; p: boolean }>(
+      `WITH RECURSIVE input(name, oid) AS (
+        SELECT t, to_regclass('public.' || t)::oid
+        FROM unnest($1::text[]) AS t
+      ),
+      deps(name, oid) AS (
+        SELECT name, oid FROM input WHERE oid IS NOT NULL
         UNION
-        SELECT d.refobjid
+        SELECT deps.name, d.refobjid
         FROM deps
         JOIN pg_catalog.pg_rewrite r ON r.ev_class = deps.oid
         JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass
@@ -77,25 +96,41 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
           AND d.refclassid = 'pg_catalog.pg_class'::regclass
           AND d.refobjid <> deps.oid
       )
-      SELECT EXISTS (SELECT 1 FROM deps WHERE oid IS NOT NULL)
-        AND NOT EXISTS (
+      SELECT i.name,
+        (i.oid IS NOT NULL AND NOT EXISTS (
           SELECT 1 FROM deps
           LEFT JOIN pg_catalog.pg_class c ON c.oid = deps.oid
-          WHERE c.oid IS NULL
-             OR c.relkind NOT IN ('r', 'v')
-             OR (c.relkind = 'r' AND NOT EXISTS (
-               SELECT 1 FROM pg_catalog.pg_attribute a
-               JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-               WHERE a.attrelid = c.oid AND a.attname = 'scope_id'
-                 AND a.attnotnull AND NOT a.attisdropped AND a.attgenerated = 's'
-                 AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid)
-                 AND pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) = $2
-             ))
-        ) AS p`,
-      [`public.${table}`, "'public:'::text"],
-    )).rows[0].p
-    publicCache.set(table, p)
-    return p
+          WHERE deps.name = i.name AND (
+            c.oid IS NULL
+            OR c.relkind NOT IN ('r', 'v')
+            OR (c.relkind = 'r' AND NOT EXISTS (
+              SELECT 1 FROM pg_catalog.pg_attribute a
+              JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+              WHERE a.attrelid = c.oid AND a.attname = 'scope_id'
+                AND a.attnotnull AND NOT a.attisdropped AND a.attgenerated = 's'
+                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid)
+                AND pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) = $2
+            ))
+          )
+        )) AS p
+      FROM input i`,
+      [tables, "'public:'::text"],
+    )
+    for (const row of rows) publicCache.set(row.name, row.p)
+  }
+  // Anonymous rendering needs no change stream. Install its triggers before
+  // the first API request can write, on the high-priority database lane.
+  const ensureShapes = () => shapesReady ??= serialize(async () => {
+    shapes = await createShapes({ db, tables: cfg.tables, schema: cfg.schema, serialize, serializeLow, fail: cfg.fail })
+    await warmPublicCache(cfg.tables)
+  })
+  const publicOnly = async (table: string) => {
+    const hit = publicCache.get(table)
+    if (hit !== undefined) return hit
+    await warmPublicCache([table])
+    const warmed = publicCache.get(table)
+    if (warmed === undefined) throw new Error(`public cache did not warm ${table}`)
+    return warmed
   }
   const scopesOf = async (sub: string) => (await db.query<{ s: string[] }>('SELECT subject_scopes($1) AS s', [sub])).rows[0].s
 
@@ -132,10 +167,13 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     // As the auth service mints it: a table whose every row is public by
     // construction takes `public:` alone, so every subject sends one `where`
     // and its shapes are one in the Worker's cache.
-    const scopes = await serialize(async () => (await publicOnly(body.table!)) ? ['public:'] : await scopesOf(claims.sub as string))
+    const table = body.table
+    const scopes = publicCache.get(table) === true
+      ? ['public:']
+      : await serialize(async () => (await publicOnly(table)) ? ['public:'] : await scopesOf(claims.sub as string), 'low')
     const where = shapeWhere(scopes)
-    const token = await signJwt(secret, { typ: 'shape', table: body.table, where, sub: claims.sub, exp: now() + SHAPE_TOKEN_TTL_S })
-    return json(200, { token, table: body.table, where, expires_in: SHAPE_TOKEN_TTL_S })
+    const token = await signJwt(secret, { typ: 'shape', table, where, sub: claims.sub, exp: now() + SHAPE_TOKEN_TTL_S })
+    return json(200, { token, table, where, expires_in: SHAPE_TOKEN_TTL_S })
   }
 
   // As the stack's gate: the token names the table and the predicate the
@@ -147,7 +185,11 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const p = new URL(req.url).searchParams
     if (p.get('table') !== claims.table) return json(403, { error: 'table not authorized' })
     if (p.get('where') !== claims.where) return json(403, { error: 'where not authorized' })
-    return shapes.serve(req, () => serialize(() => scopesOf(claims.sub as string)))
+    const table = claims.table as string
+    const reachOf = () => publicCache.get(table) === true
+      ? Promise.resolve(['public:'])
+      : serialize(async () => (await publicOnly(table)) ? ['public:'] : await scopesOf(claims.sub as string), 'low')
+    return shapes.serve(req, reachOf)
   }
 
   async function isPublicRead(table: string, search: URLSearchParams): Promise<boolean> {
@@ -216,17 +258,17 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     }
   }
 
-  let pendingSnapshots = 0
+  const pendingSnapshots = { high: 0, low: 0 }
   return {
     handle,
     service,
-    async publicSnapshot(generation, use) {
-      // Admit before joining the database chain; the renderer's queue cannot
-      // see requests waiting here, and each snapshot also delays API writes.
-      if (pendingSnapshots >= 16) throw new PublicSnapshotCapacity('public snapshot queue full')
-      pendingSnapshots++
-      try { return await serialize(() => publicSnapshot(db, generation, use, cfg.schema)) }
-      finally { pendingSnapshots-- }
+    async publicSnapshot(generation, use, priority = 'high') {
+      // Admit per lane before joining the database queue so queued low-priority
+      // prefetches cannot starve interactive renders, and each lane stays bounded.
+      if (pendingSnapshots[priority] >= 16) throw new PublicSnapshotCapacity('public snapshot queue full')
+      pendingSnapshots[priority]++
+      try { return await serialize(() => publicSnapshot(db, generation, use, cfg.schema), priority) }
+      finally { pendingSnapshots[priority]-- }
     },
   }
 }

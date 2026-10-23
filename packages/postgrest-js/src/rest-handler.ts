@@ -24,7 +24,7 @@ type Queryable = Pick<PGlite, 'query' | 'exec'>
 /** Reads within an existing transaction. Its owner supplies the role and scopes. */
 export function readRest(db: Queryable, req: Request, schema?: ReadSchema, cacheOwner: object = db): Promise<Response> {
   if (req.method !== 'GET') throw new Error('snapshot reads only accept GET')
-  return route(db, req, schema, cacheOwner, cacheOwner === db ? undefined : 'app_user')
+  return route(db, req, schema, cacheOwner, 'app_user')
 }
 
 async function tableExists(db: Queryable, table: string, cacheOwner: object, role?: string): Promise<boolean> {

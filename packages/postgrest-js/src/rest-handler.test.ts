@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { PGlite } from '@electric-sql/pglite'
 import { createRestHandler, applyScopeSession } from './rest-handler.js'
+import { writeWhere } from './rest-read.js'
 
 describe('createRestHandler', () => {
   let db: PGlite
@@ -188,6 +189,17 @@ describe('createRestHandler', () => {
     expect(body).toHaveLength(1)
   })
 
+  it('preserves SQL LIKE semantics for exact, single-character, wildcard, and NULL values', async () => {
+    await db.query(`INSERT INTO "hello" ("id", "message") VALUES ('like-1', 'alpha_beta'), ('like-2', 'alphaXbeta')`)
+    const exact = await (await handler(new Request('http://localhost/hello?message=like.alphaXbeta'))).json()
+    expect(exact).toEqual([{ id: 'like-2', message: 'alphaXbeta' }])
+    const underscore = await (await handler(new Request('http://localhost/hello?message=like.alpha_beta&order=id.asc'))).json()
+    expect(underscore.map((r: { id: string }) => r.id)).toEqual(['like-1', 'like-2'])
+    await db.exec(`CREATE TABLE "notes" ("id" TEXT PRIMARY KEY, "note" TEXT); INSERT INTO "notes" VALUES ('n1', 'hello'), ('n2', NULL);`)
+    const wildcard = await (await handler(new Request('http://localhost/notes?note=like.*'))).json()
+    expect(wildcard).toEqual([{ id: 'n1', note: 'hello' }])
+  })
+
   // Upsert (merge-duplicates)
   it('handles POST with merge-duplicates (upsert)', async () => {
     // First insert
@@ -271,6 +283,16 @@ describe('createRestHandler', () => {
     })
     const res = await handler(req)
     expect(res.status).toBe(201)
+  })
+
+  it('compiles wildcard-only like and ilike filters as IS NOT NULL without bound pattern parameters', async () => {
+    const params: unknown[] = []
+    const where = writeWhere(new URLSearchParams('message=ilike.**&id=like.*'), params)
+    expect(where).toBe(' WHERE "message" IS NOT NULL AND "id" IS NOT NULL')
+    expect(params).toEqual([])
+
+    const res = await handler(new Request('http://localhost/hello?id=eq.ord-1&message=ilike.**'))
+    expect(await res.json()).toEqual([{ id: 'ord-1', message: 'aaa' }])
   })
 })
 

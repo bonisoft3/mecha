@@ -24,6 +24,7 @@ export interface ShapesConfig {
   schema?: Record<string, { durability?: string }>
   /** The one chain every use of `db` goes through: PGlite is one connection. */
   serialize: <T>(fn: () => Promise<T>) => Promise<T>
+  serializeLow?: <T>(fn: () => Promise<T>) => Promise<T>
   /** Where a failure no request can answer is raised: a change whose row
    * could not be read back, after which every read of its table is a 410. */
   fail: (error: Error) => void
@@ -81,7 +82,7 @@ const ident = (s: string) => `"${s.replaceAll('"', '""')}"`
 const literal = (s: string) => `'${s.replaceAll("'", "''")}'`
 
 export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
-  const { db, serialize, fail } = cfg
+  const { db, serialize, serializeLow = serialize, fail } = cfg
   const logs = new Map<string, Log>()
   const bootId = crypto.randomUUID().slice(0, 8)
   for (const table of cfg.tables) {
@@ -229,11 +230,10 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
     // refuses it, so neither is read at its first here.
     const repeated = subset.find((k, i) => subset.indexOf(k) !== i)
     if (repeated !== undefined) return refuse(repeated.slice('subset__'.length), `${repeated} repeated`)
-    const reach = await reachOf()
     const base: Record<string, string> = { 'electric-handle': l.handle, 'cache-control': 'no-store', 'content-type': 'application/json' }
     const upToDate = () => ({ headers: { control: 'up-to-date', global_last_seen_lsn: String(l.filled) } })
 
-    if (subset.length > 0) return await snapshot(table, l, p, reach, base)
+    if (subset.length > 0) return await snapshot(table, l, p, reachOf, base)
     // From now, or from the start with no snapshot: no rows, only the position.
     if (offset === 'now' || (offset === '-1' && changesOnly)) {
       return new Response(JSON.stringify([upToDate()]), {
@@ -241,9 +241,10 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
       })
     }
     if (offset === '-1') {
+      const reach = await reachOf()
       // Each row under the transaction that last wrote it, its xmin, so a write
       // a page awaits is confirmed by a log read from the start too.
-      const rows = await serialize(() => db.query<{ r: Row; x: string }>(`SELECT ${asText(table)} AS r, t.xmin::text AS x FROM ${ident(table)} t WHERE ${shapeWhere(reach)}`))
+      const rows = await serializeLow(() => db.query<{ r: Row; x: string }>(`SELECT ${asText(table)} AS r, t.xmin::text AS x FROM ${ident(table)} t WHERE ${shapeWhere(reach)}`))
       const msgs: unknown[] = rows.rows.map((x) => rowMessage(table, 'insert', x.r, Number(x.x)))
       msgs.push(upToDate())
       return new Response(JSON.stringify(msgs), {
@@ -257,17 +258,21 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
     if (handle !== l.handle || after < oldest - 1) {
       return new Response(JSON.stringify([{ headers: { control: 'must-refetch' } }]), { status: 409, headers: base })
     }
+    let reached: string[] | undefined
     // The snapshot's predicate names scopes, so a row in none is in no shape.
-    const pending = () => {
+    const pending = async () => {
       const upTo = l.filled
-      return l.entries.filter((e) => e.offset > after && e.offset <= upTo && e.scope !== null && reach.includes(e.scope))
+      const candidates = l.entries.filter((e) => e.offset > after && e.offset <= upTo && e.scope !== null)
+      if (candidates.length === 0) return []
+      const reach = reached ??= await reachOf()
+      return candidates.filter((e) => reach.includes(e.scope!))
     }
-    let entries = pending()
+    let entries = await pending()
     if (entries.length === 0 && live) {
       await waitFor(l, 20_000, req.signal)
       const gone = lost()
       if (gone) return gone
-      entries = pending()
+      entries = await pending()
     }
     const headers: Record<string, string> = {
       ...base,
@@ -288,7 +293,7 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
   // position not in it: the client retires a snapshot when a change at its
   // `database_lsn` arrives, before judging that change against it.
   let marks = 0
-  async function snapshot(table: string, l: Log, p: URLSearchParams, reach: string[], base: Record<string, string>): Promise<Response> {
+  async function snapshot(table: string, l: Log, p: URLSearchParams, reachOf: () => Promise<string[]>, base: Record<string, string>): Promise<Response> {
     const bound = subsetParams(p.get('subset__params'))
     if (bound === undefined) return refuse('params', `subset__params=${p.get('subset__params')} is not an object of positions to strings`)
     const where = p.get('subset__where')
@@ -310,9 +315,10 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
     const from = p.get('offset')
     const own = from === null || from === 'now' || from === '-1' ? null : from
     if (own !== null && !/^[0-9]+_0$/.test(own)) return refuse('offset', `offset=${own} is not a position`)
+    const reach = await reachOf()
     const sql = `SELECT ${asText(table)} AS r FROM ${ident(table)} t WHERE (${shapeWhere(reach)})` +
       (where === null ? '' : ` AND (${where})`) + (order === null ? '' : ` ORDER BY ${order}`) + (limit === null ? '' : ` LIMIT ${limit}`)
-    const read = await serialize(async () => {
+    const read = await serializeLow(async () => {
       const seen = (await db.query<{ xmin: string; xmax: string; xip: string[] }>(
         'SELECT pg_snapshot_xmin(s)::xid::text AS xmin, pg_snapshot_xmax(s)::xid::text AS xmax, ARRAY(SELECT pg_snapshot_xip(s)::xid::text) AS xip FROM pg_current_snapshot() s',
       )).rows[0]

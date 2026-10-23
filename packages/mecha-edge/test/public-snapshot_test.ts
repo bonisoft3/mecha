@@ -203,3 +203,71 @@ Deno.test('public view embeds use declared references and preserve target RLS in
     assert.deepEqual(await response.json(), expected)
   } finally { await db.close() }
 })
+
+// Without priority lanes and `publicCache` fast-paths, background Electric
+// shape handshakes and speculative prefetches queue ahead of interactive SSR
+// snapshots on PGlite's single connection.
+Deno.test('interactive public snapshots jump ahead of background shape snapshots while offset=now bypasses the database chain', async () => {
+  const db = await PGlite.create()
+  const resume = Promise.withResolvers<void>(), started = Promise.withResolvers<void>()
+  try {
+    await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+    await db.exec(await Deno.readTextFile(new URL('fixture.sql', import.meta.url)))
+    const cluster = await createEdgeCluster({ db, tables: ['board', 'note'], secret: 'test', log: line => { throw new Error(line) }, fail: error => { throw error } })
+    const guest = await (await cluster.handle(new Request('https://test/auth/guest', { method: 'POST' }))).json() as { token: string }
+    const firstToken = await (await cluster.handle(new Request('https://test/auth/shape', {
+      method: 'POST', headers: { authorization: 'Bearer ' + guest.token }, body: JSON.stringify({ table: 'board' }),
+    }))).json() as { token: string; where: string }
+    const noteToken = await (await cluster.handle(new Request('https://test/auth/shape', {
+      method: 'POST', headers: { authorization: 'Bearer ' + guest.token }, body: JSON.stringify({ table: 'note' }),
+    }))).json() as { token: string; where: string }
+
+    const held = cluster.publicSnapshot('generation', async () => {
+      started.resolve()
+      await resume.promise
+      return 'held'
+    })
+    await started.promise
+
+    const fastToken = await cluster.handle(new Request('https://test/auth/shape', {
+      method: 'POST', headers: { authorization: 'Bearer ' + guest.token }, body: JSON.stringify({ table: 'board' }),
+    }))
+    assert.equal(fastToken.status, 200)
+    const fastNow = await cluster.handle(new Request(
+      `https://test/electric/v1/shape?table=note&where=${encodeURIComponent(noteToken.where)}&offset=now&log=changes_only`,
+      { headers: { authorization: 'Bearer ' + noteToken.token } },
+    ))
+    assert.equal(fastNow.status, 200)
+
+    const order: string[] = []
+    const shapeSnap = cluster.handle(new Request(
+      `https://test/electric/v1/shape?table=board&where=${encodeURIComponent(firstToken.where)}&offset=-1`,
+      { headers: { authorization: 'Bearer ' + firstToken.token } },
+    )).then((res) => { order.push(`shape:${res.status}`) })
+    const lowSnapshots = Array.from({ length: 16 }, (_, idx) =>
+      cluster.publicSnapshot('generation', async (s) => {
+        const rows = await s.read('/board?select=title')
+        if (idx === 0) order.push(`prefetch:${rows.length}`)
+      }, 'low')
+    )
+    await assert.rejects(
+      () => cluster.publicSnapshot('generation', () => Promise.resolve(), 'low'),
+      (e: unknown) => e instanceof PublicSnapshotCapacity && e.message === 'public snapshot queue full',
+    )
+    const highSnapshots = Array.from({ length: 5 }, (_, idx) =>
+      cluster.publicSnapshot('generation', async (s) => {
+        const rows = await s.read('/board?select=title')
+        order.push(`live-${idx + 1}:${rows.length}`)
+      }, 'high')
+    )
+
+    resume.resolve()
+    await Promise.all([held, shapeSnap, ...lowSnapshots, ...highSnapshots])
+    assert.deepEqual(order.slice(0, 4), ['live-1:1', 'live-2:1', 'live-3:1', 'prefetch:1'])
+    assert.equal(order.includes('shape:200'), true)
+    assert.equal(order.includes('live-5:1'), true)
+  } finally {
+    resume.resolve()
+    await db.close()
+  }
+})

@@ -439,9 +439,11 @@ The facts the design rests on:
   later table, mecha's own included: without a policy, `app_user` could repoint
   `schedule.emits_entity` and set `suspended`, which the ticker then acts on as
   `service`. `ENABLE ROW LEVEL SECURITY` with no policy closes it.
-- **croner.** `n/step` means n to the end of the field (`5/10` in minutes is 5,
-  15 … 55); a parser reading a bare value as `lo = hi = n` matches only n, and
-  the DST gap check then discards the rest silently.
+- **croner.** A step steps over `*` or a range (`*/10`, `5-59/10`); croner 10
+  refuses `n/step`, and so does the DST gap check's own parser, so the two never
+  disagree on which minutes an expression names. Its time zones are read through
+  `Intl.DateTimeFormat`, which a page's SES lockdown leaves alone; croner 9's
+  `toLocaleString` answered every zoned schedule there "Invalid time value".
 - **A coarse clock.** Poking every 10 seconds against a minutely schedule
   produces exactly one tick per minute, on the minute. At cloud tier each poke is
   a billed wake, which is why `?caller=` is recorded.

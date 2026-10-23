@@ -37,11 +37,8 @@ const WALK_CAP = 512;
  * refused rather than silently matching nothing, which would make a schedule
  * that never fires look healthy.
  *
- * A bare `n` means the single value n, but `n/step` means n to the end of the
- * field — `5/10` in minutes is 5, 15, 25 … 55, not 5 alone. Reading it as a
- * single value is silent tick loss of precisely the kind this whole file
- * exists to refuse: croner emits every one of them and the gap check throws
- * all but the first away.
+ * A step steps over `*` or a range, as croner 10 reads it: `n/step` is
+ * refused, since a bare `n` is the single value n and croner refuses it too.
  */
 function admits(field: string, value: number, first: number, last: number): boolean {
   return field.split(",").some((term) => {
@@ -51,8 +48,9 @@ function admits(field: string, value: number, first: number, last: number): bool
     let lo = first, hi = last;
     if (spec !== "*") {
       const dash = spec.indexOf("-");
+      if (dash === -1 && stepText !== undefined) throw new Error(`cron: "${term}" steps from a single value; write */step or a-b/step`);
       lo = Number(dash === -1 ? spec : spec.slice(0, dash));
-      hi = dash === -1 ? (stepText === undefined ? lo : last) : Number(spec.slice(dash + 1));
+      hi = dash === -1 ? lo : Number(spec.slice(dash + 1));
       if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
         throw new Error(`cron: bad range "${term}"`);
       }

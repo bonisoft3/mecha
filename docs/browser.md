@@ -127,6 +127,59 @@ the shape's own predicate early, is a 400. `subset__params` binds by position:
 the client leaves a compiled null out of it, so a position it skips binds
 null, and one the predicate does not use is a 400.
 
+## Drains and the clock
+
+The clusters that run no change capture, this one and the
+[edge's](../packages/mecha-edge/README.md), run an app's drains and its
+schedules themselves, from the same two modules.
+
+**A drain** ([`drains.ts`](../packages/mecha-browser/drains.ts)) is a database
+function called as the `service` role when a table it names changes: pronto's
+`#Drain`, which the container tier calls from a stream over the change bus.
+Here `createDrains` installs a `drain_notify` trigger on every table any drain
+names, apart from the shape trigger, since a tick table or a queue an app made
+in its own SQL may carry no shape. The trigger notifies the table's name, which
+Postgres delivers once per table per transaction, after it commits; a row
+trigger, so a statement that changes no row wakes nothing, and a truncate
+wakes once. A trigger left on a table no drain names any more is dropped. A
+notification marks owed every drain naming that table, and owed drains are
+called one second later, the stream's batching period, each once, in
+declaration order. A call is `SELECT <call>(<arg> => '<value>', …)`, the
+body's keys as named arguments and each value untyped text, which Postgres
+reads as the argument's type as PostgREST's JSON is, in a transaction that sets the role, empty scopes and
+the claims `{"role":"service"}` locally, through the cluster's one chain. A
+call's own writes notify after it commits: a queue drain is owed again until a
+call writes nothing, and a drain that has not run yet in the same pass reads
+them when it does.
+
+Nothing is durable, which the drain contract makes safe: a call takes whatever
+is pending, so a lost wake is a delay until the next change, tick or boot, and
+a repeated one changes nothing. Every drain is called once as they install,
+when the page boots and on the edge's first request, sweep or render, which
+is how a wake an isolate heard and never answered is recovered,
+as the stream's start recovers rows queued while it was down. A failed call is
+logged with the database's words, and the drain is called again after the
+clock's backoff (30 s, doubling to an hour) or at once on the next change to
+its tables; its queue stays as it was. PGlite enforces no `statement_timeout`
+(measured on 0.5.8: a 3 s sleep under a 500 ms timeout ran 3 s), so the
+drain's `timeout` bounds nothing here. The host bounds a call: the platform's
+CPU limit at the edge, nothing in a page.
+
+**The clock** ([`clock.ts`](../packages/mecha-browser/clock.ts)) is
+[the ticker's](../services/ticker/README.md) sweep over mecha's `schedule`
+table, through crud as the `service` role, as the ticker writes it. Nothing is
+woken past the row: the tick lands in its table, whose drain trigger owes the
+drains that name it. `createCluster` sweeps once at boot where the database
+holds the table, then keeps one timer at the next instant a schedule owes a
+runnable tick (`nextDue`), re-read after a write. What a sweep left owed at its
+own instant waits the same backoff until the next sweep, a write's re-read
+included, which holds those schedules by name and no other; a re-read never
+runs beside a sweep. `clock: 'disabled'`, a
+frozen archive's, sweeps nothing. A page's clock runs while the page is
+open: a boot records what came due meanwhile, late where its lateness has
+passed, as any tier whose clock stopped does. The edge keeps the timer as the
+object's alarm.
+
 ## The fence
 
 [`fence.ts`](../packages/mecha-browser/fence.ts) removes every span from a
@@ -147,9 +200,9 @@ and boot fails. `container` is the only tier name the grammar knows.
   `catch` runs on the flag and clears it. There is no bus, no retry and no dead
   letter. Duplicates are still absorbed
   ([`postgrest-js`](#what-stands-in-for-what)).
-- **A service writer.** A pipeline sink writes on the reader's session,
-  confined to the reader's scopes. On a server, the `service` role holds
-  `BYPASSRLS`.
+- **A service writer in `bootPlatform`.** A pipeline sink writes on the
+  reader's session, confined to the reader's scopes. On a server, and for
+  `createCluster`'s drains and clock, the `service` role holds `BYPASSRLS`.
 - **Sharing.** There is one user, minted at every boot, and shapes go by scope
   only: a keyed shape for a row granted by key is refused. A database that
   outlives the page holds rows the next boot's subject cannot see.

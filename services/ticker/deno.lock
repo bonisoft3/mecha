@@ -3,7 +3,7 @@
   "specifiers": {
     "jsr:@std/assert@1.0.8": "1.0.8",
     "jsr:@std/internal@^1.0.5": "1.0.14",
-    "npm:croner@9.0.0": "9.0.0"
+    "npm:croner@10.0.1": "10.0.1"
   },
   "jsr": {
     "@std/assert@1.0.8": {
@@ -17,13 +17,13 @@
     }
   },
   "npm": {
-    "croner@9.0.0": {
-      "integrity": "sha512-onMB0OkDjkXunhdW9htFjEhqrD54+M94i6ackoUkjHKbRnXdyEyKRelp4nJ1kAz32+s27jP1FsebpJCVl0BsvA=="
+    "croner@10.0.1": {
+      "integrity": "sha512-ixNtAJndqh173VQ4KodSdJEI6nuioBWI0V1ITNKhZZsO0pEMoDxz539T4FTTbSZ/xIOSuDnzxLVRqBVSvPNE2g=="
     }
   },
   "workspace": {
     "dependencies": [
-      "npm:croner@9.0.0"
+      "npm:croner@10.0.1"
     ]
   }
 }

@@ -86,6 +86,18 @@ command's transaction aborts as it would under plv8, and a step that spends its
 fuel is one such failure. Every step evaluates fresh rules and charges initialization
 and the final fuel check, as plv8 does.
 
+## Drains
+
+The object calls an app's drains as their tables change, by the browser
+platform's dispatcher ([drains and the clock](../../docs/browser.md#drains-and-the-clock)):
+`edgeObject({ drains })`, the table pronto writes into the Worker from the
+app's `.pronto/cluster.json`. The first request, sweep or render after a boot
+installs them and calls each once, which is how a wake the evicted isolate
+heard and never answered is recovered; a boot that only migrates installs
+none, since the release's drains may name a table its migration creates. A
+failed call's retry stands at the alarm, which calls it within the alarm, so
+an eviction does not lose it.
+
 ## The clock
 
 The object runs [the ticker's](../../services/ticker/README.md) sweep
@@ -95,8 +107,9 @@ pronto's `mecha-ports.ts`) — through `/crud` as the `service` role, as the
 ticker writes it: the same keys, lateness rule, `Forbid` and watermark. What
 differs is the clock, [`clock.ts`](src/clock.ts), and that nothing is woken
 past the row: there is no change-capture unit here, the row is in the
-database the sweep wrote it to, where a machine's `fire` trigger takes the
-schedule and wakes the instance in that same transaction. Every request's
+database the sweep wrote it to, where a drain naming its table is owed and a
+machine's `fire` trigger takes the schedule and wakes the instance in that
+same transaction. Every request's
 transaction runs serializable, the level a machine's `serial()` demands: one
 connection, so the level costs no conflict.
 
@@ -114,7 +127,8 @@ which minted it:
   in a loop, and each sweep in a row that leaves it owed doubles the wait up
   to the Cron Trigger's hour; the occurrences a lost span left behind are
   recorded by whatever sweep runs next, never chased one wake at a time.
-  With nothing owed the alarm is cleared, so a cancelled deadline boots
+  The alarm stands at a failed drain's retry when that is earlier. With
+  nothing owed the alarm is cleared, so a cancelled deadline boots
   nothing; a schedule row the ticker's `due.ts` refuses arms nothing and is
   reported by name on every sweep. The object
   sleeps between occurrences: a daily schedule costs one wake a day, which
@@ -142,8 +156,8 @@ above is the whole retry — a thrown alarm would add the platform's six rapid
 reruns to it.
 
 For a frozen archive, `edgeObject({ clock: 'disabled', ... })` runs no
-clock: boot and alarm delivery clear any standing alarm, a poke is refused
-(409), and the schedule rows are kept as they were. The default is
+clock: boot and alarm delivery clear any standing alarm but a failed drain's
+retry, a poke is refused (409), and the schedule rows are kept as they were. The default is
 `clock: 'ticker'`. Alarms do not boot an incomplete data directory. Reset
 deletes the alarm before replacing the directory.
 
@@ -226,7 +240,10 @@ span, watermarks, retries; [`test/clock-object_test.ts`](test/clock-object_test.
 runs it in the object under `wrangler dev`: a failed deadline retrying while a
 healthy one fires without requests, the Cron Trigger (`/__scheduled`) and a
 publish's poke sweeping a cron schedule, and a frozen archive clearing its
-alarms.
+alarms. [`test/drains_test.ts`](test/drains_test.ts) runs
+[`test/drains-worker.ts`](test/drains-worker.ts): a row written before the
+object listened drained at boot as the service role, a failed drain's retry at
+the alarm, and a guest's write calling a mended drain at once.
 
 The same command also runs `test/public-snapshot_test.ts` against real PGlite:
 public-only access without a guest, joins and aggregates, direct-write revisions,

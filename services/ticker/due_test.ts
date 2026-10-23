@@ -204,13 +204,12 @@ Deno.test("a step is a step, and a bad one is refused", () => {
   // 02:00 through 02:45 never happen on this night; the walk keeps nothing.
   assertEquals(ticks, []);
 
-  // `n/step` is n to the end of the field, not n alone. croner emits every one
-  // of them, so reading it as a single value drops all but the first —
-  // silently, which is the one thing the gap check must never do.
+  // A range steps from its start; a single value has nothing to step over,
+  // and croner 10 refuses `n/step` as this file does.
   assertEquals(
     due({
       ...base,
-      cron: "5/10 2 * * *",
+      cron: "5-59/10 2 * * *",
       time_zone: "UTC",
       max_lateness_seconds: 86400,
       last_tick_at: "2026-03-01T00:00:00.000Z",
@@ -218,7 +217,7 @@ Deno.test("a step is a step, and a bad one is refused", () => {
     ["02:05", "02:15", "02:25", "02:35", "02:45", "02:55"],
   );
 
-  for (const cron of ["*/0 * * * *", "*/x * * * *"]) {
+  for (const cron of ["*/0 * * * *", "*/x * * * *", "5/10 * * * *"]) {
     assertThrows(
       () => due({ ...base, cron, last_tick_at: "2026-03-01T00:00:00Z" }, new Date("2026-03-01T12:00:00Z")),
       Error,
@@ -319,4 +318,24 @@ Deno.test("nextOwed skips the instant a DST gap shifts onto, as due() refuses it
   // on 03:30 that morning, which the expression does not name.
   const s = owing({ cron: "30 2 * * *", time_zone: "America/New_York", max_lateness_seconds: 86400, last_tick_at: "2026-03-08T06:00:00Z" });
   assertEquals(nextOwed(s, at("2026-03-08T16:00:00Z")), at("2026-03-09T06:30:00Z"));
+});
+
+Deno.test("a zoned cron is read without toLocaleString, which a page's lockdown tames", () => {
+  // SES's default localeTaming answers toLocaleString as toString, deaf to its
+  // timeZone. croner 9 converted zones through it, so in a page every zoned
+  // schedule failed with "Invalid time value"; croner 10 reads Intl.
+  const tamed = Date.prototype.toLocaleString;
+  Date.prototype.toLocaleString = Date.prototype.toString;
+  try {
+    const ticks = due({
+      ...base,
+      cron: "0 0 * * *",
+      time_zone: "America/Sao_Paulo",
+      max_lateness_seconds: 86400,
+      last_tick_at: "2026-10-21T12:00:00.000Z",
+    }, new Date("2026-10-22T12:00:00Z"));
+    assertEquals(ticks.map((t) => t.tick_at), ["2026-10-22T03:00:00.000Z"]);
+  } finally {
+    Date.prototype.toLocaleString = tamed;
+  }
 });

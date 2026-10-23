@@ -2,20 +2,28 @@
 // user a single-file page has: PGlite runs the RLS bootstrap and the migrations,
 // the user is minted at boot and every request is theirs, PostgREST answers
 // /crud, and a shape server speaks Electric's protocol over a log the tables'
-// triggers feed. Its bare imports are pinned in cluster.deno.json, which a
-// bundler takes into its own map.
+// triggers feed. The app's drains are called as their tables change
+// (drains.ts), and its schedules are swept on a timer at the next instant one
+// owes a tick (clock.ts): while the page is open, since nothing runs while it
+// is closed, and at boot, which records what came due meanwhile, late where its
+// lateness has passed, as any tier whose clock stopped does. Its bare imports
+// are pinned in cluster.deno.json, which a bundler takes into its own map.
 // Routes: /auth/guest, /auth/shape, /auth/whoami, /crud/*, /electric/v1/shape
 // (shapes.ts).
 import type { PGlite } from '@electric-sql/pglite'
 import { createRestHandler } from '@mecha/postgrest-js'
 import { encodeBase64Url } from 'jsr:@std/encoding@1.0.7/base64url'
 import { shapeWhere } from '../../services/auth/jwt.ts'
+import { createClock, hasSchedules, serviceCrud } from './clock.ts'
+import { createDrains, type Drain, type Drains } from './drains.ts'
 import { browserTier } from './fence.ts'
 import { createShapes } from './shapes.ts'
 
 export interface ClusterConfig {
   db: PGlite
-  /** rls.sql first, then the app's migrations in order. */
+  /** The database's scripts in order, each run through the browser tier's
+   * fence: the bundler's are the edge's (pronto's edge-scripts.ts), mecha's
+   * schedule table before the app's schedule seed among them. */
   sql: string[]
   /** Server tables that carry shapes. */
   tables: string[]
@@ -25,11 +33,23 @@ export interface ClusterConfig {
   /** Where a failure no request can answer is raised: a change whose row
    * could not be read back, after which every read of its table is a 410. */
   fail: (error: Error) => void
+  drains?: Drain[]
+  /** A frozen archive retains its schedules and runs none. */
+  clock?: 'ticker' | 'disabled'
 }
 
 export interface Cluster {
   handle: (req: Request) => Promise<Response>
+  drains: Drains
+  /** Resolves when the clock's pass under way, if any, is done. */
+  swept: () => Promise<void>
+  /** Ends the drains and the clock once what is under way returns, for a
+   * host that closes the database next. */
+  stop: () => Promise<void>
 }
+
+/** setTimeout's longest wait; a farther instant is re-read when it fires. */
+const LONGEST_WAIT = 2 ** 31 - 1
 
 type Row = Record<string, unknown>
 
@@ -63,13 +83,59 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
   const shapes = await createShapes({ db, tables: cfg.tables, schema: cfg.schema, serialize, fail })
 
   const rest = createRestHandler(db, { role: 'app_user', scopes })
-  async function crud(req: Request): Promise<Response> {
+  const asService = createRestHandler(db, { role: 'service', scopes: () => [], claims: () => ({ role: 'service' }) })
+  const inner = async (req: Request) => {
     const u = new URL(req.url)
     u.pathname = u.pathname.replace(/^\/crud/, '')
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
-    const inner = new Request(u, { method: req.method, headers: req.headers, body })
-    return serialize(() => rest(inner))
+    return new Request(u, { method: req.method, headers: req.headers, body })
   }
+  async function crud(req: Request): Promise<Response> {
+    const r = await inner(req)
+    const res = await serialize(() => rest(r))
+    // A write may have armed a deadline (a machine's settle).
+    if (ticks && res.ok && req.method !== 'GET' && req.method !== 'HEAD') await clock.arm()
+    return res
+  }
+
+  const drains = await createDrains({ db, drains: cfg.drains ?? [], serialize, log })
+
+  // The sweep writes through crud as the service role, as the ticker does.
+  const crudAsService = serviceCrud(async (req) => {
+    const r = await inner(req)
+    return serialize(() => asService(r))
+  })
+  const ticks = cfg.clock !== 'disabled' && await serialize(() => hasSchedules(db))
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let timerAt: number | null = null
+  let stopped = false
+  const clearTimer = () => {
+    if (timer !== null) clearTimeout(timer)
+    timer = timerAt = null
+  }
+  const clock = createClock({
+    db, read: serialize, crud: crudAsService, ticks,
+    timer: {
+      get: () => Promise.resolve(timerAt),
+      clear: () => Promise.resolve(clearTimer()),
+      set: (at) => {
+        clearTimer()
+        if (stopped) return Promise.resolve()
+        timerAt = at
+        timer = setTimeout(() => {
+          timer = timerAt = null
+          sweep()
+        }, Math.min(Math.max(at - Date.now(), 0), LONGEST_WAIT))
+        return Promise.resolve()
+      },
+    },
+  })
+  function sweep() {
+    clock.sweep('page').then(({ report }) => {
+      for (const s of report.schedules) if (s.error !== undefined) log(`schedule ${s.schedule} failed: ${s.error}`)
+    }).catch((e) => fail(e instanceof Error ? e : new Error(String(e))))
+  }
+  if (ticks) sweep()
 
   // The shell asks for a guest and later for a shape token: the one user
   // answers both, and a shape's predicate is what their scopes reach now.
@@ -98,5 +164,16 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     }
   }
 
-  return { handle }
+  return {
+    handle,
+    drains,
+    swept: () => clock.settled(),
+    stop: async () => {
+      stopped = true
+      clearTimer()
+      await clock.settled()
+      clearTimer()
+      await drains.stop()
+    },
+  }
 }

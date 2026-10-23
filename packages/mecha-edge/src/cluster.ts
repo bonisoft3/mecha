@@ -1,12 +1,14 @@
 // mecha's cluster for many subjects on one PGlite connection: guests minted
 // with HS256 tokens, each request's role, scopes and claims set inside its own
 // transaction (postgrest-js), and Electric's shape protocol answered for the
-// subject a shape token names (mecha-browser's shapes.ts). The schema is the
-// data directory's: nothing here migrates.
+// subject a shape token names (mecha-browser's shapes.ts), and the app's
+// drains called as their tables change (mecha-browser's drains.ts). The schema
+// is the data directory's: nothing here migrates.
 // Routes: /auth/guest, /auth/whoami, /auth/shape, /crud/*, /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
 import { shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
+import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
 
@@ -21,6 +23,9 @@ export interface EdgeClusterConfig {
   log: (line: string) => void
   /** A change whose row could not be read back: the shape log has a hole. */
   fail: (error: Error) => void
+  drains?: Drain[]
+  /** The earliest retry of a failed drain moved (drains.ts). */
+  retry?: () => void
 }
 
 export interface EdgeCluster {
@@ -29,6 +34,11 @@ export interface EdgeCluster {
    * what the ticker writes on the container tier. Never routed. */
   service: (req: Request) => Promise<Response>
   publicSnapshot<T>(generation: string, use: (snapshot: PublicSnapshot) => Promise<T>, priority?: 'high' | 'low'): Promise<T>
+  /** The drains, installed and called once on first use: never by a boot
+   * that only migrates, whose drains may name tables the migration makes. */
+  drains: () => Promise<Drains>
+  /** The drains once installed, or null. */
+  installed: () => Drains | null
 }
 
 // The auth service's lifetimes (services/auth/main.ts).
@@ -124,6 +134,15 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     shapes = await createShapes({ db, tables: cfg.tables, schema: cfg.schema, serialize, serializeLow, fail: cfg.fail })
     await warmPublicCache(cfg.tables)
   })
+  let drainsReady: Promise<Drains> | undefined
+  let installed: Drains | null = null
+  // An install that failed is tried again by the next use, not kept. Drains
+  // are background work, so they take the low lane.
+  const drains = () => drainsReady ??= createDrains({ db, drains: cfg.drains ?? [], serialize: serializeLow, log, retry: cfg.retry })
+    .then((d) => installed = d, (e) => {
+      drainsReady = undefined
+      throw e
+    })
   const publicOnly = async (table: string) => {
     const hit = publicCache.get(table)
     if (hit !== undefined) return hit
@@ -235,6 +254,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
 
   async function service(req: Request): Promise<Response> {
     await ensureShapes()
+    await drains()
     const u = new URL(req.url)
     u.pathname = u.pathname.replace(/^\/crud/, '')
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
@@ -246,6 +266,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const path = new URL(req.url).pathname
     try {
       await ensureShapes()
+      await drains()
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)
@@ -262,12 +283,17 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   return {
     handle,
     service,
+    drains,
+    installed: () => installed,
     async publicSnapshot(generation, use, priority = 'high') {
       // Admit per lane before joining the database queue so queued low-priority
       // prefetches cannot starve interactive renders, and each lane stays bounded.
       if (pendingSnapshots[priority] >= 16) throw new PublicSnapshotCapacity('public snapshot queue full')
       pendingSnapshots[priority]++
-      try { return await serialize(() => publicSnapshot(db, generation, use, cfg.schema), priority) }
+      try {
+        await drains()
+        return await serialize(() => publicSnapshot(db, generation, use, cfg.schema), priority)
+      }
       finally { pendingSnapshots[priority]-- }
     },
   }

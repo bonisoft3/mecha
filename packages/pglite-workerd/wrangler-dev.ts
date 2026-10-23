@@ -18,6 +18,7 @@ const wrangler = `${await output('mise', ['where', 'npm:wrangler'])}/node_module
 // the ticker's node_modules (services/ticker/deno.json): wrangler's bundler
 // resolves no npm: specifier, and the release's edge.ts installs it the same way.
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/ticker/deno.json`])
+await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../mecha-edge/deno.json`])
 
 function freePort(): number {
   const l = Deno.listen({ port: 0, hostname: '127.0.0.1' })
@@ -58,11 +59,24 @@ export async function startWorker(config: URL, state: string): Promise<Worker> {
     const [watch, keep] = child.stdout.tee()
     keep.pipeTo(out.writable)
     let seen = ''
-    for await (const chunk of watch.pipeThrough(new TextDecoderStream())) {
-      seen += chunk
-      if (seen.includes('Ready on')) break
+    const timeout = AbortSignal.timeout(30_000)
+    try {
+      for await (const chunk of watch.pipeThrough(new TextDecoderStream(), { signal: timeout })) {
+        seen += chunk
+        if (seen.includes('Ready on')) break
+        if (seen.includes('[ERROR]') || seen.includes('Build failed')) {
+          try { child.kill('SIGKILL') } catch {}
+          throw new Error(`wrangler dev build failed:\n${seen}`)
+        }
+      }
+    } catch (e) {
+      try { child.kill('SIGKILL') } catch {}
+      throw new Error(`wrangler dev failed to become ready: ${e}\n${seen}\nsee ${log}{,.err}`)
     }
-    if (!seen.includes('Ready on')) throw new Error(`wrangler dev exited before ready; see ${log}{,.err}`)
+    if (!seen.includes('Ready on')) {
+      try { child.kill('SIGKILL') } catch {}
+      throw new Error(`wrangler dev exited before ready; see ${log}{,.err}`)
+    }
   }
   const stop = async () => {
     const tree = [child.pid, ...(await descendants(child.pid))]
@@ -70,7 +84,11 @@ export async function startWorker(config: URL, state: string): Promise<Worker> {
       try { Deno.kill(pid, 'SIGKILL') } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e }
     }
     await child.status
-    while ((await Promise.all(tree.map(async (pid) => (await new Deno.Command('kill', { args: ['-0', String(pid)], stderr: 'null' }).output()).success))).some(Boolean)) await delay(100)
+    for (let i = 0; i < 50; i++) {
+      const alive = (await Promise.all(tree.map(async (pid) => (await new Deno.Command('kill', { args: ['-0', String(pid)], stderr: 'null' }).output()).success))).some(Boolean)
+      if (!alive) break
+      await delay(100)
+    }
   }
   await start()
   return { origin: `http://127.0.0.1:${port}`, restart: async () => { await stop(); await start() }, stop }

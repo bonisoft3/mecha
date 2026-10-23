@@ -2,10 +2,17 @@
 // with HS256 tokens, each request's role, scopes and claims set inside its own
 // transaction (postgrest-js), and Electric's shape protocol answered for the
 // subject a shape token names (mecha-browser's shapes.ts), and the app's
-// drains called as their tables change (mecha-browser's drains.ts). The schema
-// is the data directory's: nothing here migrates.
-// Routes: /auth/guest, /auth/whoami, /auth/shape, /crud/*, /electric/v1/shape.
+// drains called as their tables change (mecha-browser's drains.ts).
+// Routes: /auth/guest, /auth/whoami, /auth/shape, /auth/register/start,
+// /auth/register/verify, /auth/login/start, /auth/login/verify, /crud/*,
+// /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
+import {
+  generateAuthenticationOptions,
+  generateRegistrationOptions,
+  verifyAuthenticationResponse,
+  verifyRegistrationResponse,
+} from '@simplewebauthn/server'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
 import { shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
@@ -26,6 +33,8 @@ export interface EdgeClusterConfig {
   drains?: Drain[]
   /** The earliest retry of a failed drain moved (drains.ts). */
   retry?: () => void
+  rpId?: string
+  origin?: string
 }
 
 export interface EdgeCluster {
@@ -44,6 +53,16 @@ export interface EdgeCluster {
 // The auth service's lifetimes (services/auth/main.ts).
 const USER_TOKEN_TTL_S = 7 * 24 * 3600
 const SHAPE_TOKEN_TTL_S = 900
+const STATE_TTL_S = 300
+
+const enc = new TextEncoder()
+const ADJECTIVES = ['amber', 'brisk', 'calm', 'dusk', 'ember', 'fern', 'gold', 'hazel', 'ivory', 'jade', 'kind', 'lunar', 'mellow', 'noble', 'ochre', 'pale', 'quiet', 'rustic', 'sage', 'tidal']
+const NOUNS = ['fox', 'wren', 'otter', 'pine', 'reed', 'moth', 'lark', 'moss', 'dune', 'cove', 'elk', 'finch', 'heron', 'ibis', 'kite', 'lynx', 'newt', 'orca', 'quail', 'seal']
+function generateHandle(): string {
+  const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]
+  const n = NOUNS[Math.floor(Math.random() * NOUNS.length)]
+  return `${a}-${n}-${10 + Math.floor(Math.random() * 90)}`
+}
 
 type Claims = Record<string, unknown>
 
@@ -128,6 +147,32 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     )
     for (const row of rows) publicCache.set(row.name, row.p)
   }
+  let authTablesReady: Promise<void> | undefined
+  const createAuthTables = async () => {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS webauthn_credential (
+        id text primary key,
+        user_id uuid not null references app_user(id) on delete cascade,
+        public_key bytea not null,
+        counter bigint not null default 0
+      );
+      ALTER TABLE webauthn_credential ENABLE ROW LEVEL SECURITY;
+      REVOKE ALL ON webauthn_credential FROM PUBLIC;
+      DO $$
+      DECLARE
+        r text;
+      BEGIN
+        FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('app_user', 'service', 'anon') LOOP
+          EXECUTE format('REVOKE ALL ON webauthn_credential FROM %I', r);
+        END LOOP;
+      END $$;
+    `)
+  }
+  const ensureAuthTables = () => authTablesReady ??= serialize(createAuthTables).catch((e) => {
+    authTablesReady = undefined
+    throw e
+  })
+
   // Anonymous rendering needs no change stream. Install its triggers before
   // the first API request can write, on the high-priority database lane.
   const ensureShapes = () => shapesReady ??= serialize(async () => {
@@ -175,6 +220,178 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const claims = await session(req)
     if (!claims) return json(401, { error: 'invalid token' })
     return json(200, { id: claims.sub, handle: claims.handle })
+  }
+
+  async function readState(body: Record<string, unknown>, purpose: string): Promise<Record<string, unknown> | null> {
+    if (typeof body.state !== 'string') return null
+    const claims = await verifyJwt(secret, body.state)
+    return claims && claims.purpose === purpose ? claims : null
+  }
+
+  async function registerStart(req: Request): Promise<Response> {
+    const hasAuth = req.headers.has('authorization')
+    const claims = hasAuth ? await session(req) : null
+    if (hasAuth && !claims) return json(401, { error: 'invalid token' })
+    if (claims && claims.guest !== true) return json(409, { error: 'already an account' })
+    const promote = claims !== null
+    const handle = claims ? (claims.handle as string) : generateHandle()
+    const userId = claims ? (claims.sub as string) : crypto.randomUUID()
+    const rpId = cfg.rpId ?? new URL(req.url).hostname
+    const options = await generateRegistrationOptions({
+      rpName: rpId,
+      rpID: rpId,
+      userName: handle,
+      userID: enc.encode(userId),
+      authenticatorSelection: {
+        residentKey: 'required',
+        userVerification: 'preferred',
+      },
+    })
+    const state = await signJwt(secret, {
+      purpose: 'register',
+      handle,
+      userId,
+      promote,
+      challenge: options.challenge,
+      exp: now() + STATE_TTL_S,
+    })
+    return json(200, { ...options, state })
+  }
+
+  async function registerVerify(req: Request): Promise<Response> {
+    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body) return json(400, { error: 'invalid json body' })
+    const st = await readState(body, 'register')
+    if (!st) return json(401, { error: 'invalid state' })
+    const rpId = cfg.rpId ?? new URL(req.url).hostname
+    const origin = cfg.origin ?? new URL(req.url).origin
+    let verification
+    try {
+      verification = await verifyRegistrationResponse({
+        // deno-lint-ignore no-explicit-any
+        response: body.response as any,
+        expectedChallenge: st.challenge as string,
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+        requireUserVerification: false,
+      })
+    } catch {
+      return json(401, { error: 'registration verification failed' })
+    }
+    if (!verification.verified || !verification.registrationInfo) {
+      return json(401, { error: 'registration verification failed' })
+    }
+    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo
+    const userId = st.userId as string
+    await ensureAuthTables()
+    if (st.promote === true) {
+      const added = await serialize(() =>
+        db.query(
+          `INSERT INTO webauthn_credential (id, user_id, public_key, counter)
+           SELECT $1, $2, $3, $4
+           WHERE NOT EXISTS (SELECT 1 FROM webauthn_credential WHERE user_id = $2)`,
+          [credentialID, userId, credentialPublicKey, counter],
+        ),
+      )
+      if (added.affectedRows === 0) return json(409, { error: 'already an account' })
+      const token = await signJwt(secret, { role: 'app_user', sub: userId, handle: st.handle, exp: now() + USER_TOKEN_TTL_S })
+      return json(200, { token, user: { id: userId, handle: st.handle } })
+    }
+    let handle = st.handle as string
+    let inserted = false
+    for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+      try {
+        await serialize(async () => {
+          await db.query('BEGIN')
+          try {
+            await db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [userId, handle])
+            await db.query(
+              'INSERT INTO webauthn_credential (id, user_id, public_key, counter) VALUES ($1, $2, $3, $4)',
+              [credentialID, userId, credentialPublicKey, counter],
+            )
+            await db.query('COMMIT')
+          } catch (e) {
+            await db.query('ROLLBACK')
+            throw e
+          }
+        })
+        inserted = true
+      } catch (e) {
+        if (typeof e === 'object' && e !== null && 'code' in e && (e as { code: string }).code === '23505') {
+          handle = generateHandle()
+        } else {
+          throw e
+        }
+      }
+    }
+    if (!inserted) return json(500, { error: 'could not allocate identity' })
+    const token = await signJwt(secret, { role: 'app_user', sub: userId, handle, exp: now() + USER_TOKEN_TTL_S })
+    return json(200, { token, user: { id: userId, handle } })
+  }
+
+  async function loginStart(req: Request): Promise<Response> {
+    const rpId = cfg.rpId ?? new URL(req.url).hostname
+    const options = await generateAuthenticationOptions({
+      rpID: rpId,
+      allowCredentials: [],
+    })
+    const state = await signJwt(secret, {
+      purpose: 'login',
+      challenge: options.challenge,
+      exp: now() + STATE_TTL_S,
+    })
+    return json(200, { ...options, state })
+  }
+
+  async function loginVerify(req: Request): Promise<Response> {
+    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body) return json(400, { error: 'invalid json body' })
+    const st = await readState(body, 'login')
+    if (!st) return json(401, { error: 'invalid state' })
+    const response = body.response as { id?: string } | undefined
+    if (!response || typeof response.id !== 'string') {
+      return json(401, { error: 'authentication verification failed' })
+    }
+    await ensureAuthTables()
+    const { rows: creds } = await serialize(() =>
+      db.query<{ id: string; public_key: Uint8Array; counter: number | bigint; user_id: string; handle: string }>(
+        `SELECT c.id, c.public_key, c.counter, c.user_id, u.handle
+         FROM webauthn_credential c JOIN app_user u ON u.id = c.user_id
+         WHERE c.id = $1`,
+        [response.id],
+      ),
+    )
+    if (creds.length === 0) return json(401, { error: 'authentication verification failed' })
+    const cred = creds[0]
+    const rpId = cfg.rpId ?? new URL(req.url).hostname
+    const origin = cfg.origin ?? new URL(req.url).origin
+    let verification
+    try {
+      verification = await verifyAuthenticationResponse({
+        // deno-lint-ignore no-explicit-any
+        response: body.response as any,
+        expectedChallenge: st.challenge as string,
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+        requireUserVerification: false,
+        authenticator: {
+          credentialID: cred.id,
+          credentialPublicKey: cred.public_key instanceof Uint8Array ? cred.public_key : new Uint8Array(cred.public_key),
+          counter: Number(cred.counter),
+        },
+      })
+    } catch {
+      return json(401, { error: 'authentication verification failed' })
+    }
+    if (!verification.verified) return json(401, { error: 'authentication verification failed' })
+    await serialize(() =>
+      db.query('UPDATE webauthn_credential SET counter = $1 WHERE id = $2', [
+        verification.authenticationInfo.newCounter,
+        cred.id,
+      ]),
+    )
+    const token = await signJwt(secret, { role: 'app_user', sub: cred.user_id, handle: cred.handle, exp: now() + USER_TOKEN_TTL_S })
+    return json(200, { token, user: { id: cred.user_id, handle: cred.handle } })
   }
 
   async function shapeToken(req: Request): Promise<Response> {
@@ -270,6 +487,10 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)
+      if (req.method === 'POST' && path === '/auth/register/start') return await registerStart(req)
+      if (req.method === 'POST' && path === '/auth/register/verify') return await registerVerify(req)
+      if (req.method === 'POST' && path === '/auth/login/start') return await loginStart(req)
+      if (req.method === 'POST' && path === '/auth/login/verify') return await loginVerify(req)
       if (path.startsWith('/crud/')) return await crud(req)
       if (path === '/electric/v1/shape') return await shape(req)
       return json(404, { error: `no route for ${path}` })

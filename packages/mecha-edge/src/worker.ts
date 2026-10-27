@@ -115,7 +115,12 @@ export const edgeWorker = {
     if (!CLUSTER_ROUTES.test(path)) {
       if (!env.ASSETS) return json({ error: `no route for ${path}` }, 404)
       const res = await env.ASSETS.fetch(req)
-      if (res.status !== 404 || !navigation(req)) return res
+      if (res.status !== 404) return res
+      if (!navigation(req)) {
+        const out = new Response(req.method === 'HEAD' ? null : res.body, res)
+        out.headers.set('cache-control', 'no-store')
+        return out
+      }
       // A route is the page's: the document answers a navigation to any path,
       // and nothing else, so a missing asset is a 404 and not the whole page.
       const root = await env.ASSETS.fetch(new Request(new URL('/', req.url), req))

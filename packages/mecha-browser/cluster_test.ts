@@ -111,6 +111,14 @@ const ids = async (res: Response) => ((await res.json()) as { data: Msg[] }).dat
 /** A real ShapeStream of item from now, up to date, whose live requests wait
  * until `open()`, so a write can land between its position and a snapshot. */
 async function gatedStream(cluster: Cluster) {
+  const ac = new AbortController()
+  const timers: ReturnType<typeof setTimeout>[] = []
+  const origSetTimeout = globalThis.setTimeout
+  globalThis.setTimeout = ((fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const id = origSetTimeout(fn, ms, ...args)
+    timers.push(id)
+    return id
+  }) as typeof setTimeout
   let open: () => void = () => {}
   const gate = new Promise<void>((r) => (open = r))
   const fetchClient = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -121,8 +129,15 @@ async function gatedStream(cluster: Cluster) {
     return cluster.handle(new Request(url, init))
   }
   const stream = new ShapeStream<Record<string, unknown>>({
-    url: 'http://cluster.local/electric/v1/shape', params: { table: 'item', replica: 'full' }, log: 'changes_only', offset: 'now', fetchClient,
+    url: 'http://cluster.local/electric/v1/shape', params: { table: 'item', replica: 'full' }, log: 'changes_only', offset: 'now', fetchClient, signal: ac.signal,
   })
+  const origUnsubscribe = stream.unsubscribeAll.bind(stream)
+  stream.unsubscribeAll = () => {
+    origUnsubscribe()
+    ac.abort()
+    globalThis.setTimeout = origSetTimeout
+    for (const t of timers) clearTimeout(t)
+  }
   const seen: Msg[] = []
   stream.subscribe((ms) => { for (const m of ms as Msg[]) if (m.key) seen.push(m) })
   while (!stream.isUpToDate) await new Promise((r) => setTimeout(r, 10))

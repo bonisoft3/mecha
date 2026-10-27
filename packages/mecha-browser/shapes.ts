@@ -52,7 +52,8 @@ interface Log {
    * `tail - filled` newest are the unfilled ones. */
   filled: number
   entries: Entry[]
-  waiters: Set<() => void>
+  waiters: Map<string, Set<() => void>>
+  waitersAll: Set<() => void>
   schema: Record<string, { type: string; pk_index?: number; not_null?: boolean }>
   /** The primary key's columns, in the key's order. */
   pk: string[]
@@ -112,7 +113,7 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
       const at = pk.indexOf(c.column_name)
       schema[c.column_name] = { type: c.udt_name, ...(at >= 0 ? { pk_index: at } : {}), ...(c.is_nullable === 'NO' ? { not_null: true } : {}) }
     }
-    logs.set(table, { handle: `${table}-${bootId}`, tail: 0, filled: 0, entries: [], waiters: new Set(), schema, pk })
+    logs.set(table, { handle: `${table}-${bootId}`, tail: 0, filled: 0, entries: [], waiters: new Map(), waitersAll: new Set(), schema, pk })
   }
 
   // The notification carries the key and the scope, not the row: pg_notify
@@ -153,6 +154,27 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
     return { key: `"public"."${table}"/${l.pk.map((c) => `"${String(row[c])}"`).join('/')}`, value: row, headers }
   }
 
+  const wake = (l: Log, scope: string | null) => {
+    if (scope === null) {
+      wakeAll(l)
+      return
+    }
+    const toWake = new Set<() => void>(l.waitersAll)
+    const set = l.waiters.get(scope)
+    if (set) {
+      for (const w of set) toWake.add(w)
+    }
+    for (const w of toWake) w()
+  }
+
+  const wakeAll = (l: Log) => {
+    const toWake = new Set<() => void>(l.waitersAll)
+    for (const set of l.waiters.values()) {
+      for (const w of set) toWake.add(w)
+    }
+    for (const w of toWake) w()
+  }
+
   // A change is numbered as its notification arrives, which is before any
   // request queued after the write runs: a subset snapshot taken then counts it
   // as seen. Its row is read back by its key, in the order the notifications
@@ -171,8 +193,7 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
         if (r.rows.length === 0) {
           l.entries.splice(l.entries.length - (l.tail - l.filled), 1)
           l.filled = entry.offset
-          for (const w of l.waiters) w()
-          l.waiters.clear()
+          wakeAll(l)
           return
         }
         row = r.rows[0].r
@@ -183,25 +204,49 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
       l.filled = entry.offset
       const trim = l.entries.length - (l.tail - l.filled) - RETAINED
       if (trim > 0) l.entries.splice(0, trim)
-      for (const w of l.waiters) w()
-      l.waiters.clear()
+      wake(l, entry.scope)
     }).catch((e) => {
       const first = l.broken === undefined
       l.broken ??= e instanceof Error ? e : new Error(String(e))
-      for (const w of l.waiters) w()
-      l.waiters.clear()
+      wakeAll(l)
       if (first) fail(new Error(`cluster lost a change to ${table}: ${l.broken.message}`, { cause: l.broken }))
     })
   })
 
   /** Until the log moves, the time runs out, or the request is abandoned. */
-  function waitFor(l: Log, ms: number, signal: AbortSignal | null): Promise<void> {
+  function waitFor(l: Log, reach: string[], ms: number, signal: AbortSignal | null): Promise<void> {
     if (signal?.aborted) return Promise.resolve()
     return new Promise((resolve) => {
-      const done = () => { clearTimeout(t); l.waiters.delete(done); signal?.removeEventListener('abort', done); resolve() }
+      let settled = false
+      const done = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(t)
+        signal?.removeEventListener('abort', done)
+        l.waitersAll.delete(done)
+        for (const s of reach) {
+          const set = l.waiters.get(s)
+          if (set) {
+            set.delete(done)
+            if (set.size === 0) l.waiters.delete(s)
+          }
+        }
+        resolve()
+      }
       const t = setTimeout(done, ms)
-      l.waiters.add(done)
       signal?.addEventListener('abort', done, { once: true })
+      if (reach.length === 0) {
+        l.waitersAll.add(done)
+      } else {
+        for (const s of reach) {
+          let set = l.waiters.get(s)
+          if (!set) {
+            set = new Set()
+            l.waiters.set(s, set)
+          }
+          set.add(done)
+        }
+      }
     })
   }
 
@@ -261,22 +306,23 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
     let reached: string[] | undefined
     // The snapshot's predicate names scopes, so a row in none is in no shape.
     const pending = async () => {
+      const reach = reached ??= await reachOf()
       const upTo = l.filled
       const candidates = l.entries.filter((e) => e.offset > after && e.offset <= upTo && e.scope !== null)
-      if (candidates.length === 0) return []
-      const reach = reached ??= await reachOf()
-      return candidates.filter((e) => reach.includes(e.scope!))
+      if (candidates.length === 0) return { entries: [], upTo }
+      return { entries: candidates.filter((e) => reach.includes(e.scope!)), upTo }
     }
-    let entries = await pending()
+    let { entries, upTo } = await pending()
     if (entries.length === 0 && live) {
-      await waitFor(l, 20_000, req.signal)
+      const reach = reached ??= await reachOf()
+      await waitFor(l, reach, 20_000, req.signal)
       const gone = lost()
       if (gone) return gone
-      entries = await pending()
+      ;({ entries, upTo } = await pending())
     }
     const headers: Record<string, string> = {
       ...base,
-      'electric-offset': offsetOf(entries.length ? entries[entries.length - 1].offset : l.filled),
+      'electric-offset': offsetOf(entries.length ? entries[entries.length - 1].offset : upTo),
       'electric-cursor': String(Date.now()),
       'electric-up-to-date': 'true',
     }

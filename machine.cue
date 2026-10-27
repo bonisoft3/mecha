@@ -28,13 +28,15 @@ package cluster
 }
 
 #XStateState: close({
-	type?:        "final"
+	type?:        "final" | "parallel"
+	initial?:     string
 	description?: string
 	tags?: [...string]
 	meta?: {...}
 	on?: [string]: #XStateTransitions
 	always?: #XStateTransitions
 	invoke?: #XStateInvoke | [...#XStateInvoke]
+	states?: [string]: #XStateState
 })
 
 #XStateInvoke: close({

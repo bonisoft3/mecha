@@ -115,8 +115,16 @@ export const edgeWorker = {
     if (!CLUSTER_ROUTES.test(path)) {
       if (!env.ASSETS) return json({ error: `no route for ${path}` }, 404)
       const res = await env.ASSETS.fetch(req)
+      if (res.status === 200) {
+        if (path.startsWith('/_immutable-') || path.includes('/_immutable-')) {
+          const out = new Response(req.method === 'HEAD' ? null : res.body, res)
+          out.headers.set('cache-control', 'public, max-age=31536000, immutable')
+          return out
+        }
+        return res
+      }
       if (res.status !== 404) return res
-      if (!navigation(req)) {
+      if (!navigation(req) || /^\/(?:_immutable-|(?:shell|omnishell|messages)\/)/.test(path)) {
         const out = new Response(req.method === 'HEAD' ? null : res.body, res)
         out.headers.set('cache-control', 'no-store')
         return out

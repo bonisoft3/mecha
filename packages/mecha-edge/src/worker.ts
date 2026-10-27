@@ -69,7 +69,9 @@ function marked(res: Response, state: string, browser = 'no-store'): Response {
 
 // A log read from its start is kept long by a browser and briefly by a shared
 // cache; any other read that is not live, a minute and five more stale.
-const electricCache = (p: URLSearchParams) => p.get('offset') === '-1'
+const electricCache = (p: URLSearchParams) => p.get('offset') === 'now' || p.get('log') === 'changes_only'
+  ? 'no-store'
+  : p.get('offset') === '-1'
   ? 'public, max-age=604800, s-maxage=3600, stale-while-revalidate=2629746'
   : 'public, max-age=60, stale-while-revalidate=300'
 
@@ -97,7 +99,9 @@ export const edgeWorker = {
     const cache = (caches as unknown as { default: Cache }).default
     if (path.startsWith('/import/')) {
       if (req.headers.get('authorization') !== `Bearer ${env.IMPORT_TOKEN}`) return json({ error: 'unauthorized' }, 401)
-      const res = await object().fetch(req)
+      const reqHeaders = new Headers(req.headers)
+      if (env.CF_VERSION_METADATA?.id) reqHeaders.set('x-expected-version', env.CF_VERSION_METADATA.id)
+      const res = await object().fetch(new Request(req, { headers: reqHeaders }))
       // A reset, or a migration that changed the schema, moves every key a
       // read of the old data was kept under.
       const moved = res.ok && (path === '/import/reset' || (path === '/import/migrate' && ((await res.clone().json()) as { applied: string[] }).applied.length > 0))

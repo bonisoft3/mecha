@@ -126,6 +126,14 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
 
     override async fetch(req: Request): Promise<Response> {
       const path = new URL(req.url).pathname
+      if (path.startsWith('/import/')) {
+        const expected = req.headers.get('x-expected-version')
+        const running = this.env.CF_VERSION_METADATA?.id
+        if (expected && running && expected !== running) {
+          setTimeout(() => this.ctx.abort(`outdated version ${running}; restarting on ${expected}`), 0)
+          return json({ outdated: true, running, expected }, 503)
+        }
+      }
       // The Worker checked the import's token: an object keeps the version,
       // and so the secrets, it started on while requests keep it awake.
       if (path === '/import/reset') await this.ctx.storage.deleteAlarm()
@@ -144,17 +152,18 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         if (req.method !== 'POST') return json({ error: 'migrate is a POST' }, 405)
         if (!this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
         const scripts = await req.json() as Script[]
-        const applied = await this.ctx.blockConcurrencyWhile(async (): Promise<string[] | NoLedger | ChangedScript | UnrunnableScript> => {
-          const { db } = await this.#boot()
-          try {
-            const names = await applyScripts(db, scripts, console.error)
+        const { db, cluster } = await this.#boot()
+        let applied: string[] | NoLedger | ChangedScript | UnrunnableScript
+        try {
+          applied = await cluster.serialize(async () => {
+            const names = await applyScripts(db, scripts)
             if (names.length) await db.exec('CHECKPOINT')
             return names
-          } catch (error) {
-            if (error instanceof NoLedger || error instanceof ChangedScript || error instanceof UnrunnableScript) return error
-            throw error
-          }
-        })
+          })
+        } catch (error) {
+          if (error instanceof NoLedger || error instanceof ChangedScript || error instanceof UnrunnableScript) applied = error
+          else throw error
+        }
         if (applied instanceof Error) return json({ error: applied.message }, 409)
         if (applied.length) setTimeout(() => this.ctx.abort('the data directory was migrated'), 0)
         return json({ applied })

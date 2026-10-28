@@ -81,6 +81,8 @@ package cluster
 // step's time and draw, and the event's payload fields. The event's kind and
 // tier are every rule's.
 #Reads: [...("actor" | "now" | "entropy" | =~"^payload\\.[a-z_][a-z0-9_]*$")]
+// What a database guard names its refusal.
+#Reason: =~"^[a-z][a-z0-9_]{0,63}$"
 
 #MachineSetup: {
 	types: {
@@ -102,7 +104,9 @@ package cluster
 	// the database is a precondition over the declared locks, naming the
 	// rules' guard it runs with, if any, and that guard's reads; an action
 	// implemented there is a list of relational effects run with the step.
-	guards: [string]: *close({reads: #Reads}) | close({rules?: string, reads?: #Reads, sql: string, reason: =~"^[a-z][a-z0-9_]{0,63}$"})
+	// A database guard may instead list checks, tried in order, the first not
+	// true refusing the event with its own reason.
+	guards: [string]: *close({reads: #Reads}) | close({rules?: string, reads?: #Reads, sql: string, reason: #Reason}) | close({rules?: string, reads?: #Reads, checks: [_, ...] & [...close({sql: string, reason: #Reason})]})
 	actions: [string]: close({reads: #Reads, writes: [...string]}) | [...{...}]
 	version: int & >0
 	fuel:    *10000 | (int & >0 & <=1000000)

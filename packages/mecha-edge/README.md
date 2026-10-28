@@ -110,8 +110,8 @@ past the row: there is no change-capture unit here, the row is in the
 database the sweep wrote it to, where a drain naming its table is owed and a
 machine's `fire` trigger takes the schedule and wakes the instance in that
 same transaction. Every request's
-transaction runs serializable, the level a machine's `serial()` demands: one
-connection, so the level costs no conflict.
+transaction runs read committed, the level a machine's `serial()` demands;
+machine steps hold their players' transaction advisory locks.
 
 Two clocks, as the ticker asks of every tier, and each tick's `caller` says
 which minted it:

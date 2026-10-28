@@ -50,6 +50,26 @@ async function evaluated(expression: string) {
 
 const copied = (state: Partial<State>) => exported(state, "surface.targets.database.dockerfile.copy[0].srcs");
 
+Deno.test("database guards accept a single refusal or ordered nonempty checks", async () => {
+  for (const guard of [
+    { sql: "true", reason: "busy" },
+    { checks: [{ sql: "true", reason: "guest" }, { sql: "false", reason: "busy" }] },
+  ]) {
+    const got = await evaluated(`#MachineSetup.guards & {admit: ${JSON.stringify(guard)}}`);
+    assert.equal(got.ok, true, got.stderr);
+    assert.deepEqual(got.value.admit, guard);
+  }
+  for (const guard of [
+    { checks: [] },
+    { checks: [{ sql: "true", reason: "Invalid" }] },
+    { checks: [{ sql: "true" }] },
+    { sql: "true", reason: "busy", checks: [{ sql: "false", reason: "guest" }] },
+  ]) {
+    const got = await evaluated(`#MachineSetup.guards & {admit: ${JSON.stringify(guard)}}`);
+    assert.equal(got.ok, false, JSON.stringify(guard));
+  }
+});
+
 Deno.test("a computation alone gets a durable CDC consumer without a clock", async () => {
   const got = await exported({
     computations: [{ name: "c", file: "c.js", to: ["sink"], wasm: [] }],

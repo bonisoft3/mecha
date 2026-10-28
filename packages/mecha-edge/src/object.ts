@@ -58,10 +58,11 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     #boot() {
       return this.#cluster ??= (async () => {
         const db = await this.#dir.open(assets)
-        // A machine's steps run serializable (its serial() refuses any other
-        // level): what the roles that drive a step default to on the
-        // container tier, this one connection defaults to for every request.
-        await db.exec(`SET default_transaction_isolation TO 'serializable'`)
+        // A machine's steps run read committed, ordered by the locks they hold
+        // on their players (its serial() refuses any other level): the
+        // container tier's default, which this one connection states for
+        // every request.
+        await db.exec(`SET default_transaction_isolation TO 'read committed'`)
         await installEngines(db, Object.keys(machines))
         const ticks = clockMode === 'ticker' && await hasSchedules(db)
         const cluster = await createEdgeCluster({

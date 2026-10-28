@@ -68,6 +68,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 #MachineTimersSql: _scheduleSql + "\n" + _machineTimersSql
 
 #ScheduleMigration: "800_schedule.sql"
+
 // Staged in the database image at 020 for compatibility with the published
 // bonitao/mecha-database:0.8.0 image, and placed in initdb at 800.
 #ScheduleStaged: "020_schedule.sql"
@@ -131,7 +132,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // language, each only where its declaration names it, as pronto endows an
 // omnishell module with Intl. services/compute/language.ts holds the same
 // list (ENDOWABLE), and cluster_test.ts holds them to each other.
-#CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams"]
+#CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio"]
 #CageEndowment:  or(#CageEndowments)
 
 // An environment variable's name: where a secret reaches the airlock.
@@ -142,30 +143,57 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // resolves inward at the address it connected (services/airlock/mail.ts).
 #ServerPattern: "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?:[0-9]{1,5}$"
 
-// A bridge: a container on the airlock's outbound network that takes HTTP
-// from its daprd and speaks another protocol to one declared server, its
-// `--allow-net` being that server and nothing else. `mail` is mecha's own,
-// services/airlock/mail.ts: SMTP, STARTTLS required unless the program says
-// the server is one it owns and runs in the clear.
-#Bridge: B={
+// An Airlock endpoint supplied by a container hatch. The role grants no
+// database credential or protocol-specific confinement.
+#Bridge: {
 	name:   =~#EffectName
-	kind:   "mail"
+	container: =~#EffectName
+	port:      *8080 | int & >=1 & <=65535
+}
+
+// Mecha's SMTP implementation, reusable as an ordinary container target.
+#MailContainer: M={
+	image:     #From
 	server: =~#ServerPattern
 	tls:    *"starttls" | "none"
-	// The right-hand side of every Message-ID the bridge sends.
 	domain: =~"^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?$"
-	// The environment variables holding the server's credentials, together
-	// or not at all.
 	user?:     =~#SecretName
 	password?: =~#SecretName
-	if B.user != _|_ {password: =~#SecretName}
-	if B.password != _|_ {user: =~#SecretName}
+	if M.user != _|_ {password: =~#SecretName}
+	if M.password != _|_ {user: =~#SecretName}
+	target: bayt.healthcheck.tcp & {
+		cmd: "builtin": null
+		activate: ""
+		healthcheck: {
+			port:           #BridgePort
+			interval:       "5s"
+			start_interval: "500ms"
+			start_period:   "30s"
+		}
+		dockerfile: {
+			from: (_from & {in: M.image}).out
+			workdir: "/app/airlock"
+			cmd: ["run", "--frozen", "--allow-net=0.0.0.0:\(#BridgePort),\(M.server)", "--allow-env=\(strings.Join(_bridgeEnv, ","))", "--allow-sys=hostname", "mail.ts"]
+		}
+		compose: {
+			environment: {
+				MAIL_SMTP:              M.server
+				MAIL_TLS:               M.tls
+				MAIL_MESSAGE_ID_DOMAIN: M.domain
+				if M.user != _|_ {
+					MAIL_USER:     "${\(M.user):?\(M.user) is required: mail container's user}"
+					MAIL_PASSWORD: "${\(M.password):?\(M.password) is required: mail container's password}"
+				}
+			}
+			restart: "on-failure"
+		}
+	}
 }
 
 // What the mail bridge may read of its environment.
 _bridgeEnv: ["MAIL_SMTP", "MAIL_TLS", "MAIL_MESSAGE_ID_DOMAIN", "MAIL_USER", "MAIL_PASSWORD", "ETHEREAL_API", "ETHEREAL_API_KEY", "ETHEREAL_CACHE", "ETHEREAL_WEB"]
 
-// The port every bridge serves its daprd on.
+// The mail container's HTTP port.
 #BridgePort: 8080
 
 // An external effect as the cluster places it: its name, the one origin it
@@ -260,6 +288,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// Timed machines share the ticker; their migrations install #MachineTimersSql.
 		timers: *[] | [...string]
 		if len(timers) > 0 {timerCheck: string & !=""}
+
 		// The external effects (services/airlock/README.md states the
 		// contract). One brings the airlock, the daprd it goes out through,
 		// the ticker and clock that wake it, and the tables they keep
@@ -269,8 +298,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// Current claim triggers are refreshed with the ledger in one transaction.
 		if len(effects) > 0 {effectInterpreters: string & !=""}
 
-		// The bridges those effects reach through, each placed as
-		// bridge-<name> (#Bridge).
+		// The container endpoints those effects reach through (#Bridge).
 		bridges: *[] | [...#Bridge]
 	}
 
@@ -292,6 +320,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		if auth {
 			server: true
 		}
+
 		// The providers a person may sign in through besides a passkey
 		// (services/auth/oidc.ts), each with the settings the program gives it.
 		// The deployment's OIDC_<NAME>_<SETTING> wins over each, so the program
@@ -319,6 +348,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		if capture {
 			server: true
 		}
+
 		// An effect runs from the database's queue and settles in its ledger.
 		if len(X.state.effects) > 0 {
 			server: true
@@ -365,7 +395,6 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		activate: ""
 	}
 
-
 	// What a service that reads the schema waits on: the database, and the
 	// migrations that carry it forward when there are any. A migration that
 	// fails therefore stops every reader from starting, rather than leaving
@@ -394,15 +423,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	_bridgeNames: [for b in X.state.bridges {b.name}]
 	_bridges: [for b in X.state.bridges {
 		name:   [if regexp.Match(#EffectName, b.name) {b.name}][0]
-		kind:   b.kind
-		server: [if regexp.Match(#ServerPattern, b.server) {b.server}][0]
-		tls:    b.tls
-		domain: b.domain
-		if b.user != _|_ {
-			user:     [if regexp.Match(#SecretName, b.user) {b.user}][0]
-			password: [if regexp.Match(#SecretName, b.password) {b.password}][0]
-		}
+		container: [if regexp.Match(#EffectName, b.container) {b.container}][0]
+		port: b.port
 	}]
+
 	// The secrets, each matched like the fields above. Read from the
 	// declaration, so a refused name fails the export instead of silently
 	// leaving the airlock without it.
@@ -429,11 +453,14 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 	let jwtSecret = "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
+
 	// The role's password and the userinfo of electric's DATABASE_URL at once,
 	// so it must need no percent-encoding.
 	let electricPassword = "${ELECTRIC_PASSWORD:-\(_devElectricPassword)}"
+
 	// PostgREST's, likewise.
 	let authenticatorPassword = "${AUTHENTICATOR_PASSWORD:-\(_devAuthenticatorPassword)}"
+
 	// The scheme and host a reader reaches the door at, stated by the
 	// deployment and never read off a request: the door answers any Host. Its
 	// default is the door's own name for a person's browser (the Caddyfile's)
@@ -483,6 +510,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				}
 			}
 		}
+
 		// The networks a consumer declares at the top of its compose model;
 		// the targets below join them by name.
 		if len(X.state.effects) > 0 {
@@ -741,6 +769,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						if !strings.HasPrefix(s.file, X.meta.runtime) if strings.HasSuffix(s.target, "/\(s.file)") {strings.TrimSuffix(s.target, s.file)},
 						"",
 					][0]}]
+
 					// Runs of consecutive statics under one root; any other static
 					// is a run of its own.
 					let _prev = list.Concat([[null], _under])
@@ -788,6 +817,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					if X.meta.door.host != _|_ {host: X.meta.door.host}
 				}
 				let validators = #"set -e -o pipefail; roots=$(caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\n' | grep -o '"root":"[^"]*"' | cut -d'"' -f4 | sort -u); if [ -n "$roots" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < "$f"); printf "$q%s$q" "${h%% *}" > "$f.etag"; done' sh '"' {} +; fi; "#
+
 				// An ORIGIN that is no origin stops the door as it starts: a
 				// template writes it into markup as it stands.
 				let admitted = #"case "${ORIGIN#http://}" in "$ORIGIN") h=${ORIGIN#https://};; *) h=${ORIGIN#http://};; esac; case "$h" in "$ORIGIN"|""|*[!A-Za-z0-9.:-]*) echo "ORIGIN '$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example" >&2; exit 1;; esac; "#
@@ -1003,6 +1033,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 				}
 			}
+
 			// The numeric stage: an app's computations, each reading the lake
 			// the service publishes from Postgres, writing back through crud
 			// as the service role, the path every pipeline writes by.
@@ -1010,6 +1041,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// Two computations may share a wasm module; it ships once.
 				let _wasm = [for w, _ in {for c in X.state.computations for w in c.wasm {(w): true}} {file: w, target: "/app/computations/\(path.Base(w, path.Unix))"}]
 				let _target = {for w in _wasm {(w.file): w.target}}
+
 				// Healthy once it serves: its port opens after the bootstrap run, and an
 				// invalidation refused while that runs would spend its retries.
 				compute: bayt.healthcheck.tcp & X._image & {
@@ -1062,6 +1094,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 				}
 			}
+
 			// A schedule, effect or machine timer requires a clock. A
 			// ticker with nothing to sweep is a container answering pokes nobody
 			// sends.
@@ -1108,6 +1141,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 				}
 			}
+
 			// Only an app that declares an effect gets an airlock, as only one
 			// that declares a schedule gets a ticker. The airlock reaches the
 			// database and its daprd (#AirlockNetworks); the daprd offers the
@@ -1187,7 +1221,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						entrypoint: ["/daprd", "--app-id", "airlock", "--dapr-listen-addresses", "0.0.0.0", "--resources-path", "/dapr/airlock", "--config", "/dapr/config.yaml", "--dapr-http-port", "3500", "--log-level", "info"]
 					}
 					compose: {
-						depends_on: {for b in X._reached {"bridge-\(b)": _started}}
+						depends_on: {for b in X._bridges if list.Contains(X._reached, b.name) {(b.container): _started}}
 						// What this daprd may reach, on the container where an operator
 						// looks (daprd reads neither): the declared origins and bridges.
 						environment: {
@@ -1199,41 +1233,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						develop: watch: [for e in X._effects {action: "sync+restart", path: "../\(e.endpoint)", target: "/dapr/airlock/\(e.name).yaml"}]
 					}
 				}
-				// Each bridge: mecha's mail bridge, a sink the cluster hosts, its net
-				// permission being its port and its one server, reached only by
-				// the airlock's daprd on `airlock-out`.
-				for b in X._bridges {
-					"bridge-\(b.name)": bayt.healthcheck.tcp & X._image & {
-						healthcheck: {
-							port:           #BridgePort
-							interval:       "5s"
-							start_interval: "500ms"
-							start_period:   "30s"
 						}
-						dockerfile: {
-							from: (_from & {in: X.meta.images.airlock}).out
-							workdir: "/app/airlock"
-							// Its own variables, the ETHEREAL_* nodemailer reads on import
-							// (unset here), the host name it greets the server with, and
-							// nothing to read.
-							cmd: ["run", "--frozen", "--allow-net=0.0.0.0:\(#BridgePort),\(b.server)", "--allow-env=\(strings.Join(_bridgeEnv, ","))", "--allow-sys=hostname", "mail.ts"]
-						}
-						compose: {
-							environment: {
-								MAIL_SMTP:              b.server
-								MAIL_TLS:               b.tls
-								MAIL_MESSAGE_ID_DOMAIN: b.domain
-								if b.user != _|_ {
-									MAIL_USER:     "${\(b.user):?\(b.user) is required: bridge \(b.name)'s user}"
-									MAIL_PASSWORD: "${\(b.password):?\(b.password) is required: bridge \(b.name)'s password}"
-								}
-							}
-							networks: ["airlock-out", "bridge-\(b.name)-egress"]
-							restart: "on-failure"
-						}
-					}
-				}
-			}
+
 			// The aggregate a consumer brings up: a container that does nothing
 			// but wait on everything else, so `up --wait launch` returns when
 			// the whole plane is healthy.
@@ -1268,6 +1269,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							"rclone-s3": _healthy
 							imgproxy:    _healthy
 						}
+
 						// A clock absent from here is a clock nothing starts. It
 						// pulls the ticker in behind it.
 						if X._wakes {
@@ -1431,25 +1433,34 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		}
 	}
 	_networks: N={
+		name: string
 		t: _
-		out: [if N.t.compose.networks != _|_ {N.t.compose.networks}, ["default"]][0]
+		_bridges: [for b in R.cluster.state.bridges if b.container == N.name {b}]
+		_base: [if N.t.compose.networks != _|_ {N.t.compose.networks}, if len(_bridges) > 0 {[]}, ["default"]][0]
+		out: [for nw, _ in {for n in list.Concat([_base, [if len(_bridges) > 0 {"airlock-out"}], [for b in _bridges {"bridge-\(b.name)-egress"}]]) {(n): true}} {nw}]
 	}
 	targets: {
+		for b in R.cluster.state.bridges {
+			let source = R._live[b.container].dockerfile.from
+			(b.container): dockerfile: from: [if source.name != _|_ {source}, if source.ref != _|_ {source}][0]
+		}
 		for n, t in R._live {
 			(n): {
 				for f, v in t if f != "compose" && f != "deps" {(f): v}
+
 				// What it waits on, and an image it copies from (a `from.ref`
 				// copy, which bayt does not read as a dependency).
 				deps: list.Concat([[for k, _ in (R._waits & {"t": t}).out {":\(k):outs"}], [if t.deps != _|_ for d in t.deps {d}]])
 				compose: {
 					for f, v in t.compose if f != "depends_on" && f != "networks" {(f): v}
 					depends_on: {for k, v in (R._waits & {"t": t}).out {("\(R.project)-\(k)"): v}}
-					networks: {for nw in (R._networks & {"t": t}).out {(nw): aliases: [n]}}
+					networks: {for nw in (R._networks & {name: n, "t": t}).out {(nw): aliases: [n]}}
 				}
 			}
 		}
 	}
 	_dangling: [
+		for b in R.cluster.state.bridges if !list.Contains([for m, _ in R._live {m}], b.container) {"bridge \(b.name) references missing container \(b.container)"},
 		for n, t in R._live for k, _ in (R._waits & {"t": t}).out
 		if !list.Contains([for m, _ in R._live {m}], k) {"\(n) waits on \(k)"},
 	]

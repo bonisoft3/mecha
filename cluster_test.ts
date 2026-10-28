@@ -10,7 +10,7 @@ import { ENDOWABLE } from "./services/compute/language.ts";
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
 type Effect = { name: string; origin?: string; bridge?: string; handler?: string; endpoint?: string; secrets?: string[] };
-type Bridge = { name: string; kind: string; server: string; tls?: string; domain: string; user?: string; password?: string };
+type Bridge = { name: string; container: string; port?: number };
 type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
@@ -338,46 +338,78 @@ Deno.test("a secret reaches the airlock as a required variable, with no default,
   }
 });
 
-const MAIL: Bridge = { name: "mail", kind: "mail", server: "smtp.mail.example:587", domain: "airlock.example" };
+const MAIL: Bridge = { name: "mail", container: "smtp" };
 const CONFIRM: Effect = { name: "confirm", bridge: "mail" };
+const mailConfig = { image: {name: "img"}, server: "smtp.mail.example:587", domain: "airlock.example" };
+const mailTarget = (config = mailConfig) => `(#MailContainer & ${JSON.stringify(config)}).target`;
+const withContainers = (state: Partial<State>, containers: string) => `(${cluster(state, {})} & {surface: targets: ${containers}})`;
+const runtimeWith = (state: Partial<State>, containers: string, field = "targets") =>
+  evaluated(`(#Runtime & {project: "p", cluster: ${withContainers(state, containers)}}).${field}`);
 
-Deno.test("a bridge an effect reaches goes out on a network of its own, its net permission its port and its one server", async () => {
-  const t = await targets({ effects: [PROBE, CONFIRM], bridges: [{ ...MAIL, user: "MAIL_USER_VAR", password: "MAIL_PASSWORD_VAR" }] });
-  const bridge = t["bridge-mail"];
-  assert.ok(bridge, "bridge-mail is placed");
+Deno.test("mail is an ordinary container serving an Airlock bridge", async () => {
+  const config = {...mailConfig, user: "MAIL_USER_VAR", password: "MAIL_PASSWORD_VAR"};
+  const got = await runtimeWith({effects: [PROBE, CONFIRM], bridges: [MAIL]}, `{smtp: ${mailTarget(config)}}`);
+  assert.equal(got.ok, true, got.stderr);
+  const t = got.value;
+  const bridge = t.smtp;
   assert.deepEqual(bridge.dockerfile.cmd, [
     "run", "--frozen", "--allow-net=0.0.0.0:8080,smtp.mail.example:587",
     "--allow-env=MAIL_SMTP,MAIL_TLS,MAIL_MESSAGE_ID_DOMAIN,MAIL_USER,MAIL_PASSWORD,ETHEREAL_API,ETHEREAL_API_KEY,ETHEREAL_CACHE,ETHEREAL_WEB",
     "--allow-sys=hostname", "mail.ts",
   ]);
-  assert.deepEqual(bridge.compose.networks, ["airlock-out", "bridge-mail-egress"]);
+  assert.deepEqual(bridge.compose.networks, {"airlock-out": {aliases: ["smtp"]}, "bridge-mail-egress": {aliases: ["smtp"]}});
   const networks = await exported({ effects: [PROBE, CONFIRM], bridges: [MAIL] }, "surface.networks");
   assert.deepEqual(networks.value["bridge-mail-egress"], {});
   assert.deepEqual(bridge.compose.environment, {
     MAIL_SMTP: "smtp.mail.example:587",
     MAIL_TLS: "starttls",
     MAIL_MESSAGE_ID_DOMAIN: "airlock.example",
-    MAIL_USER: "${MAIL_USER_VAR:?MAIL_USER_VAR is required: bridge mail's user}",
-    MAIL_PASSWORD: "${MAIL_PASSWORD_VAR:?MAIL_PASSWORD_VAR is required: bridge mail's password}",
+    MAIL_USER: "${MAIL_USER_VAR:?MAIL_USER_VAR is required: mail container's user}",
+    MAIL_PASSWORD: "${MAIL_PASSWORD_VAR:?MAIL_PASSWORD_VAR is required: mail container's password}",
   });
-  // daprd reaches the bridge by name, and waits for it.
-  assert.equal(t["airlock-mesh"].compose.environment?.AIRLOCK_BRIDGES, "mail");
-  assert.deepEqual(t["airlock-mesh"].compose.depends_on?.["bridge-mail"], { condition: "service_started" });
-  // A bridged effect adds no origin.
-  assert.equal(t["airlock-mesh"].compose.environment?.AIRLOCK_ORIGINS, "https://sink.example.test");
+  assert.equal(t["airlock-mesh"].compose.environment.AIRLOCK_BRIDGES, "mail");
+  assert.deepEqual(t["airlock-mesh"].compose.depends_on["p-smtp"], { condition: "service_started" });
+  assert.ok(t["airlock-mesh"].deps.includes(":smtp:outs"));
+  assert.equal(t["airlock-mesh"].compose.environment.AIRLOCK_ORIGINS, "https://sink.example.test");
 });
 
-Deno.test("a bridge is refused unless its server is a DNS name and port, its domain a DNS name, and its credentials come together", async () => {
-  for (const bridge of [
-    { ...MAIL, server: "smtp.mail.example" },
-    { ...MAIL, server: "database:5432" },
-    { ...MAIL, server: "10.0.0.1:25" },
-    { ...MAIL, domain: "airlock" },
-    { ...MAIL, tls: "implicit" },
-    { ...MAIL, user: "MAIL_USER_VAR" },
-    { ...MAIL, name: "Mail" },
+Deno.test("mail container retains its server, domain and paired credential validation", async () => {
+  for (const config of [
+    { ...mailConfig, server: "smtp.mail.example" },
+    { ...mailConfig, server: "database:5432" },
+    { ...mailConfig, server: "10.0.0.1:25" },
+    { ...mailConfig, domain: "airlock" },
+    { ...mailConfig, tls: "implicit" },
+    { ...mailConfig, user: "MAIL_USER_VAR" },
   ]) {
-    const got = await exported({ effects: [CONFIRM], bridges: [bridge] }, "surface.targets");
+    const got = await evaluated(mailTarget(config));
+    assert.equal(got.ok, false, JSON.stringify(config));
+  }
+});
+
+Deno.test("a custom acquisition container gets the bridge role without mail configuration or implicit database access", async () => {
+  const state = {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", port: 9090}]};
+  const got = await runtimeWith(state, `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture", cmd: ["crawl"]}, compose: environment: {CALLBACK_TOKEN: "restricted"}}}`);
+  assert.equal(got.ok, true, got.stderr);
+  assert.deepEqual(got.value.crawler.dockerfile.cmd, ["crawl"]);
+  assert.deepEqual(got.value.crawler.compose.environment, {CALLBACK_TOKEN: "restricted"});
+  assert.deepEqual(got.value.crawler.compose.networks, {"airlock-out": {aliases: ["crawler"]}, "bridge-crawl-egress": {aliases: ["crawler"]}});
+  assert.deepEqual(got.value["airlock-mesh"].compose.depends_on["p-crawler"], {condition: "service_started"});
+  const explicit = await runtimeWith(state, `{crawler: {dockerfile: from: name: "crawler", compose: networks: ["callbacks"]}}`);
+  assert.equal(explicit.ok, true, explicit.stderr);
+  assert.deepEqual(explicit.value.crawler.compose.networks.callbacks, {aliases: ["crawler"]});
+});
+
+Deno.test("a bridge cannot refer to an absent, removed or unbuilt container", async () => {
+  for (const containers of ["{}", "{smtp: null}", "{smtp: {compose: {}}}"]) {
+    const got = await runtimeWith({effects: [CONFIRM], bridges: [MAIL]}, containers);
+    assert.equal(got.ok, false, containers);
+  }
+});
+
+Deno.test("bridge references require DNS labels and a valid port", async () => {
+  for (const bridge of [{...MAIL, name: "Mail"}, {...MAIL, container: "bad/name"}, {...MAIL, port: 0}, {...MAIL, port: 65536}]) {
+    const got = await exported({effects: [CONFIRM], bridges: [bridge]}, "surface.targets");
     assert.equal(got.ok, false, JSON.stringify(bridge));
   }
 });

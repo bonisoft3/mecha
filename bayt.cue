@@ -246,7 +246,7 @@ _mecha: bayt.#project & _where & {
 		// running service reaches no extension host. Workers take no
 		// permissions of their own, an option Deno still calls unstable.
 		"compute-image": _image & {
-			let _files = ["deno.json", "deno.lock", "main.ts", "workers.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "endowments.ts", "language.ts", "job.ts", "wasi.ts", "install.ts"]
+			let _files = ["deno.json", "deno.lock", "main.ts", "workers.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "wasi.ts", "install.ts"]
 			srcs: globs: [for f in _files {"services/compute/\(f)"}]
 			dockerfile: {
 				from: name: _deno
@@ -266,7 +266,7 @@ _mecha: bayt.#project & _where & {
 		// imports sit at ../compute beside it, where the source names them.
 		"airlock-image": _image & {
 			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "inward.ts", "mail.ts", "dapr.yaml"]
-			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "endowments.ts", "language.ts", "workers.ts"]
+			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts"]
 			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
 			dockerfile: {
 				from: name: _deno

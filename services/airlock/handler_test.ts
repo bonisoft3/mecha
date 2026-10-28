@@ -215,3 +215,31 @@ Deno.test("the bindings transport sends the host's metadata last, so a credentia
     globalThis.fetch = fetched;
   }
 });
+
+Deno.test("a declared Cheerio endowment parses without opening another network door", async () => {
+	const path = await file(`export function issue(input) {
+    const $ = Cheerio.load(input.html);
+    return {done: {text: $('p').text(), loader: typeof Cheerio.fromURL}};
+  }`);
+	try {
+		const handler = await Handler.admit("parse", path, {
+			...idempotent,
+			endowments: ["Cheerio"],
+		});
+		const { transport, calls } = recording(() => {
+			throw new Error("unexpected network");
+		});
+		assertEquals(
+			await handler.call(
+				"issue",
+				{ html: "<p>Hello</p>" },
+				"parse:1",
+				transport,
+			),
+			{ done: { text: "Hello", loader: "undefined" } },
+		);
+		assertEquals(calls, []);
+	} finally {
+		await Deno.remove(path);
+	}
+});

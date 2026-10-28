@@ -79,9 +79,15 @@ _cluster: cluster.#Cluster & {
 			{name: "confirm", bridge: "mail", handler: "effects/confirm.js", endpoint: "dapr/confirm.yaml", secrets: ["CONFIRM_SIGNING_KEY"]},
 		]
 		effectInterpreters: ${JSON.stringify(interpreters.join("\n\n"))}
-		bridges: [{name: "mail", kind: "mail", server: "smtp.mailpit.test:1025", tls: "none", domain: "airlock.test"}]
+		bridges: [{name: "mail", container: "bridge-mail"}]
 	}
 	capabilities: auth: true
+	surface: targets: "bridge-mail": (cluster.#MailContainer & {
+		image: _cluster.meta.images.airlock
+		server: "smtp.mailpit.test:1025"
+		tls: "none"
+		domain: "airlock.test"
+	}).target
 }
 
 networks: _cluster.surface.networks
@@ -132,6 +138,8 @@ async function generate(dir: string) {
     ...MIGRATIONS.map((m): [string, string] => [m, `migrations/${m.split("/").pop()}`]),
   ];
   for (const [from, to] of copies) await Deno.copyFile(`${MECHA}/${from}`, `${dir}/${to}`);
+  // Caddy's startup hashes files under each declared root, including this fixture.
+  await Deno.writeTextFile(`${dir}/Caddyfile`, (await Deno.readTextFile(`${dir}/Caddyfile`)).replace(":8080 {", ":8080 {\n\troot * /usr/share/caddy"));
   await Deno.writeTextFile(`${dir}/bayt.cue`, BAYT_CUE);
   const networks = JSON.parse(await must(run("cue", ["export", ".", "-e", "networks", "--out", "json"], { cwd: dir }), "cue export networks"));
   await Deno.writeTextFile(`${dir}/compose.networks.yaml`, JSON.stringify({ networks }));

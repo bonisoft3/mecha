@@ -16,7 +16,7 @@ export const LANGUAGE: ReadonlySet<string> = new Set([
 // declaration names it, as pronto endows an omnishell module with Intl. The
 // values are endowments.ts's; a name here a module did not declare reads as a
 // refusal, not as undefined.
-export const ENDOWABLE: ReadonlySet<string> = new Set(["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams"]);
+export const ENDOWABLE: ReadonlySet<string> = new Set(["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio"]);
 
 /** `names` checked as endowments a module may declare. */
 export function endowable(names: unknown, who: string): string[] {

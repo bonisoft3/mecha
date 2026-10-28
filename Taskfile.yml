@@ -109,6 +109,7 @@ tasks:
       - "../compute/realm.ts"
       - "../compute/compartment.ts"
       - "../compute/crypto.ts"
+      - "../compute/cheerio.ts"
       - "../compute/endowments.ts"
       - "../compute/language.ts"
       - "../compute/workers.ts"

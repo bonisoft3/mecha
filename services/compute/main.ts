@@ -38,7 +38,7 @@
 //   - and past it, only what the computation declares in `endowments`
 //     (language.ts's ENDOWABLE): Crypto, WebCrypto's operations that are
 //     deterministic by their specification (crypto.ts), TextEncoder,
-//     TextDecoder, URL and URLSearchParams. One used undeclared throws.
+//     TextDecoder, URL, URLSearchParams and Cheerio. One used undeclared throws.
 //
 // The service loads every computation at startup and dies on one it refuses;
 // admit.ts loads them as it does, for a lint to refuse them first.

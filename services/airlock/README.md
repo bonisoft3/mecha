@@ -146,15 +146,15 @@ ceiling, so the queue never refuses a run the ledger still counts.
 
 A cluster places the airlock only where the program declares an effect
 (`state.effects` in [cluster.cue](../../cluster.cue)), as it places the ticker
-only where one declares a schedule. It brings two services, a bridge per
-declared bridge, the ticker and clock, two initdb steps, and crud verifying
+only where one declares a schedule. It brings two services, the ticker and
+clock, two initdb steps, and crud verifying
 the service token the ticker writes with:
 
 | | |
 |---|---|
 | `airlock` | This service, FROM mecha's `airlock-image`, with the program's `effects.json` and handlers copied to `/airlock` and watched. Its own `--allow-net` is the database, its daprd and port 9997, the healthcheck's and the ticker's wake (`GET /healthz`). |
 | `airlock-mesh` | Its daprd, holding one HTTP output binding per effect and nothing else: no Redis component and no resiliency policy, so a call is made once and `entered` counts every attempt. It runs under [dapr.yaml](dapr.yaml), the bindings API alone over HTTP and gRPC, and goes out on `airlock-egress`, a network nothing else joins. |
-| `bridge-<name>` | One per declared bridge (`state.bridges`): [mail.ts](mail.ts), mecha's mail bridge, taking HTTP from the daprd on `airlock-out` and speaking SMTP to its one declared server. Its `--allow-net` is its port and that server; its environment is the server, `tls` and the `Message-ID` domain, and the credentials' variables where declared. The daprd reaches it by name in plain HTTP, its effect's binding `url` being `http://bridge-<name>:8080`. |
+| Bridge container | `state.bridges` names an existing container target and its HTTP port (default 8080). The daprd waits on that target and calls `http://<container>:<port>`. Runtime lowering attaches the target to `airlock-out` and `bridge-<name>-egress`; it grants no default network, database credential or callback permission. |
 | `011_graphile_worker.sql`, `012_airlock.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`, staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its interpreter re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
 
 **The wall is the allowlist.** The airlock stands on the internal `airlock`
@@ -176,14 +176,22 @@ pronto's record states. bayt writes no network, so a consumer
 declares the cluster's `surface.networks` in its compose model; pronto writes
 them to `compose.networks.yaml`, which every closure and the root include.
 
-**A bridge carries its own wall.** It stands on the internal `airlock-out`,
-where only the airlock's daprd reaches it, and goes out on
-`bridge-<name>-egress`, which nothing else joins, and it reaches out only as
-far as its process's `--allow-net`: its port and its
-declared server. It checks the address it connected before a byte crosses and
-refuses an inward one, and the server must be spelt as a DNS name of two labels
-or more and a port. Past it, as past any sink, nothing is the platform's to
-promise.
+**A bridge is a container role.** The application supplies the target through
+its container hatch. The role adds the internal `airlock-out` network shared
+with the daprd and other bridges, plus `bridge-<name>-egress`. An explicitly
+configured hatch network is preserved; an undeclared default network is not
+added. The role does not confine the process or enforce its outbound domains.
+A missing, removed or unbuilt target fails runtime lowering.
+
+Mecha's `#MailContainer` supplies the existing SMTP implementation as a reusable
+target. Its `image` is the pinned Airlock image (or build reference), followed
+by `server`, `tls`, `domain` and optional paired `user`/`password` environment
+variable names. Install its `target` under the container hatch's name and point
+the bridge at that name, port 8080. Its Deno permissions still admit only its
+HTTP listener and declared SMTP server, and it refuses an inward connected
+address before sending mail. Those are the mail implementation's guarantees,
+not guarantees granted to arbitrary bridges. Past a bridge, as past any sink,
+nothing is the platform's to promise.
 
 **The wake is the ticker's.** Inside a running cluster the airlock is
 reactive: it hears every enqueue at its commit. For a cluster scaled to zero,

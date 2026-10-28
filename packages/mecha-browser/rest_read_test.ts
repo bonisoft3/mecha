@@ -322,3 +322,49 @@ Deno.test('PostgREST browser view reads discover invoker to-one computed relatio
     await db.close()
   }
 })
+
+Deno.test('RealWorld reverse inner embeds and plain full-text search honor RLS', async () => {
+  const db = await PGlite.create()
+  try {
+    await db.exec(`
+      CREATE ROLE reader NOLOGIN;
+      CREATE TABLE app_user (id int PRIMARY KEY, handle text, display_name text, image_url text);
+      CREATE TABLE article (id int PRIMARY KEY, author_id int REFERENCES app_user, title text, search tsvector, created_at int);
+      CREATE TABLE follow (id int PRIMARY KEY, follower_id int REFERENCES app_user, followed_id int REFERENCES app_user, visible boolean);
+      CREATE TABLE article_tag (id int PRIMARY KEY, article_id int REFERENCES article, tag text, visible boolean);
+      INSERT INTO app_user VALUES (1, 'one', 'One', NULL), (2, 'two', 'Two', NULL), (3, 'reader', 'Reader', NULL);
+      INSERT INTO article VALUES (10, 1, 'River light', to_tsvector('simple', 'River light'), 2), (20, 2, 'Mountain light', to_tsvector('simple', 'Mountain light'), 1);
+      INSERT INTO follow VALUES (1, 3, 1, true), (2, 3, 2, false);
+      INSERT INTO article_tag VALUES (1, 10, 'travel', true), (2, 10, 'river', true), (3, 20, 'travel', false);
+      ALTER TABLE follow ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE article_tag ENABLE ROW LEVEL SECURITY;
+      CREATE POLICY follow_visible ON follow FOR SELECT USING (visible);
+      CREATE POLICY tag_visible ON article_tag FOR SELECT USING (visible);
+      GRANT USAGE ON SCHEMA public TO reader;
+      GRANT SELECT ON ALL TABLES IN SCHEMA public TO reader;
+    `)
+    const handler = createRestHandler(db, { role: 'reader', scopes: () => [] })
+    const request = async (query: string) => {
+      const res = await handler(new Request(`http://localhost/article?${query}`))
+      const body = await res.json()
+      assert.equal(res.status, 200, JSON.stringify(body))
+      return body
+    }
+    const feed = await request('select=*,author:app_user!inner(handle,display_name,image_url,follow!followed_id!inner(follower_id))&order=created_at.desc,id.desc&limit=20')
+    assert.equal(feed.length, 1)
+    assert.equal(feed[0].id, 10)
+    assert.deepEqual(feed[0].author.follow, [{ follower_id: 3 }])
+    const left = await request('select=id,author:app_user(handle,follow!followed_id(follower_id))&order=id.asc')
+    assert.deepEqual(left[1].author.follow, [])
+    const ambiguous = await handler(new Request('http://localhost/app_user?select=id,follow(id)'))
+    assert.equal(ambiguous.status, 400)
+    assert.match(JSON.stringify(await ambiguous.json()), /Ambiguous/)
+    const tag = await request('select=*,author:app_user(handle,display_name,image_url),article_tag!inner(tag)&order=created_at.desc&article_tag.tag=eq.travel&limit=20')
+    assert.equal(tag.length, 1)
+    assert.equal(tag[0].id, 10)
+    assert.deepEqual(tag[0].article_tag, [{ tag: 'travel' }])
+    const search = await request('select=*,author:app_user(handle,display_name,image_url)&order=created_at.desc&search=plfts(simple).river&limit=20')
+    assert.deepEqual(search.map((r: { id: number }) => r.id), [10])
+    assert.deepEqual(await request('select=id&search=plfts(simple).' + encodeURIComponent("river' OR true --")), [])
+  } finally { await db.close() }
+})

@@ -19,7 +19,7 @@ interface Selection {
 }
 
 interface ForeignKey {
-  kind: 'foreign-key'
+  kind: 'foreign-key' | 'reverse-key'
   name: string
   target: string
   columns: string[]
@@ -121,6 +121,20 @@ async function queryRelations(db: Queryable, table: string, refs: Record<string,
      WHERE c.contype = 'f' AND source_ns.nspname = 'public' AND target_ns.nspname = 'public' AND source.relname = $1
      GROUP BY c.oid, c.conname, target.relname${declaredSql}
     UNION ALL
+    SELECT 'reverse-key' AS kind, c.conname AS name, child.relname AS target,
+           array_agg(parent_col.attname::text ORDER BY cols.ordinality) AS columns,
+           array_agg(child_col.attname::text ORDER BY cols.ordinality) AS referenced
+      FROM pg_catalog.pg_constraint c
+      JOIN pg_catalog.pg_class child ON child.oid = c.conrelid
+      JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child.relnamespace
+      JOIN pg_catalog.pg_class parent ON parent.oid = c.confrelid
+      JOIN pg_catalog.pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+      CROSS JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS cols(child_num, parent_num, ordinality)
+      JOIN pg_catalog.pg_attribute child_col ON child_col.attrelid = child.oid AND child_col.attnum = cols.child_num
+      JOIN pg_catalog.pg_attribute parent_col ON parent_col.attrelid = parent.oid AND parent_col.attnum = cols.parent_num
+     WHERE c.contype = 'f' AND child_ns.nspname = 'public' AND parent_ns.nspname = 'public' AND parent.relname = $1
+     GROUP BY c.oid, c.conname, child.relname
+    UNION ALL
     SELECT 'computed' AS kind, p.proname AS name, target.relname AS target,
            NULL::text[] AS columns, NULL::text[] AS referenced
       FROM pg_catalog.pg_proc p
@@ -141,9 +155,10 @@ async function queryRelations(db: Queryable, table: string, refs: Record<string,
 function matchRelation(relations: Relation[], selection: Selection): Relation[] {
   const computed = relations.filter((relation) => relation.kind === 'computed' && relation.name === selection.name && !selection.hint)
   return computed.length ? computed : relations.filter((fk) => {
-    if (fk.kind !== 'foreign-key') return false
-    const matches = fk.target === selection.name || fk.name === selection.name || (fk.columns.length === 1 && fk.columns[0] === selection.name)
-    return matches && (!selection.hint || fk.name === selection.hint || (fk.columns.length === 1 && fk.columns[0] === selection.hint))
+    if (fk.kind === 'computed') return false
+    const hintColumns = fk.kind === 'reverse-key' ? fk.referenced : fk.columns
+    const matches = fk.target === selection.name || fk.name === selection.name || (fk.kind === 'foreign-key' && fk.columns.length === 1 && fk.columns[0] === selection.name)
+    return matches && (!selection.hint || fk.name === selection.hint || (hintColumns.length === 1 && hintColumns[0] === selection.hint))
   })
 }
 
@@ -157,6 +172,7 @@ interface Node {
 
 type Comparison = {
   column: string
+  config?: string
   operator: string
   value: string
   negate: boolean
@@ -259,11 +275,13 @@ function parseFilter(column: string, raw: string): Comparison {
   const negate = raw.startsWith('not.')
   const expression = negate ? raw.slice(4) : raw
   const dot = expression.indexOf('.')
-  const operator = expression.slice(0, dot)
-  if (dot < 0 || !(Object.hasOwn(operators, operator) || operator === 'is' || operator === 'in')) {
+  const token = expression.slice(0, dot)
+  const textSearch = /^plfts(?:\(([A-Za-z_][A-Za-z0-9_]*)\))?$/.exec(token)
+  const operator = textSearch ? 'plfts' : token
+  if (dot < 0 || !(Object.hasOwn(operators, operator) || operator === 'is' || operator === 'in' || operator === 'plfts')) {
     throw new ReadQueryError(`Unsupported filter: ${column}=${raw}`)
   }
-  return { column, operator, value: expression.slice(dot + 1), negate }
+  return { column, operator, value: expression.slice(dot + 1), negate, ...(textSearch?.[1] ? { config: textSearch[1] } : {}) }
 }
 
 function filterSql(filter: Filter, qualify: (column: string) => string, params: unknown[]): string {
@@ -277,6 +295,10 @@ function filterSql(filter: Filter, qualify: (column: string) => string, params: 
   if (filter.operator === 'is') {
     if (!/^(null|true|false|unknown)$/i.test(filter.value)) throw new ReadQueryError(`Invalid is value: ${filter.value}`)
     sql = `${column} IS ${filter.value.toUpperCase()}`
+  } else if (filter.operator === 'plfts') {
+    sql = filter.config
+      ? `${column} @@ plainto_tsquery(${bind(filter.config)}::regconfig, ${bind(filter.value)})`
+      : `${column} @@ plainto_tsquery(${bind(filter.value)})`
   } else if (filter.operator === 'in') {
     if (!filter.value.startsWith('(') || !filter.value.endsWith(')')) throw new ReadQueryError('in requires a parenthesized list')
     const raw = filter.value.slice(1, -1)
@@ -389,7 +411,7 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
       if (child) {
         const nested = compile(child.node)
         const relation = child.relation
-        const join = relation.kind === 'foreign-key'
+        const join = relation.kind !== 'computed'
           ? relation.columns.map((col, i) => `${quote(child.node.alias)}.${quote(relation.referenced[i])} = ${quote(node.alias)}.${quote(col)}`)
           : []
         const source = relation.kind === 'computed'
@@ -397,7 +419,9 @@ export async function planRead(db: Queryable, table: string, search: URLSearchPa
           : `public.${quote(child.node.table)}`
         const predicates = [...join, ...nested.conditions]
         const from = `FROM ${source} AS ${quote(child.node.alias)}${predicates.length ? ` WHERE ${predicates.join(' AND ')}` : ''}`
-        value = `(SELECT ${nested.json} ${from})`
+        value = relation.kind === 'reverse-key'
+          ? `(SELECT coalesce(jsonb_agg(${nested.json}), '[]'::jsonb) ${from})`
+          : `(SELECT ${nested.json} ${from})`
         if (child.inner) conditions.push(`EXISTS (SELECT 1 ${from})`)
       } else if (selection.aggregate) {
         const column = selection.name === '*' ? '*' : `${quote(node.alias)}.${quote(selection.name)}`

@@ -31,6 +31,10 @@ import (
 _electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
 _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 _cdcTrace:      _ @embed(file="services/transform/cdc-trace.yaml", type=text)
+_bifrostTs:     _ @embed(file="services/airlock/bifrost.ts", type=text)
+_whiteBackgroundTs: _ @embed(file="services/airlock/white-background.ts", type=text)
+_airlockPackage: _ @embed(file="services/airlock/package.json", type=text)
+_airlockLock: _ @embed(file="services/airlock/deno.lock", type=text)
 
 // Where postgres applies what an image carries, in name order, on a fresh data
 // directory.
@@ -103,18 +107,29 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 #GraphileMigration: "011_graphile_worker.sql"
 #AirlockMigration:  "012_airlock.sql"
 
-#AirlockUpgradeSql: """
-	SET LOCAL lock_timeout = '5s';
-	SET LOCAL statement_timeout = '60s';
-	LOCK TABLE airlock.external_effect_ledger IN ACCESS EXCLUSIVE MODE;
-	DO $upgrade$
-	BEGIN
-	  IF EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'airlock' AND table_name = 'external_effect_ledger' AND column_name = 'request') THEN
-	    ALTER TABLE airlock.external_effect_ledger RENAME COLUMN request TO input;
-	  END IF;
-	  PERFORM input FROM airlock.external_effect_ledger LIMIT 0;
-	END $upgrade$;
-	"""
+#PostgresLiteral: {
+	text: string
+	sql:  "E'\(strings.Replace(strings.Replace(text, "\\", "\\\\", -1), "'", "''", -1))'"
+}
+
+#AirlockUpgradeSql: {
+	interpreters: string
+	_body:        """
+		BEGIN
+		  IF EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'airlock' AND table_name = 'external_effect_ledger' AND column_name = 'request') THEN
+		    ALTER TABLE airlock.external_effect_ledger RENAME COLUMN request TO input;
+		    EXECUTE \((#PostgresLiteral & {text: interpreters}).sql);
+		  END IF;
+		  PERFORM input FROM airlock.external_effect_ledger LIMIT 0;
+		END
+		"""
+	sql:          """
+		SET LOCAL lock_timeout = '5s';
+		SET LOCAL statement_timeout = '60s';
+		LOCK TABLE airlock.external_effect_ledger IN ACCESS EXCLUSIVE MODE;
+		DO \((#PostgresLiteral & {text: _body}).sql);
+		"""
+}
 
 // What a sink may be: an https origin whose host is a DNS name of at least
 // two labels, the last opening with a letter. This is spelling only: a
@@ -196,12 +211,44 @@ _bridgeEnv: ["MAIL_SMTP", "MAIL_TLS", "MAIL_MESSAGE_ID_DOMAIN", "MAIL_USER", "MA
 // The mail container's HTTP port.
 #BridgePort: 8080
 
+// The port mecha's AI gateway (services/airlock/bifrost.ts) serves its daprd on.
+#BifrostPort: 8090
+
+#AiModality:    "text" | "image"
+#AiTier:        "browser" | "cheap" | "heavy"
+#AiBackendTier: "cheap" | "heavy"
+#AiTarget:      "browser" | "pages" | "docker" | "local" | "cloudflare" | "gcp" | "k8s" | "aws"
+#AiProvider:    "browser" | "ollama" | "sdcpp" | "cloudflare" | "google" | "openai"
+
+#AiModelSpec: {
+	provider?: #AiProvider
+	model:     string & !=""
+	endpoint?: string & !=""
+	size?:     =~"^[0-9]+x[0-9]+$"
+	steps?:    int & >=1 & <=64
+	dtype?:    string & !=""
+	device?:   "webgpu" | "wasm" | "auto"
+	fallback?: string & !=""
+}
+
+#AiTierOverrides: {
+	text?:  [("browser" | "cheap" | "heavy")]: #AiModelSpec | (string & !="")
+	image?: [("browser" | "cheap" | "heavy")]: #AiModelSpec | (string & !="")
+}
+
+#AiCapability: {
+	text?:   [...#AiTier]
+	image?:  [...#AiTier]
+	models?: #AiTierOverrides
+	targets?: [("browser" | "pages" | "docker" | "local" | "cloudflare" | "gcp" | "k8s" | "aws")]: #AiTierOverrides
+}
+
 // An external effect as the cluster places it: its name, the one origin it
-// may reach or the bridge it reaches through, and where the app keeps its
-// handler and its binding.
+// may reach, the bridge it reaches through, or the AI modality/tier it routes
+// through bifrost, and where the app keeps its handler and its binding.
 #Effect: E={
 	name: =~#EffectName
-	{origin: #Origin} | {bridge: =~#EffectName}
+	{origin: #Origin} | {bridge: =~#EffectName} | {ai: #AiModality, tier: *"cheap" | #AiBackendTier}
 	handler:  *"effects/\(E.name).js" | string
 	endpoint: *"services/airlock/dapr/\(E.name).yaml" | string
 	// The environment variables whose values the handler is handed.
@@ -358,6 +405,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// mecha-objects, no auth keys — dev posture) and imgproxy, behind the
 		// caddy /blobs and /img routes.
 		blobs: *false | bool
+
+		// The AI plane: tiered model routing across browser worker, cheap
+		// backend, and heavy backend tiers via mecha's bifrost AI gateway.
+		ai?: #AiCapability
 	}
 	// A migration given to a cluster with no database is one nothing applies.
 	if !X.capabilities.server {
@@ -420,6 +471,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// one declared fails the export rather than dropping out of a list.
 	_origins: [for e in X.state.effects if e.origin != _|_ {[if regexp.Match(#OriginPattern, e.origin) {e.origin}][0]}]
 	_reached: [for e in X.state.effects if e.bridge != _|_ {[if list.Contains(_bridgeNames, e.bridge) {e.bridge}][0]}]
+	_aiEffects: [for e in X.state.effects if e.ai != _|_ {{
+		modality: [if regexp.Match("^(text|image)$", e.ai) {e.ai}][0]
+		tier:     [if regexp.Match("^(cheap|heavy)$", e.tier) {e.tier}][0]
+	}}]
+	_aiOn: len(_aiEffects) > 0 || X.capabilities.ai != _|_
 	_bridgeNames: [for b in X.state.bridges {b.name}]
 	_bridges: [for b in X.state.bridges {
 		name:   [if regexp.Match(#EffectName, b.name) {b.name}][0]
@@ -602,7 +658,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							}]
 						}
 						compose: {
-							depends_on: database: _healthy
+							depends_on: {
+								database: _healthy
+								if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
+							}
 							environment: {
 								DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
 								// The schedule step is initdb's alone, so a volume older
@@ -618,12 +677,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							from: (_from & {in: X.meta.images.database}).out
 							entrypoint: ["psql"]
 							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/airlock-upgrade.sql"]
-							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\(#AirlockUpgradeSql)\n\(X.state.effectInterpreters)\nAIRLOCK"]
+							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\((#AirlockUpgradeSql & {interpreters: X.state.effectInterpreters}).sql)\nAIRLOCK"]
 						}
 						compose: {
 							depends_on: {
 								database: _healthy
-								if len(X.state.pgroll) > 0 {migrate: _completed}
 							}
 							environment: {
 								PGHOST:     "database"
@@ -813,17 +871,19 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// runs on a laptop (docs/proxy.md).
 				expose: door: {
 					port: X.meta.door.port
+					udp:  true
 					publish: environment: X.meta.door.env
 					if X.meta.door.host != _|_ {host: X.meta.door.host}
 				}
-				let validators = #"set -e -o pipefail; roots=$(caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\n' | grep -o '"root":"[^"]*"' | cut -d'"' -f4 | sort -u); if [ -n "$roots" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < "$f"); printf "$q%s$q" "${h%% *}" > "$f.etag"; done' sh '"' {} +; fi; "#
+				let validators = #"set -e -o pipefail; roots=$(caddy adapt --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\n' | grep -o '"root":"[^"]*"' | cut -d'"' -f4 | sort -u); if [ -n "$roots" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < "$f"); printf "$q%s$q" "${h%% *}" > "$f.etag"; done' sh '"' {} +; fi; "#
 
 				// An ORIGIN that is no origin stops the door as it starts: a
 				// template writes it into markup as it stands.
 				let admitted = #"case "${ORIGIN#http://}" in "$ORIGIN") h=${ORIGIN#https://};; *) h=${ORIGIN#http://};; esac; case "$h" in "$ORIGIN"|""|*[!A-Za-z0-9.:-]*) echo "ORIGIN '$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example" >&2; exit 1;; esac; "#
-				let scripts = [if X.meta.served != _|_ {"PRONTO_RELEASE_SCRIPTS=$(cat /etc/caddy/release-scripts 2>/dev/null || true); export PRONTO_RELEASE_SCRIPTS; "}, ""][0]
+				let scripts = [if X.meta.served != _|_ {"PRONTO_RELEASE_SCRIPTS=$(cat /etc/caddy/release-scripts 2>/dev/null || true); export PRONTO_RELEASE_SCRIPTS; printf 'PRONTO_RELEASE_SCRIPTS=%s\\n' \"$PRONTO_RELEASE_SCRIPTS\" >> /etc/caddy/env; "}, ""][0]
+				let tlsEnv = #": > /etc/caddy/env; case "$h" in *:*) _p=${h##*:};; *) _p=8443;; esac; export CADDY_TLS_HOST_PORT="${CADDY_TLS_HOST_PORT:-$_p}"; printf 'CADDY_TLS_HOST_PORT=%s\n' "$CADDY_TLS_HOST_PORT" >> /etc/caddy/env; if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; printf 'CADDY_TLS=%s\n' "$CADDY_TLS" >> /etc/caddy/env; fi; "#
 				entrypoint: {
-					do: "\(admitted)\(validators)\(scripts)if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; fi; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
+					do: "\(admitted)\(tlsEnv)\(scripts)\(validators)exec caddy run --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile"
 					shell: "sh"
 					env:   compose.environment
 					if X.capabilities.server {
@@ -1221,16 +1281,64 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						entrypoint: ["/daprd", "--app-id", "airlock", "--dapr-listen-addresses", "0.0.0.0", "--resources-path", "/dapr/airlock", "--config", "/dapr/config.yaml", "--dapr-http-port", "3500", "--log-level", "info"]
 					}
 					compose: {
-						depends_on: {for b in X._bridges if list.Contains(X._reached, b.name) {(b.container): _started}}
+						depends_on: {
+							for b in X._bridges if list.Contains(X._reached, b.name) {(b.container): _started}
+							if X._aiOn {bifrost: _started}
+						}
 						// What this daprd may reach, on the container where an operator
 						// looks (daprd reads neither): the declared origins and bridges.
 						environment: {
 							AIRLOCK_ORIGINS: strings.Join(X._origins, " ")
-							AIRLOCK_BRIDGES: strings.Join([for b in X._bridges {b.name}], " ")
+							AIRLOCK_BRIDGES: strings.Join(list.Concat([[for b in X._bridges {b.name}], [if X._aiOn {"bifrost"}]]), " ")
 						}
 						networks: ["airlock", "airlock-out", "airlock-egress"]
 						restart: "on-failure"
 						develop: watch: [for e in X._effects {action: "sync+restart", path: "../\(e.endpoint)", target: "/dapr/airlock/\(e.name).yaml"}]
+					}
+				}
+				// Mecha's AI gateway (services/airlock/bifrost.ts): normalizes
+				// OpenAI-compatible /v1/chat/completions and /v1/images/generations
+				// calls from the airlock's daprd across release-target providers
+				// (Ollama, sd.cpp, Cloudflare Workers AI, Google Gemini/Imagen) and
+				// model tiers (`cheap`, `heavy`).
+				if X._aiOn {
+					bifrost: bayt.healthcheck.tcp & X._image & {
+						healthcheck: {
+							port:           #BifrostPort
+							interval:       "5s"
+							start_interval: "500ms"
+							start_period:   "30s"
+						}
+						dockerfile: {
+							from: (_from & {in: X.meta.images.airlock}).out
+							workdir: "/app/airlock"
+							preamble: [
+								"COPY <<'BIFROST' /app/airlock/bifrost.ts\n\(_bifrostTs)\nBIFROST",
+								"COPY <<'WHITE_BACKGROUND' /app/airlock/white-background.ts\n\(_whiteBackgroundTs)\nWHITE_BACKGROUND",
+								"COPY <<'PACKAGE' /app/airlock/package.json\n\(_airlockPackage)\nPACKAGE",
+								"COPY <<'LOCK' /app/airlock/deno.lock\n\(_airlockLock)\nLOCK",
+								"RUN deno cache --frozen --node-modules-dir=auto bifrost.ts",
+							]
+							cmd: ["run", "--allow-net", "--allow-env", "/app/airlock/bifrost.ts"]
+						}
+						compose: {
+							environment: {
+								BIFROST_PORT:         "\(#BifrostPort)"
+								AI_TARGET:            "${AI_TARGET:-${SAYT_PLATFORM:-docker}}"
+								AI_LOCAL_OLLAMA_HOST: "${AI_LOCAL_OLLAMA_HOST:-http://host.docker.internal:11434}"
+								AI_LOCAL_SDCPP_HOST:  "${AI_LOCAL_SDCPP_HOST:-http://host.docker.internal:8000}"
+								CF_ACCOUNT_ID:        "${CF_ACCOUNT_ID:-}"
+								CF_API_TOKEN:         "${CF_API_TOKEN:-}"
+								GEMINI_API_KEY:       "${GEMINI_API_KEY:-}"
+								GOOGLE_API_KEY:       "${GOOGLE_API_KEY:-}"
+								OPENAI_API_KEY:       "${OPENAI_API_KEY:-}"
+								if X.capabilities.ai != _|_ {
+									AI_MODELS: json.Marshal(X.capabilities.ai)
+								}
+							}
+							networks: ["airlock-out", "default", "airlock-egress"]
+							restart: "on-failure"
+						}
 					}
 				}
 						}

@@ -18,6 +18,7 @@ const wrangler = `${await output('mise', ['where', 'npm:wrangler'])}/node_module
 // the ticker's node_modules (services/ticker/deno.json): wrangler's bundler
 // resolves no npm: specifier, and the release's edge.ts installs it the same way.
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/ticker/deno.json`])
+await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/airlock/deno.json`])
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../mecha-edge/deno.json`])
 
 function freePort(): number {
@@ -46,6 +47,14 @@ export async function startWorker(config: URL, state: string): Promise<Worker> {
   const port = freePort()
   const log = `${state}.log`
   let child: Deno.ChildProcess
+  const terminate = async () => {
+    const tree = [child.pid, ...(await descendants(child.pid))]
+    for (const pid of tree.reverse()) {
+      try { Deno.kill(pid, 'SIGKILL') } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e }
+    }
+    await child.status
+    return tree
+  }
   const start = async () => {
     const out = await Deno.open(log, { write: true, create: true, truncate: true })
     const err = await Deno.open(`${log}.err`, { write: true, create: true, truncate: true })
@@ -55,9 +64,16 @@ export async function startWorker(config: URL, state: string): Promise<Worker> {
       stdout: 'piped',
       stderr: 'piped',
     }).spawn()
-    child.stderr.pipeTo(err.writable)
+    const stderrLog = child.stderr.pipeTo(err.writable)
     const [watch, keep] = child.stdout.tee()
-    keep.pipeTo(out.writable)
+    const stdoutLog = keep.pipeTo(out.writable)
+    const logs = async () => {
+      await child.status
+      await Promise.race([Promise.all([stdoutLog, stderrLog]), delay(1_000)])
+      const [stdout, stderr] = await Promise.all([Deno.readTextFile(log), Deno.readTextFile(`${log}.err`)])
+      const tail = (text: string) => text.length > 16_000 ? text.slice(-16_000) : text
+      return `\nstdout (${log}):\n${tail(stdout)}\nstderr (${log}.err):\n${tail(stderr)}`
+    }
     let seen = ''
     const timeout = AbortSignal.timeout(30_000)
     try {
@@ -65,25 +81,20 @@ export async function startWorker(config: URL, state: string): Promise<Worker> {
         seen += chunk
         if (seen.includes('Ready on')) break
         if (seen.includes('[ERROR]') || seen.includes('Build failed')) {
-          try { child.kill('SIGKILL') } catch {}
           throw new Error(`wrangler dev build failed:\n${seen}`)
         }
       }
     } catch (e) {
-      try { child.kill('SIGKILL') } catch {}
-      throw new Error(`wrangler dev failed to become ready: ${e}\n${seen}\nsee ${log}{,.err}`)
+      await terminate()
+      throw new Error(`wrangler dev failed to become ready: ${e}\n${seen}${await logs()}`)
     }
     if (!seen.includes('Ready on')) {
-      try { child.kill('SIGKILL') } catch {}
-      throw new Error(`wrangler dev exited before ready; see ${log}{,.err}`)
+      await terminate()
+      throw new Error(`wrangler dev exited before ready${await logs()}`)
     }
   }
   const stop = async () => {
-    const tree = [child.pid, ...(await descendants(child.pid))]
-    for (const pid of tree) {
-      try { Deno.kill(pid, 'SIGKILL') } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e }
-    }
-    await child.status
+    const tree = await terminate()
     for (let i = 0; i < 50; i++) {
       const alive = (await Promise.all(tree.map(async (pid) => (await new Deno.Command('kill', { args: ['-0', String(pid)], stderr: 'null' }).output()).success))).some(Boolean)
       if (!alive) break

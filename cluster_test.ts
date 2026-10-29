@@ -9,7 +9,7 @@ import { ENDOWABLE } from "./services/compute/language.ts";
 
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
-type Effect = { name: string; origin?: string; bridge?: string; handler?: string; endpoint?: string; secrets?: string[] };
+type Effect = { name: string; origin?: string; bridge?: string; ai?: "text" | "image"; tier?: "cheap" | "heavy"; handler?: string; endpoint?: string; secrets?: string[] };
 type Bridge = { name: string; container: string; port?: number };
 type State = {
   migrations: string[];
@@ -288,7 +288,10 @@ Deno.test("ledger upgrades require current interpreters and finish before schema
     assert.ok(upgrade.dockerfile.cmd.includes("--single-transaction"));
     assert.ok(upgrade.dockerfile.cmd.includes("--set=ON_ERROR_STOP=1"));
     assert.deepEqual(upgrade.compose.depends_on.database, { condition: "service_healthy" });
-    assert.deepEqual(upgrade.compose.depends_on.migrate, Object.keys(pgroll).length ? { condition: "service_completed_successfully" } : undefined);
+    assert.equal(upgrade.compose.depends_on.migrate, undefined);
+    if (Object.keys(pgroll).length) {
+      assert.deepEqual(t.migrate.compose.depends_on["airlock-upgrade"], { condition: "service_completed_successfully" });
+    }
     for (const reader of ["crud", "electric", "auth", "conduit", "airlock"]) {
       assert.deepEqual(t[reader].compose.depends_on["airlock-upgrade"], { condition: "service_completed_successfully" }, reader);
     }
@@ -659,4 +662,24 @@ Deno.test("a provider's program defaults stand until the deployment sets its own
   for (const bad of [{ secret: "shh" }, { scope: "openid ${HOME}" }, { params: "a=}" }]) {
     assert.equal((await exported({}, "capabilities", { signIn: { google: bad } })).ok, false, JSON.stringify(bad));
   }
+});
+
+Deno.test("an AI effect or capability turns on the bifrost gateway on airlock-out", async () => {
+  const got = await exported(
+    { effects: [{ name: "draft", ai: "text", tier: "cheap" }], effectInterpreters: "SELECT 1;" },
+    "surface.targets",
+    { ai: { text: ["browser", "cheap", "heavy"], image: ["browser", "cheap", "heavy"] } },
+  );
+  assert.equal(got.ok, true, got.stderr);
+  assert.ok(got.value.bifrost, "bifrost target emitted when AI is used");
+  assert.equal(got.value.bifrost.compose.environment.BIFROST_PORT, "8090");
+  assert.equal(got.value.bifrost.compose.environment.AI_TARGET, "${AI_TARGET:-${SAYT_PLATFORM:-docker}}");
+  assert.equal(got.value.bifrost.compose.environment.CF_ACCOUNT_ID, "${CF_ACCOUNT_ID:-}");
+  assert.equal(got.value.bifrost.compose.environment.CF_API_TOKEN, "${CF_API_TOKEN:-}");
+  assert.equal(got.value.bifrost.compose.environment.GEMINI_API_KEY, "${GEMINI_API_KEY:-}");
+  assert.equal(got.value.bifrost.compose.environment.GOOGLE_API_KEY, "${GOOGLE_API_KEY:-}");
+  assert.equal(got.value.bifrost.compose.environment.OPENAI_API_KEY, "${OPENAI_API_KEY:-}");
+  assert.deepEqual(got.value.bifrost.compose.networks, ["airlock-out", "default", "airlock-egress"]);
+  assert.ok(got.value["airlock-mesh"].compose.depends_on.bifrost, "airlock-mesh depends on bifrost");
+  assert.match(got.value["airlock-mesh"].compose.environment.AIRLOCK_BRIDGES, /\bbifrost\b/);
 });

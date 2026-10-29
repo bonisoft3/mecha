@@ -20,6 +20,9 @@
           "services/airlock/reentry.ts",
           "services/airlock/inward.ts",
           "services/airlock/mail.ts",
+          "services/airlock/bifrost.ts",
+          "services/airlock/white-background.ts",
+          "services/airlock/package.json",
           "services/airlock/dapr.yaml"
         ],
         "dst": "/app/airlock/",
@@ -45,7 +48,8 @@
       }
     ],
     "epilogue": [
-      "RUN deno cache --frozen main.ts cage.ts mail.ts"
+      "RUN deno install --frozen",
+      "RUN deno cache --frozen main.ts cage.ts mail.ts bifrost.ts"
     ],
     "add": [],
     "mounts": [],
@@ -72,6 +76,9 @@
       "services/airlock/reentry.ts",
       "services/airlock/inward.ts",
       "services/airlock/mail.ts",
+      "services/airlock/bifrost.ts",
+      "services/airlock/white-background.ts",
+      "services/airlock/package.json",
       "services/airlock/dapr.yaml",
       "services/compute/compartment.ts",
       "services/compute/realm.ts",
@@ -175,6 +182,9 @@
           "services/airlock/reentry.ts",
           "services/airlock/inward.ts",
           "services/airlock/mail.ts",
+          "services/airlock/bifrost.ts",
+          "services/airlock/white-background.ts",
+          "services/airlock/package.json",
           "services/airlock/dapr.yaml",
           "services/compute/compartment.ts",
           "services/compute/realm.ts",

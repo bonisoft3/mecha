@@ -1,15 +1,16 @@
 # generated from bayt.cue — do not edit
 FROM denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432 AS airlock-image
 WORKDIR /app/airlock
-COPY services/airlock/deno.json services/airlock/deno.lock services/airlock/main.ts services/airlock/airlock.ts services/airlock/handler.ts services/airlock/cage.ts services/airlock/reentry.ts services/airlock/inward.ts services/airlock/mail.ts services/airlock/dapr.yaml /app/airlock/
+COPY services/airlock/deno.json services/airlock/deno.lock services/airlock/main.ts services/airlock/airlock.ts services/airlock/handler.ts services/airlock/cage.ts services/airlock/reentry.ts services/airlock/inward.ts services/airlock/mail.ts services/airlock/bifrost.ts services/airlock/white-background.ts services/airlock/package.json services/airlock/dapr.yaml /app/airlock/
 COPY services/compute/compartment.ts services/compute/realm.ts services/compute/crypto.ts services/compute/cheerio.ts services/compute/endowments.ts services/compute/language.ts services/compute/workers.ts /app/compute/
-COPY --parents services/airlock/deno.json services/airlock/deno.lock services/airlock/main.ts services/airlock/airlock.ts services/airlock/handler.ts services/airlock/cage.ts services/airlock/reentry.ts services/airlock/inward.ts services/airlock/mail.ts services/airlock/dapr.yaml services/compute/compartment.ts services/compute/realm.ts services/compute/crypto.ts services/compute/cheerio.ts services/compute/endowments.ts services/compute/language.ts services/compute/workers.ts ./
+COPY --parents services/airlock/deno.json services/airlock/deno.lock services/airlock/main.ts services/airlock/airlock.ts services/airlock/handler.ts services/airlock/cage.ts services/airlock/reentry.ts services/airlock/inward.ts services/airlock/mail.ts services/airlock/bifrost.ts services/airlock/white-background.ts services/airlock/package.json services/airlock/dapr.yaml services/compute/compartment.ts services/compute/realm.ts services/compute/crypto.ts services/compute/cheerio.ts services/compute/endowments.ts services/compute/language.ts services/compute/workers.ts ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.airlock-image.json ./.bayt/
-RUN deno cache --frozen main.ts cage.ts mail.ts
+RUN deno install --frozen
+RUN deno cache --frozen main.ts cage.ts mail.ts bifrost.ts
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS airlock-image_ctxs
 WORKDIR /monorepo/libraries/mecha
-COPY --parents services/airlock/deno.json services/airlock/deno.lock services/airlock/main.ts services/airlock/airlock.ts services/airlock/handler.ts services/airlock/cage.ts services/airlock/reentry.ts services/airlock/inward.ts services/airlock/mail.ts services/airlock/dapr.yaml services/compute/compartment.ts services/compute/realm.ts services/compute/crypto.ts services/compute/cheerio.ts services/compute/endowments.ts services/compute/language.ts services/compute/workers.ts ./
+COPY --parents services/airlock/deno.json services/airlock/deno.lock services/airlock/main.ts services/airlock/airlock.ts services/airlock/handler.ts services/airlock/cage.ts services/airlock/reentry.ts services/airlock/inward.ts services/airlock/mail.ts services/airlock/bifrost.ts services/airlock/white-background.ts services/airlock/package.json services/airlock/dapr.yaml services/compute/compartment.ts services/compute/realm.ts services/compute/crypto.ts services/compute/cheerio.ts services/compute/endowments.ts services/compute/language.ts services/compute/workers.ts ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
 RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi

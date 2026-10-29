@@ -42,6 +42,8 @@ export interface EdgeCluster {
   /** A /crud/* request as the service role, for the object's own clock:
    * what the ticker writes on the container tier. Never routed. */
   service: (req: Request) => Promise<Response>
+  /** Runs `fn` on the cluster's serialized PGlite queue after shape triggers
+   * are installed. */
   serialize: <T>(fn: () => Promise<T>, priority?: 'high' | 'low') => Promise<T>
   publicSnapshot<T>(generation: string, use: (snapshot: PublicSnapshot) => Promise<T>, priority?: 'high' | 'low'): Promise<T>
   /** The drains, installed and called once on first use: never by a boot
@@ -505,8 +507,11 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   return {
     handle,
     service,
+    async serialize<T>(fn: () => Promise<T>, priority: 'high' | 'low' = 'high'): Promise<T> {
+      await ensureShapes()
+      return await serialize(fn, priority)
+    },
     drains,
-    serialize,
     installed: () => installed,
     async publicSnapshot(generation, use, priority = 'high') {
       // Admit per lane before joining the database queue so queued low-priority

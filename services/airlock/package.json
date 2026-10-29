@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "dependencies": {
+    "fast-png": "6.4.0",
+    "jpeg-js": "0.4.4"
+  }
+}

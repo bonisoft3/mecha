@@ -139,10 +139,11 @@ so a migration that fails stops them all rather than leaving them to serve the
 schema it did not reach. A cluster given none has no `migrate` target, and one
 without a database refuses them.
 
-Clusters with external effects also run `airlock-upgrade` after pgroll and before
+Clusters with external effects also run `airlock-upgrade` before pgroll,
 schema readers or the worker start. It renames a retained ledger's `request`
 column to `input` and refreshes `state.effectInterpreters` in one transaction, retaining
-pending claims and outcomes. Pronto supplies the current invoking machines' SQL;
+pending claims and outcomes. Trigger refresh runs only when the legacy column
+exists, so restarts preserve subsequent app migrations. Pronto supplies the current invoking machines' SQL;
 a native cluster supplies its current claim triggers. The upgrade is repeatable,
 and a failure rolls back both the column change and trigger refresh. Stop the
 previous application and worker before upgrading a retained volume; old worker

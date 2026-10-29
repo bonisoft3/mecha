@@ -18,6 +18,8 @@ import { createEdgeCluster, type EdgeCluster, type EdgeClusterConfig } from './c
 import { type Clock, createClock, hasSchedules, serviceCrud } from './clock.ts'
 import type { Drain } from '../../mecha-browser/drains.ts'
 import { type EdgeMachines, installEngines, installHostStep } from './machines.ts'
+import { createEdgeAirlock, type EdgeAirlock, type EdgeEffects } from './airlock.ts'
+import type { AiCapabilitiesConfig } from '../../../services/airlock/bifrost.ts'
 import { applyScripts, ChangedScript, NoLedger, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
 
@@ -27,6 +29,7 @@ export interface EdgeEnv {
   IMPORT_TOKEN: string
   CF_VERSION_METADATA: { id: string }
   ASSETS?: Fetcher
+  AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> }
 }
 
 export interface EdgeOptions {
@@ -37,6 +40,10 @@ export interface EdgeOptions {
   storageFormat?: StorageFormat
   /** The app's machines by name, each the step its migration declares. */
   machines?: EdgeMachines
+  /** The app's external effects by name, each bound to its handler and target. */
+  effects?: EdgeEffects
+  /** The app's AI tier and model configuration (shell.json). */
+  ai?: AiCapabilitiesConfig
   /** A frozen archive retains its schedules and runs none. */
   clock?: 'ticker' | 'disabled'
   drains?: Drain[]
@@ -48,12 +55,16 @@ export class DataDirectoryLoading extends Error {
   constructor() { super('the data directory is loading') }
 }
 
-export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, clock: clockMode = 'ticker', drains = [] }: EdgeOptions) {
+const earliest = (a: number | null, b: number | null): number | null =>
+  a === null ? b : b === null ? a : Math.min(a, b)
+
+export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, effects = {}, ai, clock: clockMode = 'ticker', drains = [] }: EdgeOptions) {
   // pgl_step reaches the step through the isolate: one set of machines per Worker.
   installHostStep(machines)
+  const hasAirlock = Object.keys(effects).length > 0
   return class Cluster extends DurableObject<EdgeEnv> {
     readonly #dir = new DataDirectory(this.ctx.storage, storageFormat)
-    #cluster: Promise<{ db: PGlite; cluster: EdgeCluster; clock: Clock; ticks: boolean }> | null = null
+    #cluster: Promise<{ db: PGlite; cluster: EdgeCluster; clock: Clock; airlock: EdgeAirlock; ticks: boolean }> | null = null
 
     #boot() {
       return this.#cluster ??= (async () => {
@@ -74,11 +85,20 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
           // boot; a fresh object is that boot.
           retry: () => { clock.arm().catch((e) => this.ctx.abort(String(e))) },
         })
-        // The alarm, at what the schedules owe and a failed drain's retry. A
-        // frozen archive's stands at the retry alone.
+        const airlock = createEdgeAirlock({
+          db,
+          serialize: (fn, priority) => cluster.serialize(fn, priority),
+          effects,
+          ai,
+          env: this.env as unknown as Record<string, unknown>,
+          log: console.error,
+          retry: () => { clock.arm().catch((e) => this.ctx.abort(String(e))) },
+        })
+        // The alarm, at what the schedules owe and a failed drain's or effect's retry.
+        // A frozen archive's stands at the retry alone.
         const clock = createClock({
-          db, read: (fn) => fn(), crud: serviceCrud(cluster.service), ticks,
-          also: () => cluster.installed()?.retryAt() ?? null,
+          db, read: (fn) => cluster.serialize(fn, 'low'), crud: serviceCrud(cluster.service), ticks,
+          also: () => earliest(cluster.installed()?.retryAt() ?? null, airlock.retryAt()),
           timer: {
             get: () => this.ctx.storage.getAlarm(),
             set: (at) => this.ctx.storage.setAlarm(at),
@@ -86,7 +106,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
           },
         })
         await clock.arm()
-        return { db, cluster, clock, ticks }
+        return { db, cluster, clock, airlock, ticks }
       })().catch((e) => {
         // A boot that failed leaves nothing to answer with; the next request
         // meets a fresh object.
@@ -97,19 +117,21 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
 
     override async alarm(): Promise<void> {
       if (!this.#dir.complete) return
-      // A frozen archive with no drains owes nothing an alarm could stand at:
-      // one left standing is cleared without booting the directory.
-      if (clockMode === 'disabled' && drains.length === 0) return this.ctx.storage.deleteAlarm()
-      const { cluster, clock, ticks } = await this.#boot()
+      // A frozen archive with no drains or effects owes nothing an alarm could
+      // stand at: one left standing is cleared without booting the directory.
+      if (clockMode === 'disabled' && drains.length === 0 && !hasAirlock) return this.ctx.storage.deleteAlarm()
+      const { cluster, clock, airlock, ticks } = await this.#boot()
       // A failed drain's retry is called within the alarm, not on a timer an
       // eviction would drop.
       await (await cluster.drains()).retryDue()
+      if (hasAirlock) await airlock.drain()
       if (!ticks) {
         await clock.arm()
         return
       }
       const { report, failed } = await clock.sweep('alarm')
       if (failed) console.error(`edge sweep failed: ${JSON.stringify(report.schedules.filter((s) => s.error !== undefined))}`)
+      if (hasAirlock) await airlock.drain()
     }
 
     /** The database once booted, and the alarm re-read from it, for a
@@ -186,18 +208,22 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       if (path === '/poke') {
         if (req.method !== 'POST') return json({ error: 'poke is a POST' }, 405)
         if (clockMode === 'disabled') return json({ error: 'the clock is disabled' }, 409)
-        const { cluster, clock, ticks } = await this.#boot()
+        const { cluster, clock, airlock, ticks } = await this.#boot()
         if (!ticks) return json({ error: 'the data directory holds no schedule table' }, 409)
         // The poke stands in for an alarm the platform lost, a drain's included.
         await (await cluster.drains()).retryDue()
         const { report, failed } = await clock.sweep(new URL(req.url).searchParams.get('caller'))
+        if (hasAirlock) await airlock.drain()
         return json(report, failed ? 500 : 200)
       }
       if (CLUSTER_ROUTES.test(path)) {
-        const { cluster, clock, ticks } = await this.#boot()
+        const { cluster, clock, airlock, ticks } = await this.#boot()
         const res = await cluster.handle(req)
-        // A write may have armed a deadline (a machine's settle).
-        if (ticks && res.ok && /^\/crud(\/|$)/.test(path) && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) await clock.arm()
+        // A write may have armed a deadline (a machine's settle) or enqueued an effect.
+        if (res.ok && /^\/crud(\/|$)/.test(path) && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+          if (ticks) await clock.arm()
+          if (hasAirlock) this.ctx.waitUntil(airlock.drain())
+        }
         return res
       }
       return json({ error: `no route for ${path}` }, 404)

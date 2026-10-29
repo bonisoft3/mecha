@@ -3,3 +3,4 @@ services:
   libraries_mecha-caddy:
     ports:
     - ${MECHA_DOOR_HOST_PORT:-8080}:8080
+    - ${MECHA_DOOR_HOST_PORT:-8080}:8080/udp

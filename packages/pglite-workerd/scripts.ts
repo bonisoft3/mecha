@@ -18,9 +18,12 @@ import { browserTier } from '../mecha-browser/fence.ts'
 export interface Script { name: string; sql: string | null }
 
 /** mecha's own steps, named as its cluster names them (cluster.cue's
- * #TenancyMigration and #ScheduleMigration), so a directory restored from a
- * container's database and one built here read one ledger. */
+ * #TenancyMigration, #GraphileMigration, #AirlockMigration and
+ * #ScheduleMigration), so a directory restored from a container's database and
+ * one built here read one ledger. */
 export const TENANCY_SCRIPT = '003_rls.sql'
+export const GRAPHILE_SCRIPT = '011_graphile_worker.sql'
+export const AIRLOCK_SCRIPT = '012_airlock.sql'
 export const SCHEDULE_SCRIPT = '800_schedule.sql'
 
 /** A directory built before the ledger existed: what it holds is unknown. */

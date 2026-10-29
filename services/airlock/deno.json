@@ -1,4 +1,5 @@
 {
+  "nodeModulesDir": "auto",
   "imports": {
     "@endo/module-source": "npm:@endo/module-source@1.4.0",
     "@grpc/grpc-js": "npm:@grpc/grpc-js@1.14.4",

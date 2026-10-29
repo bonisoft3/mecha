@@ -7,7 +7,9 @@
     "@mecha/postgrest-js": "../postgrest-js/src/index.ts",
     "../postgrest-js/src/rest-handler.js": "../postgrest-js/src/rest-handler.ts",
     "../postgrest-js/src/rest-read.js": "../postgrest-js/src/rest-read.ts",
-    "../postgrest-js/src/validate.js": "../postgrest-js/src/validate.ts"
+    "../postgrest-js/src/validate.js": "../postgrest-js/src/validate.ts",
+    "fast-png": "npm:fast-png@6.4.0",
+    "jpeg-js": "npm:jpeg-js@0.4.4"
   },
   "compilerOptions": {
     "types": [

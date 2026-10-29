@@ -46,7 +46,7 @@ export function sinkPath(path: unknown): string {
 }
 
 /** Nothing one sink call is worth waiting on longer than this. */
-const CALL_TIMEOUT_MS = 10_000;
+const CALL_TIMEOUT_MS = 45_000;
 
 /**
  * The real transport: the effect's HTTP output binding on the airlock's daprd.
@@ -87,7 +87,7 @@ export function bindingsTransport(mesh: string): Transport {
 
 /** The longest one call of a handler may take, its sink calls included, before
  * it counts as no answer. */
-const HANDLER_TIMEOUT_MS = 60_000;
+const HANDLER_TIMEOUT_MS = 90_000;
 
 /** An effect's handler, admitted: compiled once, run in a fresh cage per call. */
 export class Handler {

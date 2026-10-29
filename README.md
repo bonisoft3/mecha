@@ -114,4 +114,4 @@ docker compose --profile '*' down -v
 
 ## License
 
-LGPL-3.0
+[GPL-3.0](LICENSE)

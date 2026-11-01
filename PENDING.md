@@ -154,6 +154,6 @@ and salt would close `/img`.
 the suite ([the blob plane](docs/capabilities.md#the-blob-plane)).
 
 **An AI gateway runs in its seat**
-([beside the cluster](docs/capabilities.md#beside-the-cluster)). Bifrost there
+([beside the cluster](docs/capabilities.md#beside-the-cluster)). tsbifrost there
 would give pipelines one model endpoint inside the cluster, as the page's model
 handler does at browser tier.

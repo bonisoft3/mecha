@@ -7,6 +7,7 @@
 
 import pg from "pg";
 import { hold, start } from "./airlock.ts";
+import { daprBlobs } from "./blobs.ts";
 import { admitAll, bindingsTransport } from "./handler.ts";
 
 function required(name: string): string {
@@ -40,7 +41,10 @@ if (import.meta.main) {
   );
   const db = new pg.Pool({ connectionString });
   const { key } = await hold(connectionString);
-  const runner = await start({ connectionString, db, effects, handlers, transport: bindingsTransport(mesh), secrets, headers }, key);
+  // Set where the cluster has a blob plane: the URL a stored key is served at.
+  const blobUrl = Deno.env.get("BLOB_URL");
+  const blobs = blobUrl === undefined ? undefined : daprBlobs(mesh, blobUrl);
+  const runner = await start({ connectionString, db, effects, handlers, transport: bindingsTransport(mesh), secrets, headers, blobs }, key);
   Deno.serve({ port: 9997, onListen() {} }, (req) => new Response(null, { status: new URL(req.url).pathname === "/healthz" ? 204 : 404 }));
   await runner.promise;
   // On a signal Graphile returns its jobs and ends the process itself; a

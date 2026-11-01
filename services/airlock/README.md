@@ -86,12 +86,15 @@ export async function reconcile(input, sink) {
 
 - `input` is XState's word: the effect's `input`, frozen. `sink.key` is the ledger key, also sent as every request's
   `Idempotency-Key`.
-- `sink.fetch(path, {method, body})` takes an absolute path in plain characters: no
+- `sink.fetch(path, {method, body, headers})` takes an absolute path in plain characters: no
   `%` before the query, no empty or dot segment. It answers `{status, body}`, the body
-  parsed when the sink answers JSON.
+  parsed when the sink answers JSON. `headers` are the handler's own, such as
+  tsbifrost's `X-Bf-Passthrough-Extra-Params`: names daprd forwards (uppercase first),
+  never one HTTP or the host sets, and visible ASCII values (`sinkHeaders` in
+  `reentry.ts`, which the edge airlock applies too).
 - The host sends the request as a call of the effect's output binding on daprd,
-  `/v1.0/bindings/<effect>`, with the path, the `Idempotency-Key` and the content type
-  as the binding's metadata, so the host alone sets headers. The binding's `url` is
+  `/v1.0/bindings/<effect>`, with the path, the handler's headers, the `Idempotency-Key`
+  and the content type as the binding's metadata. The binding's `url` is
   the declared origin, and daprd answers the sink's status in `Metadata.statuscode`
   (the binding is declared with `errorIfNot2XX` off). A credential the sink reads from a
   header is the effect's `credential: {header, scheme?, secret}`: the airlock reads the
@@ -106,6 +109,15 @@ export async function reconcile(input, sink) {
   their specification (`../compute/crypto.ts`), and `TextEncoder`. An endowment it uses
   without declaring throws where it is used.
 - A throw, or no answer within 60 seconds, is no answer.
+- Bytes are answered as `{"$blob": {base64, type}}` anywhere in the answer (`blobs.ts`):
+  PNG, JPEG or WebP. Before the outcome settles, the host stores each in the cluster's
+  blob plane under a key derived from the ledger key and the blob's place in the answer,
+  so a retried run rewrites the same object, and the outcome carries the URL the plane
+  serves it at: `/img/insecure/plain/s3://mecha-objects/<key>` through imgproxy in
+  compose, written over the airlock daprd's `blobs` binding (dapr's S3 binding on
+  rclone-s3); the edge's image route on the Worker's R2 bucket at the edge. Bytes never
+  reach the ledger or a row: inline, a level's pictures outgrew the edge's in-memory
+  database. A cluster with no blob plane refuses the answer.
 
 ## After a crash
 

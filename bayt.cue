@@ -265,7 +265,7 @@ _mecha: bayt.#project & _where & {
 		// The handler's cage is compute's realm, so the compute files it
 		// imports sit at ../compute beside it, where the source names them.
 		"airlock-image": _image & {
-			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "inward.ts", "mail.ts", "bifrost.ts", "white-background.ts", "package.json", "dapr.yaml"]
+			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "inward.ts", "mail.ts", "tsbifrost.ts", "white-background.ts", "package.json", "dapr.yaml"]
 			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts"]
 			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
 			dockerfile: {
@@ -275,7 +275,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: [for f in _airlock {"services/airlock/\(f)"}], dst: "/app/airlock/"},
 					{srcs: [for f in _compute {"services/compute/\(f)"}], dst: "/app/compute/"},
 				]
-				epilogue: ["RUN deno install --frozen", "RUN deno cache --frozen main.ts cage.ts mail.ts bifrost.ts"]
+				epilogue: ["RUN deno install --frozen", "RUN deno cache --frozen main.ts cage.ts mail.ts tsbifrost.ts"]
 			}
 		}
 		"clock-image": _image & {
@@ -354,9 +354,10 @@ _mecha: bayt.#project & _where & {
 				develop: watch: [{action: "sync+restart", path: "../services/arroyo/queries/", target: "/queries/"}]
 			}
 		}
-		// The AI gateway's seat (github.com/maximhq/bifrost), a placeholder
-		// that holds the port.
-		"bifrost": _run & {
+		// The seat of the AI gateway, a placeholder that holds its port: the
+		// cluster runs tsbifrost (services/airlock/tsbifrost.ts) for an app that
+		// uses AI.
+		"tsbifrost": _run & {
 			dockerfile: {
 				from: name: bayt.lock.images.busybox
 				cmd: ["sleep", "infinity"]

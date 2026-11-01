@@ -26,7 +26,7 @@ include:
   required: false
 - path: ./compose.arroyo.yaml
   required: false
-- path: ./compose.bifrost.yaml
+- path: ./compose.tsbifrost.yaml
   required: false
 - path: ./compose.nubox.yaml
   required: false

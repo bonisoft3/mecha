@@ -1,5 +1,5 @@
 import { whiteBackgroundBase64 } from "./white-background.ts";
-// The AI gateway bridge (bifrost): OpenAI-compatible HTTP from the airlock's
+// The AI gateway bridge (tsbifrost): OpenAI-compatible HTTP from the airlock's
 // daprd in, tier-and-target-routed model calls out.
 //
 // An app declares its modalities and tiers in `capabilities.ai`, with optional
@@ -10,10 +10,22 @@ import { whiteBackgroundBase64 } from "./white-background.ts";
 //   - GET  /v1/models
 //   - GET  /healthz
 //
-// Bifrost resolves (target, modality, tier) to the concrete provider, model,
+// tsbifrost resolves (target, modality, tier) to the concrete provider, model,
 // endpoint, image dimensions, and step budget, translates the wire payload for
 // Ollama, sd.cpp, Cloudflare Workers AI, Google Gemini / Imagen, or OpenAI,
 // and returns a normalized OpenAI-shaped response with `model` and `tier`.
+//
+// What the provider is sent, each layer merged into the one before it
+// (mergeExtra: objects field by field, anything else replaced):
+//   1. the body tsbifrost builds from the request's normalized fields;
+//   2. the model's `params` from `capabilities.ai`, provider-specific fields
+//      (Phoenix's `guidance`) declared beside the model they belong to;
+//   3. the request's `extra_params`, only under the header
+//      `x-bf-passthrough-extra-params: true`, Bifrost's own contract
+//      (docs.getbifrost.ai/providers/request-options). Without the header they
+//      are refused, not dropped.
+// Where Bifrost lets its own fields win, a field a later layer names wins here:
+// naming it is the caller's whole intent.
 
 export type AiModality = "text" | "image";
 export type AiTier = "browser" | "cheap" | "heavy";
@@ -27,6 +39,9 @@ export type AiModelSpec = {
   endpoint?: string;
   size?: string;
   steps?: number;
+  /** Merged into the provider call for this model only: an override that
+   * names another model leaves them behind. */
+  params?: Record<string, unknown>;
 };
 
 export type AiModelOverride = string | Partial<AiModelSpec>;
@@ -49,7 +64,9 @@ export type AiCapabilitiesConfig = {
   targets?: Partial<Record<AiTarget, AiModalityMap<AiModelOverride>>>;
 };
 
-export const BIFROST_PORT = 8090;
+export const TSBIFROST_PORT = 8090;
+
+const GEMMA_4_NO_THINKING = { chat_template_kwargs: { enable_thinking: false } };
 
 export const DEFAULT_AI_MODELS: Record<AiTarget, Record<AiModality, Record<AiTier, AiModelSpec>>> = {
   browser: {
@@ -103,8 +120,10 @@ export const DEFAULT_AI_MODELS: Record<AiTarget, Record<AiModality, Record<AiTie
   cloudflare: {
     text: {
       browser: { provider: "browser", model: "google/gemma-4-e2b-it" },
-      cheap: { provider: "cloudflare", model: "@cf/google/gemma-4-26b-a4b-it" },
-      heavy: { provider: "cloudflare", model: "@cf/google/gemma-4-26b-a4b-it" },
+      // Thinking, Gemma 4 spent its whole budget before answering: a deck's words took 32 s
+      // where they take 5 s without, past the airlock's 45 s bound once the deck is long.
+      cheap: { provider: "cloudflare", model: "@cf/google/gemma-4-26b-a4b-it", params: GEMMA_4_NO_THINKING },
+      heavy: { provider: "cloudflare", model: "@cf/google/gemma-4-26b-a4b-it", params: GEMMA_4_NO_THINKING },
     },
     image: {
       browser: { provider: "browser", model: "procedural-svg-sketch", size: "256x256", steps: 1 },
@@ -150,15 +169,23 @@ export const DEFAULT_AI_MODELS: Record<AiTarget, Record<AiModality, Record<AiTie
   },
 };
 
+/** `spec` moved to `model`, leaving its params behind when the model changes. */
+function forModel(spec: AiModelSpec, model: string): AiModelSpec {
+  if (model === spec.model) return { ...spec };
+  const { params: _left, ...rest } = spec;
+  return { ...rest, model };
+}
+
 function applyOverride(base: AiModelSpec, override?: AiModelOverride): AiModelSpec {
   if (!override) return { ...base };
-  if (typeof override === "string") return { ...base, model: override };
+  if (typeof override === "string") return forModel(base, override);
   return {
-    provider: override.provider ?? base.provider,
-    model: override.model ?? base.model,
-    ...(override.endpoint !== undefined ? { endpoint: override.endpoint } : base.endpoint !== undefined ? { endpoint: base.endpoint } : {}),
-    ...(override.size !== undefined ? { size: override.size } : base.size !== undefined ? { size: base.size } : {}),
-    ...(override.steps !== undefined ? { steps: override.steps } : base.steps !== undefined ? { steps: base.steps } : {}),
+    ...forModel(base, override.model ?? base.model),
+    ...(override.provider !== undefined ? { provider: override.provider } : {}),
+    ...(override.endpoint !== undefined ? { endpoint: override.endpoint } : {}),
+    ...(override.size !== undefined ? { size: override.size } : {}),
+    ...(override.steps !== undefined ? { steps: override.steps } : {}),
+    ...(override.params !== undefined ? { params: override.params } : {}),
   };
 }
 
@@ -185,9 +212,8 @@ export function resolveModelSpec(
   const envSteps = env[`${envPrefix}_STEPS`];
 
   return {
-    ...withTarget,
+    ...forModel(withTarget, envModel || withTarget.model),
     ...(envProvider ? { provider: envProvider } : {}),
-    ...(envModel ? { model: envModel } : {}),
     ...(envEndpoint ? { endpoint: envEndpoint } : {}),
     ...(envSize ? { size: envSize } : {}),
     ...(envSteps && Number.isInteger(Number(envSteps)) ? { steps: Number(envSteps) } : {}),
@@ -198,7 +224,7 @@ export interface CloudflareAiBinding {
   run(model: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
-export type BifrostOptions = {
+export type TsBifrostOptions = {
   target?: AiTarget;
   config?: AiCapabilitiesConfig;
   env?: Record<string, string | undefined>;
@@ -217,7 +243,38 @@ function isTier(v: unknown): v is AiBackendTier {
   return v === "cheap" || v === "heavy";
 }
 
-export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Promise<Response> {
+export const PASSTHROUGH_HEADER = "x-bf-passthrough-extra-params";
+
+type Extra = Record<string, unknown>;
+
+const isPlain = (v: unknown): v is Extra => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** The request's extra_params, or the 400 that refuses them. */
+function extraParams(req: Request, body: Record<string, unknown>): Extra | Response {
+  if (body.extra_params === undefined) return {};
+  if (!isPlain(body.extra_params)) return json(400, { error: "extra_params must be an object" });
+  if (req.headers.get(PASSTHROUGH_HEADER)?.toLowerCase() !== "true") {
+    return json(400, { error: `extra_params reach the provider only with header ${PASSTHROUGH_HEADER}: true` });
+  }
+  return body.extra_params;
+}
+
+/** Layers 2 and 3 of what the provider is sent: the model's params, where the
+ * request did not name another model, then the request's extra_params. */
+function layered(spec: AiModelSpec, model: string, requested: Extra): Extra {
+  return mergeExtra(model === spec.model ? spec.params ?? {} : {}, requested);
+}
+
+/** `extra` merged into `base`: objects field by field, anything else replaced. */
+export function mergeExtra(base: Extra, extra: Extra): Extra {
+  const out: Extra = { ...base };
+  for (const [k, v] of Object.entries(extra)) {
+    out[k] = isPlain(v) && isPlain(out[k]) ? mergeExtra(out[k] as Extra, v) : v;
+  }
+  return out;
+}
+
+export function createTsBifrost(opts: TsBifrostOptions = {}): (req: Request) => Promise<Response> {
   const env = opts.env ?? (typeof Deno !== "undefined" ? Deno.env.toObject() : {});
   const rawTarget = (opts.target ?? env.AI_TARGET ?? env.SAYT_PLATFORM ?? "docker") as AiTarget;
   const target: AiTarget = rawTarget in DEFAULT_AI_MODELS ? rawTarget : "docker";
@@ -250,7 +307,7 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
       for (const [k, v] of Object.entries(meta)) {
         if (k !== "path" && typeof v === "string") headers.set(k, v);
       }
-      const innerReq = new Request(`http://bifrost:${BIFROST_PORT}${subPath}`, {
+      const innerReq = new Request(`http://tsbifrost:${TSBIFROST_PORT}${subPath}`, {
         method,
         headers,
         ...(method !== "GET" && method !== "HEAD" && envelope.data !== undefined
@@ -296,6 +353,8 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
       } catch {
         return json(400, { error: "invalid JSON body" });
       }
+      const requested = extraParams(req, body);
+      if (requested instanceof Response) return requested;
       const tier: AiBackendTier = isTier(body.tier) ? body.tier : "cheap";
       const messages = body.messages;
       if (!Array.isArray(messages) || messages.length === 0) {
@@ -305,6 +364,7 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
       const model = typeof body.model === "string" && body.model !== "" && body.model !== "auto"
         ? body.model
         : spec.model;
+      const extra = layered(spec, model, requested);
       const idempotencyKey = req.headers.get("idempotency-key") ?? "";
 
       try {
@@ -314,13 +374,14 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
           model,
           messages as Array<{ role: string; content: string }>,
           body,
+          extra,
           idempotencyKey,
           env,
           fetcher,
           aiBinding,
         );
         return json(200, {
-          id: `chatcmpl-${idempotencyKey || "bifrost"}`,
+          id: `chatcmpl-${idempotencyKey || "tsbifrost"}`,
           object: "chat.completion",
           model,
           tier,
@@ -334,7 +395,7 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
           ],
         });
       } catch (e) {
-        console.error(`bifrost chat/completions error (${spec.provider}/${model}/${tier}):`, e instanceof Error ? e.stack ?? e.message : String(e));
+        console.error(`tsbifrost chat/completions error (${spec.provider}/${model}/${tier}):`, e instanceof Error ? e.stack ?? e.message : String(e));
         if (e instanceof UpstreamError) {
           return json(e.status, { error: e.message, provider: spec.provider, model, tier });
         }
@@ -349,6 +410,8 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
       } catch {
         return json(400, { error: "invalid JSON body" });
       }
+      const requested = extraParams(req, body);
+      if (requested instanceof Response) return requested;
       const tier: AiBackendTier = isTier(body.tier) ? body.tier : "cheap";
       const prompt = body.prompt;
       if (typeof prompt !== "string" || prompt.trim() === "") {
@@ -358,6 +421,7 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
       const model = typeof body.model === "string" && body.model !== "" && body.model !== "auto"
         ? body.model
         : spec.model;
+      const extra = layered(spec, model, requested);
       const size = typeof body.size === "string" && body.size !== "" ? body.size : (spec.size ?? "256x256");
       const steps = typeof body.steps === "number" ? body.steps : (spec.steps ?? 1);
       const idempotencyKey = req.headers.get("idempotency-key") ?? "";
@@ -371,6 +435,7 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
           size,
           steps,
           body,
+          extra,
           idempotencyKey,
           env,
           fetcher,
@@ -386,7 +451,7 @@ export function createBifrost(opts: BifrostOptions = {}): (req: Request) => Prom
           data: [{ b64_json }],
         });
       } catch (e) {
-        console.error(`bifrost chat/completions error (${spec.provider}/${model}/${tier}):`, e instanceof Error ? e.stack ?? e.message : String(e));
+        console.error(`tsbifrost images/generations error (${spec.provider}/${model}/${tier}):`, e instanceof Error ? e.stack ?? e.message : String(e));
         if (e instanceof UpstreamError) {
           return json(e.status, { error: e.message, provider: spec.provider, model, tier });
         }
@@ -411,6 +476,7 @@ async function dispatchText(
   model: string,
   messages: Array<{ role: string; content: string }>,
   body: Record<string, unknown>,
+  extra: Extra,
   idempotencyKey: string,
   env: Record<string, string | undefined>,
   fetcher: typeof fetch,
@@ -438,7 +504,7 @@ async function dispatchText(
         "content-type": "application/json",
         ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
       },
-      body: JSON.stringify({
+      body: JSON.stringify(mergeExtra({
         model,
         stream: false,
         ...(jsonSchema ? { format: jsonSchema } : wantsJson ? { format: "json" } : {}),
@@ -448,7 +514,7 @@ async function dispatchText(
           ...(seed !== undefined ? { seed } : {}),
         },
         messages,
-      }),
+      }, extra)),
     });
     const text = await res.text();
     if (!res.ok) throw new UpstreamError(res.status, `ollama ${res.status}: ${text}`);
@@ -501,19 +567,19 @@ async function dispatchText(
         }
         return undefined;
       };
-      const candidateModels = model.includes("gemma-4")
-        ? ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/google/gemma-3-12b-it", "@cf/meta/llama-3.1-8b-instruct-fast", model]
-        : [model, "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/google/gemma-3-12b-it", "@cf/meta/llama-3.1-8b-instruct-fast"];
+      // The configured model first: one that answers worse ran ahead of it, and Llama 3.3
+      // left regional names untranslated where Gemma 4 named the species.
+      const candidateModels = [model, "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/google/gemma-3-12b-it", "@cf/meta/llama-3.1-8b-instruct-fast"];
       const textErrors: string[] = [];
       for (const m of candidateModels) {
         try {
-          const out = await aiBinding.run(m, {
+          const out = await aiBinding.run(m, mergeExtra({
             messages,
-            max_tokens: Math.max(maxTokens, 1024),
+            max_tokens: maxTokens,
             temperature,
             ...(wantsJson ? { response_format: responseFormat } : {}),
             ...(seed !== undefined ? { seed } : {}),
-          });
+          }, extra));
           const content = extractText(out);
           if (typeof content === "string") return content;
           textErrors.push(`${m}: non-string ${JSON.stringify(out)?.slice(0, 400)}`);
@@ -533,13 +599,13 @@ async function dispatchText(
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
       },
-      body: JSON.stringify({
+      body: JSON.stringify(mergeExtra({
         messages,
         max_tokens: maxTokens,
         temperature,
         ...(wantsJson ? { response_format: responseFormat } : {}),
         ...(seed !== undefined ? { seed } : {}),
-      }),
+      }, extra)),
     });
     const text = await res.text();
     if (!res.ok) throw new UpstreamError(res.status, `cloudflare ${res.status}: ${text}`);
@@ -568,7 +634,7 @@ async function dispatchText(
         ...(apiKey ? { "x-goog-api-key": apiKey } : {}),
         ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
       },
-      body: JSON.stringify({
+      body: JSON.stringify(mergeExtra({
         ...(systemParts.length > 0 ? { systemInstruction: { parts: systemParts } } : {}),
         contents: contents.length > 0 ? contents : [{ role: "user", parts: systemParts }],
         generationConfig: {
@@ -577,7 +643,7 @@ async function dispatchText(
           ...(wantsJson ? { responseMimeType: "application/json" } : {}),
           ...(seed !== undefined ? { seed } : {}),
         },
-      }),
+      }, extra)),
     });
     const text = await res.text();
     if (!res.ok) throw new UpstreamError(res.status, `google ${res.status}: ${text}`);
@@ -599,14 +665,14 @@ async function dispatchText(
       ...(env.OPENAI_API_KEY ? { authorization: `Bearer ${env.OPENAI_API_KEY}` } : {}),
       ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
     },
-    body: JSON.stringify({
+    body: JSON.stringify(mergeExtra({
       model,
       messages,
       temperature,
       max_tokens: maxTokens,
       ...(wantsJson ? { response_format: { type: "json_object" } } : {}),
       ...(seed !== undefined ? { seed } : {}),
-    }),
+    }, extra)),
   });
   const text = await res.text();
   if (!res.ok) throw new UpstreamError(res.status, `openai ${res.status}: ${text}`);
@@ -624,6 +690,7 @@ async function dispatchImage(
   size: string,
   steps: number,
   body: Record<string, unknown>,
+  extra: Extra,
   idempotencyKey: string,
   env: Record<string, string | undefined>,
   fetcher: typeof fetch,
@@ -633,6 +700,21 @@ async function dispatchImage(
   const negativePrompt = typeof body.negative_prompt === "string" ? body.negative_prompt : undefined;
 
   if (spec.provider === "cloudflare") {
+    // One model takes the same JSON input over the binding and over REST.
+    const cfImageInput = (m: string): Extra => {
+      if (m.includes("leonardo/")) {
+        const [wStr, hStr] = size.split("x");
+        return mergeExtra({
+          prompt,
+          width: Math.min(Math.max(Number(wStr) || 512, 256), 512),
+          height: Math.min(Math.max(Number(hStr) || 512, 256), 512),
+          num_steps: steps,
+          ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+          ...(seed !== undefined ? { seed } : {}),
+        }, extra);
+      }
+      return mergeExtra({ prompt, steps: Math.min(Math.max(steps, 1), 8) }, extra);
+    };
     if (aiBinding && !spec.endpoint && !env.CF_API_TOKEN) {
       const extractImageB64 = async (out: unknown): Promise<string | undefined> => {
         if (out && typeof out === "object" && ("image" in out || "result" in out || "data" in out)) {
@@ -660,6 +742,7 @@ async function dispatchImage(
           form.append("prompt", prompt);
           form.append("steps", String(steps));
           if (seed !== undefined) form.append("seed", String(seed));
+          for (const [k, v] of Object.entries(extra)) form.set(k, typeof v === "string" ? v : JSON.stringify(v));
           const req = new Response(form);
           const contentType = req.headers.get("content-type") || "multipart/form-data";
           const out = await aiBinding.run(m, {
@@ -667,25 +750,7 @@ async function dispatchImage(
           });
           return extractImageB64(out);
         }
-        if (m.includes("leonardo/")) {
-          const [wStr, hStr] = size.split("x");
-          const width = Math.min(Math.max(Number(wStr) || 512, 256), 512);
-          const height = Math.min(Math.max(Number(hStr) || 512, 256), 512);
-          const out = await aiBinding.run(m, {
-            prompt,
-            width,
-            height,
-            num_steps: steps,
-            ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
-            ...(seed !== undefined ? { seed } : {}),
-          });
-          return extractImageB64(out);
-        }
-        const out = await aiBinding.run(m, {
-          prompt,
-          steps: Math.min(Math.max(steps, 1), 8),
-        });
-        return extractImageB64(out);
+        return extractImageB64(await aiBinding.run(m, cfImageInput(m)));
       };
       const b64 = await runCfImageModel(model);
       if (b64) return b64;
@@ -701,11 +766,7 @@ async function dispatchImage(
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
       },
-      body: JSON.stringify({
-        prompt,
-        num_steps: steps,
-        ...(seed !== undefined ? { seed } : {}),
-      }),
+      body: JSON.stringify(cfImageInput(model)),
     });
     const text = await res.text();
     if (!res.ok) throw new UpstreamError(res.status, `cloudflare ${res.status}: ${text}`);
@@ -729,10 +790,10 @@ async function dispatchImage(
           ...(apiKey ? { "x-goog-api-key": apiKey } : {}),
           ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
         },
-        body: JSON.stringify({
+        body: JSON.stringify(mergeExtra({
           contents: [{ role: "user", parts: [{ text: prompt }] }],
           generationConfig: { responseModalities: ["IMAGE"] },
-        }),
+        }, extra)),
       });
       const text = await res.text();
       if (!res.ok) throw new UpstreamError(res.status, `google ${res.status}: ${text}`);
@@ -751,13 +812,13 @@ async function dispatchImage(
         ...(apiKey ? { "x-goog-api-key": apiKey } : {}),
         ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
       },
-      body: JSON.stringify({
+      body: JSON.stringify(mergeExtra({
         instances: [{ prompt }],
         parameters: {
           sampleCount: 1,
           ...(seed !== undefined ? { seed } : {}),
         },
-      }),
+      }, extra)),
     });
     const text = await res.text();
     if (!res.ok) throw new UpstreamError(res.status, `google ${res.status}: ${text}`);
@@ -783,7 +844,7 @@ async function dispatchImage(
       "content-type": "application/json",
       ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
     },
-    body: JSON.stringify({
+    body: JSON.stringify(mergeExtra({
       model,
       prompt,
       ...(negativePrompt !== undefined ? { negative_prompt: negativePrompt } : {}),
@@ -792,7 +853,7 @@ async function dispatchImage(
       steps,
       response_format: "b64_json",
       ...(seed !== undefined ? { seed } : {}),
-    }),
+    }, extra)),
   });
   const text = await res.text();
   if (!res.ok) throw new UpstreamError(res.status, `sdcpp ${res.status}: ${text}`);
@@ -806,6 +867,6 @@ async function dispatchImage(
 }
 
 if (import.meta.main) {
-  const port = Number(Deno.env.get("BIFROST_PORT") ?? BIFROST_PORT);
-  Deno.serve({ hostname: "0.0.0.0", port }, createBifrost());
+  const port = Number(Deno.env.get("TSBIFROST_PORT") ?? TSBIFROST_PORT);
+  Deno.serve({ hostname: "0.0.0.0", port }, createTsBifrost());
 }

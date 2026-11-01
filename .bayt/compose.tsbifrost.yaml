@@ -1,0 +1,26 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-tsbifrost:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.tsbifrost
+      target: tsbifrost
+      tags:
+      - bayt-libraries_mecha-tsbifrost:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-tsbifrost:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+    image: bayt-libraries_mecha-tsbifrost:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    ports:
+    - 8090:8090
+  libraries_mecha-tsbifrost_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.tsbifrost
+      target: tsbifrost_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+    image: bayt-libraries_mecha-tsbifrost_bayt:latest
+    scale: 0

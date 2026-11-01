@@ -31,7 +31,7 @@
     "entrypoint": null,
     "incremental": false
   },
-  "name": "bifrost",
+  "name": "tsbifrost",
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",
@@ -49,7 +49,7 @@
   "env": {},
   "synthetics": {
     "bayt": {
-      "name": "bifrost_bayt",
+      "name": "tsbifrost_bayt",
       "project": "libraries_mecha",
       "dir": "libraries/mecha",
       "activate": "",
@@ -59,9 +59,9 @@
       },
       "outs": {
         "globs": [
-          ".bayt/compose.bifrost.yaml",
-          ".bayt/Dockerfile.bifrost",
-          ".bayt/bayt.bifrost.json",
+          ".bayt/compose.tsbifrost.yaml",
+          ".bayt/Dockerfile.tsbifrost",
+          ".bayt/bayt.tsbifrost.json",
           ".bayt/Taskfile.yml",
           ".bayt/Taskfile.bayt.yml",
           ".bayt/process-compose.yaml"
@@ -80,11 +80,11 @@
         "similar": false
       },
       "upClosure": [
-        "libraries/mecha/.bayt/compose.bifrost.yaml"
+        "libraries/mecha/.bayt/compose.tsbifrost.yaml"
       ]
     },
     "outs": {
-      "name": "bifrost_outs",
+      "name": "tsbifrost_outs",
       "project": "libraries_mecha",
       "dir": "libraries/mecha",
       "activate": "",
@@ -108,7 +108,7 @@
         "similar": false
       },
       "upClosure": [
-        "libraries/mecha/.bayt/compose.bifrost.yaml"
+        "libraries/mecha/.bayt/compose.tsbifrost.yaml"
       ]
     }
   },
@@ -119,7 +119,7 @@
   "transitiveDeps": [],
   "transitiveCrossDeps": [],
   "upClosure": [
-    "libraries/mecha/.bayt/compose.bifrost.yaml"
+    "libraries/mecha/.bayt/compose.tsbifrost.yaml"
   ],
   "chainedDeps": [],
   "cmds": [],

@@ -664,22 +664,22 @@ Deno.test("a provider's program defaults stand until the deployment sets its own
   }
 });
 
-Deno.test("an AI effect or capability turns on the bifrost gateway on airlock-out", async () => {
+Deno.test("an AI effect or capability turns on the tsbifrost gateway on airlock-out", async () => {
   const got = await exported(
     { effects: [{ name: "draft", ai: "text", tier: "cheap" }], effectInterpreters: "SELECT 1;" },
     "surface.targets",
     { ai: { text: ["browser", "cheap", "heavy"], image: ["browser", "cheap", "heavy"] } },
   );
   assert.equal(got.ok, true, got.stderr);
-  assert.ok(got.value.bifrost, "bifrost target emitted when AI is used");
-  assert.equal(got.value.bifrost.compose.environment.BIFROST_PORT, "8090");
-  assert.equal(got.value.bifrost.compose.environment.AI_TARGET, "${AI_TARGET:-${SAYT_PLATFORM:-docker}}");
-  assert.equal(got.value.bifrost.compose.environment.CF_ACCOUNT_ID, "${CF_ACCOUNT_ID:-}");
-  assert.equal(got.value.bifrost.compose.environment.CF_API_TOKEN, "${CF_API_TOKEN:-}");
-  assert.equal(got.value.bifrost.compose.environment.GEMINI_API_KEY, "${GEMINI_API_KEY:-}");
-  assert.equal(got.value.bifrost.compose.environment.GOOGLE_API_KEY, "${GOOGLE_API_KEY:-}");
-  assert.equal(got.value.bifrost.compose.environment.OPENAI_API_KEY, "${OPENAI_API_KEY:-}");
-  assert.deepEqual(got.value.bifrost.compose.networks, ["airlock-out", "default", "airlock-egress"]);
-  assert.ok(got.value["airlock-mesh"].compose.depends_on.bifrost, "airlock-mesh depends on bifrost");
-  assert.match(got.value["airlock-mesh"].compose.environment.AIRLOCK_BRIDGES, /\bbifrost\b/);
+  assert.ok(got.value.tsbifrost, "tsbifrost target emitted when AI is used");
+  assert.equal(got.value.tsbifrost.compose.environment.TSBIFROST_PORT, "8090");
+  assert.equal(got.value.tsbifrost.compose.environment.AI_TARGET, "${AI_TARGET:-${SAYT_PLATFORM:-docker}}");
+  assert.equal(got.value.tsbifrost.compose.environment.CF_ACCOUNT_ID, "${CF_ACCOUNT_ID:-}");
+  assert.equal(got.value.tsbifrost.compose.environment.CF_API_TOKEN, "${CF_API_TOKEN:-}");
+  assert.equal(got.value.tsbifrost.compose.environment.GEMINI_API_KEY, "${GEMINI_API_KEY:-}");
+  assert.equal(got.value.tsbifrost.compose.environment.GOOGLE_API_KEY, "${GOOGLE_API_KEY:-}");
+  assert.equal(got.value.tsbifrost.compose.environment.OPENAI_API_KEY, "${OPENAI_API_KEY:-}");
+  assert.deepEqual(got.value.tsbifrost.compose.networks, ["airlock-out", "default", "airlock-egress"]);
+  assert.ok(got.value["airlock-mesh"].compose.depends_on.tsbifrost, "airlock-mesh depends on tsbifrost");
+  assert.match(got.value["airlock-mesh"].compose.environment.AIRLOCK_BRIDGES, /\btsbifrost\b/);
 });

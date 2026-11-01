@@ -33,8 +33,8 @@ function sink(key: string) {
   return harden({
     key,
     fetch(path: unknown, init: unknown = {}) {
-      const { method = "GET", body } = (init ?? {}) as { method?: unknown; body?: unknown };
-      return ask({ fetch: { path, method, body } });
+      const { method = "GET", body, headers } = (init ?? {}) as { method?: unknown; body?: unknown; headers?: unknown };
+      return ask({ fetch: { path, method, body, headers } });
     },
   });
 }

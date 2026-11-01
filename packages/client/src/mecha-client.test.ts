@@ -396,12 +396,12 @@ describe("a runtime with no Web Locks", () => {
   })
 })
 
-// The device tier is a localStorage-backed collection, and a region reads it
-// through a live query. @tanstack/db 0.8.1 through 0.8.7 throw `Query
-// contributors with the same row key are not congruent` when such a row is
-// updated — the engine sees the old and new row as two positive contributors
-// for one key. It is why the workspace pins 0.8.0, and this is what says so:
-// it passes on 0.8.0 and on everything before it, and fails on the rest.
+// A region reads the device tier through a live query. @tanstack/db 0.8.1
+// through 0.8.7 throw `Query contributors with the same row key are not
+// congruent` when such a row is updated — the engine sees the old and new row
+// as two positive contributors for one key. It is why the workspace pins 0.8.0,
+// and this is what says so: it passes on 0.8.0 and on everything before it,
+// and fails on the rest.
 describe("a device tier under a live query", () => {
   it("carries an update through to the query", async () => {
     const kv = new Map<string, string>()
@@ -431,6 +431,83 @@ describe("a device tier under a live query", () => {
       await new Promise((r) => setTimeout(r, 60))
 
       expect([...view.values()].map((r: any) => r.variant)).toEqual(["paulista"])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+// The device tier was TanStack's localStorage collection, which never cleared the
+// optimistic row of a write it confirmed itself: every device row stayed
+// `$synced: false`, so a region bound to one was pending forever and its screen
+// never settled.
+describe("a device row", () => {
+  it("is confirmed once written and outlives its client", async () => {
+    const kv = new Map<string, string>()
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => kv.get(k) ?? null,
+      setItem: (k: string, v: string) => void kv.set(k, v),
+      removeItem: (k: string) => void kv.delete(k),
+      key: (i: number) => [...kv.keys()][i] ?? null,
+      clear: () => kv.clear(),
+      get length() {
+        return kv.size
+      },
+    })
+    const open = () => createMechaClient({
+      tables: [{ id: "form", table: "form", durability: "device" }],
+      electricUrl: "http://localhost:0/electric",
+      crudUrl: "http://localhost:0/crud",
+      authUrl: "http://localhost:0/auth",
+    })
+    try {
+      const first = open()
+      first.collections.form.subscribeChanges(() => {}, { includeInitialState: true })
+      await first.insert("form", [{ id: "draft", topic: "Moedas" }])
+      await first.update("form", [{ key: "draft", changes: { topic: "Selos" } }])
+      expect((first.collections.form.get("draft") as any).$synced).toBe(true)
+      const second = open()
+      second.collections.form.subscribeChanges(() => {}, { includeInitialState: true })
+      await new Promise((r) => setTimeout(r, 0))
+      expect(second.collections.form.get("draft")).toMatchObject({ id: "draft", topic: "Selos", $synced: true })
+      // TanStack's own format and key, so rows stored before this client stay.
+      expect(JSON.parse(kv.get("mecha:form")!)).toEqual({ "s:draft": { versionKey: "mecha", data: { id: "draft", topic: "Selos" } } })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  // A release added the form's audience columns, and a reader's form saved before it
+  // came back without them: a screen binding {audience} threw on the missing column.
+  it("stored before a column was declared, takes the column's default", async () => {
+    const kv = new Map<string, string>([["mecha:form", JSON.stringify({ "s:draft": { versionKey: "mecha", data: { id: "draft", topic: "Moedas" } } })]])
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => kv.get(k) ?? null,
+      setItem: (k: string, v: string) => void kv.set(k, v),
+      removeItem: (k: string) => void kv.delete(k),
+      key: (i: number) => [...kv.keys()][i] ?? null,
+      clear: () => kv.clear(),
+      get length() {
+        return kv.size
+      },
+    })
+    try {
+      const client = createMechaClient({
+        tables: [{
+          id: "form", table: "form", durability: "device",
+          fields: [
+            { name: "id", type: "string", required: true },
+            { name: "topic", type: "string", required: true },
+            { name: "audience_key", type: "string", required: true, default: "diff_kids" },
+            { name: "audience", type: "string", required: true, default: "" },
+          ],
+        }],
+        electricUrl: "http://localhost:0/electric",
+        crudUrl: "http://localhost:0/crud",
+        authUrl: "http://localhost:0/auth",
+      })
+      client.collections.form.subscribeChanges(() => {}, { includeInitialState: true })
+      expect(client.collections.form.get("draft")).toMatchObject({ id: "draft", topic: "Moedas", audience_key: "diff_kids", audience: "" })
     } finally {
       vi.unstubAllGlobals()
     }

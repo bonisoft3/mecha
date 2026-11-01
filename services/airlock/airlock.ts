@@ -22,6 +22,7 @@ import { EventEmitter } from "node:events";
 import pg from "pg";
 import { type Answer, type Effect, outcome, type Outcome, step } from "./reentry.ts";
 import type { Handler, Transport } from "./handler.ts";
+import { type BlobStore, stowed } from "./blobs.ts";
 
 export type Airlock = {
   connectionString: string;
@@ -34,6 +35,8 @@ export type Airlock = {
   /** The header each effect's credential adds to its sink calls, read once;
    * the handler never holds it. */
   headers: Record<string, Record<string, string>>;
+  /** The cluster's blob plane, where an answer's bytes go; absent without one. */
+  blobs?: BlobStore;
 };
 
 const q = (name: string) => `"${name}"`;
@@ -224,9 +227,10 @@ async function perform(a: Airlock, name: string, effect: Effect, key: string, in
   try {
     if (next === "reconcile") {
       const known = await handler.call("reconcile", input, key, a.transport, a.secrets[name], a.headers[name]);
-      if (!("absent" in known)) return outcome(effect, known, true);
+      if (!("absent" in known)) return outcome(effect, await stowed(known, key, a.blobs), true);
     }
-    return outcome(effect, await handler.call("issue", input, key, a.transport, a.secrets[name], a.headers[name]) as Answer, false);
+    const answer = await handler.call("issue", input, key, a.transport, a.secrets[name], a.headers[name]) as Answer;
+    return outcome(effect, await stowed(answer, key, a.blobs), false);
   } catch (e) {
     if (entered < effect.attempts) throw e;
     console.error(`${key}: no answer after ${entered} runs, so unknown:`, e);

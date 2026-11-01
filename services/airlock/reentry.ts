@@ -57,6 +57,9 @@ export type Outcome = {
   reconciled: boolean;
 };
 
+/** How long one call outside may take: a sink call, or storing one blob. */
+export const CALL_TIMEOUT_MS = 45_000;
+
 export function outcome(effect: Effect, answer: Answer | "unknown", reconciled: boolean): Outcome {
   if (answer === "unknown") return { target: effect.onError, kind: "unknown", data: null, reconciled };
   if ("done" in answer) return { target: effect.onDone, kind: "done", data: answer.done, reconciled };
@@ -74,6 +77,28 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9-]*$/;
 const HEADER = /^[A-Z][A-Za-z0-9-]*$/;
 const RESERVED_HEADERS = new Set(["idempotency-key", "content-type", "content-length", "accept", "host", "transfer-encoding", "traceparent", "tracestate", "baggage"]);
 const SECRET = /^[A-Z][A-Z0-9_]*$/;
+const HEADER_VALUE = /^[\x21-\x7e]([\x20-\x7e]*[\x21-\x7e])?$/;
+
+/** The headers a handler sets on one sink call, checked: names daprd forwards,
+ * none HTTP or the host sets (the idempotency key, the effect's credential),
+ * and visible ASCII values. Both airlocks take them, so one handler sets them
+ * in either. */
+export function sinkHeaders(headers: unknown, host: string[] = []): Record<string, string> {
+  if (headers === undefined) return {};
+  if (typeof headers !== "object" || headers === null || Array.isArray(headers)) {
+    throw new TypeError(`sink headers must be an object of strings, got ${JSON.stringify(headers)}`);
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    const taken = RESERVED_HEADERS.has(name.toLowerCase()) || host.some((h) => h.toLowerCase() === name.toLowerCase());
+    if (!HEADER.test(name) || taken) {
+      throw new TypeError(`sink header ${JSON.stringify(name)}: a name daprd forwards (uppercase first) that neither HTTP nor the host sets`);
+    }
+    if (typeof value !== "string" || !HEADER_VALUE.test(value)) {
+      throw new TypeError(`sink header ${name}: the value is visible ASCII, got ${JSON.stringify(value)}`);
+    }
+  }
+  return headers as Record<string, string>;
+}
 /** The effect's name is also its Dapr binding's. */
 const ENDPOINT = /^[a-z][a-z0-9-]*$/;
 

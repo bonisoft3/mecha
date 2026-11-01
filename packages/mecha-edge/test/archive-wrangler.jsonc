@@ -6,6 +6,7 @@
     "binding": "ASSETS"
   },
   "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {
@@ -47,6 +48,7 @@
     }
   ],
   "alias": {
+    "typescript": "../src/typescript-absent.js",
     "@electric-sql/pglite": "../../pglite-workerd/dist/index.js",
     "@electric-sql/pglite/basefs": "../../pglite-workerd/dist/fs/base.js",
     "@mecha/postgrest-js": "../../postgrest-js/src/index.ts"

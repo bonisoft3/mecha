@@ -86,12 +86,12 @@ services:
     profiles:
     - arroyo
     scale: 1
-  bifrost:
+  tsbifrost:
     extends:
-      file: ./compose.bifrost.yaml
-      service: libraries_mecha-bifrost
+      file: ./compose.tsbifrost.yaml
+      service: libraries_mecha-tsbifrost
     profiles:
-    - bifrost
+    - tsbifrost
     scale: 1
   nubox:
     extends:

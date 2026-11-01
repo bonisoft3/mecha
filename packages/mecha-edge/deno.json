@@ -2,7 +2,9 @@
   "nodeModulesDir": "auto",
   "imports": {
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
+    "@electric-sql/pglite-icu-full": "npm:@electric-sql/pglite-icu-full@0.0.2",
     "@simplewebauthn/server": "npm:@simplewebauthn/server@10.0.1",
+    "graphile-worker": "npm:graphile-worker@0.18.0",
     "croner": "npm:croner@10.0.1",
     "@mecha/postgrest-js": "../postgrest-js/src/index.ts",
     "../postgrest-js/src/rest-handler.js": "../postgrest-js/src/rest-handler.ts",

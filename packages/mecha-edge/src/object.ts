@@ -19,7 +19,8 @@ import { type Clock, createClock, hasSchedules, serviceCrud } from './clock.ts'
 import type { Drain } from '../../mecha-browser/drains.ts'
 import { type EdgeMachines, installEngines, installHostStep } from './machines.ts'
 import { createEdgeAirlock, type EdgeAirlock, type EdgeEffects } from './airlock.ts'
-import type { AiCapabilitiesConfig } from '../../../services/airlock/bifrost.ts'
+import type { AiCapabilitiesConfig } from '../../../services/airlock/tsbifrost.ts'
+import type { BlobStore } from '../../../services/airlock/blobs.ts'
 import { applyScripts, ChangedScript, NoLedger, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
 
@@ -30,6 +31,10 @@ export interface EdgeEnv {
   CF_VERSION_METADATA: { id: string }
   ASSETS?: Fetcher
   AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> }
+  /** The edge's image plane (pronto's edgeImages): the R2 bucket, and the bucket
+   * name its `/img/insecure/plain/s3://<bucket>/<key>` route answers for. */
+  IMAGE_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown> }
+  IMAGE_SOURCE_BUCKET?: string
 }
 
 export interface EdgeOptions {
@@ -93,6 +98,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
           env: this.env as unknown as Record<string, unknown>,
           log: console.error,
           retry: () => { clock.arm().catch((e) => this.ctx.abort(String(e))) },
+          blobs: imagePlane(this.env),
         })
         // The alarm, at what the schedules owe and a failed drain's or effect's retry.
         // A frozen archive's stands at the retry alone.
@@ -105,6 +111,10 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
             clear: () => this.ctx.storage.deleteAlarm(),
           },
         })
+        // A job a drain or a settle enqueued, with no write after it, waited for
+        // the next write or the hourly cron: a deck's text sat queued for minutes.
+        // Graphile's add_job announces each insert, as its own workers hear it.
+        if (hasAirlock) await db.listen('"jobs:insert"', () => this.ctx.waitUntil(airlock.drain()))
         await clock.arm()
         return { db, cluster, clock, airlock, ticks }
       })().catch((e) => {
@@ -228,5 +238,16 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       }
       return json({ error: `no route for ${path}` }, 404)
     }
+  }
+}
+
+// An answer's bytes go where the legacy import's pictures are, served by the
+// same route, so a stored URL reads like an imported one.
+function imagePlane(env: EdgeEnv): BlobStore | undefined {
+  const bucket = env.IMAGE_OBJECTS
+  if (bucket === undefined || env.IMAGE_SOURCE_BUCKET === undefined) return undefined
+  return {
+    put: async (key, bytes, type) => { await bucket.put(key, bytes, { httpMetadata: { contentType: type } }) },
+    url: (key) => `/img/insecure/plain/s3://${env.IMAGE_SOURCE_BUCKET}/${key}`,
   }
 }

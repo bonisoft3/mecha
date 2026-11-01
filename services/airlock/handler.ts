@@ -11,7 +11,7 @@
 
 import { compile } from "../compute/workers.ts";
 import { endowable } from "../compute/language.ts";
-import { type Answer, type Effect, parseManifest } from "./reentry.ts";
+import { type Answer, type Effect, parseManifest, sinkHeaders, CALL_TIMEOUT_MS } from "./reentry.ts";
 
 const NONE = { type: "module", deno: { permissions: "none" } } as const;
 
@@ -23,7 +23,7 @@ export type Response = { status: number; body: unknown };
 export type Transport = (
   endpoint: string,
   path: string,
-  init: { method: string; body?: unknown },
+  init: { method: string; body?: unknown; headers?: Record<string, string> },
   key: string,
   headers: Record<string, string>,
 ) => Promise<Response>;
@@ -46,7 +46,6 @@ export function sinkPath(path: unknown): string {
 }
 
 /** Nothing one sink call is worth waiting on longer than this. */
-const CALL_TIMEOUT_MS = 45_000;
 
 /**
  * The real transport: the effect's HTTP output binding on the airlock's daprd.
@@ -66,9 +65,10 @@ export function bindingsTransport(mesh: string): Transport {
         operation: init.method.toLowerCase(),
         ...(init.body === undefined ? {} : { data: init.body }),
         // Metadata past the binding's own reaches the sink as headers: the
-        // ledger key, and the credential the effect declares, which the host
-        // alone holds.
+        // handler's own (sinkHeaders), the ledger key, and the credential the
+        // effect declares, which the host alone holds.
         metadata: {
+          ...init.headers,
           ...headers,
           path: sinkPath(path),
           "Idempotency-Key": key,
@@ -126,9 +126,10 @@ export class Handler {
     const serve = async (data: Record<string, unknown>) => {
       const id = data.id;
       try {
-        const { path, method, body } = data.fetch as { path: unknown; method: unknown; body: unknown };
+        const { path, method, body, headers: asked } = data.fetch as { path: unknown; method: unknown; body: unknown; headers: unknown };
         if (typeof method !== "string" || !METHODS.has(method)) throw new TypeError(`sink method ${JSON.stringify(method)}`);
-        worker.postMessage({ id, answer: await transport(this.name, sinkPath(path), { method, body }, key, headers) });
+        const own = sinkHeaders(asked, Object.keys(headers));
+        worker.postMessage({ id, answer: await transport(this.name, sinkPath(path), { method, body, headers: own }, key, headers) });
       } catch (e) {
         worker.postMessage({ id, failure: e instanceof Error ? e.message : String(e) });
       }

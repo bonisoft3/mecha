@@ -31,7 +31,25 @@ import (
 _electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
 _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 _cdcTrace:      _ @embed(file="services/transform/cdc-trace.yaml", type=text)
-_bifrostTs:     _ @embed(file="services/airlock/bifrost.ts", type=text)
+_tsbifrostTs:   _ @embed(file="services/airlock/tsbifrost.ts", type=text)
+_blobsBinding: """
+	apiVersion: dapr.io/v1alpha1
+	kind: Component
+	metadata:
+	  name: blobs
+	spec:
+	  type: bindings.aws.s3
+	  version: v1
+	  metadata:
+	    - {name: bucket, value: mecha-objects}
+	    - {name: region, value: rclone}
+	    - {name: endpoint, value: "http://rclone-s3:3900"}
+	    - {name: accessKey, value: GK000000000000000000000000}
+	    - {name: secretKey, value: "0000000000000000000000000000000000000000000000000000000000000000"}
+	    - {name: forcePathStyle, value: "true"}
+	    - {name: disableSSL, value: "true"}
+	    - {name: decodeBase64, value: "true"}
+	"""
 _whiteBackgroundTs: _ @embed(file="services/airlock/white-background.ts", type=text)
 _airlockPackage: _ @embed(file="services/airlock/package.json", type=text)
 _airlockLock: _ @embed(file="services/airlock/deno.lock", type=text)
@@ -211,8 +229,8 @@ _bridgeEnv: ["MAIL_SMTP", "MAIL_TLS", "MAIL_MESSAGE_ID_DOMAIN", "MAIL_USER", "MA
 // The mail container's HTTP port.
 #BridgePort: 8080
 
-// The port mecha's AI gateway (services/airlock/bifrost.ts) serves its daprd on.
-#BifrostPort: 8090
+// The port mecha's AI gateway (services/airlock/tsbifrost.ts) serves its daprd on.
+#TsBifrostPort: 8090
 
 #AiModality:    "text" | "image"
 #AiTier:        "browser" | "cheap" | "heavy"
@@ -229,6 +247,8 @@ _bridgeEnv: ["MAIL_SMTP", "MAIL_TLS", "MAIL_MESSAGE_ID_DOMAIN", "MAIL_USER", "MA
 	dtype?:    string & !=""
 	device?:   "webgpu" | "wasm" | "auto"
 	fallback?: string & !=""
+	// Merged into the provider call for this model only (services/airlock/tsbifrost.ts).
+	params?:   {[string]: _}
 }
 
 #AiTierOverrides: {
@@ -245,9 +265,10 @@ _bridgeEnv: ["MAIL_SMTP", "MAIL_TLS", "MAIL_MESSAGE_ID_DOMAIN", "MAIL_USER", "MA
 
 // An external effect as the cluster places it: its name, the one origin it
 // may reach, the bridge it reaches through, or the AI modality/tier it routes
-// through bifrost, and where the app keeps its handler and its binding.
+// through tsbifrost, and where the app keeps its handler and its binding.
 #Effect: E={
-	name: =~#EffectName
+	// `blobs` is the blob plane's own binding on the airlock's daprd.
+	name: =~#EffectName & !="blobs"
 	{origin: #Origin} | {bridge: =~#EffectName} | {ai: #AiModality, tier: *"cheap" | #AiBackendTier}
 	handler:  *"effects/\(E.name).js" | string
 	endpoint: *"services/airlock/dapr/\(E.name).yaml" | string
@@ -407,7 +428,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		blobs: *false | bool
 
 		// The AI plane: tiered model routing across browser worker, cheap
-		// backend, and heavy backend tiers via mecha's bifrost AI gateway.
+		// backend, and heavy backend tiers via mecha's tsbifrost AI gateway.
 		ai?: #AiCapability
 	}
 	// A migration given to a cluster with no database is one nothing applies.
@@ -1022,6 +1043,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					compose: {
 						environment: RCLONE_LOCAL_BUCKET: "mecha-objects"
+						// The airlock stores an effect's bytes here through its daprd,
+						// which reaches only what stands on airlock-egress.
+						if len(X._effects) > 0 {networks: ["default", "airlock-egress"]}
 						healthcheck: {
 							test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:3900/ 2>&1 | grep -q 'HTTP/'"]
 							interval:     "5s", timeout:         "5s", retries: 6
@@ -1246,6 +1270,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							DATABASE_URL: databaseUrl
 							MESH_URL:     "http://airlock-mesh:3500"
 							AIRLOCK_DIR:  "/airlock"
+							// An answer's bytes go to the blob plane, served by imgproxy
+							// (services/airlock/blobs.ts).
+							if X.capabilities.blobs {BLOB_URL: "/img/insecure/plain/s3://mecha-objects/"}
 							// A secret has no default: compose refuses to start without
 							// it rather than hand a handler a guessable one.
 							for k in X._secrets {
@@ -1278,33 +1305,38 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							[{from: (_from & {in: X.meta.images.airlock}).out, srcs: ["/app/airlock/dapr.yaml"], dst: "/dapr/config.yaml"}],
 							[for e in X._effects {srcs: [e.endpoint], dst: "/dapr/airlock/\(e.name).yaml"}],
 						])
+						// The blob plane's binding (services/airlock/blobs.ts): rclone-s3
+						// takes any credentials, and the airlock sends bytes as base64.
+						if X.capabilities.blobs {
+							preamble: ["COPY <<'BLOBS' /dapr/airlock/blobs.yaml\n\(_blobsBinding)\nBLOBS"]
+						}
 						entrypoint: ["/daprd", "--app-id", "airlock", "--dapr-listen-addresses", "0.0.0.0", "--resources-path", "/dapr/airlock", "--config", "/dapr/config.yaml", "--dapr-http-port", "3500", "--log-level", "info"]
 					}
 					compose: {
 						depends_on: {
 							for b in X._bridges if list.Contains(X._reached, b.name) {(b.container): _started}
-							if X._aiOn {bifrost: _started}
+							if X._aiOn {tsbifrost: _started}
 						}
 						// What this daprd may reach, on the container where an operator
 						// looks (daprd reads neither): the declared origins and bridges.
 						environment: {
 							AIRLOCK_ORIGINS: strings.Join(X._origins, " ")
-							AIRLOCK_BRIDGES: strings.Join(list.Concat([[for b in X._bridges {b.name}], [if X._aiOn {"bifrost"}]]), " ")
+							AIRLOCK_BRIDGES: strings.Join(list.Concat([[for b in X._bridges {b.name}], [if X._aiOn {"tsbifrost"}]]), " ")
 						}
 						networks: ["airlock", "airlock-out", "airlock-egress"]
 						restart: "on-failure"
 						develop: watch: [for e in X._effects {action: "sync+restart", path: "../\(e.endpoint)", target: "/dapr/airlock/\(e.name).yaml"}]
 					}
 				}
-				// Mecha's AI gateway (services/airlock/bifrost.ts): normalizes
+				// Mecha's AI gateway (services/airlock/tsbifrost.ts): normalizes
 				// OpenAI-compatible /v1/chat/completions and /v1/images/generations
 				// calls from the airlock's daprd across release-target providers
 				// (Ollama, sd.cpp, Cloudflare Workers AI, Google Gemini/Imagen) and
 				// model tiers (`cheap`, `heavy`).
 				if X._aiOn {
-					bifrost: bayt.healthcheck.tcp & X._image & {
+					tsbifrost: bayt.healthcheck.tcp & X._image & {
 						healthcheck: {
-							port:           #BifrostPort
+							port:           #TsBifrostPort
 							interval:       "5s"
 							start_interval: "500ms"
 							start_period:   "30s"
@@ -1313,17 +1345,17 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							from: (_from & {in: X.meta.images.airlock}).out
 							workdir: "/app/airlock"
 							preamble: [
-								"COPY <<'BIFROST' /app/airlock/bifrost.ts\n\(_bifrostTs)\nBIFROST",
+								"COPY <<'TSBIFROST' /app/airlock/tsbifrost.ts\n\(_tsbifrostTs)\nTSBIFROST",
 								"COPY <<'WHITE_BACKGROUND' /app/airlock/white-background.ts\n\(_whiteBackgroundTs)\nWHITE_BACKGROUND",
 								"COPY <<'PACKAGE' /app/airlock/package.json\n\(_airlockPackage)\nPACKAGE",
 								"COPY <<'LOCK' /app/airlock/deno.lock\n\(_airlockLock)\nLOCK",
-								"RUN deno cache --frozen --node-modules-dir=auto bifrost.ts",
+								"RUN deno cache --frozen --node-modules-dir=auto tsbifrost.ts",
 							]
-							cmd: ["run", "--allow-net", "--allow-env", "/app/airlock/bifrost.ts"]
+							cmd: ["run", "--allow-net", "--allow-env", "/app/airlock/tsbifrost.ts"]
 						}
 						compose: {
 							environment: {
-								BIFROST_PORT:         "\(#BifrostPort)"
+								TSBIFROST_PORT:       "\(#TsBifrostPort)"
 								AI_TARGET:            "${AI_TARGET:-${SAYT_PLATFORM:-docker}}"
 								AI_LOCAL_OLLAMA_HOST: "${AI_LOCAL_OLLAMA_HOST:-http://host.docker.internal:11434}"
 								AI_LOCAL_SDCPP_HOST:  "${AI_LOCAL_SDCPP_HOST:-http://host.docker.internal:8000}"

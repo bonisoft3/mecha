@@ -1,7 +1,7 @@
 ---
 type: concept
 title: Capabilities
-description: The switches in cluster.cue that add planes to a cluster — data, change feed, auth, blobs, schedules, effects — and what mecha's own stack runs beside them.
+description: The switches in cluster.cue that add planes to a cluster — data, change feed, auth, blobs, schedules, effects, the AI gateway — and what mecha's own stack runs beside them.
 ---
 
 # Capabilities
@@ -49,6 +49,10 @@ signature, and consumers write `insecure` in the signature segment.
 with its prefix stripped. A Caddyfile that keeps these routes while the plane
 is off answers them with 502. mecha's own Caddyfile routes `/img` only.
 
+An effect's answered bytes land here too: a cluster with effects puts rclone-s3 on
+`airlock-egress` and gives the airlock's daprd a `blobs` binding (dapr's S3 binding), through
+which the airlock stores them before an outcome settles ([the airlock](../services/airlock/README.md#a-handler)).
+
 What bites:
 
 - **Nothing on the plane authorizes.** Anyone who reaches `/blobs` can list,
@@ -65,6 +69,40 @@ What bites:
 At browser tier, `rclone-js` answers the same S3 subset over IndexedDB
 ([the browser platform](browser.md#what-stands-in-for-what)).
 
+## The AI gateway
+
+An AI effect or capability turns on **tsbifrost**
+([`services/airlock/tsbifrost.ts`](../services/airlock/tsbifrost.ts)), mecha's
+own TypeScript gateway, on `airlock-out` at port 8090. Handlers speak one
+OpenAI-shaped contract to it (`/v1/chat/completions`, `/v1/images/generations`
+with a `tier`), and it resolves `(target, modality, tier)` to a provider and
+model: Ollama and sd.cpp in docker and local, Workers AI on Cloudflare (the
+binding inside mecha-edge, REST elsewhere), Gemini and Imagen on GCP, any
+OpenAI-compatible endpoint by override.
+
+A field only one provider knows goes one of two ways, and the head of
+`tsbifrost.ts` gives the order they merge in:
+
+- **A model's `params`** in `capabilities.ai`, beside the model they belong to
+  (`targets: cloudflare: image: heavy: {model: "@cf/leonardo/phoenix-1.0",
+  params: guidance: 4}`). They ride to that model alone: an override or a
+  request that names another model leaves them behind. A handler's tier
+  resolves to a different provider on each target, and Google answers a field
+  it does not know with a 400, so this is where a provider's own knob belongs.
+- **A request's `extra_params`**, Bifrost's passthrough: merged into the
+  provider call only under the header `x-bf-passthrough-extra-params: true`,
+  refused with a 400 naming the header without it. A handler sets the header
+  through `sink.fetch`'s `headers`
+  ([the handler contract](../services/airlock/README.md)).
+
+A field either one names wins over the one tsbifrost builds, and
+`extra_params` win over `params`.
+
+[Maxim's Bifrost](https://github.com/maximhq/bifrost), the Go gateway, is the
+alternative: more providers, but one more image and its configuration store,
+and nothing for the Durable Object that mecha-edge runs tsbifrost in as a
+function.
+
 ## Beside the cluster
 
 `#Cluster` has no switch for two things mecha's own stack
@@ -73,9 +111,10 @@ At browser tier, `rclone-js` answers the same S3 subset over IndexedDB
 - **Stream processing**: redpanda, `kafka-fanout` (a second rpk pipeline
   teeing `cdc-events` onto Kafka) and Arroyo
   ([streaming joins](streaming-joins.md)).
-- **The AI gateway's seat**: `bifrost`, a busybox that holds port 8090. No
-  gateway runs there. At browser tier, pipeline calls to a model URL are
-  answered in the page, by the models its embedder supplies
+- **The AI gateway's seat**: `tsbifrost`, a busybox that holds port 8090.
+  [The gateway](#the-ai-gateway) runs in an app's cluster. At browser tier,
+  pipeline calls to a model URL are answered in the page, by the models its
+  embedder supplies
   ([the browser platform](browser.md#what-stands-in-for-what)).
 
 Both come up on a bare `up`, not as manual targets.

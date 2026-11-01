@@ -27,7 +27,7 @@ async function file(source: string): Promise<string> {
   return path;
 }
 
-type Call = { endpoint: string; path: string; init: { method: string; body?: unknown }; key: string; headers: Record<string, string> };
+type Call = { endpoint: string; path: string; init: { method: string; body?: unknown; headers?: Record<string, string> }; key: string; headers: Record<string, string> };
 function recording(answer: (c: Call) => { status: number; body: unknown }): { calls: Call[]; transport: Transport } {
   const calls: Call[] = [];
   return {
@@ -59,7 +59,7 @@ Deno.test("a handler reaches its sink only through the transport, by path, with 
   assertEquals(calls, [{
     endpoint: "charge",
     path: "/v1/charges",
-    init: { method: "POST", body: { amount: 1250, key: "charge:p1" } },
+    init: { method: "POST", body: { amount: 1250, key: "charge:p1" }, headers: {} },
     key: "charge:p1",
     headers: {},
   }]);
@@ -242,4 +242,39 @@ Deno.test("a declared Cheerio endowment parses without opening another network d
 	} finally {
 		await Deno.remove(path);
 	}
+});
+
+Deno.test("a handler sets its own headers on a sink call, never one the host or HTTP sets", async () => {
+  const asking = (headers: unknown) => file(`export const issue = async (input, sink) => {
+    await sink.fetch("/v1/images/generations", { method: "POST", body: {}, headers: ${JSON.stringify(headers)} });
+    return { done: null };
+  };`);
+  const rec = recording(() => ({ status: 200, body: null }));
+  const h = await Handler.admit("charge", await asking({ "X-Bf-Passthrough-Extra-Params": "true" }), idempotent);
+  await h.call("issue", {}, "k", rec.transport, {}, { Authorization: "Bearer vk" });
+  assertEquals(rec.calls.map((c) => [c.init.headers, c.headers]), [[{ "X-Bf-Passthrough-Extra-Params": "true" }, { Authorization: "Bearer vk" }]]);
+  // A lowercase name daprd would drop, the ledger key, the binding's path and
+  // the credential would each let the handler unsay what the host says.
+  for (const refused of [{ "x-lower": "1" }, { "Idempotency-Key": "other" }, { path: "/elsewhere" }, { Authorization: "Bearer mine" }, { "X-Bad": "a\nb" }, ["X-A"]]) {
+    const none = recording(() => ({ status: 200, body: null }));
+    const bad = await Handler.admit("charge", await asking(refused), idempotent);
+    await assertRejects(() => bad.call("issue", {}, "k", none.transport, {}, { Authorization: "Bearer vk" }), Error, "sink header");
+    assertEquals(none.calls, []);
+  }
+});
+
+Deno.test("the bindings transport sends a handler's headers as metadata, before the host's", async () => {
+  const sent: unknown[] = [];
+  const fetched = globalThis.fetch;
+  globalThis.fetch = (_url, init) => {
+    sent.push(JSON.parse(init!.body as string));
+    return Promise.resolve(new Response("{}", { status: 200, headers: { "metadata.statuscode": "200", "metadata.content-type": "application/json" } }));
+  };
+  try {
+    const transport = bindingsTransport("http://mesh");
+    await transport("illustrate", "/v1/images/generations", { method: "POST", body: {}, headers: { "X-Bf-Passthrough-Extra-Params": "true" } }, "k", {});
+    assertEquals(sent, [{ operation: "post", data: {}, metadata: { "X-Bf-Passthrough-Extra-Params": "true", path: "/v1/images/generations", "Idempotency-Key": "k", "Content-Type": "application/json" } }]);
+  } finally {
+    globalThis.fetch = fetched;
+  }
 });

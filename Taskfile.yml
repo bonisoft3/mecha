@@ -100,7 +100,7 @@ tasks:
     desc: "airlock service: re-entry, the manifest, the handler's cage and its one door out, the poke, the inward check, Graphile's initdb step"
     dir: services/airlock
     cmds:
-      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-run reentry_test.ts handler_test.ts inward_test.ts graphile_sql_test.ts mail_test.ts admit_test.ts
+      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-run reentry_test.ts handler_test.ts inward_test.ts graphile_sql_test.ts mail_test.ts admit_test.ts tsbifrost_test.ts white-background_test.ts blobs_test.ts
     sources:
       - "*.ts"
       - "*.sql"

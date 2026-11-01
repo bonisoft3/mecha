@@ -4,7 +4,7 @@ import type { Collection, LoadSubsetOptions } from "@tanstack/db"
 import { electricCollectionOptions } from "@tanstack/electric-db-collection"
 import { BroadcastChannelLeader, NonRetriableError, startOfflineExecutor, WebLocksLeader } from "@tanstack/offline-transactions"
 import type { LeaderElection } from "@tanstack/offline-transactions"
-import { localOnlyCollectionOptions, localStorageCollectionOptions } from "@tanstack/db"
+import { localOnlyCollectionOptions } from "@tanstack/db"
 import { idempotentSink } from "./sync-sink.js"
 import { unionCollectionOptions } from "./union.js"
 import { carriers, types } from "./types.js"
@@ -390,6 +390,63 @@ export function coalescedLoad(load: (opts: LoadSubsetOptions) => true | Promise<
   }
 }
 
+// A device table's rows, kept across restarts in this browser's localStorage. TanStack's
+// localStorage collection (0.8.0) confirms a write inside its own onInsert and never clears
+// the optimistic row, so every device row read as an unconfirmed write forever: the table is
+// a local-only collection, which is always confirmed, written through to the key in the
+// format that collection kept ({"s:<key>": {versionKey, data}}), so rows stored before stay.
+// Another tab's write arrives as a storage event. Where no localStorage exists (a server
+// render) it is local-only alone, as TanStack's in-memory storage was. A row stored before
+// a column was declared takes the column's default when read: a release that added
+// columns met readers' saved forms without them, and a binding to one threw.
+function deviceCollection(t: { id: string; key: string; fields?: readonly TypeField[] }): Collection<any, any, any> {
+  const storageKey = `mecha:${t.id}`
+  const storage = (globalThis as { localStorage?: Storage }).localStorage
+  const defaults = (t.fields ?? []).filter((f) => f.default !== undefined)
+  const read = (): Map<unknown, Record<string, unknown>> => {
+    const raw = storage?.getItem(storageKey) ?? null
+    const parsed = raw === null ? {} : JSON.parse(raw)
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`${storageKey} does not hold a device table`)
+    return new Map(Object.entries(parsed).map(([slot, stored]: [string, any]) => {
+      if (typeof stored !== "object" || stored === null || typeof stored.data !== "object") throw new Error(`${storageKey}: ${slot} is not a stored row`)
+      const row = { ...stored.data }
+      for (const f of defaults) if (!(f.name in row)) row[f.name] = f.default
+      return [row[t.key], row]
+    }))
+  }
+  const collection = createCollection(localOnlyCollectionOptions({
+    id: `mecha:${t.id}`,
+    getKey: (item: any) => item[t.key],
+    initialData: [...read().values()],
+  }))
+  if (storage === undefined) return collection
+  const own = (row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).filter(([k]) => !k.startsWith("$")))
+  // A constant versionKey: two tabs holding the same rows write the same text, and an
+  // unchanged value raises no storage event, so they settle instead of echoing.
+  const slot = (key: unknown) => typeof key === "number" ? `n:${key}` : `s:${String(key)}`
+  collection.subscribeChanges(() => {
+    const text = JSON.stringify(Object.fromEntries([...collection.values()].map((row: any) => [slot(row[t.key]), { versionKey: "mecha", data: own(row) }])))
+    if (storage.getItem(storageKey) !== text) storage.setItem(storageKey, text)
+  })
+  globalThis.addEventListener?.("storage", (event: Event) => {
+    const e = event as StorageEvent
+    if (e.key !== storageKey || e.storageArea !== storage) return
+    const next = read()
+    for (const row of collection.toArray as Record<string, unknown>[]) {
+      if (!next.has(row[t.key])) collection.delete(row[t.key] as any)
+    }
+    for (const [key, row] of next) {
+      const held = collection.get(key as any) as Record<string, unknown> | undefined
+      if (held === undefined) collection.insert(row)
+      else if (JSON.stringify(own(held)) !== JSON.stringify(row)) collection.update(key as any, (draft: any) => {
+        for (const k of Object.keys(draft)) if (!k.startsWith("$") && !(k in row)) delete draft[k]
+        Object.assign(draft, row)
+      })
+    }
+  })
+  return collection
+}
+
 export function createMechaClient(config: MechaClientConfig): MechaClient {
   let bound: Types | undefined
   const typeTable = (): Types => {
@@ -603,15 +660,9 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   const isLocal = (t: Table) => t.durability === "tab" || t.durability === "device"
   for (const t of byId.values()) {
     if (isLocal(t)) {
-      collections[t.id] = createCollection(
-        t.durability === "device"
-          ? localStorageCollectionOptions({
-              id: `mecha:${t.id}`,
-              storageKey: `mecha:${t.id}`,
-              getKey: (item: any) => item[t.key],
-            })
-          : localOnlyCollectionOptions({ id: `mecha:${t.id}`, getKey: (item: any) => item[t.key] }),
-      )
+      collections[t.id] = t.durability === "device"
+        ? deviceCollection(t)
+        : createCollection(localOnlyCollectionOptions({ id: `mecha:${t.id}`, getKey: (item: any) => item[t.key] }))
       continue
     }
     if (!reachable.has(t.id)) {

@@ -5,7 +5,7 @@
 // WebAuthn challenge travels in a short-lived HS256 `state` JWT instead of
 // server-side sessions. app_user is a program entity created by the database
 // migrations; this service only self-migrates webauthn_credential and
-// identity_link, in its own schema (migrate).
+// identity_link, in its own schema (schema.ts).
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -25,6 +25,7 @@ import {
   verifyJwt as verify,
 } from "./jwt.ts";
 import { type Links, oidc, type Profile, providersFrom } from "./oidc.ts";
+import { prepareAuthTables, sealAuthTables } from "./schema.ts";
 export { shapeWhere };
 
 function required(name: string): string {
@@ -100,54 +101,10 @@ export const sql = postgres(DATABASE_URL, { connection: { statement_timeout: STA
 
 export async function migrate(): Promise<void> {
   // One instance at a time: replicas starting together (a rollout) would race
-  // each step below.
+  // each step below. Where the tables live and why: schema.ts.
   await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtext('mecha auth: migrate'))`;
-    // Both tables decide who signs in as whom, so they live in a schema no app
-    // role may use. An app grants every table in public (mecha's 002_grants,
-    // pronto's emitted grants and default privileges) and the CRUD API serves
-    // public, BYPASSRLS roles included, so neither a revoke nor row security
-    // there outlasts the next such grant; nothing grants on this schema.
-    await tx`CREATE SCHEMA IF NOT EXISTS mecha_auth`;
-    // Where an earlier release left them in public, they move with their rows,
-    // shed every grant public gave them, and leave a view of the old name: an
-    // earlier release still serving reads and writes through it, and one
-    // starting again fails at its ALTER TABLE rather than making empty tables.
-    // security_invoker holds the view to its caller's privileges, which no app
-    // role has on mecha_auth.
-    for (const table of ["webauthn_credential", "identity_link"]) {
-      const [where] = await tx`SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public' AND c.relname = ${table}`;
-      if (where?.relkind === "v") continue;
-      if (where && where.relkind !== "r") throw new Error(`public.${table} is a ${where.relkind}, neither the table an earlier release made nor this service's view`);
-      if (where) {
-        const [moved] = await tx`SELECT to_regclass(${"mecha_auth." + table}) IS NOT NULL AS moved`;
-        if (moved.moved) throw new Error(`${table} is in both public and mecha_auth: keep the one holding the live rows and drop the other`);
-        await tx.unsafe(`ALTER TABLE public.${table} SET SCHEMA mecha_auth`);
-        await tx.unsafe(`DO $$ DECLARE r text; BEGIN
-          FOR r IN SELECT DISTINCT a.grantee::regrole::text FROM pg_class c, aclexplode(c.relacl) a
-            WHERE c.oid = 'mecha_auth.${table}'::regclass AND a.grantee <> 0 AND a.grantee <> c.relowner LOOP
-            EXECUTE format('REVOKE ALL ON mecha_auth.${table} FROM %s', r);
-          END LOOP;
-        END $$`);
-        await tx.unsafe(`REVOKE ALL ON mecha_auth.${table} FROM PUBLIC`);
-        await tx`DELETE FROM mecha.rls_exempt WHERE table_name = ${"public." + table}`;
-      }
-    }
-    await tx`CREATE TABLE IF NOT EXISTS mecha_auth.webauthn_credential (
-      id text primary key,
-      user_id uuid not null references public.app_user(id) on delete cascade,
-      public_key bytea not null,
-      counter bigint not null default 0
-    )`;
-    await tx`CREATE TABLE IF NOT EXISTS mecha_auth.identity_link (
-      provider text not null,
-      issuer text not null,
-      sub text not null,
-      user_id uuid not null unique references public.app_user(id) on delete cascade,
-      created_at timestamptz not null default now(),
-      primary key (provider, issuer, sub)
-    )`;
+    await tx.unsafe(prepareAuthTables(["webauthn_credential", "identity_link"]));
     await tx`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS issuer text,
       ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text`;
     // A legacy provider label may have named any issuer. Its owner must supply
@@ -163,15 +120,7 @@ export async function migrate(): Promise<void> {
         ALTER TABLE mecha_auth.identity_link ADD PRIMARY KEY (provider, issuer, sub);
       END IF;
     END $$`;
-    for (const table of ["webauthn_credential", "identity_link"]) {
-      const [view] = await tx`SELECT to_regclass(${"public." + table}) IS NULL AS missing`;
-      if (view.missing) await tx.unsafe(`CREATE VIEW public.${table} WITH (security_invoker = true) AS SELECT * FROM mecha_auth.${table}`);
-    }
-    // The audit scans every schema; it is told these are the service's own.
-    await tx`INSERT INTO mecha.rls_exempt VALUES
-      ('mecha_auth.webauthn_credential', 'the auth service''s own table, in a schema no app role may use'),
-      ('mecha_auth.identity_link', 'the auth service''s own table, in a schema no app role may use')
-      ON CONFLICT DO NOTHING`;
+    await tx.unsafe(sealAuthTables(["webauthn_credential", "identity_link"]));
   });
 }
 

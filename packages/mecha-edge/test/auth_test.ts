@@ -292,6 +292,20 @@ Deno.test({
       assert.notEqual(credWriteRes.status, 200)
       assert.notEqual(credWriteRes.status, 201)
       assert.ok(credWriteRes.status >= 400)
+      // The passkeys live in mecha_auth, which no app role may use; public
+      // keeps only a security_invoker view of the old name.
+      const placed = await db.query<{ nspname: string; relkind: string; reloptions: string[] | null }>(
+        `SELECT n.nspname, c.relkind, c.reloptions FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relname = 'webauthn_credential' ORDER BY 1`,
+      )
+      assert.deepEqual(placed.rows, [
+        { nspname: 'mecha_auth', relkind: 'r', reloptions: null },
+        { nspname: 'public', relkind: 'v', reloptions: ['security_invoker=true'] },
+      ])
+      const reach = await db.query<{ usable: boolean }>(`SELECT has_schema_privilege('app_user', 'mecha_auth', 'USAGE') AS usable`)
+      assert.equal(reach.rows[0].usable, false)
+      const exempt = await db.query(`SELECT 1 FROM mecha.rls_exempt WHERE table_name = 'mecha_auth.webauthn_credential'`)
+      assert.equal(exempt.rows.length, 1)
 
       // 10. Invalid verification responses fail with 401
       const badVerifyRes = await cluster.handle(
@@ -302,6 +316,62 @@ Deno.test({
         }),
       )
       assert.equal(badVerifyRes.status, 401)
+    } finally {
+      await db.close()
+    }
+  },
+})
+
+// A release before mecha_auth made the table in public, where an app's grants
+// reached it: the next start moves it with its passkeys and none of those
+// grants, and a passkey registered then still signs in.
+Deno.test({
+  name: 'mecha-edge moves an earlier release\'s passkey table out of public with its rows',
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const origin = 'https://test.local'
+    const rpId = 'test.local'
+    const secret = 'edge-auth-secret'
+    const db = await PGlite.create()
+    try {
+      await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+      await db.exec(await Deno.readTextFile(new URL('fixture.sql', import.meta.url)))
+      const config = { db, tables: ['note', 'board'], secret, origin, rpId, log: () => {}, fail: (e: unknown) => { throw e } }
+      const first = await createEdgeCluster(config)
+      const passkey = await makePasskey(rpId)
+      const start = (await (await first.handle(new Request(`${origin}/auth/register/start`, { method: 'POST' }))).json()) as any
+      const registered = await first.handle(new Request(`${origin}/auth/register/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state: start.state, response: passkey.register(start.challenge, origin) }),
+      }))
+      assert.equal(registered.status, 200)
+      const user = ((await registered.json()) as any).user
+      // The layout an earlier release left: the table in public, granted to app_user.
+      await db.exec(`
+        DROP VIEW public.webauthn_credential;
+        ALTER TABLE mecha_auth.webauthn_credential SET SCHEMA public;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON public.webauthn_credential TO app_user;
+      `)
+
+      const next = await createEdgeCluster(config)
+      const login = (await (await next.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))).json()) as any
+      const signedIn = await next.handle(new Request(`${origin}/auth/login/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state: login.state, response: await passkey.login(login.challenge, origin) }),
+      }))
+      assert.equal(signedIn.status, 200)
+      assert.equal(((await signedIn.json()) as any).user.id, user.id)
+      const after = await db.query<{ table: string | null; view: string; granted: boolean; rows: number }>(
+        `SELECT to_regclass('mecha_auth.webauthn_credential')::text AS table,
+                (SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.webauthn_credential')) AS view,
+                has_table_privilege('app_user', 'mecha_auth.webauthn_credential', 'SELECT, INSERT, UPDATE, DELETE') AS granted,
+                (SELECT count(*)::int FROM mecha_auth.webauthn_credential WHERE user_id = $1) AS rows`,
+        [user.id],
+      )
+      assert.deepEqual(after.rows[0], { table: 'mecha_auth.webauthn_credential', view: 'v', granted: false, rows: 1 })
     } finally {
       await db.close()
     }

@@ -22,6 +22,8 @@ class, given PGlite's assets and the tables that carry shapes:
 |---|---|---|
 | `POST /auth/guest` | a new `app_user` row and its session token | nothing |
 | `GET /auth/whoami` | the session's subject | a session |
+| `POST /auth/register/start`, `/auth/register/verify` | a passkey for a new account or for the session's guest | a session for a guest's |
+| `POST /auth/login/start`, `/auth/login/verify` | the passkey's account and its session token | a registered passkey |
 | `POST /auth/shape` | a shape token naming the table and the `where` the client must send | a session |
 | `/crud/*` | postgrest-js, in a transaction carrying the subject's role, `app.scopes` and `request.jwt.claims` | a session |
 | `GET /electric/v1/shape` | Electric's shape protocol ([`shapes.ts`](../mecha-browser/shapes.ts)) | a shape token whose `table` and `where` the request repeats |
@@ -29,8 +31,10 @@ class, given PGlite's assets and the tables that carry shapes:
 
 Tokens are HS256 under `JWT_SECRET`, with the auth service's claims and
 lifetimes ([its contract](../../services/auth/README.md)): a guest's session
-lasts 7 days, a shape token 900 s. Guests are the only sign-in; passkeys need
-the auth service's ceremonies, which run nowhere here.
+lasts 7 days, a shape token 900 s. Passkeys sign in through the same
+ceremonies (`/auth/register/*`, `/auth/login/*`); their table lives in
+`mecha_auth`, out of the REST handler's `public`, as the auth service keeps it
+([schema.ts](../../services/auth/schema.ts)), sealed when the cluster starts.
 
 Read metadata includes the shell schema's field references. PostgreSQL views
 carry no foreign-key constraints, so their declared `ref` fields supply the

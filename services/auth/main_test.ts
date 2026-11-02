@@ -1111,10 +1111,20 @@ Deno.test({
       await sql.unsafe(`alter table mecha_auth.${table} set schema public`);
       await sql.unsafe(`grant select, insert, update, delete on public.${table} to app_user`);
     }
+    await sql`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_probe') THEN CREATE ROLE column_probe NOLOGIN; END IF;
+    END $$`;
+    await sql`grant select (user_id) on public.webauthn_credential to column_probe`;
+    await sql`grant usage on schema mecha_auth to app_user`;
     await migrate();
+    const [schema] = await sql`select has_schema_privilege('app_user', 'mecha_auth', 'USAGE') as usable`;
+    assertEquals(schema.usable, false);
+    const [column] = await sql`select has_column_privilege('column_probe', 'mecha_auth.webauthn_credential', 'user_id', 'select') as granted`;
+    assertEquals(column.granted, false);
     for (const table of ["webauthn_credential", "identity_link"]) {
       const [acl] = await sql`select has_table_privilege('app_user', ${"mecha_auth." + table}, 'select, insert, update, delete') as granted`;
       assertEquals(acl.granted, false, table);
+
     }
     assertEquals((await sql`select user_id from mecha_auth.webauthn_credential where id = 'moved'`)[0].user_id, owner.id);
     assertEquals((await links.userFor({ ...alice, sub: "g-moved" })).id, owner.id);

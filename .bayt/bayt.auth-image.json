@@ -15,7 +15,8 @@
           "services/auth/deno.lock",
           "services/auth/jwt.ts",
           "services/auth/main.ts",
-          "services/auth/oidc.ts"
+          "services/auth/oidc.ts",
+          "services/auth/schema.ts"
         ],
         "dst": "/app/",
         "link": true,
@@ -53,7 +54,8 @@
       "services/auth/deno.lock",
       "services/auth/jwt.ts",
       "services/auth/main.ts",
-      "services/auth/oidc.ts"
+      "services/auth/oidc.ts",
+      "services/auth/schema.ts"
     ],
     "exclude": []
   },
@@ -144,7 +146,8 @@
           "services/auth/deno.lock",
           "services/auth/jwt.ts",
           "services/auth/main.ts",
-          "services/auth/oidc.ts"
+          "services/auth/oidc.ts",
+          "services/auth/schema.ts"
         ],
         "exclude": []
       },

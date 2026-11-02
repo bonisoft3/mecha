@@ -5,7 +5,7 @@
 // WebAuthn challenge travels in a short-lived HS256 `state` JWT instead of
 // server-side sessions. app_user is a program entity created by the database
 // migrations; this service only self-migrates webauthn_credential and
-// identity_link.
+// identity_link, in its own schema (migrate).
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -99,45 +99,80 @@ const STATE_TTL_S = 300;
 export const sql = postgres(DATABASE_URL, { connection: { statement_timeout: STATEMENT_TIMEOUT_MS } });
 
 export async function migrate(): Promise<void> {
-  await sql`CREATE TABLE IF NOT EXISTS webauthn_credential (
-    id text primary key,
-    user_id uuid not null references app_user(id) on delete cascade,
-    public_key bytea not null,
-    counter bigint not null default 0
-  )`;
-  // Read by this service alone, on its own connection; no app role reaches
-  // it, and the audit is told so rather than left to report it.
-  await sql`INSERT INTO mecha.rls_exempt VALUES
-    ('public.webauthn_credential', 'the auth service''s own table: read by it alone, on its own connection')
-    ON CONFLICT DO NOTHING`;
+  // One instance at a time: replicas starting together (a rollout) would race
+  // each step below.
   await sql.begin(async (tx) => {
-    await tx`CREATE TABLE IF NOT EXISTS identity_link (
+    await tx`SELECT pg_advisory_xact_lock(hashtext('mecha auth: migrate'))`;
+    // Both tables decide who signs in as whom, so they live in a schema no app
+    // role may use. An app grants every table in public (mecha's 002_grants,
+    // pronto's emitted grants and default privileges) and the CRUD API serves
+    // public, BYPASSRLS roles included, so neither a revoke nor row security
+    // there outlasts the next such grant; nothing grants on this schema.
+    await tx`CREATE SCHEMA IF NOT EXISTS mecha_auth`;
+    // Where an earlier release left them in public, they move with their rows,
+    // shed every grant public gave them, and leave a view of the old name: an
+    // earlier release still serving reads and writes through it, and one
+    // starting again fails at its ALTER TABLE rather than making empty tables.
+    // security_invoker holds the view to its caller's privileges, which no app
+    // role has on mecha_auth.
+    for (const table of ["webauthn_credential", "identity_link"]) {
+      const [where] = await tx`SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = ${table}`;
+      if (where?.relkind === "v") continue;
+      if (where && where.relkind !== "r") throw new Error(`public.${table} is a ${where.relkind}, neither the table an earlier release made nor this service's view`);
+      if (where) {
+        const [moved] = await tx`SELECT to_regclass(${"mecha_auth." + table}) IS NOT NULL AS moved`;
+        if (moved.moved) throw new Error(`${table} is in both public and mecha_auth: keep the one holding the live rows and drop the other`);
+        await tx.unsafe(`ALTER TABLE public.${table} SET SCHEMA mecha_auth`);
+        await tx.unsafe(`DO $$ DECLARE r text; BEGIN
+          FOR r IN SELECT DISTINCT a.grantee::regrole::text FROM pg_class c, aclexplode(c.relacl) a
+            WHERE c.oid = 'mecha_auth.${table}'::regclass AND a.grantee <> 0 AND a.grantee <> c.relowner LOOP
+            EXECUTE format('REVOKE ALL ON mecha_auth.${table} FROM %s', r);
+          END LOOP;
+        END $$`);
+        await tx.unsafe(`REVOKE ALL ON mecha_auth.${table} FROM PUBLIC`);
+        await tx`DELETE FROM mecha.rls_exempt WHERE table_name = ${"public." + table}`;
+      }
+    }
+    await tx`CREATE TABLE IF NOT EXISTS mecha_auth.webauthn_credential (
+      id text primary key,
+      user_id uuid not null references public.app_user(id) on delete cascade,
+      public_key bytea not null,
+      counter bigint not null default 0
+    )`;
+    await tx`CREATE TABLE IF NOT EXISTS mecha_auth.identity_link (
       provider text not null,
       issuer text not null,
       sub text not null,
-      user_id uuid not null unique references app_user(id) on delete cascade,
+      user_id uuid not null unique references public.app_user(id) on delete cascade,
       created_at timestamptz not null default now(),
       primary key (provider, issuer, sub)
     )`;
-    await tx`ALTER TABLE identity_link ADD COLUMN IF NOT EXISTS issuer text,
+    await tx`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS issuer text,
       ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text`;
     // A legacy provider label may have named any issuer. Its owner must supply
     // that issuer before these accounts can safely accept another sign-in.
-    const [legacy] = await tx`SELECT EXISTS (SELECT 1 FROM identity_link WHERE issuer IS NULL) AS unassigned`;
+    const [legacy] = await tx`SELECT EXISTS (SELECT 1 FROM mecha_auth.identity_link WHERE issuer IS NULL) AS unassigned`;
     if (legacy.unassigned) throw new Error("identity_link has unassigned issuers: add and populate its issuer column from the original identity provider before starting auth");
-    await tx`ALTER TABLE identity_link ALTER COLUMN issuer SET NOT NULL`;
+    await tx`ALTER TABLE mecha_auth.identity_link ALTER COLUMN issuer SET NOT NULL`;
     await tx`DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint c
         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
-        WHERE c.conrelid = 'identity_link'::regclass AND c.contype = 'p' AND a.attname = 'issuer') THEN
-        ALTER TABLE identity_link DROP CONSTRAINT identity_link_pkey;
-        ALTER TABLE identity_link ADD PRIMARY KEY (provider, issuer, sub);
+        WHERE c.conrelid = 'mecha_auth.identity_link'::regclass AND c.contype = 'p' AND a.attname = 'issuer') THEN
+        ALTER TABLE mecha_auth.identity_link DROP CONSTRAINT identity_link_pkey;
+        ALTER TABLE mecha_auth.identity_link ADD PRIMARY KEY (provider, issuer, sub);
       END IF;
     END $$`;
+    for (const table of ["webauthn_credential", "identity_link"]) {
+      const [view] = await tx`SELECT to_regclass(${"public." + table}) IS NULL AS missing`;
+      if (view.missing) await tx.unsafe(`CREATE VIEW public.${table} WITH (security_invoker = true) AS SELECT * FROM mecha_auth.${table}`);
+    }
+    // The audit scans every schema; it is told these are the service's own.
+    await tx`INSERT INTO mecha.rls_exempt VALUES
+      ('mecha_auth.webauthn_credential', 'the auth service''s own table, in a schema no app role may use'),
+      ('mecha_auth.identity_link', 'the auth service''s own table, in a schema no app role may use')
+      ON CONFLICT DO NOTHING`;
   });
-  await sql`INSERT INTO mecha.rls_exempt VALUES
-    ('public.identity_link', 'the auth service''s own table: read by it alone, on its own connection')
-    ON CONFLICT DO NOTHING`;
 }
 
 // --- HS256 JWT via WebCrypto, under this service's secret ---
@@ -517,9 +552,9 @@ async function registerVerify(req: Request): Promise<Response> {
   if (st.promote === true) {
     // The guest becomes an account once: a guest token that outlives its
     // promotion is still a guest's, and adds no second way in.
-    const added = await sql`insert into webauthn_credential (id, user_id, public_key, counter)
+    const added = await sql`insert into mecha_auth.webauthn_credential (id, user_id, public_key, counter)
       select ${credentialID}, ${userId}, ${credentialPublicKey}, ${counter}
-      where not exists (select 1 from webauthn_credential where user_id = ${userId})`;
+      where not exists (select 1 from mecha_auth.webauthn_credential where user_id = ${userId})`;
     if (added.count === 0) return jsonError(409, "already an account");
     const token = await issueUserToken(userId, st.handle as string);
     return json(200, { token, user: { id: userId, handle: st.handle } });
@@ -531,7 +566,7 @@ async function registerVerify(req: Request): Promise<Response> {
     try {
       await sql.begin(async (tx) => {
         await tx`insert into app_user (id, handle) values (${userId}, ${handle})`;
-        await tx`insert into webauthn_credential (id, user_id, public_key, counter)
+        await tx`insert into mecha_auth.webauthn_credential (id, user_id, public_key, counter)
           values (${credentialID}, ${userId}, ${credentialPublicKey}, ${counter})`;
       });
       inserted = true;
@@ -571,7 +606,7 @@ async function loginVerify(req: Request): Promise<Response> {
   // The credential identifies the user (resident key).
   const creds = await sql`
     select c.id, c.public_key, c.counter, c.user_id, u.handle
-    from webauthn_credential c join app_user u on u.id = c.user_id
+    from mecha_auth.webauthn_credential c join app_user u on u.id = c.user_id
     where c.id = ${response.id}`;
   if (creds.length === 0) {
     return jsonError(401, "authentication verification failed");
@@ -598,7 +633,7 @@ async function loginVerify(req: Request): Promise<Response> {
   if (!verification.verified) {
     return jsonError(401, "authentication verification failed");
   }
-  await sql`update webauthn_credential
+  await sql`update mecha_auth.webauthn_credential
     set counter = ${verification.authenticationInfo.newCounter}
     where id = ${cred.id as string}`;
   const userId = cred.user_id as string;
@@ -641,7 +676,7 @@ export const links: Links = {
       // One sign-in at a time per subject, so two tabs signing in at once make
       // one person, not two.
       await tx`select pg_advisory_xact_lock(hashtext(${JSON.stringify([p.provider, p.issuer, p.sub])}))`;
-      const [link] = await tx`update identity_link set name = ${p.name}, picture = ${p.picture}
+      const [link] = await tx`update mecha_auth.identity_link set name = ${p.name}, picture = ${p.picture}
         where provider = ${p.provider} and issuer = ${p.issuer} and sub = ${p.sub} returning user_id`;
       if (link) {
         const [u] = await tx`select handle from app_user where id = ${link.user_id}`;
@@ -657,7 +692,7 @@ export const links: Links = {
           if ((e as { code?: string }).code === "23505") continue;
           throw e;
         }
-        await tx`insert into identity_link (provider, issuer, sub, user_id, name, picture)
+        await tx`insert into mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture)
           values (${p.provider}, ${p.issuer}, ${p.sub}, ${id}, ${p.name}, ${p.picture})`;
         return { id, handle };
       }
@@ -666,7 +701,7 @@ export const links: Links = {
   },
   async handleOf(provider: string, issuer: string, id: string) {
     const [u] = await sql`select u.handle from app_user u
-      where u.id = ${id} and exists (select 1 from identity_link l where l.user_id = u.id and l.provider = ${provider} and l.issuer = ${issuer})`;
+      where u.id = ${id} and exists (select 1 from mecha_auth.identity_link l where l.user_id = u.id and l.provider = ${provider} and l.issuer = ${issuer})`;
     return u ? (u.handle as string) : null;
   },
 };

@@ -81,6 +81,13 @@ it, as a reader is made on `webauthn_credential`; the service creates the table
 when it starts, so an app's migration that declares such a trigger declares the
 table as the service does.
 
+Both tables live in the schema `mecha_auth`, which no app role may use: an
+app's grants on every table in `public` and the CRUD API serving `public` reach
+neither. The service moves them there, rows and all, from `public`, where
+earlier releases made them, and refuses to start where both copies exist. A
+trigger or reader an app declares names them `mecha_auth.identity_link` and
+`mecha_auth.webauthn_credential`.
+
 The issuer is the configured issuer URL, with the preset's accepted ID-token
 aliases treated as that same issuer. Replacing an issuer never transfers its
 subjects or browser sessions. Removing a provider also ends cookie adoption.

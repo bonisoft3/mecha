@@ -15,15 +15,16 @@
 //   is cached only behind a token the Worker verified for that table and
 //   where; a public-only table's where names `public:` alone, so its chunks
 //   are every guest's.
-// - A guest's GET /crud is keyed by its URL and last write: a public-only
-//   read (marked `x-mecha-scope: public` by the cluster) is shared across
-//   guests, while a subject-scoped read is keyed by the guest's `sub`; writes
-//   advance both keys. A subject-scoped read is kept seconds. A public one is
-//   fresh as long, and after that served stale while one refresh per colo
-//   replaces it, for a day: a read the object takes long to answer is paid by
-//   the refresh, not a guest. A write through this colo moves the key; one
-//   made elsewhere (another colo, the object itself) is seen as before, once
-//   the entry is past its seconds, after one stale answer.
+// - A guest's GET /crud is keyed by its URL: a public-only read (marked
+//   `x-mecha-scope: public` by the cluster) is shared across guests, while a
+//   subject-scoped read is also keyed by the guest's `sub` and last write. A
+//   subject-scoped read is kept seconds. A public one is fresh as long, and
+//   after that served stale while one refresh per colo replaces it, for a day:
+//   a read the object takes long to answer is paid by the refresh, not a guest.
+//   A write through this colo makes every entry stored before it stale, and for
+//   a writer of the table no answer at all, who reads what they wrote. One made
+//   elsewhere (another colo, the object itself) is seen as before, once the
+//   entry is past its seconds, after one stale answer.
 // - Nothing live, no write, no 4xx or 5xx, and no session but a guest's.
 // - The browser keeps a shape response that is not live as Electric's server
 //   would let it, and nothing else.
@@ -36,6 +37,8 @@ const CRUD_TTL_S = 5
 const PUBLIC_CRUD_FRESH_MS = CRUD_TTL_S * 1000
 const PUBLIC_CRUD_KEEP_S = 86_400
 const STORED_AT = 'x-edge-stored-at'
+// Long enough for a public entry older than a reader's write to have been refreshed behind someone.
+const OWN_WRITE_KEEP_S = 300
 // One refresh per stale key per isolate, as edge-ssr.ts's renders.
 const refreshing = new Map<string, Promise<void>>()
 const CLUSTER_ROUTES = /^\/(auth|crud|electric)(\/|$)/
@@ -83,6 +86,8 @@ function storedPublic(res: Response): Response {
   stored.headers.set(STORED_AT, String(Date.now()))
   return stored
 }
+
+const tableOf = (path: string) => path.split('/')[2]
 
 const navigation = (req: Request) =>
   (req.method === 'GET' || req.method === 'HEAD') && (req.headers.get('sec-fetch-mode') === 'navigate' || (req.headers.get('accept') ?? '').includes('text/html'))
@@ -191,11 +196,19 @@ export const edgeWorker = {
       const writesKey = keyOf(version, reset, 'writes', claims.sub as string)
       const publicWritesKey = keyOf(version, reset, 'writes', 'public')
       if (req.method === 'GET' && guest) {
-        const lastPublicWrite = (await (await cache.match(publicWritesKey))?.text()) ?? '0'
-        const publicKey = keyOf(version, reset, 'crud', 'public', lastPublicWrite, url.pathname + url.search)
+        const lastPublicWrite = Number((await (await cache.match(publicWritesKey))?.text()) ?? '0')
+        const lastOwnWrite = Number((await (await cache.match(writesKey))?.text()) ?? '0')
+        // Only a write this read can see: a new guest's first act is a write of its own, which kept
+        // it from every entry. A read that embeds could see any table's, so it asks of them all.
+        const lastOwnWriteHere = url.searchParams.get('select')?.includes('(')
+          ? lastOwnWrite
+          : Number((await (await cache.match(keyOf(version, reset, 'writes', claims.sub as string, tableOf(path))))?.text()) ?? '0')
+        const publicKey = keyOf(version, reset, 'crud', 'public', url.pathname + url.search)
         const publicHit = await cache.match(publicKey)
-        if (publicHit) {
-          if (Date.now() - Number(publicHit.headers.get(STORED_AT)) <= PUBLIC_CRUD_FRESH_MS) return marked(publicHit, 'hit')
+        const storedAt = Number(publicHit?.headers.get(STORED_AT))
+        // A reader reads its own writes, so an entry older than one is no answer for them.
+        if (publicHit && storedAt > lastOwnWriteHere) {
+          if (Date.now() - storedAt <= PUBLIC_CRUD_FRESH_MS && storedAt > lastPublicWrite) return marked(publicHit, 'hit')
           if (!refreshing.has(publicKey.url)) {
             const refresh = (async () => {
               const res = await object().fetch(new Request(req.url, { headers: req.headers }))
@@ -210,8 +223,7 @@ export const edgeWorker = {
           }
           return marked(publicHit, 'stale')
         }
-        const lastWrite = (await (await cache.match(writesKey))?.text()) ?? '0'
-        const subjectKey = keyOf(version, reset, 'crud', claims.sub as string, lastWrite, url.pathname + url.search)
+        const subjectKey = keyOf(version, reset, 'crud', claims.sub as string, String(lastOwnWrite), url.pathname + url.search)
         const subjectHit = await cache.match(subjectKey)
         if (subjectHit) return marked(subjectHit, 'hit')
         const res = await object().fetch(req)
@@ -226,7 +238,8 @@ export const edgeWorker = {
         const res = await object().fetch(req)
         const now = String(Date.now())
         // Before answering, so the next read cannot find the old key.
-        await cache.put(writesKey, new Response(now, { headers: { 'cache-control': `max-age=${CRUD_TTL_S}` } }))
+        await cache.put(writesKey, new Response(now, { headers: { 'cache-control': `max-age=${OWN_WRITE_KEEP_S}` } }))
+        await cache.put(keyOf(version, reset, 'writes', claims.sub as string, tableOf(path)), new Response(now, { headers: { 'cache-control': `max-age=${OWN_WRITE_KEEP_S}` } }))
         await cache.put(publicWritesKey, new Response(now, { headers: { 'cache-control': 'max-age=86400' } }))
         return res
       }

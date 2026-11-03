@@ -80,7 +80,8 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
     }
     assert.equal(fetches, 2)
 
-    // Alice writes a private note; writes invalidate public and private keys.
+    // Alice writes a private note; a write makes what was stored before it stale.
+    await new Promise(resolve => setTimeout(resolve, 2))
     const write = await edgeWorker.fetch(new Request('https://app.example/crud/note', {
       method: 'POST',
       headers: { authorization: `Bearer ${alice.token}`, 'content-type': 'application/json', prefer: 'return=representation' },
@@ -90,9 +91,32 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
     assert.equal(fetches, 3)
 
     const bobBoardAfterWrite = await edgeWorker.fetch(new Request('https://app.example/crud/board?select=title', { headers: { authorization: `Bearer ${bob.token}` } }), env, ctx)
+    // Anyone's write discarded every entry, so the next reader of each paid the whole trip to the
+    // object: an answer now, and the refresh behind it.
+    assert.equal(bobBoardAfterWrite.headers.get('x-edge-cache'), 'stale')
     await flush()
-    assert.equal(bobBoardAfterWrite.headers.get('x-edge-cache'), 'miss')
     assert.equal(fetches, 4)
+    const bobBoardRefreshed = await edgeWorker.fetch(new Request('https://app.example/crud/board?select=title', { headers: { authorization: `Bearer ${bob.token}` } }), env, ctx)
+    assert.equal(bobBoardRefreshed.headers.get('x-edge-cache'), 'hit')
+    assert.equal(fetches, 4)
+    // A write of one table says nothing of another's, and a new guest's first act is a write, which
+    // kept every guest from every entry.
+    const aliceViewAfterWrite = await edgeWorker.fetch(new Request('https://app.example/crud/board_view?select=title', { headers: { authorization: `Bearer ${alice.token}` } }), env, ctx)
+    await flush()
+    assert.equal(aliceViewAfterWrite.headers.get('x-edge-cache'), 'stale')
+    assert.equal(fetches, 5)
+    // Its writer reads what they wrote, from the object, even an entry anyone else would be answered from.
+    await new Promise(resolve => setTimeout(resolve, 2))
+    await edgeWorker.fetch(new Request('https://app.example/crud/board', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${alice.token}`, 'content-type': 'application/json', prefer: 'return=representation' },
+      body: JSON.stringify({ title: 'nova' }),
+    }), env, ctx)
+    const fetchesAfterWrite = fetches
+    const aliceBoardAfterWrite = await edgeWorker.fetch(new Request('https://app.example/crud/board?select=title', { headers: { authorization: `Bearer ${alice.token}` } }), env, ctx)
+    await flush()
+    assert.equal(aliceBoardAfterWrite.headers.get('x-edge-cache'), 'miss')
+    assert.equal(fetches, fetchesAfterWrite + 1)
 
     // Evict the cache (simulating TTL expiry of writesKey or colo change):
     // Alice's read of a user-scoped table must never populate a public key that leaks to Bob.

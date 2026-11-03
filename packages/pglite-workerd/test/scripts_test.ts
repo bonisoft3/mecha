@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
-import { applyScripts, ChangedScript, NoLedger, pgrollScripts, recordScripts, UnrunnableScript } from '../scripts.ts'
+import { applyScripts, ChangedScript, isSeedScript, NoLedger, pgrollScripts, recordScripts, UnrunnableScript } from '../scripts.ts'
 
 const tables = async (db: PGlite) => (await db.query<{ tablename: string }>("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")).rows.map((r) => r.tablename)
 
@@ -51,4 +51,9 @@ Deno.test('a pgroll set becomes scripts of its raw SQL that run, and an operatio
   } finally {
     await db.close()
   }
+})
+
+// A migration with "seed" anywhere in its name counted as a seed, so a kept directory never ran it.
+Deno.test('a seed is a script named so, not one that mentions the word', () => {
+  assert.deepEqual(['900_seed.sql', '801_schedule_seed.sql', '20261102_seed_pictures_are_objects.sql'].map(isSeedScript), [true, true, false])
 })

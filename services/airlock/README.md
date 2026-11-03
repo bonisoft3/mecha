@@ -115,7 +115,7 @@ export async function reconcile(input, sink) {
   so a retried run rewrites the same object, and the outcome carries the URL the plane
   serves it at: `/img/insecure/plain/s3://mecha-objects/<key>` through imgproxy in
   compose, written over the airlock daprd's `blobs` binding (dapr's S3 binding on
-  rclone-s3); the edge's image route on the Worker's R2 bucket at the edge. Bytes never
+  rclone-s3); the same URL on the Worker's R2 bucket at the edge. Bytes never
   reach the ledger or a row: inline, a level's pictures outgrew the edge's in-memory
   database. A cluster with no blob plane refuses the answer.
 

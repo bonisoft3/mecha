@@ -99,16 +99,38 @@ export const edgeWorker = {
     const cache = (caches as unknown as { default: Cache }).default
     if (path.startsWith('/import/')) {
       if (req.headers.get('authorization') !== `Bearer ${env.IMPORT_TOKEN}`) return json({ error: 'unauthorized' }, 401)
+      // A release's seed objects: a name is its content, so one held is never sent again.
+      if (path.startsWith('/import/blob/')) {
+        if (!env.BLOB_OBJECTS) return json({ error: 'this release binds no blob storage' }, 404)
+        const key = decodeURIComponent(path.slice('/import/blob/'.length))
+        if (await env.BLOB_OBJECTS.head(key)) return json({ stored: false })
+        if (req.method === 'HEAD') return new Response(null, { status: 404 })
+        if (req.method !== 'PUT') return json({ error: 'a blob is sent with PUT' }, 405)
+        await env.BLOB_OBJECTS.put(key, new Uint8Array(await req.arrayBuffer()), { httpMetadata: { contentType: req.headers.get('content-type') ?? 'application/octet-stream' } })
+        return json({ stored: true })
+      }
       const reqHeaders = new Headers(req.headers)
       if (env.CF_VERSION_METADATA?.id) reqHeaders.set('x-expected-version', env.CF_VERSION_METADATA.id)
-      const res = await object().fetch(new Request(req, { headers: reqHeaders }))
-      // A reset, or a migration that changed the schema, moves every key a
-      // read of the old data was kept under.
-      const moved = res.ok && (path === '/import/reset' || (path === '/import/migrate' && ((await res.clone().json()) as { applied: string[] }).applied.length > 0))
-      if (moved) {
+      // A migration, or a reset, moved every key a read of the old data was kept under, and the next
+      // object boots on the new schema. The restart's own request dies with the object, as it asked;
+      // any other failure leaves the old one running, and says so.
+      const restart = () => object().fetch(new Request(`${url.origin}/import/restart`, { method: 'POST', headers: reqHeaders }))
+        .catch((e) => { if (!String(e).includes('asked by the Worker')) throw e })
+      const moveOn = async () => {
         await cache.put(keyOf(env.CF_VERSION_METADATA.id, 'reset'), new Response(String(Date.now()), { headers: { 'cache-control': 'max-age=86400' } }))
         await cache.delete(keyOf(env.CF_VERSION_METADATA.id, 'epoch'))
+        await restart()
       }
+      // Publish asks for it itself where a migration landed and its answer did not.
+      if (path === '/import/restart') {
+        await moveOn()
+        return json({ restarted: true })
+      }
+      const res = await object().fetch(new Request(req, { headers: reqHeaders }))
+      const moved = res.ok && (path === '/import/reset' || (path === '/import/migrate' && ((await res.clone().json()) as { applied: string[] }).applied.length > 0))
+      if (moved) await moveOn()
+      const outdated = res.status === 503 && res.headers.get('content-type')?.includes('json') && ((await res.clone().json()) as { outdated?: boolean }).outdated === true
+      if (outdated) await restart()
       return res
     }
     if (path === '/poke') {

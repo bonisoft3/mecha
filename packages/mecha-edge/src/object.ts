@@ -31,10 +31,10 @@ export interface EdgeEnv {
   CF_VERSION_METADATA: { id: string }
   ASSETS?: Fetcher
   AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> }
-  /** The edge's image plane (pronto's edgeImages): the R2 bucket, and the bucket
-   * name its `/img/insecure/plain/s3://<bucket>/<key>` route answers for. */
-  IMAGE_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown> }
-  IMAGE_SOURCE_BUCKET?: string
+  /** The edge's blob storage, and the URL a stored key is served at (the same
+   * variable a container cluster's airlock reads). */
+  BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown> }
+  BLOB_URL?: string
 }
 
 export interface EdgeOptions {
@@ -159,11 +159,13 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
 
     override async fetch(req: Request): Promise<Response> {
       const path = new URL(req.url).pathname
+      // Asked by the Worker once it holds an answer that ends this object. Ended from in here, on a
+      // timer, the answer could be lost: a migration that landed once read as refused.
+      if (path === '/import/restart') this.ctx.abort('asked by the Worker')
       if (path.startsWith('/import/')) {
         const expected = req.headers.get('x-expected-version')
         const running = this.env.CF_VERSION_METADATA?.id
         if (expected && running && expected !== running) {
-          setTimeout(() => this.ctx.abort(`outdated version ${running}; restarting on ${expected}`), 0)
           return json({ outdated: true, running, expected }, 503)
         }
       }
@@ -172,15 +174,14 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       if (path === '/import/reset') await this.ctx.storage.deleteAlarm()
       if (path === '/import/reset' && this.#cluster) {
         // A release replacing live data: the directory goes now, the object
-        // and its PGlite once this answer is out.
+        // and its PGlite once the Worker holds this answer.
         this.#dir.reset()
-        setTimeout(() => this.ctx.abort('the data directory was reset'), 0)
         return json({ reset: true })
       }
       // A release's migrations over a directory kept: what the ledger lacks
-      // is applied while nothing else runs, and the object ends once the
-      // answer is out, so the next request boots on the new schema, under
-      // new shape handles, as after a reset.
+      // is applied while nothing else runs, and the Worker ends the object
+      // once it holds the answer, so the next request boots on the new schema,
+      // under new shape handles, as after a reset.
       if (path === '/import/migrate') {
         if (req.method !== 'POST') return json({ error: 'migrate is a POST' }, 405)
         if (!this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
@@ -198,7 +199,6 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
           else throw error
         }
         if (applied instanceof Error) return json({ error: applied.message }, 409)
-        if (applied.length) setTimeout(() => this.ctx.abort('the data directory was migrated'), 0)
         return json({ applied })
       }
       if (path.startsWith('/import/')) {
@@ -241,13 +241,12 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
   }
 }
 
-// An answer's bytes go where the legacy import's pictures are, served by the
-// same route, so a stored URL reads like an imported one.
+// An answer's bytes go where every other object is, served by the same route.
 function imagePlane(env: EdgeEnv): BlobStore | undefined {
-  const bucket = env.IMAGE_OBJECTS
-  if (bucket === undefined || env.IMAGE_SOURCE_BUCKET === undefined) return undefined
+  const bucket = env.BLOB_OBJECTS
+  if (bucket === undefined || env.BLOB_URL === undefined) return undefined
   return {
     put: async (key, bytes, type) => { await bucket.put(key, bytes, { httpMetadata: { contentType: type } }) },
-    url: (key) => `/img/insecure/plain/s3://${env.IMAGE_SOURCE_BUCKET}/${key}`,
+    url: (key) => `${env.BLOB_URL}${key}`,
   }
 }

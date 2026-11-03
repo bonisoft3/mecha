@@ -39,7 +39,8 @@ export class UnrunnableScript extends Error {
   constructor(name: string, op: string) { super(`${name}: ${op} is pgroll's to run, and pgroll does not run here`) }
 }
 
-const seed = (name: string) => name.includes('seed')
+// A seed file, by its name's end: a migration that only mentions seeds is owed like any other.
+export const isSeedScript = (name: string) => /(^|_)seed\.sql$/.test(name)
 export const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('')
 
 export async function digest(sql: string | null): Promise<string | null> {
@@ -95,7 +96,7 @@ export async function applyScripts(db: PGlite, scripts: Script[], log: (line: st
   await ledger(db)
   const recorded = new Map((await db.query<{ name: string; sha256: string | null }>('SELECT name, sha256 FROM public._pronto_migrations')).rows.map((r) => [r.name, r.sha256]))
   // Byte order, as a directory being built applies them.
-  const owed = [...scripts].filter((s) => !seed(s.name)).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  const owed = [...scripts].filter((s) => !isSeedScript(s.name)).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   for (const script of owed) {
     if (recorded.has(script.name) && recorded.get(script.name) !== await digest(script.sql)) throw new ChangedScript(script.name)
   }

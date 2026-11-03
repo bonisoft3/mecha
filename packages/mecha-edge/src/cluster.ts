@@ -19,6 +19,7 @@ import { prepareAuthTables, sealAuthTables } from '../../../services/auth/schema
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
+import { lanes } from './lanes.ts'
 
 export interface EdgeClusterConfig {
   db: PGlite
@@ -78,33 +79,11 @@ const now = () => Math.floor(Date.now() / 1000)
 
 export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeCluster> {
   const { db, secret, log } = cfg
-  // PGlite is one connection: interactive renders and API reads/writes take
-  // the high lane ahead of background shape tokens, subset snapshots, and
-  // prefetches, with 1 low turn after every 4 consecutive high turns.
-  let running = false
-  let highStreak = 0
-  const high: Array<() => void> = []
-  const low: Array<() => void> = []
-  function pump() {
-    if (running) return
-    const takeLow = low.length > 0 && (high.length === 0 || highStreak >= 4)
-    const next = takeLow ? low.shift() : high.shift()
-    if (!next) return
-    highStreak = takeLow ? 0 : highStreak + 1
-    running = true
-    next()
-  }
-  function serialize<T>(fn: () => Promise<T>, priority: 'high' | 'low' = 'high'): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      ;(priority === 'high' ? high : low).push(() => {
-        Promise.resolve().then(fn).then(resolve, reject).finally(() => {
-          running = false
-          pump()
-        })
-      })
-      pump()
-    })
-  }
+  const lane = lanes()
+  // Interactive API work takes the api lane; background shape tokens, subset snapshots and
+  // prefetches take the low one.
+  const serialize = <T>(fn: () => Promise<T>, priority: 'high' | 'low' = 'high'): Promise<T> =>
+    lane(fn, priority === 'high' ? 'api' : 'low')
   const serializeLow = <T>(fn: () => Promise<T>): Promise<T> => serialize(fn, 'low')
   let shapes: Awaited<ReturnType<typeof createShapes>>
   let shapesReady: Promise<void> | undefined
@@ -518,7 +497,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       pendingSnapshots[priority]++
       try {
         await drains()
-        return await serialize(() => publicSnapshot(db, generation, use, cfg.schema), priority)
+        return await lane(() => publicSnapshot(db, generation, use, cfg.schema), priority === 'high' ? 'render' : 'low')
       }
       finally { pendingSnapshots[priority]-- }
     },

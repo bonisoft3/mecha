@@ -28,16 +28,17 @@ import (
 	mise "github.com/bonisoft3/bayt/stacks/mise"
 	sayt "github.com/bonisoft3/bayt/stacks/sayt"
 	cluster "github.com/bonisoft3/mecha:cluster"
+	activepieces "github.com/bonisoft3/mecha/services/activepieces:activepieces"
 )
 
 _postgres: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
 // The one pgroll in the repository: every migration a cluster is given runs
 // through it, and pgroll/pgroll_test.ts holds the grammar to its tag.
-_pgroll: "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
+_pgroll:  "ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de039e7d7b795773b1ff63e1419d79dbd830"
 _connect: "redpandadata/connect:4.114.0@sha256:481e8df48ed733f080623ae67f0dccc82d29ae509dfb3f957347a9e900e74910"
 // The services' Deno is the repository's (mise.toml), on glibc, which the
 // compute service's DuckDB binding needs; one base for all three.
-_deno: "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
+_deno:    "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
 _busybox: "busybox:1.36.1-musl@sha256:2f9af5cf39068ec3a9e124feceaa11910c511e23a1670dcfdff0bc16793545fb"
 _curl:    "tarampampam/curl@sha256:617b3306349beaacb7ad82bddda8d6876a40c3bad06d7a28981504d230802d7e"
 
@@ -59,18 +60,18 @@ _stack: cluster.#Cluster & {
 	meta: {
 		app: "mecha"
 		images: {
-			database:   {ref: ":database-image"}
-			mesh:       {ref: ":mesh-image"}
-			conduit:    {ref: ":conduit-image"}
-			auth:       {ref: ":auth-image"}
-			ticker:     {ref: ":ticker-image"}
-			clock:      {ref: ":clock-image"}
-			compute:    {ref: ":compute-image"}
-			airlock:    {ref: ":airlock-image"}
+			database: {ref: ":database-image"}
+			mesh: {ref: ":mesh-image"}
+			conduit: {ref: ":conduit-image"}
+			auth: {ref: ":auth-image"}
+			ticker: {ref: ":ticker-image"}
+			clock: {ref: ":clock-image"}
+			compute: {ref: ":compute-image"}
+			airlock: {ref: ":airlock-image"}
 		}
 		// A plain-HTTP door: mecha's proxy config serves no TLS, and the
 		// smoke suites and the benchmark address localhost:8080.
-		caddyfile:       "services/proxy/Caddyfile"
+		caddyfile: "services/proxy/Caddyfile"
 		door: {port: 8080, scheme: "http", env: "MECHA_DOOR_HOST_PORT", host: 8080}
 		conduitTemplate: "services/cdc/pipelines/cdc-to-dapr.yaml"
 		statics: []
@@ -132,7 +133,7 @@ _mecha: bayt.#project & _where & {
 		// that the tmpl embeds need.
 		"build": sayt.build & mise.exec & {
 			srcs: globs: ["proto/**"]
-			cmd: "builtin": do: "buf lint proto"
+			cmd: "builtin": do:    "buf lint proto"
 			dockerfile: from: ref: ":setup"
 		}
 
@@ -259,13 +260,10 @@ _mecha: bayt.#project & _where & {
 				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "/app/main.ts"]
 			}
 		}
-		// The airlock and the mail bridge: one image, two commands, each scoped
-		// by the cluster target that runs it, and the bindings-only
-		// configuration the airlock's daprd copies from it (dapr.yaml).
-		// The handler's cage is compute's realm, so the compute files it
-		// imports sit at ../compute beside it, where the source names them.
+		"activepieces-image": (activepieces.#Target & {source: "services/activepieces"}).target
+		// The handler cage imports compute's realm through its sibling directory.
 		"airlock-image": _image & {
-			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "inward.ts", "mail.ts", "tsbifrost.ts", "white-background.ts", "package.json", "dapr.yaml"]
+			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "tsbifrost.ts", "white-background.ts", "package.json", "dapr.yaml"]
 			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts"]
 			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
 			dockerfile: {
@@ -275,7 +273,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: [for f in _airlock {"services/airlock/\(f)"}], dst: "/app/airlock/"},
 					{srcs: [for f in _compute {"services/compute/\(f)"}], dst: "/app/compute/"},
 				]
-				epilogue: ["RUN deno install --frozen", "RUN deno cache --frozen main.ts cage.ts mail.ts tsbifrost.ts"]
+				epilogue: ["RUN deno install --frozen", "RUN deno cache --frozen main.ts cage.ts tsbifrost.ts"]
 			}
 		}
 		"clock-image": _image & {
@@ -319,7 +317,7 @@ _mecha: bayt.#project & _where & {
 			}
 			compose: {
 				depends_on: {
-					"\(_mecha.name)-redis":    {condition: "service_healthy"}
+					"\(_mecha.name)-redis": {condition: "service_healthy"}
 					"\(_mecha.name)-redpanda": {condition: "service_healthy"}
 				}
 				restart: "on-failure"
@@ -346,7 +344,7 @@ _mecha: bayt.#project & _where & {
 				depends_on: {
 					"\(_mecha.name)-redpanda": {condition: "service_healthy"}
 					"\(_mecha.name)-database": {condition: "service_started"}
-					"\(_mecha.name)-redis":    {condition: "service_started"}
+					"\(_mecha.name)-redis": {condition: "service_started"}
 				}
 				ports: ["5115"]
 				networks: default: aliases: ["arroyo"]
@@ -401,9 +399,9 @@ _mecha: bayt.#project & _where & {
 			compose: {
 				manual: true
 				depends_on: {
-					"\(_mecha.name)-crud":     {condition: "service_healthy"}
-					"\(_mecha.name)-caddy":    {condition: "service_healthy"}
-					"\(_mecha.name)-auth":     {condition: "service_started"}
+					"\(_mecha.name)-crud": {condition: "service_healthy"}
+					"\(_mecha.name)-caddy": {condition: "service_healthy"}
+					"\(_mecha.name)-auth": {condition: "service_started"}
 					"\(_mecha.name)-electric": {condition: "service_healthy"}
 				}
 			}
@@ -415,8 +413,8 @@ _mecha: bayt.#project & _where & {
 			compose: {
 				manual: true
 				depends_on: {
-					"\(_mecha.name)-conduit":   {condition: "service_healthy"}
-					"\(_mecha.name)-redis":     {condition: "service_healthy"}
+					"\(_mecha.name)-conduit": {condition: "service_healthy"}
+					"\(_mecha.name)-redis": {condition: "service_healthy"}
 					"\(_mecha.name)-transform": {condition: "service_started"}
 				}
 				environment: CRUD_URL: "http://crud:3000"
@@ -444,10 +442,10 @@ _mecha: bayt.#project & _where & {
 			compose: {
 				manual: true
 				depends_on: {
-					"\(_mecha.name)-arroyo":       {condition: "service_healthy"}
+					"\(_mecha.name)-arroyo": {condition: "service_healthy"}
 					"\(_mecha.name)-kafka-fanout": {condition: "service_started"}
-					"\(_mecha.name)-conduit":      {condition: "service_healthy"}
-					"\(_mecha.name)-transform":    {condition: "service_started"}
+					"\(_mecha.name)-conduit": {condition: "service_healthy"}
+					"\(_mecha.name)-transform": {condition: "service_started"}
 				}
 			}
 		}
@@ -471,7 +469,7 @@ _mecha: bayt.#project & _where & {
 				manual: true
 				depends_on: {
 					"\(_mecha.name)-rclone-s3": {condition: "service_healthy"}
-					"\(_mecha.name)-imgproxy":  {condition: "service_healthy"}
+					"\(_mecha.name)-imgproxy": {condition: "service_healthy"}
 				}
 			}
 		}

@@ -1,0 +1,27 @@
+# generated from bayt.cue — do not edit
+FROM denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432 AS activepieces-image
+WORKDIR /runner
+COPY services/activepieces/main.ts services/activepieces/runner.ts services/activepieces/child.ts services/activepieces/deno.json services/activepieces/deno.lock /runner/
+COPY --parents services/activepieces/main.ts services/activepieces/runner.ts services/activepieces/child.ts services/activepieces/deno.json services/activepieces/deno.lock ./
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.activepieces-image.json ./.bayt/
+EXPOSE 8080
+CMD ["run", "--frozen", "--cached-only", "--config=/runner/deno.json", "--allow-env", "--allow-read", "--allow-net", "--allow-run", "/runner/main.ts"]
+RUN deno cache --frozen --config /runner/deno.json /runner/main.ts /runner/child.ts
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS activepieces-image_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents services/activepieces/main.ts services/activepieces/runner.ts services/activepieces/child.ts services/activepieces/deno.json services/activepieces/deno.lock ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS activepieces-image_srcs
+COPY --from=activepieces-image_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS activepieces-image_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.activepieces-image.yaml .bayt/Dockerfile.activepieces-image .bayt/bayt.activepieces-image.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/process-compose.yaml ./
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS activepieces-image_bayt
+COPY --from=activepieces-image_bayt_ctxs /monorepo /monorepo

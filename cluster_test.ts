@@ -363,32 +363,28 @@ Deno.test("a secret reaches the airlock as a required variable, with no default,
 
 const MAIL: Bridge = { name: "mail", container: "smtp" };
 const CONFIRM: Effect = { name: "confirm", bridge: "mail" };
-const mailConfig = { image: {name: "img"}, server: "smtp.mail.example:587", domain: "airlock.example" };
-const mailTarget = (config = mailConfig) => `(#MailContainer & ${JSON.stringify(config)}).target`;
+const activepiecesConfig = { image: {name: "img"}, source: "activepieces/integrations", secrets: ["SMTP_AUTH_JSON"] };
+const activepiecesTarget = (config = activepiecesConfig) => `(#ActivepiecesContainer & ${JSON.stringify(config)}).target`;
 const withContainers = (state: Partial<State>, containers: string) => `(${cluster(state, {})} & {surface: targets: ${containers}})`;
 const runtimeWith = (state: Partial<State>, containers: string, field = "targets") =>
   evaluated(`(#Runtime & {project: "p", cluster: ${withContainers(state, containers)}}).${field}`);
 
-Deno.test("mail is an ordinary container serving an Airlock bridge", async () => {
-  const config = {...mailConfig, user: "MAIL_USER_VAR", password: "MAIL_PASSWORD_VAR"};
-  const got = await runtimeWith({effects: [PROBE, CONFIRM], bridges: [MAIL]}, `{smtp: ${mailTarget(config)}}`);
+Deno.test("Activepieces is an ordinary container serving an Airlock bridge", async () => {
+  const got = await runtimeWith({effects: [PROBE, CONFIRM], bridges: [MAIL]}, `{smtp: ${activepiecesTarget()}}`);
   assert.equal(got.ok, true, got.stderr);
   const t = got.value;
   const bridge = t.smtp;
-  assert.deepEqual(bridge.dockerfile.cmd, [
-    "run", "--frozen", "--allow-net=0.0.0.0:8080,smtp.mail.example:587",
-    "--allow-env=MAIL_SMTP,MAIL_TLS,MAIL_MESSAGE_ID_DOMAIN,MAIL_USER,MAIL_PASSWORD,ETHEREAL_API,ETHEREAL_API_KEY,ETHEREAL_CACHE,ETHEREAL_WEB",
-    "--allow-sys=hostname", "mail.ts",
-  ]);
+  assert.equal(bridge.dockerfile.workdir, "/app");
+  assert.deepEqual(bridge.srcs.globs, ["activepieces/integrations/**"]);
+  assert.equal(bridge.dockerfile.cmd, undefined);
   assert.deepEqual(bridge.compose.networks, {"airlock-out": {aliases: ["smtp"]}, "bridge-mail-egress": {aliases: ["smtp"]}});
   const networks = await exported({ effects: [PROBE, CONFIRM], bridges: [MAIL] }, "surface.networks");
   assert.deepEqual(networks.value["bridge-mail-egress"], {});
   assert.deepEqual(bridge.compose.environment, {
-    MAIL_SMTP: "smtp.mail.example:587",
-    MAIL_TLS: "starttls",
-    MAIL_MESSAGE_ID_DOMAIN: "airlock.example",
-    MAIL_USER: "${MAIL_USER_VAR:?MAIL_USER_VAR is required: mail container's user}",
-    MAIL_PASSWORD: "${MAIL_PASSWORD_VAR:?MAIL_PASSWORD_VAR is required: mail container's password}",
+    ACTIVEPIECES_MANIFEST: "/app/manifest.json",
+    ACTIVEPIECES_REGISTRY: "/app/registry.ts",
+    PORT: "8080",
+    SMTP_AUTH_JSON: "${SMTP_AUTH_JSON:?SMTP_AUTH_JSON is required by the integration hatch}",
   });
   assert.equal(t["airlock-mesh"].compose.environment.AIRLOCK_BRIDGES, "mail");
   assert.deepEqual(t["airlock-mesh"].compose.depends_on["p-smtp"], { condition: "service_started" });
@@ -396,17 +392,10 @@ Deno.test("mail is an ordinary container serving an Airlock bridge", async () =>
   assert.equal(t["airlock-mesh"].compose.environment.AIRLOCK_ORIGINS, "https://sink.example.test");
 });
 
-Deno.test("mail container retains its server, domain and paired credential validation", async () => {
-  for (const config of [
-    { ...mailConfig, server: "smtp.mail.example" },
-    { ...mailConfig, server: "database:5432" },
-    { ...mailConfig, server: "10.0.0.1:25" },
-    { ...mailConfig, domain: "airlock" },
-    { ...mailConfig, tls: "implicit" },
-    { ...mailConfig, user: "MAIL_USER_VAR" },
-  ]) {
-    const got = await evaluated(mailTarget(config));
-    assert.equal(got.ok, false, JSON.stringify(config));
+Deno.test("Activepieces container requires valid secret names", async () => {
+  for (const secret of ["smtp_auth", "1KEY", ""]) {
+    const got = await evaluated(activepiecesTarget({...activepiecesConfig, secrets: [secret]}));
+    assert.equal(got.ok, false, secret);
   }
 });
 
@@ -580,6 +569,16 @@ Deno.test("the release builds exactly the published images", async () => {
   assert.deepEqual(matrix[1].slice(1, -1).split(",").map((s) => s.trim()), images);
 });
 
+Deno.test("the standalone Activepieces Dockerfile matches the shared build recipe", async () => {
+  const out = await new Deno.Command("cue", {
+    args: ["export", "./services/activepieces:activepieces", "-e", "Dockerfile", "--out", "text"],
+    cwd: MECHA, stdout: "piped", stderr: "piped",
+  }).output();
+  assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
+  const dockerfile = new TextDecoder().decode(out.stdout);
+  assert.equal(dockerfile, await Deno.readTextFile(`${MECHA}services/activepieces/Dockerfile`));
+});
+
 // The migration runner is the database image run as a runner: pgroll and the
 // script ship there, so one image serves both and one pin names it.
 Deno.test("the migrate runner takes the database image", async () => {
@@ -617,15 +616,15 @@ Deno.test("the blob store runs rclone's own image", async () => {
   assert.match(got.value.entrypoint.join(" "), /mkdir -p .*RCLONE_LOCAL_BUCKET.* && exec rclone serve s3/);
 });
 
-Deno.test("a cluster takes the published images and no others", async () => {
+Deno.test("a cluster requires the core published images; Activepieces is selected by its container recipe", async () => {
   const out = await new Deno.Command("cue", {
     args: ["export", ".:cluster", "-e", "{images: [for k, _ in #Cluster.meta.images {k}], published: #Images}"],
     cwd: MECHA, stdout: "piped", stderr: "piped",
   }).output();
   assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
   const { images, published } = JSON.parse(new TextDecoder().decode(out.stdout));
-  assert.deepEqual([...images].sort(), [...published].sort());
-  assert.deepEqual([...published].sort(), ["airlock", "auth", "clock", "compute", "conduit", "database", "mesh", "ticker"]);
+  assert.deepEqual([...images].sort(), published.filter((s: string) => s !== "activepieces").sort());
+  assert.deepEqual([...published].sort(), ["activepieces", "airlock", "auth", "clock", "compute", "conduit", "database", "mesh", "ticker"]);
 });
 
 // A provider's settings are the deployment's, over defaults the program may

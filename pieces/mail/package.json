@@ -1,0 +1,25 @@
+{
+  "name": "@bonisoft/activepieces-mail",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "*.schema.json"
+  ],
+  "dependencies": {
+    "@activepieces/pieces-framework": "0.32.0",
+    "ajv": "8.20.0",
+    "nodemailer": "10.2.1"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "8.0.2"
+  },
+  "scripts": {
+    "build": "deno task build",
+    "test": "deno task test"
+  }
+}

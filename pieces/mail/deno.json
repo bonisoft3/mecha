@@ -1,0 +1,15 @@
+{
+	"imports": {
+		"@activepieces/pieces-framework": "npm:@activepieces/pieces-framework@0.32.0",
+		"@std/assert": "jsr:@std/assert@1.0.8",
+		"ajv": "npm:ajv@8.20.0",
+		"nodemailer": "npm:nodemailer@10.2.1",
+		"nodemailer-types": "npm:@types/nodemailer@8.0.2"
+	},
+	"lock": true,
+	"nodeModulesDir": "none",
+	"tasks": {
+		"build": "deno run --frozen -A build.ts",
+		"test": "deno test --frozen --allow-net src/index_test.ts"
+	}
+}

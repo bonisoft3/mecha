@@ -19,8 +19,6 @@
           "services/airlock/cage.ts",
           "services/airlock/reentry.ts",
           "services/airlock/blobs.ts",
-          "services/airlock/inward.ts",
-          "services/airlock/mail.ts",
           "services/airlock/tsbifrost.ts",
           "services/airlock/white-background.ts",
           "services/airlock/package.json",
@@ -50,7 +48,7 @@
     ],
     "epilogue": [
       "RUN deno install --frozen",
-      "RUN deno cache --frozen main.ts cage.ts mail.ts tsbifrost.ts"
+      "RUN deno cache --frozen main.ts cage.ts tsbifrost.ts"
     ],
     "add": [],
     "mounts": [],
@@ -76,8 +74,6 @@
       "services/airlock/cage.ts",
       "services/airlock/reentry.ts",
       "services/airlock/blobs.ts",
-      "services/airlock/inward.ts",
-      "services/airlock/mail.ts",
       "services/airlock/tsbifrost.ts",
       "services/airlock/white-background.ts",
       "services/airlock/package.json",
@@ -183,8 +179,6 @@
           "services/airlock/cage.ts",
           "services/airlock/reentry.ts",
           "services/airlock/blobs.ts",
-          "services/airlock/inward.ts",
-          "services/airlock/mail.ts",
           "services/airlock/tsbifrost.ts",
           "services/airlock/white-background.ts",
           "services/airlock/package.json",

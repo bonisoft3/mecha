@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "receipt"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "accepted",
+        "permanent-refusal",
+        "temporary-refusal",
+        "uncertain"
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "messageId"
+      ],
+      "properties": {
+        "messageId": {
+          "type": "string"
+        },
+        "code": {
+          "type": "integer"
+        },
+        "response": {
+          "type": "string"
+        },
+        "accepted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

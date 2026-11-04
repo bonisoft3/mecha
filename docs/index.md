@@ -33,3 +33,5 @@
 * [PGlite for workerd](../packages/pglite-workerd/README.md) - reference: @electric-sql/pglite 0.5.8 built so a Durable Object loads it as built, its data directory kept page by page in the object's SQLite, and the resumable, verified load that puts a directory there.
 * [airlock](../services/airlock/README.md) - reference: The one way out of a cluster — the ledger a guard claims, the Graphile job its worker hears at the commit, the handler's cage and its sink reached only through a Dapr binding, what a run does after a crash, and the bindings-only daprd a cluster places it behind.
 * [@mecha/lake](../packages/lake/README.md) - reference: The browser-side consumer of a published DuckLake.
+
+* [[../services/activepieces/README|Activepieces runner]] — app-selected standard pieces, scoped actions and process isolation; optional [[../pieces/mail/README|mail piece]].

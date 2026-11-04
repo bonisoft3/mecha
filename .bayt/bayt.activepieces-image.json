@@ -1,0 +1,187 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": {
+      "name": "denoland/deno:debian-2.9.7@sha256:fa335acdf6b72106eda2cb6a8cb5f4187e7630e357467489db4b2e7352d5e432"
+    },
+    "workdir": "/runner",
+    "copy": [
+      {
+        "from": null,
+        "srcs": [
+          "services/activepieces/main.ts",
+          "services/activepieces/runner.ts",
+          "services/activepieces/child.ts",
+          "services/activepieces/deno.json",
+          "services/activepieces/deno.lock"
+        ],
+        "dst": "/runner/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "epilogue": [
+      "RUN deno cache --frozen --config /runner/deno.json /runner/main.ts /runner/child.ts"
+    ],
+    "expose": [
+      8080
+    ],
+    "cmd": [
+      "run",
+      "--frozen",
+      "--cached-only",
+      "--config=/runner/deno.json",
+      "--allow-env",
+      "--allow-read",
+      "--allow-net",
+      "--allow-run",
+      "/runner/main.ts"
+    ],
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "healthcheck": null,
+    "entrypoint": null,
+    "incremental": false
+  },
+  "name": "activepieces-image",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "services/activepieces/main.ts",
+      "services/activepieces/runner.ts",
+      "services/activepieces/child.ts",
+      "services/activepieces/deno.json",
+      "services/activepieces/deno.lock"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "activepieces-image_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.activepieces-image.yaml",
+          ".bayt/Dockerfile.activepieces-image",
+          ".bayt/bayt.activepieces-image.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.activepieces-image.yaml"
+      ]
+    },
+    "outs": {
+      "name": "activepieces-image_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.activepieces-image.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "activepieces-image_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/activepieces/main.ts",
+          "services/activepieces/runner.ts",
+          "services/activepieces/child.ts",
+          "services/activepieces/deno.json",
+          "services/activepieces/deno.lock"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.activepieces-image.yaml"
+      ]
+    }
+  },
+  "visibility": "public",
+  "emitsSrcs": true,
+  "deps": [],
+  "sameProjectDeps": [],
+  "transitiveDeps": [],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.activepieces-image.yaml"
+  ],
+  "chainedDeps": [],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

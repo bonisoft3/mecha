@@ -1,0 +1,6 @@
+{
+	"imports": {
+		"ajv": "npm:ajv@8.20.0"
+	},
+	"lock": true
+}

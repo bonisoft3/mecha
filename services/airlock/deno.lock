@@ -10,7 +10,6 @@
     "npm:fast-png@6.4.0": "6.4.0",
     "npm:graphile-worker@0.18.0": "0.18.0",
     "npm:jpeg-js@0.4.4": "0.4.4",
-    "npm:nodemailer@10.0.13": "10.0.13",
     "npm:pg@8.16.3": "8.16.3",
     "npm:ses@1.15.0": "1.15.0"
   },
@@ -494,9 +493,6 @@
     "ms@2.1.3": {
       "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="
     },
-    "nodemailer@10.0.13": {
-      "integrity": "sha512-SzG86OlvcW/NNhUFC6uROMwRTL4n7MswfQqC/T8mhkmnY1YVa23zUEMYi4ijSeXSl9GLz9ZeTJDUatEDuY5FeQ=="
-    },
     "nth-check@2.1.1": {
       "integrity": "sha512-lqjrjmaOoAnWfMmBPL+XNnynZh2+swxiX3WUE0s4yEHI6m+AwrK2UZOimIRl3X/4QctVqS8AiZjFqyOGrMXb/w==",
       "dependencies": [
@@ -724,7 +720,6 @@
       "npm:@endo/module-source@1.4.0",
       "npm:@grpc/grpc-js@1.14.4",
       "npm:graphile-worker@0.18.0",
-      "npm:nodemailer@10.0.13",
       "npm:pg@8.16.3",
       "npm:ses@1.15.0"
     ],

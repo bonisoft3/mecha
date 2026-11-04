@@ -53,6 +53,12 @@ services:
       service: libraries_mecha-compute-image
     profiles:
     - compute-image
+  activepieces-image:
+    extends:
+      file: ./compose.activepieces-image.yaml
+      service: libraries_mecha-activepieces-image
+    profiles:
+    - activepieces-image
   airlock-image:
     extends:
       file: ./compose.airlock-image.yaml

@@ -1,0 +1,24 @@
+say:
+  self: {}
+  build:
+    rulemap:
+      activepieces:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "mise x -- deno check --frozen main.ts child.ts runner_test.ts"
+  lint:
+    rulemap:
+      activepieces:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "mise x -- deno lint *.ts"
+          - do: "mise x -- deno fmt --check *.ts deno.json"
+  test:
+    rulemap:
+      activepieces:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "mise x -- deno test --frozen --allow-run --allow-net=127.0.0.1 --allow-env --allow-read runner_test.ts"

@@ -7,6 +7,6 @@ spec:
   version: v1
   metadata:
     - name: url
-      value: http://bridge-mail:8080
+      value: http://bridge-mail:8080/actions/sendMail
     - name: errorIfNot2XX
       value: "false"

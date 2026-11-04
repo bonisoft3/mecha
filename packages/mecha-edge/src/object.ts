@@ -7,6 +7,7 @@
 // deadlines, the cluster's cron — are the ticker's sweep on the object's
 // alarm and under the Worker's Cron Trigger (clock.ts). The alarm also stands
 // at a failed drain's retry, which an evicted isolate's timer would not keep.
+// A hatch's sweep runs on the poke, whatever an alarm does.
 // The environment: CLUSTER, the object's namespace; JWT_SECRET, the tokens'
 // secret; IMPORT_TOKEN, the bearer /import/* takes; CF_VERSION_METADATA, the
 // Worker's version; ASSETS, the static files, where it has any.
@@ -19,6 +20,7 @@ import { type Clock, createClock, hasSchedules, serviceCrud } from './clock.ts'
 import type { Drain } from '../../mecha-browser/drains.ts'
 import { type EdgeMachines, installEngines, installHostStep } from './machines.ts'
 import { createEdgeAirlock, type EdgeAirlock, type EdgeEffects } from './airlock.ts'
+import { hatchAt, type EdgeHatch } from './hatches.ts'
 import type { AiCapabilitiesConfig } from '../../../services/airlock/tsbifrost.ts'
 import type { BlobStore } from '../../../services/airlock/blobs.ts'
 import { applyScripts, ChangedScript, NoLedger, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
@@ -52,6 +54,7 @@ export interface EdgeOptions {
   /** A frozen archive retains its schedules and runs none. */
   clock?: 'ticker' | 'disabled'
   drains?: Drain[]
+  hatches?: EdgeHatch[]
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -63,13 +66,17 @@ export class DataDirectoryLoading extends Error {
 const earliest = (a: number | null, b: number | null): number | null =>
   a === null ? b : b === null ? a : Math.min(a, b)
 
-export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, effects = {}, ai, clock: clockMode = 'ticker', drains = [] }: EdgeOptions) {
+export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, effects = {}, ai, clock: clockMode = 'ticker', drains = [], hatches = [] }: EdgeOptions) {
   // pgl_step reaches the step through the isolate: one set of machines per Worker.
   installHostStep(machines)
   const hasAirlock = Object.keys(effects).length > 0
   return class Cluster extends DurableObject<EdgeEnv> {
     readonly #dir = new DataDirectory(this.ctx.storage, storageFormat)
     #cluster: Promise<{ db: PGlite; cluster: EdgeCluster; clock: Clock; airlock: EdgeAirlock; ticks: boolean }> | null = null
+
+    // One instance per hatch for this object's life, so what it remembers between
+    // requests, such as a rate limit, holds. One that fails to create is not kept.
+    readonly #hatches = new Map<EdgeHatch, ReturnType<EdgeHatch['create']>>()
 
     #boot() {
       return this.#cluster ??= (async () => {
@@ -123,6 +130,38 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         this.ctx.abort(e)
         throw e
       })
+    }
+
+    #served(hatch: EdgeHatch) {
+      let served = this.#hatches.get(hatch)
+      if (!served) {
+        const database = {
+          query: async <T>(sql: string, params?: unknown[]) => {
+            const { db, cluster } = await this.#boot()
+            return cluster.serialize(() => db.query<T>(sql, params))
+          },
+          transaction: async <T>(fn: (tx: import('./hatches.ts').HatchQuery) => Promise<T>) => {
+            const { db, cluster } = await this.#boot()
+            return cluster.serialize(() => db.transaction(fn))
+          },
+        }
+        served = hatch.create({ database, env: this.env as unknown as Record<string, unknown> })
+        this.#hatches.set(hatch, served)
+      }
+      return served
+    }
+
+    /** What each hatch's sweep said, every hatch asked whatever another answers. */
+    async #sweepHatches(): Promise<string[]> {
+      const errors: string[] = []
+      for (const hatch of hatches) {
+        try {
+          await this.#served(hatch).sweep?.()
+        } catch (error) {
+          errors.push(`${hatch.route}: ${error instanceof AggregateError ? `${error.message}: ${error.errors.join('; ')}` : error}`)
+        }
+      }
+      return errors
     }
 
     override async alarm(): Promise<void> {
@@ -211,6 +250,12 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         }
         return this.#dir.importing(path.slice('/import/'.length), req)
       }
+      const hatch = hatchAt(hatches, path)
+      if (hatch) {
+        if (!this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
+        await this.#boot()
+        return this.#served(hatch).fetch(req)
+      }
       // While a load is under way there is nothing to boot over.
       if ((CLUSTER_ROUTES.test(path) || path === '/poke') && !this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
       // The poke: contentless, from the Worker's Cron Trigger or a publish,
@@ -218,13 +263,19 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       if (path === '/poke') {
         if (req.method !== 'POST') return json({ error: 'poke is a POST' }, 405)
         if (clockMode === 'disabled') return json({ error: 'the clock is disabled' }, 409)
-        const { cluster, clock, airlock, ticks } = await this.#boot()
-        if (!ticks) return json({ error: 'the data directory holds no schedule table' }, 409)
+        const { db, cluster, clock, airlock, ticks } = await this.#boot()
+        if (!ticks && hatches.length === 0) return json({ error: 'the data directory holds no schedule table' }, 409)
+        const caller = new URL(req.url).searchParams.get('caller')
         // The poke stands in for an alarm the platform lost, a drain's included.
         await (await cluster.drains()).retryDue()
-        const { report, failed } = await clock.sweep(new URL(req.url).searchParams.get('caller'))
+        const { report, failed } = ticks ? await clock.sweep(caller) : { report: {}, failed: false }
         if (hasAirlock) await airlock.drain()
-        return json(report, failed ? 500 : 200)
+        // A publish's poke may come before a first deploy's hatch secrets exist.
+        const hatchErrors = caller === 'publish' ? [] : await this.#sweepHatches()
+        // A standalone Postgres has no checkpointer: without this, every byte ever
+        // written stays in pg_wal.
+        await cluster.serialize(() => db.exec('CHECKPOINT'))
+        return json({ ...report, hatchErrors }, failed || hatchErrors.length ? 500 : 200)
       }
       if (CLUSTER_ROUTES.test(path)) {
         const { cluster, clock, airlock, ticks } = await this.#boot()

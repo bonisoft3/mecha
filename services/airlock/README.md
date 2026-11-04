@@ -31,8 +31,7 @@ This file is the contract.
   handler the airlock would refuse fails before it is deployed.
 - [dapr.yaml](dapr.yaml): the airlock daprd's configuration, the bindings API
   and nothing else.
-- [mail.ts](mail.ts): mecha's mail bridge, and [inward.ts](inward.ts), the
-  address check it makes of the server it connected.
+- [[../activepieces/README|Activepieces runner]]: standard pieces in application container hatches.
 - [graphile.sql](graphile.sql), written by [graphile_sql.ts](graphile_sql.ts)
   (`task generate:graphile`): Graphile Worker's schema as one initdb step.
 
@@ -195,15 +194,14 @@ configured hatch network is preserved; an undeclared default network is not
 added. The role does not confine the process or enforce its outbound domains.
 A missing, removed or unbuilt target fails runtime lowering.
 
-Mecha's `#MailContainer` supplies the existing SMTP implementation as a reusable
-target. Its `image` is the pinned Airlock image (or build reference), followed
-by `server`, `tls`, `domain` and optional paired `user`/`password` environment
-variable names. Install its `target` under the container hatch's name and point
-the bridge at that name, port 8080. Its Deno permissions still admit only its
-HTTP listener and declared SMTP server, and it refuses an inward connected
-address before sending mail. Those are the mail implementation's guarantees,
-not guarantees granted to arbitrary bridges. Past a bridge, as past any sink,
-nothing is the platform's to promise.
+Mecha's `#ActivepiecesContainer` supplies the generic action runner. Pronto
+instantiates it from a container hatch's `activepieces` definition and scopes
+each bridge to one action alias. Applications select local or pinned catalogue
+pieces and own their fixed inputs, contracts and credential references. See
+[[../../../../plugins/pronto/docs/activepieces-hatches|Activepieces hatches]].
+The optional [[../../pieces/mail/README|mail piece]] implements SMTP; no mail
+transport knowledge is built into the runner. Past a bridge, as past any sink,
+external delivery remains subject to the effect's reentry policy.
 
 **The wake is the ticker's.** Inside a running cluster the airlock is
 reactive: it hears every enqueue at its commit. For a cluster scaled to zero,

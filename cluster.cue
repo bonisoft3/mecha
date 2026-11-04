@@ -85,7 +85,7 @@ _airlockLock: _ @embed(file="services/airlock/deno.lock", type=text)
 // the framework's (mecha's and pronto's) 800-899, and a caller's seed 900.
 // One file per prefix, so the framework keeps out of the range an app
 // numbers its steps in, and pronto refuses an app step in 8xx.
-_scheduleSql: _ @embed(file="services/ticker/schedule.sql", type=text)
+_scheduleSql:      _ @embed(file="services/ticker/schedule.sql", type=text)
 _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text)
 #MachineTimersSql: _scheduleSql + "\n" + _machineTimersSql
 
@@ -166,67 +166,21 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // omnishell module with Intl. services/compute/language.ts holds the same
 // list (ENDOWABLE), and cluster_test.ts holds them to each other.
 #CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio"]
-#CageEndowment:  or(#CageEndowments)
+#CageEndowment: or(#CageEndowments)
 
 // An environment variable's name: where a secret reaches the airlock.
 #SecretName: "^[A-Z][A-Z0-9_]*$"
 
-// A server a bridge dials: a DNS name of two labels or more and its port.
-// Spelling only, as #OriginPattern is; the bridge refuses a name that
-// resolves inward at the address it connected (services/airlock/mail.ts).
-#ServerPattern: "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?:[0-9]{1,5}$"
-
 // An Airlock endpoint supplied by a container hatch. The role grants no
 // database credential or protocol-specific confinement.
 #Bridge: {
-	name:   =~#EffectName
+	name:      =~#EffectName
 	container: =~#EffectName
+	action?: =~"^[a-zA-Z][a-zA-Z0-9_]*$"
 	port:      *8080 | int & >=1 & <=65535
 }
 
-// Mecha's SMTP implementation, reusable as an ordinary container target.
-#MailContainer: M={
-	image:     #From
-	server: =~#ServerPattern
-	tls:    *"starttls" | "none"
-	domain: =~"^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?$"
-	user?:     =~#SecretName
-	password?: =~#SecretName
-	if M.user != _|_ {password: =~#SecretName}
-	if M.password != _|_ {user: =~#SecretName}
-	target: bayt.healthcheck.tcp & {
-		cmd: "builtin": null
-		activate: ""
-		healthcheck: {
-			port:           #BridgePort
-			interval:       "5s"
-			start_interval: "500ms"
-			start_period:   "30s"
-		}
-		dockerfile: {
-			from: (_from & {in: M.image}).out
-			workdir: "/app/airlock"
-			cmd: ["run", "--frozen", "--allow-net=0.0.0.0:\(#BridgePort),\(M.server)", "--allow-env=\(strings.Join(_bridgeEnv, ","))", "--allow-sys=hostname", "mail.ts"]
-		}
-		compose: {
-			environment: {
-				MAIL_SMTP:              M.server
-				MAIL_TLS:               M.tls
-				MAIL_MESSAGE_ID_DOMAIN: M.domain
-				if M.user != _|_ {
-					MAIL_USER:     "${\(M.user):?\(M.user) is required: mail container's user}"
-					MAIL_PASSWORD: "${\(M.password):?\(M.password) is required: mail container's password}"
-				}
-			}
-			restart: "on-failure"
-		}
-	}
-}
-
-// What the mail bridge may read of its environment.
-_bridgeEnv: ["MAIL_SMTP", "MAIL_TLS", "MAIL_MESSAGE_ID_DOMAIN", "MAIL_USER", "MAIL_PASSWORD", "ETHEREAL_API", "ETHEREAL_API_KEY", "ETHEREAL_CACHE", "ETHEREAL_WEB"]
-
-// The mail container's HTTP port.
+// Container bridge HTTP port.
 #BridgePort: 8080
 
 // The port mecha's AI gateway (services/airlock/tsbifrost.ts) serves its daprd on.
@@ -332,8 +286,8 @@ _devServiceJwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsIn
 _devJwtSecret: "mecha-dev-secret-please-override-32ch"
 // The query parameter caddy adds after the gate and electric checks; one
 // literal, so the two cannot be given different ones by a slip.
-_devElectricSecret: "dev-electric-secret"
-_devElectricPassword: "dev-electric-password"
+_devElectricSecret:        "dev-electric-secret"
+_devElectricPassword:      "dev-electric-password"
 _devAuthenticatorPassword: "dev-authenticator-password"
 
 #Cluster: X={
@@ -483,7 +437,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// is matched here; one refused leaves an index out of range in every
 	// command line and path built from it.
 	_effects: [for e in X.state.effects {
-		name:     [if regexp.Match(#EffectName, e.name) {e.name}][0]
+		name: [if regexp.Match(#EffectName, e.name) {e.name}][0]
 		handler:  e.handler
 		endpoint: e.endpoint
 	}]
@@ -499,7 +453,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	_aiOn: len(_aiEffects) > 0 || X.capabilities.ai != _|_
 	_bridgeNames: [for b in X.state.bridges {b.name}]
 	_bridges: [for b in X.state.bridges {
-		name:   [if regexp.Match(#EffectName, b.name) {b.name}][0]
+		name: [if regexp.Match(#EffectName, b.name) {b.name}][0]
 		container: [if regexp.Match(#EffectName, b.container) {b.container}][0]
 		port: b.port
 	}]
@@ -627,16 +581,16 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							[for s in X._staged {
 								from: (_from & {in: X.meta.images.database}).out
 								srcs: ["\(#StagedDir)/\(s.src)"]
-								dst:  "\(#InitdbDir)/\(s.dst)"
+								dst: "\(#InitdbDir)/\(s.dst)"
 							}],
 						])
 					}
 					compose: {
 						ports: ["5432"]
 						environment: {
-							POSTGRES_USER:        "${POSTGRES_USER:-postgres}"
-							POSTGRES_PASSWORD:    "${POSTGRES_PASSWORD:-postgres}"
-							POSTGRES_DB:          "${POSTGRES_DB:-\(X.meta.app)}"
+							POSTGRES_USER:          "${POSTGRES_USER:-postgres}"
+							POSTGRES_PASSWORD:      "${POSTGRES_PASSWORD:-postgres}"
+							POSTGRES_DB:            "${POSTGRES_DB:-\(X.meta.app)}"
 							ELECTRIC_PASSWORD:      electricPassword
 							AUTHENTICATOR_PASSWORD: authenticatorPassword
 							// ORDER BY on text reaches a reader, so it sorts the way a
@@ -728,8 +682,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
 							}
 							environment: {
-								PGHOST: "database"
-								PGUSER: "${POSTGRES_USER:-postgres}"
+								PGHOST:     "database"
+								PGUSER:     "${POSTGRES_USER:-postgres}"
 								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
 								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
 							}
@@ -747,7 +701,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						from: name: "postgrest/postgrest:v16.4@sha256:d155c6718ed9a9f990d159a2ab7c0a3f16944dbb6d0a0344557421042acfe0df"
 					}
 					expose: {
-						http:  port: 3000
+						http: port:  3000
 						admin: port: 3001
 					}
 					entrypoint: {
@@ -789,8 +743,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					expose: http: port: 9999
 					entrypoint: {
-						do:    "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts"
-						env:   compose.environment
+						do:  "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts"
+						env: compose.environment
 						after: database: "healthy"
 					}
 					compose: {
@@ -803,7 +757,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// The door's port is the host's pick; auth reads this
 							// default as whichever port the request came through.
 							WEBAUTHN_ORIGIN: "${WEBAUTHN_ORIGIN:-https://localhost:*}"
-							OIDC_PROVIDERS:  strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
+							OIDC_PROVIDERS: strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
 							for p, d in X.capabilities.signIn {
 								let k = "OIDC_\(strings.ToUpper(p))_CLIENT_ID"
 								if d.client == _|_ {
@@ -1149,7 +1103,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							CRUD_URL:     "http://crud:3000"
 							DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							LAKE_DIR:     "/lake"
-							CDC_SLOT:     (#ConduitSlot & {app: X.meta.app}).name
+							CDC_SLOT: (#ConduitSlot & {app: X.meta.app}).name
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
 								name: c.name
 								file: "/app/computations/\(c.name).js"
@@ -1373,7 +1327,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						}
 					}
 				}
-						}
+			}
 
 			// The aggregate a consumer brings up: a container that does nothing
 			// but wait on everything else, so `up --wait launch` returns when
@@ -1574,7 +1528,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	}
 	_networks: N={
 		name: string
-		t: _
+		t:    _
 		_bridges: [for b in R.cluster.state.bridges if b.container == N.name {b}]
 		_base: [if N.t.compose.networks != _|_ {N.t.compose.networks}, if len(_bridges) > 0 {[]}, ["default"]][0]
 		out: [for nw, _ in {for n in list.Concat([_base, [if len(_bridges) > 0 {"airlock-out"}], [for b in _bridges {"bridge-\(b.name)-egress"}]]) {(n): true}} {nw}]

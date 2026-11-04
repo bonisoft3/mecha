@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "message",
+    "host",
+    "port",
+    "starttls",
+    "messageIdDomain",
+    "requestKey"
+  ],
+  "properties": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "subject",
+        "text"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[^\\s@<>\",;]+@[^\\s@<>\",;]+\\.[^\\s@<>\",;]+$"
+        },
+        "to": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\s@<>\",;]+@[^\\s@<>\",;]+\\.[^\\s@<>\",;]+$"
+          }
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[^\\r\\n]*$"
+        },
+        "text": {
+          "type": "string"
+        },
+        "html": {
+          "type": "string"
+        },
+        "cc": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\s@<>\",;]+@[^\\s@<>\",;]+\\.[^\\s@<>\",;]+$"
+          }
+        },
+        "bcc": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\s@<>\",;]+@[^\\s@<>\",;]+\\.[^\\s@<>\",;]+$"
+          }
+        },
+        "replyTo": {
+          "type": "string",
+          "pattern": "^[^\\s@<>\",;]+@[^\\s@<>\",;]+\\.[^\\s@<>\",;]+$"
+        },
+        "ical": {
+          "type": "object",
+          "required": [
+            "method",
+            "content"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "pattern": "^[A-Z]+$"
+            },
+            "content": {
+              "type": "string"
+            },
+            "filename": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "host": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "starttls": {
+      "type": "boolean"
+    },
+    "messageIdDomain": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$"
+    },
+    "requestKey": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "ca": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -18,6 +18,7 @@
 package cluster
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"list"
 	"path"
@@ -629,14 +630,18 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							from: (_from & {in: X.meta.images.database}).out
 							entrypoint: ["/migrate.sh"]
 							cmd: [#PgRollDir, grammar.#Baseline]
-							// Each migration is written into the image from the
-							// value state.pgroll holds, so what runs is what was
-							// vetted, and no file beside it can say otherwise. A
-							// marshalled migration is one line opening with `{`,
-							// never the delimiter, and the quoted delimiter keeps
-							// the builder from expanding anything in it.
+							// Docker's heredoc parser limits each input line to 64 KiB.
+							// Base64 keeps each chunk ASCII and preserves the vetted JSON.
 							epilogue: [for n, m in X.state.pgroll {
-								"COPY <<'PGROLL' \(#PgRollDir)/\(n).json\n\(json.Marshal(m))\nPGROLL"
+								let jsonText = json.Marshal(m)
+								if len(jsonText) <= 8192 {
+									"COPY <<'PGROLL' \(#PgRollDir)/\(n).json\n\(jsonText)\nPGROLL"
+								}
+								if len(jsonText) > 8192 {
+									let encoded = '\(base64.Encode(null, jsonText))'
+									let chunks = [for i in list.Range(0, len(encoded), 8192) {"\(strings.ByteSlice(encoded, i, list.Min([i+8192, len(encoded)])))"}]
+									"COPY <<'PGROLL' /tmp/\(n).json.parts\n\(strings.Join(chunks, "\n"))\nPGROLL\nRUN mkdir -p \(#PgRollDir) && base64 -d < /tmp/\(n).json.parts > \(#PgRollDir)/\(n).json && rm /tmp/\(n).json.parts"
+								}
 							}]
 						}
 						compose: {

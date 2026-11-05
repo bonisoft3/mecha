@@ -228,3 +228,37 @@ Deno.test("the migrate target carries every volume forward, and a failure keeps 
     await Deno.remove(scratch, { recursive: true });
   }
 });
+
+Deno.test("the generated migration Dockerfile preserves large SQL exactly", async () => {
+  const dir = await Deno.makeTempDir({ dir: `${MECHA}/tests`, prefix: ".large-migration-" });
+  const relative = dir.slice(MECHA.length + 1);
+  const root = fileURLToPath(new URL("../../../../", import.meta.url)).replace(/\/$/, "");
+  const tag = `mecha-large-migration:${crypto.randomUUID().slice(0, 8)}`;
+  const sql = "SELECT 'a\\b $HOME \'quoted\' 🂡';\n-- PGROLL\n" + "x".repeat(1_500_000);
+  let built = false;
+  try {
+    await Deno.writeTextFile(`${dir}/bayt.cue`, `package fixture
+import (
+  bayt "bonisoft.org/plugins/bayt/core:bayt"
+  cluster "bonisoft.org/libraries/mecha:cluster"
+)
+_payload: ${JSON.stringify(sql)}
+_cluster: cluster.#Cluster & {
+  meta: {app: "fixture", images: [string]: name: "busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223", bounds: {authStatementMs: 5000, tickerCallMs: 35000}}
+  state: {migrations: [], pipelines: [], schedules: [], pgroll: {"01_large": {operations: [{sql: {up: _payload}}]}, "02_small": {operations: [{sql: {up: "SELECT 1"}}]}}}
+}
+project: bayt.#project & {name: "large_migration_fixture", dir: "libraries/mecha/${relative}", targets: migrate: dockerfile: _cluster.surface.targets.migrate.dockerfile}
+`);
+    const nu = `use ${root}/plugins/sayt/auto-bayt.nu docker-env; with-env (docker-env) { cd ${dir}; use ${root}/plugins/bayt/core/generate.nu; generate --runtime plugins/bayt }`;
+    await must(run("mise", ["x", "--", "nu", "-c", nu]), "bayt generate");
+    await must(run("docker", ["build", "-q", "--target", "migrate", "-t", tag, "-f", `${dir}/.bayt/Dockerfile.migrate`, dir]), "build migration image");
+    built = true;
+    const json = JSON.parse(await must(run("docker", ["run", "--rm", "--entrypoint", "cat", tag, "/pgroll/01_large.json"]), "read migration"));
+    assert.deepEqual(json, { operations: [{ sql: { up: sql } }] });
+    const small = JSON.parse(await must(run("docker", ["run", "--rm", "--entrypoint", "cat", tag, "/pgroll/02_small.json"]), "read small migration"));
+    assert.deepEqual(small, { operations: [{ sql: { up: "SELECT 1" } }] });
+  } finally {
+    if (built) await must(run("docker", ["image", "rm", tag]), "remove test image tag");
+    await Deno.remove(dir, { recursive: true });
+  }
+});

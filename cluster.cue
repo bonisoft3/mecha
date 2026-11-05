@@ -850,7 +850,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					publish: environment: X.meta.door.env
 					if X.meta.door.host != _|_ {host: X.meta.door.host}
 				}
-				let validators = #"set -e -o pipefail; roots=$(caddy adapt --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile | tr , '\n' | grep -o '"root":"[^"]*"' | cut -d'"' -f4 | sort -u); if [ -n "$roots" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < "$f"); printf "$q%s$q" "${h%% *}" > "$f.etag"; done' sh '"' {} +; fi; "#
+				let validators = #"set -e -o pipefail; roots=$(caddy adapt --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile | awk '{ while (match($0, /"root":"[^"]*"/)) { print substr($0, RSTART + 8, RLENGTH - 9); $0 = substr($0, RSTART + RLENGTH) } }' | sort -u); if [ -n "$roots" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < "$f"); printf "$q%s$q" "${h%% *}" > "$f.etag"; done' sh '"' {} +; fi; "#
 
 				// An ORIGIN that is no origin stops the door as it starts: a
 				// template writes it into markup as it stands.

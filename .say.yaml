@@ -58,5 +58,5 @@ say:
         priority: -1
         stop: true
         cmds:
-          - do: "mise x -- deno test --no-config --no-lock --allow-run=docker,cue,mise --allow-read --allow-write --allow-env --allow-net services/migrate/migrate_test.ts tests/planes_test.ts tests/airlock_test.ts"
+          - do: "mise x -- deno test --no-config --no-lock --allow-run=docker,cue,mise --allow-read --allow-write --allow-env --allow-net services/migrate/migrate_test.ts tests/planes_test.ts tests/airlock_test.ts tests/caddy_test.ts"
           - do: "mise x -- task integrate:compute"

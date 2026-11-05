@@ -109,6 +109,16 @@ BEGIN
     'WITH CHECK (scope_id = ANY((SELECT current_scopes())::text[]))', tbl);
 END $$;
 
+-- A generated runtime can replace this transaction-entry hook to acquire its
+-- write locks before table triggers (including IVM) acquire theirs.
+CREATE SCHEMA IF NOT EXISTS mecha;
+GRANT USAGE ON SCHEMA mecha TO PUBLIC;
+DO $init$ BEGIN
+  IF to_regprocedure('mecha.request_write_gate()') IS NULL THEN
+    EXECUTE 'CREATE FUNCTION mecha.request_write_gate() RETURNS void LANGUAGE plpgsql AS $body$ BEGIN END $body$';
+  END IF;
+END $init$;
+
 -- PostgREST calls this once per request, in the request's transaction, after
 -- switching to the request role. It is what makes current_scopes() a constant
 -- for the statement rather than a subquery per row.
@@ -121,13 +131,6 @@ END $$;
 -- moves past 0. Not for a read, nor for a function call, which may be one:
 -- naming a transaction assigns it an id, spent for nothing there. Added to
 -- whatever headers the request already set rather than replacing them.
---
--- It must exist wherever PGRST_DB_PRE_REQUEST names it, and that setting is
--- unconditional for a server app -- so it cannot be conditional either, which
--- rules out emitting it per app. It can live here because it reads settings
--- and writes others and depends on nothing an app declares.
---
--- Not SECURITY DEFINER: it reaches no table.
 CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void
   LANGUAGE plpgsql AS $$
 DECLARE
@@ -138,6 +141,9 @@ BEGIN
   END IF;
   PERFORM set_config('app.scopes',
     array_to_string(public.subject_scopes(sub), ','), true);
+  IF current_setting('request.method', true) IN ('POST', 'PATCH', 'PUT', 'DELETE') THEN
+    PERFORM mecha.request_write_gate();
+  END IF;
   IF current_setting('request.method', true) IN ('POST', 'PATCH', 'PUT', 'DELETE')
      AND current_setting('request.path', true) NOT LIKE '/rpc/%' THEN
     PERFORM set_config('response.headers',
@@ -162,12 +168,10 @@ END $$;
 -- hand every signed-in user the ability to exempt any table and silence the
 -- gate, and a REVOKE here would be undone by the next such grant. Being outside
 -- `public` also keeps it off PostgREST, which serves that schema.
-CREATE SCHEMA IF NOT EXISTS mecha;
 CREATE TABLE IF NOT EXISTS mecha.rls_exempt (
   table_name text PRIMARY KEY,
   reason     text NOT NULL
 );
-GRANT USAGE ON SCHEMA mecha TO PUBLIC;
 GRANT SELECT ON mecha.rls_exempt TO PUBLIC;
 
 -- Where a shape may be keyed besides `scope_id`, declared rather than

@@ -19,6 +19,8 @@ package cluster
 	id:           =~"^[a-z][a-z0-9_]{0,30}$"
 	initial:      string
 	description?: string
+	meta?:        {...}
+	invoke?:      #XStateInvoke | [...#XStateInvoke]
 	// Taken in every state, as XState lets an event a state leaves unhandled
 	// reach the machine. A state does not take the same event: XState would
 	// fall back to the machine's transition when the state's guard refuses,
@@ -48,6 +50,7 @@ package cluster
 })
 
 #XStateTransition: close({
+	reenter?:     bool
 	target?:      string
 	guard?:       string
 	actions?:     string | [...string]

@@ -293,7 +293,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 
 #Cluster: X={
 	state: {
-		migrations: [...string]
+		migrations: [...string] & list.UniqueItems()
 		// Changes to a schema that already exists, in pgroll's own grammar and
 		// keyed by the version each creates. `migrations` build the schema on a
 		// fresh volume; these carry a volume that outlived a change forward, and
@@ -400,7 +400,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// built.
 	_initdb: [K=string]: =~"(^|/)[0-9]{3}_[^/]*$" & =~"(^|/)\(K)_[^/]*$"
 	_initdb: {
-		(strings.SliceRunes(#TenancyMigration, 0, 3)): #TenancyMigration
+		let tenancy = [for migration in X.state.migrations if path.Base(migration, path.Unix) == #TenancyMigration {migration}]
+		if len(tenancy) == 0 {
+			(strings.SliceRunes(#TenancyMigration, 0, 3)): #TenancyMigration
+		}
 		if X.capabilities.server {
 			(strings.SliceRunes(#RolePasswordsStep, 0, 3)): #RolePasswordsStep
 		}
@@ -412,6 +415,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			(strings.SliceRunes(#AirlockMigration, 0, 3)):  #AirlockMigration
 		}
 		for m in X.state.migrations {(strings.SliceRunes(path.Base(m, path.Unix), 0, 3)): m}
+		if len(tenancy) > 1 {
+			(strings.SliceRunes(#TenancyMigration, 0, 3)): "duplicate migration \(#TenancyMigration)"
+		}
 	}
 
 	// No target runs a lifecycle command: the image is the recipe, the

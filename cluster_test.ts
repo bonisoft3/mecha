@@ -682,3 +682,16 @@ Deno.test("an AI effect or capability turns on the tsbifrost gateway on airlock-
   assert.ok(got.value["airlock-mesh"].compose.depends_on.tsbifrost, "airlock-mesh depends on tsbifrost");
   assert.match(got.value["airlock-mesh"].compose.environment.AIRLOCK_BRIDGES, /\btsbifrost\b/);
 });
+
+Deno.test("an explicit tenancy baseline replaces the image floor once", async () => {
+  const baseline = "services/database/migrations/003_rls.sql";
+  const generated = await copied({ migrations: [baseline, "m/004_types.sql"] });
+  assert.equal(generated.ok, true, generated.stderr);
+  assert.deepEqual(generated.value, [baseline, "m/004_types.sql"]);
+  const duplicate = await copied({ migrations: [baseline, baseline] });
+  assert.equal(duplicate.ok, false);
+  assert.match(duplicate.stderr, /duplicate migration/);
+  const collision = await copied({ migrations: [baseline, "other/003_rls.sql"] });
+  assert.equal(collision.ok, false);
+  assert.match(collision.stderr, /_initdb\."003": conflicting values/);
+});

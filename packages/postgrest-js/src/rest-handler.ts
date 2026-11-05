@@ -27,6 +27,30 @@ export function readRest(db: Queryable, req: Request, schema?: ReadSchema, cache
   return route(db, req, schema, cacheOwner, 'app_user')
 }
 
+/** Executes separately limited reads in one statement under the caller's transaction. */
+export async function readRestBatch(db: Queryable, paths: string[], schema?: ReadSchema, cacheOwner: object = db): Promise<unknown[][]> {
+  if (paths.length < 2 || paths.length > 32) throw new Error('snapshot batch must contain 2 to 32 reads')
+  const params: unknown[] = []
+  const queries: string[] = []
+  for (const path of paths) {
+    if (!/^\/[A-Za-z_][A-Za-z0-9_]*(?:\?|$)/.test(path)) throw new Error('invalid snapshot read path')
+    const url = new URL('https://snapshot.invalid' + path)
+    const table = url.pathname.slice(1)
+    validateIdentifier(table)
+    const limit = url.searchParams.getAll('limit')
+    if (limit.length !== 1 || !/^\d+$/.test(limit[0]) || Number(limit[0]) > 1000) throw new Error('snapshot batch requires bounded reads')
+    if (!await tableExists(db, table, cacheOwner, 'app_user')) throw new Error(`snapshot read 404: Table "${table}" not found`)
+    const plan = await planRead(db, table, url.searchParams, schema, cacheOwner)
+    const offset = params.length
+    const sql = plan.sql.replace(/\$(\d+)/g, (_match, n) => `$${Number(n) + offset}`)
+    params.push(...plan.params)
+    queries.push(`SELECT ${queries.length} AS ordinal, coalesce(jsonb_agg(data), '[]'::jsonb) AS data FROM (${sql}) AS batch_rows`)
+  }
+  const { rows } = await db.query<{ ordinal: number; data: unknown[] }>(`${queries.join(' UNION ALL ')} ORDER BY ordinal`, params)
+  if (rows.length !== paths.length || rows.some((row, i) => row.ordinal !== i || !Array.isArray(row.data))) throw new Error('invalid snapshot batch result')
+  return rows.map(row => row.data)
+}
+
 async function tableExists(db: Queryable, table: string, cacheOwner: object, role?: string): Promise<boolean> {
   const cache = metadataCache(cacheOwner)
   const key = role ? `${role}\0${table}` : undefined

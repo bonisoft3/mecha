@@ -1,11 +1,12 @@
 import type { PGlite } from '@electric-sql/pglite'
-import { clearMetadataCache, metadataCache, readRest, type ReadSchema } from '@mecha/postgrest-js'
+import { clearMetadataCache, metadataCache, readRest, readRestBatch, type ReadSchema } from '@mecha/postgrest-js'
 
 export class PublicSnapshotCapacity extends Error {}
 
 export interface PublicSnapshot {
   revision: string
   read(path: string): Promise<unknown[]>
+  readMany(paths: string[]): Promise<unknown[][]>
 }
 
 const generations = new WeakMap<PGlite, string>()
@@ -51,8 +52,15 @@ export async function publicSnapshot<T>(
       reads.push(pending.then(() => undefined, error => ({ error })))
       return pending
     }
+    const readMany = (paths: string[]): Promise<unknown[][]> => {
+      if (!active) throw new Error('snapshot is closed')
+      const pending = chain.then(() => readRestBatch(tx, paths, schema, db))
+      chain = pending.then(() => undefined, () => undefined)
+      reads.push(pending.then(() => undefined, error => ({ error })))
+      return pending
+    }
     try {
-      return { value: await use({ revision, read }) }
+      return { value: await use({ revision, read, readMany }) }
     } finally {
       active = false
       // A detached failed read must roll back rather than let the transaction commit.

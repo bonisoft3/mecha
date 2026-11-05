@@ -271,3 +271,44 @@ Deno.test('interactive public snapshots jump ahead of background shape snapshots
     await db.close()
   }
 })
+
+Deno.test('batched snapshot reads preserve each parent order, limit, offset, and public scope', async () => {
+  const db = await PGlite.create()
+  try {
+    await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+    await db.exec(`CREATE ROLE app_user; CREATE TABLE batch_goal (id int PRIMARY KEY, parent int NOT NULL, minute int NOT NULL);
+      GRANT SELECT ON batch_goal TO app_user;
+      ALTER TABLE batch_goal ENABLE ROW LEVEL SECURITY;
+      CREATE POLICY public_goals ON batch_goal FOR SELECT TO app_user USING (parent < 4);
+      INSERT INTO batch_goal SELECT n, 1, n FROM generate_series(1, 45) n;
+      INSERT INTO batch_goal VALUES (100, 2, 4), (101, 2, 3), (102, 2, 8), (103, 4, 9);`)
+    const paths = [
+      '/batch_goal?select=id&parent=eq.1&order=minute.desc&limit=40',
+      '/batch_goal?select=id&parent=eq.2&order=minute.desc&limit=2',
+      '/batch_goal?select=id&parent=eq.1&order=minute.asc&offset=40&limit=2',
+      '/batch_goal?select=id&parent=eq.3&order=minute.asc&limit=40',
+      '/batch_goal?select=id&parent=eq.4&order=minute.asc&limit=40',
+    ]
+    await publicSnapshot(db, 'batch', snapshot => snapshot.read('/batch_goal?limit=1'))
+    const originalTransaction = db.transaction.bind(db)
+    let dataQueries = 0
+    db.transaction = (async fn => originalTransaction(async tx => {
+      const query = tx.query.bind(tx)
+      tx.query = ((...args: Parameters<typeof tx.query>) => {
+        if (String(args[0]).includes(' AS batch_rows')) dataQueries++
+        return query(...args)
+      }) as typeof tx.query
+      return await fn(tx)
+    })) as typeof db.transaction
+    await publicSnapshot(db, 'batch', async snapshot => {
+      const batched = await snapshot.readMany(paths)
+      assert.equal(dataQueries, 1)
+      assert.deepEqual(batched.map(rows => rows.map((row: any) => row.id)), [
+        Array.from({ length: 40 }, (_, i) => 45 - i), [102, 100], [41, 42], [], [],
+      ])
+      assert.deepEqual(batched, await Promise.all(paths.map(path => snapshot.read(path))))
+    })
+    db.transaction = originalTransaction
+    await assert.rejects(publicSnapshot(db, 'batch', snapshot => snapshot.readMany(['/batch_goal?limit=1', '/batch_goal'])), /bounded reads/)
+  } finally { await db.close() }
+})

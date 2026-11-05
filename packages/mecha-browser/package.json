@@ -28,7 +28,9 @@
     "@mecha/rclone-js": "workspace:*",
     "@mecha/tanstackdb-pglite": "workspace:*",
     "@tanstack/db": "0.8.0",
-    "msw": "^2.7.0"
+    "msw": "^2.7.0",
+    "@electric-sql/pglite-pg_ivm": "0.0.9",
+    "@mecha/incremental-views": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

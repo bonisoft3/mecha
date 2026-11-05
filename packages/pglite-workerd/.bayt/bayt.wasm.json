@@ -18,6 +18,12 @@
         "dest": "/src/",
         "sha256": "31b7d5c46a9501b653536cce2ba593739144981cb0aa25692b678d68505ad2cd",
         "unpack": true
+      },
+      {
+        "url": "https://codeload.github.com/sraoss/pg_ivm/tar.gz/b66487f7a6f8deee3998e858d773e19923e4bd4b",
+        "dest": "/src/",
+        "sha256": "a7c29129e959dd4233a7e565883e15e97bf9aa8e40650597868447227788fd12",
+        "unpack": true
       }
     ],
     "mounts": [],
@@ -176,7 +182,7 @@
         "defaultExclude": null
       },
       "dockerfile": {
-        "do": "nu wasm.nu /src/postgres-pglite-b133782cd759f08b3aeb263b80a963b39c7b7af1 release"
+        "do": "nu wasm.nu /src/postgres-pglite-b133782cd759f08b3aeb263b80a963b39c7b7af1 release /src/pg_ivm-b66487f7a6f8deee3998e858d773e19923e4bd4b"
       },
       "name": "builtin",
       "shell": "exec",

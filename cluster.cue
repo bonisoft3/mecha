@@ -103,6 +103,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 
 // Canonical PostgreSQL options for both container and process-compose runtimes.
 #PostgresArgs: [
+	"-c", "session_preload_libraries=pg_ivm",
 	"-c", "wal_level=logical",
 	"-c", "fsync=off",
 	"-c", "synchronous_commit=off",

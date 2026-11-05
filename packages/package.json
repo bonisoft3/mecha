@@ -11,7 +11,8 @@
     "mecha-browser",
     "collections",
     "client",
-    "pipeline"
+    "pipeline",
+    "incremental-views"
   ],
   "scripts": {
     "build": "pnpm --filter \"./*\" run build",

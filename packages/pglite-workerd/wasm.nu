@@ -16,7 +16,7 @@
 
 const TREE = '/work/postgres-pglite'
 const STATIC = '/work/static'
-const MODULES = [[name dir]; [plpgsql src/pl/plpgsql/src] [dict_snowball src/backend/snowball] [pgl_step contrib/pgl_step]]
+const MODULES = [[name dir]; [plpgsql src/pl/plpgsql/src] [dict_snowball src/backend/snowball] [pgl_step contrib/pgl_step] [pg_ivm contrib/pg_ivm]]
 # What the TypeScript side calls; nothing else is kept alive.
 const EXPORTS = [
   _main _malloc _free _fopen _fclose _fflush _pclose ___errno_location _strerror
@@ -41,7 +41,7 @@ export def upstream []: nothing -> record {
   let script = open build-pglite.sh | lines
   let steps = $script | take until {|l| $l starts-with '# Step 3.1' }
   if ($steps | length) == ($script | length) { error make {msg: "build-pglite.sh has no '# Step 3.1'; its steps moved"} }
-  $steps | where $it != 'emcc --clear-cache'
+  $steps | where $it != 'emcc --clear-cache' | each {|line| $line | str replace 'emmake make PORTNAME=emscripten -j ||' 'emmake make PORTNAME=emscripten -j2 ||' }
     | append $'printf "%s\n" "$PGLITE_CFLAGS" > ($STATIC)/cflags'
     | append $'printf "%s\n" "$INSTALL_FOLDER" > ($STATIC)/prefix'
     | str join "\n" | save -f /work/steps.sh
@@ -54,7 +54,7 @@ export def upstream []: nothing -> record {
 export def modules []: nothing -> table {
   $MODULES | each {|m|
     ^emmake make -C $m.dir PORTNAME=emscripten clean
-    ^emmake make -C $m.dir PORTNAME=emscripten -j ('COPT=-D_PG_init=pgl_{m}__PG_init -DPg_magic_func=pgl_{m}_Pg_magic_func' | fill $m.name)
+    ^emmake make -C $m.dir PORTNAME=emscripten -j2 ('COPT=-D_PG_init=pgl_{m}__PG_init -DPg_magic_func=pgl_{m}_Pg_magic_func' | fill $m.name)
     let objs = glob $'($TREE)/($m.dir)/**/*.o' | sort
     let syms = ^$env.LLVM_NM --defined-only -g ...$objs | lines
     let funcs = $syms | parse --regex '^\S+ \S pg_finfo_(?<f>\S+)$' | get f | sort | uniq
@@ -138,7 +138,7 @@ export def link [modules: table, cflags: list<string>, prefix: string] {
     ...$preload -o pglite.js)
 }
 
-def main [src: path, out: path] {
+def main [src: path, out: path, ivm: path] {
   let out = $out | path expand
   let patch = $env.FILE_PWD | path join patches postgres-pglite.patch
   rm -rf /work
@@ -149,6 +149,15 @@ def main [src: path, out: path] {
   let built = upstream
   # The package's own modules, placed in the tree beside contrib's.
   cp -r ($env.FILE_PWD | path join modules pgl_step) ($TREE | path join contrib pgl_step)
+  cp -r $ivm ($TREE | path join contrib pg_ivm)
+  let ivmMake = $TREE | path join contrib pg_ivm Makefile
+  open $ivmMake | str replace 'PGXS := $(shell $(PG_CONFIG) --pgxs)
+include $(PGXS)' 'subdir = contrib/pg_ivm
+top_builddir = ../..
+include $(top_builddir)/src/Makefile.global
+include $(top_srcdir)/contrib/contrib-global.mk' | save -f $ivmMake
+  cp ...(glob ($TREE | path join contrib pg_ivm 'pg_ivm--*.sql')) ($built.prefix | path join share postgresql extension)
+  cp ($TREE | path join contrib pg_ivm pg_ivm.control) ($built.prefix | path join share postgresql extension)
   link (modules) $built.cflags $built.prefix
   mkdir $out
   cp src/backend/pglite.js src/backend/pglite.wasm src/backend/pglite.data ($built.prefix | path join bin initdb.js) ($built.prefix | path join bin initdb.wasm) $out

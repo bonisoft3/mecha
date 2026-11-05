@@ -11,7 +11,9 @@
     "../postgrest-js/src/rest-read.js": "../postgrest-js/src/rest-read.ts",
     "../postgrest-js/src/validate.js": "../postgrest-js/src/validate.ts",
     "fast-png": "npm:fast-png@6.4.0",
-    "jpeg-js": "npm:jpeg-js@0.4.4"
+    "jpeg-js": "npm:jpeg-js@0.4.4",
+    "@electric-sql/pglite-pg_ivm": "npm:@electric-sql/pglite-pg_ivm@0.0.9",
+    "@mecha/incremental-views": "../incremental-views/runtime.ts"
   },
   "compilerOptions": {
     "types": [

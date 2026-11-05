@@ -38,6 +38,14 @@ for table in ${REQUIRED_TABLES//,/ }; do
 	fi
 done
 
+ask <<'SQL'
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_ivm' AND extversion <> '1.13') THEN
+    RAISE EXCEPTION 'mecha requires pg_ivm 1.13';
+  END IF;
+END $$;
+SQL
+
 pgroll init
 
 if [ "$(ask <<< "SELECT count(*) FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'baseline';")" = 0 ]; then

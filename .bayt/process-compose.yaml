@@ -18,6 +18,8 @@ processes:
     - docker-entrypoint.sh
     - postgres
     - -c
+    - session_preload_libraries=pg_ivm
+    - -c
     - wal_level=logical
     - -c
     - fsync=off

@@ -4,6 +4,7 @@
 // chunk is verified; only then does open() start PGlite over it. Over a partial
 // or absent directory PGlite would run initdb and answer from an empty database.
 import { PGlite, type PGliteOptions } from '@electric-sql/pglite'
+import { loadIncrementalViews } from '../../incremental-views/runtime.ts'
 import { SqliteFS, type StorageFormat } from './sqlite-fs.ts'
 
 /** What the package's dist/ holds, as a Worker imports it. */
@@ -72,7 +73,7 @@ export class DataDirectory {
       initialMemory: INITIAL_MEMORY,
       startParams: [...PGlite.defaultStartParams, ...Object.entries(SETTINGS).flatMap(([k, v]) => ['-c', `${k}=${v}`])],
       ...options,
-    })
+    }).then(loadIncrementalViews)
   }
 
   /** Drops the stored directory. Open, its PGlite is lost with it: the owner

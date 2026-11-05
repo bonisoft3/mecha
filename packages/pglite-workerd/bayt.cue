@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
+	ivm "github.com/bonisoft3/mecha/packages/incremental-views:incremental_views"
 )
 
 // @electric-sql/pglite@0.5.8 and the postgres-pglite commit it pins, as
@@ -65,9 +66,12 @@ _build: bayt.#project & {
 					srcs: ["/usr/bin/nu"]
 					dst:  "/usr/local/bin/nu"
 				}}
-				add: [_archive & {_repo: "postgres-pglite", _pin: _postgresPglite}]
+				add: [
+					_archive & {_repo: "postgres-pglite", _pin: _postgresPglite},
+					{url: ivm.#Source.url, sha256: ivm.#Source.sha256, dest: "/src/", unpack: true},
+				]
 			}
-			cmd: "builtin": dockerfile: do: "nu wasm.nu /src/postgres-pglite-\(_postgresPglite.commit) release"
+			cmd: "builtin": dockerfile: do: "nu wasm.nu /src/postgres-pglite-\(_postgresPglite.commit) release /src/pg_ivm-\(ivm.#Source.commit)"
 		}
 
 		// The TypeScript package over the wasm: pglite's own build, with the

@@ -150,6 +150,20 @@ Deno.test("the migrate target carries every volume forward, and a failure keeps 
       assert.equal((await states())[svc("migrate")].ExitCode, 0);
     });
 
+    await t.step("an existing database with an incompatible pg_ivm catalog is refused before migrations", async () => {
+      await sql("CREATE EXTENSION pg_ivm VERSION '1.13'");
+      const before = await ledger();
+      await sql("UPDATE pg_extension SET extversion='1.12' WHERE extname='pg_ivm'");
+      try {
+        const rejected = await compose(["run", "--rm", "--no-deps", svc("migrate")]);
+        assert.equal(rejected.ok, false);
+        assert.match(rejected.stderr + rejected.stdout, /mecha requires pg_ivm 1\.13/);
+        assert.deepEqual(await ledger(), before);
+      } finally {
+        await sql("UPDATE pg_extension SET extversion='1.13' WHERE extname='pg_ivm'");
+      }
+    });
+
     await t.step("a migration added under running readers reaches PostgREST without a restart", async () => {
       const since = await started("crud");
       await offer({ "02_hello_tone": addColumn("Hello", "tone") });

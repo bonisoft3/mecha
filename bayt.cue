@@ -29,6 +29,7 @@ import (
 	sayt "github.com/bonisoft3/bayt/stacks/sayt"
 	cluster "github.com/bonisoft3/mecha:cluster"
 	activepieces "github.com/bonisoft3/mecha/services/activepieces:activepieces"
+	ivm "github.com/bonisoft3/mecha/packages/incremental-views:incremental_views"
 )
 
 _postgres: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
@@ -149,7 +150,7 @@ _mecha: bayt.#project & _where & {
 				// architecture, inside the same RUN so the .deb and the fetch
 				// tooling leave no layer behind.
 				defaultPreamble: extensions: (apt.#install & {
-					pkgs: ["ca-certificates", "wget"]
+					pkgs: ["ca-certificates", "wget", "build-essential", "postgresql-server-dev-18"]
 					then: [
 						"arch=$(dpkg --print-architecture)",
 						"case \"$arch\" in amd64) sum=969ca7bbf2341ea747f8ffa99226f0ae7ce2cd74353d12e9d13b09cc2362c47f;; arm64) sum=52bb956d95a3e51262250316cb3124e5cfd38aaeef60379cba615b0c5aedd05a;; *) echo \"no plv8 artifact for $arch\" >&2; exit 1;; esac",
@@ -157,8 +158,13 @@ _mecha: bayt.#project & _where & {
 						"echo \"$sum  /tmp/plv8.deb\" | sha256sum -c -",
 						"dpkg -i /tmp/plv8.deb",
 						"rm /tmp/plv8.deb",
+						"wget -qO /tmp/pg_ivm.tar.gz '\(ivm.#Source.url)'",
+						"echo '\(ivm.#Source.sha256)  /tmp/pg_ivm.tar.gz' | sha256sum -c -",
+						"mkdir /tmp/pg_ivm && tar -xzf /tmp/pg_ivm.tar.gz --strip-components=1 -C /tmp/pg_ivm",
+						"make -C /tmp/pg_ivm PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config && make -C /tmp/pg_ivm PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config install",
+						"rm -rf /tmp/pg_ivm /tmp/pg_ivm.tar.gz",
 					]
-					purge: ["wget", "ca-certificates"]
+					purge: ["wget", "ca-certificates", "build-essential", "postgresql-server-dev-18"]
 				}).out
 				// The data directory lives on the container's writable layer.
 				preamble: ["ENV PGDATA=/postgresql-data"]

@@ -1,0 +1,7 @@
+{
+  "name": "@mecha/incremental-views",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./runtime.ts" },
+  "files": ["runtime.ts"]
+}

@@ -1,6 +1,8 @@
 {
   "nodeModulesDir": "none",
   "imports": {
+    "@tanstack/db": "npm:@tanstack/db@0.8.0",
+    "@tanstack/electric-db-collection": "npm:@tanstack/electric-db-collection@0.4.0",
     "@electric-sql/client": "npm:@electric-sql/client@1.5.27",
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
     "@electric-sql/pglite-icu-full": "npm:@electric-sql/pglite-icu-full@0.0.2",
@@ -9,6 +11,7 @@
     "../postgrest-js/src/rest-handler.js": "../postgrest-js/src/rest-handler.ts",
     "../postgrest-js/src/rest-read.js": "../postgrest-js/src/rest-read.ts",
     "../postgrest-js/src/validate.js": "../postgrest-js/src/validate.ts",
+    "@mecha/client/types": "../client/src/types.ts",
     "@electric-sql/pglite-pg_ivm": "npm:@electric-sql/pglite-pg_ivm@0.0.9",
     "@mecha/incremental-views": "../incremental-views/runtime.ts"
   }

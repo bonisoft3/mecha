@@ -1,0 +1,67 @@
+{
+  "engineVersion": "1.5.4",
+  "wasmVersion": "1.33.1-dev57.0",
+  "wasmSha256": "6b9531fbaf8f846c01c619370607c81ae4f9d4dc3abaecb392936766e8cdf9c9",
+  "sdkVersion": "3.1.71",
+  "sources": [
+    {
+      "name": "wasm",
+      "repository": "duckdb/duckdb-wasm",
+      "commit": "ef8a4f8912b6e7f62bc0cc490145ebd391b79e1f",
+      "sha256": "cfb341651597baa977bfbfcce2f1cc58106c68a38bcc7f9ce3a019a40aca58a4"
+    },
+    {
+      "name": "duckdb",
+      "repository": "duckdb/duckdb",
+      "commit": "08e34c447bae34eaee3723cac61f2878b6bdf787",
+      "sha256": "0deb78bb53dd5030323503b2f3ff5d52d66af7969dcf1f3849a203d7c769e481"
+    },
+    {
+      "name": "arrow",
+      "repository": "apache/arrow",
+      "commit": "6a2e19a852b367c72d7b12da4d104456491ed8b7",
+      "sha256": "03fe1b971609bdec287c77a5c9c89928a32be19875cb1458c711c1b80e33a7b4"
+    },
+    {
+      "name": "benchmark",
+      "repository": "google/benchmark",
+      "commit": "e991355c02b93fe17713efe04cbc2e278e00fdbd",
+      "sha256": "914f898c9efcd4d328dafad10df0cdc59708771acf66c29eaf0becc38a140a04"
+    },
+    {
+      "name": "gflags",
+      "repository": "gflags/gflags",
+      "commit": "827c769e5fc98e0f2a34c47cef953cc6328abced",
+      "sha256": "ce2931dd537eaab7dab78b25bec6136a0756ca0b2acbdab9aec0266998c0d9a7"
+    },
+    {
+      "name": "googletest",
+      "repository": "google/googletest",
+      "commit": "16f637fbf4ffc3f7a01fa4eceb7906634565242f",
+      "sha256": "879a4064738cb3c76a11d449145b442654d7282f3cd0f5f03ec8c3dc862646c6"
+    },
+    {
+      "name": "rapidjson",
+      "repository": "Tencent/rapidjson",
+      "commit": "973dc9c06dcd3d035ebd039cfb9ea457721ec213",
+      "sha256": "d0c9e52823d493206eb721d38cb3a669ca0212360862bd15a3c2f7d35ea7c6f7"
+    }
+  ],
+  "cmakeVersion": "3.29.6",
+  "cmake": {
+    "archive": "linux-x86_64",
+    "sha256": "28fef61e64840b784da6db35218fd3ae179ff8bf0be1c8a9d075d6185a0e4fdc"
+  },
+  "ninjaVersion": "1.13.2",
+  "ninja": {
+    "archive": "ninja-linux.zip",
+    "sha256": "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6"
+  },
+  "sourceDateEpoch": "1782104575",
+  "loaderSha256": "fa731fdfea73c7d95ebe85cba90c4ea18457bcaf919c525b71b8d38528c30655",
+  "pageCacheBytes": 4194304,
+  "sdkImage": "emscripten/emsdk@sha256:9922c93314b63a1d9ceba2e76f03737f1f9cc4b7350341211e2d3555633ffdd5",
+  "dockerPlatform": "linux/amd64",
+  "denoVersion": "2.9.7",
+  "denoSha256": "c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490"
+}

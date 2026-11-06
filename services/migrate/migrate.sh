@@ -7,8 +7,8 @@
 #
 # The schema initdb built is recorded once as <baseline>, whether the volume is
 # fresh or predates this runner. Then every migration the ledger lacks is
-# applied in name order and completed before the next starts. A second run
-# over the same set applies nothing.
+# applied in name order and completed before the next starts. Idempotent SQL
+# reconciliations run transactionally after that on every invocation.
 set -euo pipefail
 
 dir=$1
@@ -77,6 +77,12 @@ for file in "$dir"/*.json; do
 		exit 1
 	fi
 	latest=$name
+done
+
+# Permissions follow the current declaration, outside the immutable ledger.
+# Suppress inferred migrations so restating them does not alter pgroll history.
+for file in "$dir"/*.sql; do
+	ask --single-transaction -c "SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '60s'; SET LOCAL pgroll.no_inferred_migrations = 'TRUE';" --file="$file"
 done
 
 # PostgREST serves from a schema cache it reads once: a reader already running

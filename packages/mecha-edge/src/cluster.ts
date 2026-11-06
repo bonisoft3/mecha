@@ -19,6 +19,7 @@ import { prepareAuthTables, sealAuthTables } from '../../../services/auth/schema
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
+import { createSnapshotCoordinator, NOTIFY_CHANNEL, type BatchMachine, type Computation, type Output, type Snapshot, type SnapshotCoordinator, type SnapshotIdentity } from '../../compute-snapshot/src/index.ts'
 import { lanes } from './lanes.ts'
 
 export interface EdgeClusterConfig {
@@ -35,6 +36,7 @@ export interface EdgeClusterConfig {
   drains?: Drain[]
   /** The earliest retry of a failed drain moved (drains.ts). */
   retry?: () => void
+  compute?: { computations: Computation[]; machine: BatchMachine; retainSnapshot?(identity: SnapshotIdentity): Promise<void>; execute?(snapshot: Snapshot): Promise<Output>; changed(): void }
   rpId?: string
   origin?: string
 }
@@ -53,6 +55,8 @@ export interface EdgeCluster {
   drains: () => Promise<Drains>
   /** The drains once installed, or null. */
   installed: () => Drains | null
+  compute(): Promise<SnapshotCoordinator | null>
+  read<T>(use: () => Promise<T>): Promise<T>
 }
 
 // The auth service's lifetimes (services/auth/main.ts).
@@ -168,6 +172,14 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       drainsReady = undefined
       throw e
     })
+  let computeReady: Promise<SnapshotCoordinator | null> | undefined
+  const compute = () => computeReady ??= (async () => {
+    if (!cfg.compute?.computations.length) return null
+    await ensureShapes()
+    const coordinator = await createSnapshotCoordinator({ db, serialize: serializeLow, ...cfg.compute })
+    await db.listen(NOTIFY_CHANNEL, () => cfg.compute!.changed())
+    return coordinator
+  })().catch(error => { computeReady = undefined; throw error })
   const publicOnly = async (table: string) => {
     const hit = publicCache.get(table)
     if (hit !== undefined) return hit
@@ -451,6 +463,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
 
   async function service(req: Request): Promise<Response> {
     await ensureShapes()
+    await compute()
     await drains()
     const u = new URL(req.url)
     u.pathname = u.pathname.replace(/^\/crud/, '')
@@ -463,6 +476,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const path = new URL(req.url).pathname
     try {
       await ensureShapes()
+      await compute()
       await drains()
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
@@ -490,6 +504,8 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     },
     drains,
     installed: () => installed,
+    compute,
+    read: serializeLow,
     async publicSnapshot(generation, use, priority = 'high') {
       // Admit per lane before joining the database queue so queued low-priority
       // prefetches cannot starve interactive renders, and each lane stays bounded.

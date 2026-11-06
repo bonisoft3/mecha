@@ -249,12 +249,39 @@ Deno.test('a table no drain names any more loses its triggers', async () => {
   try {
     const first = await createCluster({ db, sql: [rls, schema], tables: [], drains: DRAINS, log: () => {}, fail: (e) => { throw e } })
     await first.stop()
+    await db.exec(`CREATE SCHEMA retired; CREATE TABLE retired.request (id int);
+      CREATE TRIGGER drain_notify AFTER INSERT ON retired.request FOR EACH ROW EXECUTE FUNCTION drain_notify();`)
     const second = await createCluster({ db, sql: [], tables: [], drains: [], log: () => {}, fail: (e) => { throw e } })
     await second.stop()
+    await db.exec('INSERT INTO retired.request VALUES (1)')
     assert.deepEqual((await db.query("SELECT tgname FROM pg_trigger WHERE tgname LIKE 'drain_%'")).rows, [])
   } finally {
     await db.close()
   }
+})
+
+Deno.test('bulk source writes enter the drain notifier once per statement', async () => {
+  const { db, cluster } = await page([DRAINS[1]])
+  try {
+    await cluster.drains.idle()
+    await db.exec('CREATE SEQUENCE drain_trigger_calls')
+    const definition = (await db.query<{ definition: string }>("SELECT pg_get_functiondef('drain_notify()'::regprocedure) AS definition")).rows[0].definition
+    await db.exec(definition.replace(/\bBEGIN\b/, "BEGIN PERFORM nextval('drain_trigger_calls');"))
+    for (const sql of [
+      'INSERT INTO request(id) SELECT generate_series(1,20)',
+      "UPDATE request SET outcome='done'",
+      'DELETE FROM request',
+    ]) {
+      await db.exec("SELECT setval('drain_trigger_calls',1,false)")
+      await db.exec(sql)
+      await cluster.drains.idle()
+      assert.equal((await db.query<{ calls: number }>('SELECT last_value::int AS calls FROM drain_trigger_calls')).rows[0].calls, 1)
+    }
+    const before = await calls(db)
+    await db.exec("UPDATE request SET outcome='done'; DELETE FROM request; INSERT INTO request(id) SELECT 1 WHERE false")
+    await cluster.drains.idle()
+    assert.deepEqual(await calls(db), before)
+  } finally { await cluster.stop(); await db.close() }
 })
 
 Deno.test('a deadline a write arms in the past after a clean sweep is swept at once', async () => {
@@ -277,4 +304,21 @@ Deno.test('a deadline a write arms in the past after a clean sweep is swept at o
     await cluster.stop()
     await db.close()
   }
+})
+
+Deno.test('background drain transactions yield to pending host events', async () => {
+  const { db, cluster } = await page(DRAINS, `
+    CREATE FUNCTION report_drain() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN PERFORM pg_notify('drain_fairness',NEW.drain); RETURN NEW; END $$;
+    CREATE TRIGGER report_drain AFTER INSERT ON calls FOR EACH ROW EXECUTE FUNCTION report_drain();`)
+  const events: string[] = []
+  const unlisten = await db.listen('drain_fairness', name => {
+    events.push(name)
+    if (name === 'apply') setTimeout(() => { events.push('host-event') }, 0)
+  })
+  try {
+    await cluster.drains.idle()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.deepEqual(events, ['apply', 'host-event', 'project'])
+  } finally { await unlisten(); await cluster.stop(); await db.close() }
 })

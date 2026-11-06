@@ -1,6 +1,6 @@
 -- The airlock's tables (README.md). The database image stages them, and a
 -- cluster whose program declares an external effect places them among the
--- initdb steps, after Graphile's schema (graphile.sql). A guard is plpgsql,
+-- initdb steps, after Durex's shared Graphile schema (../durex/graphile.sql). A guard is plpgsql,
 -- which resolves the ledger and add_job only when it runs.
 
 -- A client that could write the ledger could forge an outcome, and one that

@@ -80,7 +80,7 @@ promise chain, because PGlite has one connection. A shape's predicate is
 `shapeWhere` over the subject's scopes, the same function the auth service
 uses for the server's gate.
 
-A table's trigger notifies the row's key, its scope and the transaction id,
+A table's statement triggers notify each changed row's key, scope and transaction id,
 not the row, because `pg_notify` caps a payload at 8 KB. The change takes its
 log position when the notification arrives, and the listener reads the row
 back by key, in notification order, to fill it; a client reads the log only as
@@ -92,7 +92,12 @@ the page reloads: Electric's client retries a 500 without end, and stops on a
 410. The log retains 1,000 entries. A client that
 falls further behind, or presents another boot's handle (`<table>-<boot id>`),
 gets `409 must-refetch` and starts from a snapshot. A live request waits up to
-20 s. A table that carries a shape must have a primary key, or boot fails.
+20 s. Notifications share a 1,000-row budget across the transaction. Overflow
+or TRUNCATE invalidates the affected table's handle once, discards queued reads
+from its previous handle, and wakes clients to refetch. Full and subset snapshots
+carry PostgreSQL visibility metadata so committed deletes are acknowledged even
+when the refreshed snapshot is empty. A table that carries a shape must have a
+primary key, or boot fails.
 The embedder can pass the existing shell `schema` to identify `server` views:
 these answer reads without a shape or notification trigger. Physical server
 tables retain shapes because live queries can depend on their changes.
@@ -136,15 +141,17 @@ schedules themselves, from the same two modules.
 **A drain** ([`drains.ts`](../packages/mecha-browser/drains.ts)) is a database
 function called as the `service` role when a table it names changes: pronto's
 `#Drain`, which the container tier calls from a stream over the change bus.
-Here `createDrains` installs a `drain_notify` trigger on every table any drain
+Here `createDrains` installs statement triggers on every table any drain
 names, apart from the shape trigger, since a tick table or a queue an app made
 in its own SQL may carry no shape. The trigger notifies the table's name, which
-Postgres delivers once per table per transaction, after it commits; a row
-trigger, so a statement that changes no row wakes nothing, and a truncate
-wakes once. A trigger left on a table no drain names any more is dropped. A
+Postgres delivers once per table per transaction, after it commits. The trigger
+checks its transition table, so a statement that changes no row wakes nothing;
+a truncate wakes once. A trigger left on a table no drain names any more is dropped. A
 notification marks owed every drain naming that table, and owed drains are
 called one second later, the stream's batching period, each once, in
-declaration order. A call is `SELECT <call>(<arg> => '<value>', …)`, the
+declaration order. The dispatcher yields to the host between transactions so
+pending interactive requests can enter the cluster queue. A running SQL statement
+still occupies the single connection. A call is `SELECT <call>(<arg> => '<value>', …)`, the
 body's keys as named arguments and each value untyped text, which Postgres
 reads as the argument's type as PostgREST's JSON is, in a transaction that sets the role, empty scopes and
 the claims `{"role":"service"}` locally, through the cluster's one chain. A
@@ -234,3 +241,18 @@ and boot fails. `container` is the only tier name the grammar knows.
   whole grammar. The browser skips what the author fenced, and a bundler
   refuses the two statements when they appear outside a fence instead of
   guessing.
+
+## Snapshot computations
+
+A cluster may receive `compute` definitions, the compiled Cortex batch
+machine, and a snapshot executor. The [[../packages/compute-snapshot/docs/index|snapshot coordinator]]
+captures source relations under the database serialization boundary, executes
+outside it, and atomically publishes changed sink rows and a receipt. Source
+changes during execution produce a subsequent batch. A browser timer wakes
+the durable state; it does not hold the queue.
+
+Pronto packages the same admitted computation, pure WASM workers and generated
+DuckDB SQL for Pages. DuckDB-Wasm, JSON and ICU are packaged assets with pinned
+versions and extension checksums; execution requires no extension downloads.
+This remains whole-snapshot execution for small demos. The native runtime
+uses Feldera for incremental relational maintenance.

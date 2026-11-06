@@ -133,7 +133,11 @@ export const edgeWorker = {
       }
       const res = await object().fetch(new Request(req, { headers: reqHeaders }))
       const moved = res.ok && (path === '/import/reset' || (path === '/import/migrate' && ((await res.clone().json()) as { applied: string[] }).applied.length > 0))
-      if (moved) await moveOn()
+      if (moved) {
+        const answer = new Response(await res.arrayBuffer(), res)
+        await moveOn()
+        return answer
+      }
       const outdated = res.status === 503 && res.headers.get('content-type')?.includes('json') && ((await res.clone().json()) as { outdated?: boolean }).outdated === true
       if (outdated) await restart()
       return res

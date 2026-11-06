@@ -146,7 +146,7 @@
           "services/database/rls/rls.sql",
           "services/database/role_passwords.sh",
           "services/ticker/schedule.sql",
-          "services/airlock/graphile.sql",
+          "services/durex/graphile.sql",
           "services/airlock/airlock.sql",
           "services/migrate/migrate.sh"
         ],
@@ -169,7 +169,7 @@
               "services/database/rls/rls.sql",
               "services/database/role_passwords.sh",
               "services/ticker/schedule.sql",
-              "services/airlock/graphile.sql",
+              "services/durex/graphile.sql",
               "services/airlock/airlock.sql",
               "services/migrate/migrate.sh"
             ],

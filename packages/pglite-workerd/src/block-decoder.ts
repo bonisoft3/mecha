@@ -25,7 +25,7 @@ export class BlockDecoder {
         return previous.decoded
       }
     }
-    const decoded = decodeBlock(encoded, this.format)
+    let decoded = decodeBlock(encoded, this.format)
     const bytes = encoded.byteLength + decoded.byteLength
     if (bytes <= this.budget) {
       while (this.#bytes + bytes > this.budget) {
@@ -33,7 +33,9 @@ export class BlockDecoder {
         this.#entries.delete(oldKey)
         this.#bytes -= old.encoded.byteLength + old.decoded.byteLength
       }
-      this.#entries.set(key, { encoded: encoded.slice(), decoded })
+      // inflateSync and Buffer views can retain allocations larger than their visible bytes.
+      if (decoded.byteOffset !== 0 || decoded.buffer.byteLength !== decoded.byteLength) decoded = new Uint8Array(decoded)
+      this.#entries.set(key, { encoded: new Uint8Array(encoded), decoded })
       this.#bytes += bytes
     }
     return decoded

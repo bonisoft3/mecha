@@ -7,10 +7,12 @@
 import { BaseFilesystem, ERRNO_CODES, type FsStats } from '@electric-sql/pglite/basefs'
 import { checkFormat, encodeBlock, RAW_FORMAT, type StorageFormat } from './storage-block.ts'
 import { BlockDecoder } from './block-decoder.ts'
+import { initializeSnapshots, pinnedNextId, dropSnapshotStorage } from './physical-snapshot.ts'
 export type { StorageFormat } from './storage-block.ts'
 
 const DIR = 16384
 const FILE = 32768
+const PENDING_BLOCKS = 32
 
 interface Node { mode: number; size: number; mtime: number; id: number | null }
 
@@ -49,21 +51,28 @@ export class SqliteFS extends BaseFilesystem {
       this.#nodes.set(r.path, { mode: r.mode, size: r.size, mtime: r.mtime, id: r.id })
       if (r.id !== null && r.id >= this.#nextId) this.#nextId = r.id + 1
     }
+    this.#nextId = Math.max(this.#nextId, pinnedNextId(sql))
     if (!this.#nodes.has('/')) this.#put('/', { mode: DIR | 0o700, size: 0, mtime: Date.now(), id: null })
   }
 
   static schema(sql: SqlStorage) {
     sql.exec('CREATE TABLE IF NOT EXISTS fs_format (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)')
     sql.exec(`CREATE TABLE IF NOT EXISTS fs_node (path TEXT PRIMARY KEY, mode INTEGER NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL, id INTEGER UNIQUE)`)
+    sql.exec('CREATE TABLE IF NOT EXISTS fs_recompress (id INTEGER NOT NULL, idx INTEGER NOT NULL, PRIMARY KEY (id, idx))')
     sql.exec(`CREATE TABLE IF NOT EXISTS fs_block (id INTEGER NOT NULL, idx INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (id, idx)) WITHOUT ROWID`)
+    initializeSnapshots(sql)
   }
 
   /** Drops the stored directory; a SqliteFS over it must not be used again. */
   static drop(sql: SqlStorage) {
+    dropSnapshotStorage(sql)
+    sql.exec('DROP TABLE IF EXISTS fs_recompress')
     sql.exec('DROP TABLE IF EXISTS fs_format')
     sql.exec('DROP TABLE IF EXISTS fs_block')
     sql.exec('DROP TABLE IF EXISTS fs_node')
   }
+
+  get format(): StorageFormat { return { ...this.#format } }
 
   #put(path: string, n: Node) {
     this.#nodes.set(path, n)
@@ -102,9 +111,37 @@ export class SqliteFS extends BaseFilesystem {
     return rows.length ? this.#decoder.decode(`${id}:${idx}`, new Uint8Array(rows[0].data)) : null
   }
 
-  #setBlock(id: number, idx: number, data: Uint8Array) {
-    this.#sql.exec('INSERT OR REPLACE INTO fs_block (id, idx, data) VALUES (?, ?, ?)', id, idx, encodeBlock(data, this.#format))
+  #setBlock(id: number, idx: number, data: Uint8Array, partial = false) {
+    let encoded: Uint8Array
+    if (partial && this.#format.codec === 'deflate') {
+      this.#sql.exec('INSERT OR IGNORE INTO fs_recompress (id, idx) VALUES (?, ?)', id, idx)
+      if (this.#sql.exec('SELECT 1 FROM fs_recompress LIMIT 1 OFFSET ?', PENDING_BLOCKS).toArray().length) this.#compressOne()
+      encoded = new Uint8Array(data.length + 1)
+      encoded.set(data, 1)
+    } else {
+      encoded = encodeBlock(data, this.#format)
+    }
+    this.#sql.exec('INSERT OR REPLACE INTO fs_block (id, idx, data) VALUES (?, ?, ?)', id, idx, encoded)
+    if (!partial && this.#format.codec === 'deflate') this.#sql.exec('DELETE FROM fs_recompress WHERE id = ? AND idx = ?', id, idx)
   }
+
+  #compressOne(): boolean {
+    const [next] = this.#sql.exec<{ id: number; idx: number }>('SELECT id, idx FROM fs_recompress ORDER BY rowid LIMIT 1').toArray()
+    if (!next) return false
+    const data = this.#block(next.id, next.idx)
+    if (data) this.#sql.exec('UPDATE fs_block SET data = ? WHERE id = ? AND idx = ?', encodeBlock(data, this.#format), next.id, next.idx)
+    this.#sql.exec('DELETE FROM fs_recompress WHERE id = ? AND idx = ?', next.id, next.idx)
+    return true
+  }
+
+  #compressPending() {
+    if (this.#format.codec !== 'deflate') return
+    while (this.#compressOne()) { /* Interrupted writes are read back one stored block at a time. */ }
+  }
+
+  override syncToFs(): Promise<void> { this.#compressPending(); return Promise.resolve() }
+  override initialSyncFs(): Promise<void> { return this.syncToFs() }
+  override closeFs(): Promise<void> { return this.syncToFs() }
 
   /** Writes bytes at a position, block by block; a partial block is merged
    * with what is stored, and a block is stored only as long as it is filled. */
@@ -123,7 +160,7 @@ export class SqliteFS extends BaseFilesystem {
         if (old) block.set(old)
         block.set(src.subarray(done, done + len), within)
       }
-      this.#setBlock(n.id!, idx, block)
+      this.#setBlock(n.id!, idx, block, within !== 0 || len !== this.#format.blockSize)
       done += len
     }
   }
@@ -131,6 +168,7 @@ export class SqliteFS extends BaseFilesystem {
   #resize(path: string, n: Node, size: number) {
     if (size < n.size) {
       const keep = Math.ceil(size / this.#format.blockSize)
+      this.#sql.exec('DELETE FROM fs_recompress WHERE id = ? AND idx >= ?', n.id, keep)
       this.#sql.exec('DELETE FROM fs_block WHERE id = ? AND idx >= ?', n.id, keep)
       if (size % this.#format.blockSize) {
         const last = this.#block(n.id!, keep - 1)
@@ -157,6 +195,7 @@ export class SqliteFS extends BaseFilesystem {
     }
     if (offset !== n.size) throw new Error(`${p}: chunk at ${offset}, file has ${n.size}`)
     this.#writeAt(n, bytes, offset)
+    this.#compressPending()
     n.size = offset + bytes.length
     this.#put(p, n)
   }
@@ -278,15 +317,19 @@ export class SqliteFS extends BaseFilesystem {
     for (const k of moves) {
       const m = this.#nodes.get(k)!
       this.#nodes.delete(k)
-      this.#sql.exec('DELETE FROM fs_node WHERE path = ?', k)
-      this.#put(to + k.slice(from.length), m)
+      const moved = to + k.slice(from.length)
+      this.#sql.exec('UPDATE fs_node SET path=? WHERE path=?', moved, k)
+      this.#nodes.set(moved, m)
     }
   }
 
   #drop(path: string, n: Node) {
     this.#nodes.delete(path)
     this.#sql.exec('DELETE FROM fs_node WHERE path = ?', path)
-    if (n.id !== null) this.#sql.exec('DELETE FROM fs_block WHERE id = ?', n.id)
+    if (n.id !== null) {
+      this.#sql.exec('DELETE FROM fs_recompress WHERE id = ?', n.id)
+      this.#sql.exec('DELETE FROM fs_block WHERE id = ?', n.id)
+    }
   }
 
   rmdir(path: string): void {

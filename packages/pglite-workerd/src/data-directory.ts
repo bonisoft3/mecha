@@ -6,6 +6,9 @@
 import { PGlite, type PGliteOptions } from '@electric-sql/pglite'
 import { loadIncrementalViews } from '../../incremental-views/runtime.ts'
 import { SqliteFS, type StorageFormat } from './sqlite-fs.ts'
+import { PhysicalSnapshots, type PhysicalSnapshot, type SnapshotNodes, type SnapshotBlocks, type PhysicalImportStatus } from './physical-snapshot.ts'
+import { StorageCompression, sameFormat } from './storage-compression.ts'
+export type { PhysicalSnapshot, SnapshotNode, SnapshotNodes, SnapshotBlocks, PhysicalImportStatus } from './physical-snapshot.ts'
 
 /** What the package's dist/ holds, as a Worker imports it. */
 export interface Assets {
@@ -34,10 +37,43 @@ export class DataDirectory {
   readonly #storage: DurableObjectStorage
   #fs: SqliteFS | null = null
   #opened = false
+  #db: Promise<PGlite> | null = null
+  #physical: PhysicalSnapshots | null = null
+  readonly #compression: StorageCompression
 
   constructor(storage: DurableObjectStorage, private readonly format?: StorageFormat) {
     this.#storage = storage
     storage.sql.exec('CREATE TABLE IF NOT EXISTS data_directory (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    this.#compression = new StorageCompression(storage)
+  }
+
+  get storageReady(): boolean {
+    if (this.#compression.progress()) return false
+    const actual = this.#compression.format()
+    return !actual || !this.format || sameFormat(actual, this.format)
+  }
+
+  storageStatus() {
+    return { format: this.#compression.format(), maintenance: this.#compression.progress(), requested: this.format ?? null,
+      generation: this.complete ? this.generation : null, databaseSize: this.#storage.sql.databaseSize, ready: this.storageReady }
+  }
+
+  beginCompression(expectedGeneration: string, target: StorageFormat) {
+    if (this.#opened) throw new Error('compression requires an unopened directory')
+    this.#compression.begin(expectedGeneration, target)
+    this.#fs = null
+    return this.storageStatus()
+  }
+
+  advanceCompression(expectedGeneration: string, maxBlocks = 256) {
+    if (this.#opened) throw new Error('compression requires an unopened directory')
+    this.#compression.advance(expectedGeneration, maxBlocks)
+    this.#fs = null
+    return this.storageStatus()
+  }
+
+  #available() {
+    if (this.#compression.progress()) throw new Error('data directory storage maintenance is active')
   }
 
   get complete(): boolean {
@@ -55,16 +91,18 @@ export class DataDirectory {
   }
 
   get #dir() {
+    this.#available()
     this.#fs ??= new SqliteFS(this.#storage.sql, this.format)
     return this.#fs
   }
 
   /** PGlite over the stored directory; once per object. */
   open(assets: Assets, options: PGliteOptions = {}): Promise<PGlite> {
+    if (!this.storageReady) throw new Error('data directory storage is not ready')
     if (this.#opened) throw new Error('the data directory is already open')
     if (!this.complete) throw new Error('no complete data directory: load one through /import first')
     this.#opened = true
-    return PGlite.create({
+    this.#db = PGlite.create({
       fs: this.#dir,
       pgliteWasmModule: assets.pgliteWasm,
       initdbWasmModule: assets.initdbWasm,
@@ -74,14 +112,69 @@ export class DataDirectory {
       startParams: [...PGlite.defaultStartParams, ...Object.entries(SETTINGS).flatMap(([k, v]) => ['-c', `${k}=${v}`])],
       ...options,
     }).then(loadIncrementalViews)
+    return this.#db
+  }
+
+  get #snapshots() {
+    this.#available()
+    if (!this.#physical) {
+      SqliteFS.schema(this.#storage.sql)
+      this.#physical = new PhysicalSnapshots(this.#storage.sql, fn => this.#storage.transactionSync(fn))
+    }
+    return this.#physical
+  }
+
+  /** The caller holds the database serializer through committed sync and this cut. */
+  async freeze(id: string): Promise<PhysicalSnapshot> {
+    if (!this.complete) throw new Error('cannot snapshot an incomplete directory')
+    const prior = this.#snapshots.manifest(id)
+    if (prior) {
+      if (prior.sourceGeneration !== this.generation) throw new Error('snapshot directory generation differs')
+      return prior
+    }
+    if (this.#db) {
+      const db = await this.#db
+      if (db.fs !== this.#dir) throw new Error('snapshot requires the owned data-directory filesystem')
+      if (db.isInTransaction()) throw new Error('cannot snapshot an open PostgreSQL transaction')
+      await db.syncToFs()
+      if (db.isInTransaction()) throw new Error('snapshot requires the database serializer')
+    }
+    return this.#snapshots.freeze(id, this.generation, this.#dir.format)
+  }
+
+  snapshotManifest(id: string): PhysicalSnapshot | null { return this.#snapshots.manifest(id) }
+  snapshots(): PhysicalSnapshot[] { return this.#snapshots.list() }
+  snapshotNodes(id: string, after = ''): SnapshotNodes { return this.#snapshots.nodes(id, after) }
+  snapshotBlocks(id: string, path: string, after = -1): SnapshotBlocks { return this.#snapshots.blocks(id, path, after) }
+  releaseSnapshot(id: string): void { this.#snapshots.release(id) }
+  snapshotImportStatus(): PhysicalImportStatus | null { return this.#snapshots.importStatus() }
+  beginSnapshotImport(manifest: PhysicalSnapshot): PhysicalImportStatus {
+    if (this.#opened || this.complete) throw new Error('physical import requires an unopened incomplete directory')
+    return this.#snapshots.beginImport(manifest)
+  }
+  importSnapshotNodes(page: SnapshotNodes): PhysicalImportStatus {
+    if (this.#opened) throw new Error('physical import directory is open')
+    return this.#snapshots.importNodes(page)
+  }
+  importSnapshotBlocks(page: SnapshotBlocks): PhysicalImportStatus {
+    if (this.#opened) throw new Error('physical import directory is open')
+    return this.#snapshots.importBlocks(page)
+  }
+  finishSnapshotImport(id: string): PhysicalImportStatus {
+    if (this.#opened) throw new Error('physical import directory is open')
+    const result = this.#snapshots.finishImport(id)
+    this.#fs = null
+    return result
   }
 
   /** Drops the stored directory. Open, its PGlite is lost with it: the owner
    * ends the object (ctx.abort()) once the request that asked has its answer. */
   reset() {
+    this.#available()
     SqliteFS.drop(this.#storage.sql)
     this.#storage.sql.exec('DELETE FROM data_directory')
     this.#fs = null
+    this.#physical = null
   }
 
   /** Answers load.ts's `route` (what follows /import/). Past `status`, refused
@@ -89,6 +182,7 @@ export class DataDirectory {
    * source — and past `reset`, once complete. */
   async importing(route: string, req: Request): Promise<Response> {
     if (route === 'status') return json({ complete: this.complete })
+    if (this.#compression.progress()) return json({ error: 'data directory storage maintenance is active' }, 503)
     if (this.#opened) return json({ error: 'the data directory is open; an import needs a fresh object' }, 409)
     const q = new URL(req.url).searchParams
     switch (route) {

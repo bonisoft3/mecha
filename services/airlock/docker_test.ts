@@ -164,7 +164,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO reader;
       ALTER DEFAULT PRIVILEGES GRANT USAGE ON SCHEMAS TO reader;
       ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC;`);
-    await db.query(await Deno.readTextFile(new URL("./graphile.sql", import.meta.url)));
+    await db.query(await Deno.readTextFile(new URL("../durex/graphile.sql", import.meta.url)));
     // The database image prepends the ticker's schedule table to airlock.sql
     // (bayt.cue); here the two run in that order.
     await db.query(await Deno.readTextFile(new URL("../ticker/schedule.sql", import.meta.url)));

@@ -1,0 +1,14 @@
+say:
+  build:
+    do: "deno check --frozen build.ts test/*_test.ts test/integrate.ts"
+  lint:
+    rulemap:
+      duckdb:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "deno lint build.ts native src test"
+  test:
+    do: "deno test --frozen -A test/*_test.ts"
+  integrate:
+    do: "mise exec -- deno run --frozen -A test/integrate.ts"

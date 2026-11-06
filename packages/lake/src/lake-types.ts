@@ -1,4 +1,4 @@
-import type { TypeField, Types, CarrierField, Carriers } from "@mecha/client/types"
+import type { TypeField, Types, CarrierField, Carriers } from "../../client/src/types.ts"
 
 function quoted(name: string): string {
   if (name.length === 0) throw new Error("a typed lake field has no name")

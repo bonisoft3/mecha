@@ -15,7 +15,8 @@ type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
   schedules: string[];
-  computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string }[];
+  computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string; feldera?: string }[];
+  duckstreamEngine?: "duckdb-snapshot" | "feldera";
   effects?: Effect[];
   effectInterpreters?: string;
   pgroll?: Record<string, { operations: unknown[] }>;
@@ -77,6 +78,8 @@ Deno.test("a computation alone gets a durable CDC consumer without a clock", asy
   }, "surface.targets");
   assert.equal(got.ok, true, got.stderr);
   assert.equal(got.value.clock, undefined);
+  assert.equal(got.value.feldera, undefined);
+  assert.equal(got.value.compute.compose.environment.DUCKSTREAM_ENGINE, "${DUCKSTREAM_ENGINE:-duckdb-snapshot}");
   assert.equal(got.value.ticker, undefined);
   assert.equal(got.value.launch.compose.depends_on.transform.condition, "service_started");
   assert.equal(got.value.launch.compose.depends_on.conduit.condition, "service_healthy");
@@ -708,6 +711,44 @@ Deno.test("a provider's program defaults stand until the deployment sets its own
   // compose would read a `$` or `}` in a default as its own syntax.
   for (const bad of [{ secret: "shh" }, { scope: "openid ${HOME}" }, { params: "a=}" }]) {
     assert.equal((await exported({}, "capabilities", { signIn: { google: bad } })).ok, false, JSON.stringify(bad));
+  }
+});
+
+Deno.test("compute readiness preserves the startup allowance for each sequential native program", async () => {
+  for (const duckstreamEngine of ["duckdb-snapshot", "feldera"] as const) {
+    for (const count of [1, 2]) {
+      const computations = Array.from({ length: count }, (_, i) => ({ name: `analytics_${i}`, file: `program_${i}.js`, feldera: `program_${i}.json`, to: [`metric_${i}`], wasm: [] }));
+      const got = await exported({ duckstreamEngine, computations }, "surface.targets.compute.compose.healthcheck");
+      assert.equal(got.ok, true, got.stderr);
+      assert.equal(got.value.start_period, `${duckstreamEngine === "feldera" ? 30 * count : 15}m`);
+      assert.deepEqual(got.value.test, ["CMD", "portcheck", "--port", "9997"]);
+    }
+  }
+});
+
+Deno.test("Feldera deployment selects its pinned internal service and ships the descriptor for either engine", async () => {
+  for (const duckstreamEngine of ["duckdb-snapshot", "feldera"] as const) {
+    const got = await exported({ duckstreamEngine, computations: [{ name: "analytics", file: "duckstream/program.js", feldera: "duckstream/feldera.json", to: ["metric"], wasm: [] }] }, "surface.targets");
+    assert.equal(got.ok, true, got.stderr);
+    const { compute, feldera } = got.value;
+    assert.equal(compute.compose.environment.DUCKSTREAM_ENGINE, "${DUCKSTREAM_ENGINE:-" + duckstreamEngine + "}");
+    assert.equal(JSON.parse(compute.compose.environment.COMPUTATIONS)[0].feldera, "/app/computations/analytics.feldera.json");
+    assert.ok(compute.srcs.globs.includes("duckstream/feldera.json"));
+    assert.ok(compute.dockerfile.copy.some((copy: { srcs: string[]; dst: string }) => copy.srcs[0] === "duckstream/feldera.json" && copy.dst === "/app/computations/analytics.feldera.json"));
+    if (duckstreamEngine === "feldera") {
+      assert.equal(feldera.dockerfile.from.name, "images.feldera.com/feldera/pipeline-manager:0.367.0@sha256:42819714d16f7d5d37c17c87812ce98fb23efd2b1bfbf95b4889877f14693272");
+      assert.match(feldera.dockerfile.preamble.join("\n"), /\[profile\.unoptimized\].*strip = "symbols"/);
+      assert.deepEqual(feldera.compose.healthcheck.test, ["CMD", "httpcheck", "http://127.0.0.1:8080/healthz"]);
+      assert.equal(feldera.compose.ports, undefined);
+      assert.equal(compute.compose.depends_on.feldera.condition, "service_healthy");
+      assert.equal(compute.compose.environment.FELDERA_URL, "http://feldera:8080");
+      assert.equal(feldera.compose.environment.FELDERA_DATABASE_URL, compute.compose.environment.DATABASE_URL);
+      assert.match(feldera.compose.environment.FELDERA_DATABASE_URL, /\$\{POSTGRES_PASSWORD:-postgres\}/);
+    } else {
+      assert.equal(feldera, undefined);
+      assert.equal(compute.compose.depends_on.feldera, undefined);
+      assert.equal(compute.compose.environment.FELDERA_URL, undefined);
+    }
   }
 });
 

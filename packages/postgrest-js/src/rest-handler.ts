@@ -361,8 +361,9 @@ export function createRestHandler(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       const isValidationError = err instanceof ReadQueryError || message.startsWith('Invalid identifier:')
+      const isForbidden = typeof err === 'object' && err !== null && 'code' in err && err.code === '42501'
       return new Response(JSON.stringify({ error: message }), {
-        status: isValidationError ? 400 : 500,
+        status: isForbidden ? 403 : isValidationError ? 400 : 500,
         headers: { 'Content-Type': 'application/json' },
       })
     }

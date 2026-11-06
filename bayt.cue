@@ -141,7 +141,7 @@ _mecha: bayt.#project & _where & {
 		// ---- The images -------------------------------------------------
 
 		"database-image": _image & {
-			srcs: globs: ["services/database/rls/rls.sql", "services/database/role_passwords.sh", "services/ticker/schedule.sql", "services/airlock/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
+			srcs: globs: ["services/database/rls/rls.sql", "services/database/role_passwords.sh", "services/ticker/schedule.sql", "services/durex/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
 			dockerfile: {
 				from: name: _postgres
 				// plv8 hosts a Jessie validation inside the write's transaction.
@@ -179,7 +179,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: ["services/database/rls/rls.sql"], dst: "\(cluster.#InitdbDir)/\(cluster.#TenancyMigration)"},
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleStaged)"},
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
-					{srcs: ["services/airlock/graphile.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#GraphileMigration)"},
+					{srcs: ["services/durex/graphile.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#GraphileMigration)"},
 					{srcs: ["services/airlock/airlock.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#AirlockMigration)"},
 					{srcs: ["services/database/role_passwords.sh"], dst: "\(cluster.#StagedDir)/\(cluster.#RolePasswordsStep)"},
 					{from: {name: _pgroll}, srcs: ["/usr/bin/pgroll"], dst: "/usr/local/bin/pgroll"},
@@ -253,24 +253,30 @@ _mecha: bayt.#project & _where & {
 		// running service reaches no extension host. Workers take no
 		// permissions of their own, an option Deno still calls unstable.
 		"compute-image": _image & {
-			let _files = ["deno.json", "deno.lock", "main.ts", "workers.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "wasi.ts", "install.ts"]
-			srcs: globs: [for f in _files {"services/compute/\(f)"}]
+			let _files = ["deno.json", "deno.lock", "main.ts", "feldera.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "native-feldera.ts", "native-cleanup.ts", "native-sources.ts", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts"]
+			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts"]])
 			dockerfile: {
 				from: name: _deno
 				workdir: "/app"
-				copy: [{srcs: [for f in _files {"services/compute/\(f)"}], dst: "/app/"}]
+				copy: [
+					{srcs: [for f in _files {"services/compute/\(f)"}], dst: "/app/"},
+					{srcs: ["services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts"], dst: "/durex/"},
+					{srcs: ["packages/client/src/types.ts"], dst: "/packages/client/src/"},
+					{srcs: ["packages/lake/src/lake-types.ts"], dst: "/packages/lake/src/"},
+					{srcs: ["packages/compute-snapshot/src/sink-writes.ts"], dst: "/packages/compute-snapshot/src/"},
+				]
 				epilogue: [
 					"RUN deno cache main.ts cage.ts job.ts",
-					"RUN deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env install.ts",
+					"RUN deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts",
 				]
-				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "/app/main.ts"]
+				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "--allow-sys", "/app/main.ts"]
 			}
 		}
 		"activepieces-image": (activepieces.#Target & {source: "services/activepieces"}).target
 		// The handler cage imports compute's realm through its sibling directory.
 		"airlock-image": _image & {
 			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "tsbifrost.ts", "white-background.ts", "package.json", "dapr.yaml"]
-			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts"]
+			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts", "query-stages.ts"]
 			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
 			dockerfile: {
 				from: name: _deno

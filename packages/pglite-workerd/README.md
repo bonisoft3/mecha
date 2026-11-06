@@ -73,7 +73,27 @@ selects lossless zlib level-1 compression for a new directory. Blocks that would
 grow are stored raw, with an encoding byte. Block sizes are powers of two from
 8 to 128 KiB. `fs_format` persists the choice; reopening without options uses
 that format, and conflicting options fail. Existing directories without format
-metadata retain raw 8 KiB storage. Changing format requires a fresh import.
+metadata retain raw 8 KiB storage. Changing block size requires a fresh import.
+
+`DataDirectory.beginCompression(generation, target)` admits only an unopened,
+complete, unpinned raw 8 KiB directory and a deflate 8 KiB target.
+`advanceCompression(generation)` converts up to 256 stored blocks per call
+(at most 2048 when explicitly requested), preserving file metadata, holes,
+logical bytes and the directory generation. Each SQLite transaction commits
+the converted blocks and their cursor together. A retry resumes at that cursor;
+the final transaction installs the target format and removes the maintenance
+marker. Completed begin/advance requests can be replayed.
+
+During conversion, `fs_format` carries an unsupported version so older workers
+also refuse to open mixed encodings. Imports, snapshots and resets are refused.
+`storageReady` is false during conversion or when an existing directory differs
+from the requested format; the owner must gate requests before booting PGlite.
+Deploying that gate into a fresh isolate for the existing object permits maintenance
+without opening Postgres. An already opened directory is refused, even if its database was
+subsequently closed. `storageStatus()` reports the format, progress, generation
+and SQLite database size for an authenticated maintenance controller. Conversion
+does not alter PostgreSQL files logically or require a checkpoint: PostgreSQL
+performs its normal WAL recovery on reopening.
 Inflation is bounded by the declared block size and damaged streams fail.
 
 Decoded compressed blocks use a 4 MiB LRU budget, including their encoded copies.
@@ -81,10 +101,50 @@ Every lookup still reads authoritative SQLite bytes and compares them before
 reusing decoded data. Writes, rollback and ID reuse therefore cannot expose a
 stale decoded block; this cache saves inflation, not SQLite row reads.
 
-Larger blocks reduce SQLite allocation overhead but amplify isolated page reads
-and writes: updating one 8 KiB page can decompress and recompress 128 KiB.
+Partial writes persist the existing raw block encoding immediately. SQLite tracks
+recompression work durably; writes keep at most 32 blocks temporarily raw,
+bounding their extra storage to 4 MiB.
+Evicting the oldest pending block recompresses it; PGlite query synchronization,
+initial filesystem synchronization and import boundaries drain the remainder.
+A restart or SQLite rollback preserves both bytes and pending work, without a
+dirty JavaScript buffer. Older code can still read every block.
+
+Larger blocks reduce SQLite allocation overhead but amplify isolated page reads.
+Sequential 8 KiB page writes share one compression of their 128 KiB block.
 Compression preserves PostgreSQL indexes, transactions and query semantics;
 it does not require moving tables to another database engine.
+
+`DataDirectory.freeze(id)` creates a physical snapshot by copying file metadata,
+not file contents. The caller holds its database serializer through transaction
+completion and `freeze`; the method rejects an open PostgreSQL transaction and
+synchronizes the owned filesystem before the cut. Repeating an active ID returns
+the original manifest before synchronization. PostgreSQL WAL and control files
+are included, so an imported reader performs ordinary crash recovery.
+
+SQLite triggers retain a block's first preimage for each active snapshot in the
+same statement as its live mutation. Missing-block tombstones preserve sparse
+holes; frozen file metadata and pinned inode IDs preserve truncation, unlink and
+rename. Compression updates also retain preimages so exported encoded bytes stay
+stable. SQL rollback rolls back both the mutation and its preimage. Active
+snapshots consume storage proportional to changed blocks; they do not retain
+those blocks in JavaScript memory.
+
+`physical-snapshot.ts` defines the transport types. `snapshotNodes(id, after)`
+exports immutable metadata by path; `snapshotBlocks(id, path, after)` exports
+encoded blocks by index, with at most 128 records and 256 KiB per page. A target
+uses `beginSnapshotImport`, the two page import methods, and
+`finishSnapshotImport`. Durable cursors and byte comparisons support replay;
+opening is refused until the complete metadata and every file have arrived.
+The target records the source generation but receives its own directory
+generation. Encoded blocks keep the existing raw/deflate format.
+
+`releaseSnapshot(id)` removes preimages and metadata, retaining an ID tombstone
+until reset so a retry cannot recapture changed bytes under an old identity.
+Release source pins once the independent reader durably owns the image.
+**Release all snapshots before downgrading code or resetting the directory.**
+New code refuses reset with active snapshots and rejects missing preservation
+triggers. Older writers retain the triggers but can fail when reusing a pinned
+inode; an older reset can drop them. Downgrade with active snapshots is unsupported.
 
 [`DataDirectory`](src/data-directory.ts) owns it in an object. `initdb`
 cannot run there, so a directory built on disk — by npm's PGlite, the same
@@ -172,6 +232,14 @@ restores a dump Postgres 18 (in Docker) took of a table with a policy, an ICU
 collation and a trigger; [`test/migrate_test.ts`](test/migrate_test.ts) gives
 a directory restored from a database pgroll migrated (mecha's pinned image)
 the set with one migration more.
+
+[[wrangler-tools.ts]] resolves Node and Wrangler with `mise which --tool` from
+the package's pinned configuration. Sayt supplies its bootstrapped mise through
+`SAYT_MISE_BIN`; direct Deno test commands must set that variable to the same
+executable. Resolution never uses a global mise or Node. The
+[[test/wrangler-tools_test.ts]] regression executes both tools from an unrelated
+working directory with conflicting tools on `PATH`; a fresh mise data directory also
+checks the npm backend's current installation layout.
 
 ## Compression probe
 

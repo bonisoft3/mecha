@@ -6,7 +6,7 @@ Deno.test('createEdgeAirlock drains airlock.external_effect_ledger via Cloudflar
   const db = await createDatabase({})
   try {
     const scheduleSql = await Deno.readTextFile(new URL('../../../services/ticker/schedule.sql', import.meta.url))
-    const graphileSql = await Deno.readTextFile(new URL('../../../services/airlock/graphile.sql', import.meta.url))
+    const graphileSql = await Deno.readTextFile(new URL('../../../services/durex/graphile.sql', import.meta.url))
     const airlockSql = await Deno.readTextFile(new URL('../../../services/airlock/airlock.sql', import.meta.url))
     await db.exec(graphileSql)
     await db.exec(`${scheduleSql}\n${airlockSql}`)
@@ -165,7 +165,7 @@ Deno.test('createEdgeAirlock schedules backoff retry when an attempt fails befor
   const db = await createDatabase({})
   try {
     const scheduleSql = await Deno.readTextFile(new URL('../../../services/ticker/schedule.sql', import.meta.url))
-    const graphileSql = await Deno.readTextFile(new URL('../../../services/airlock/graphile.sql', import.meta.url))
+    const graphileSql = await Deno.readTextFile(new URL('../../../services/durex/graphile.sql', import.meta.url))
     const airlockSql = await Deno.readTextFile(new URL('../../../services/airlock/airlock.sql', import.meta.url))
     await db.exec(graphileSql)
     await db.exec(`${scheduleSql}\n${airlockSql}`)
@@ -244,7 +244,7 @@ Deno.test('createEdgeAirlock fails an attempt that gives no answer, and retries 
   const db = await createDatabase({})
   try {
     const scheduleSql = await Deno.readTextFile(new URL('../../../services/ticker/schedule.sql', import.meta.url))
-    const graphileSql = await Deno.readTextFile(new URL('../../../services/airlock/graphile.sql', import.meta.url))
+    const graphileSql = await Deno.readTextFile(new URL('../../../services/durex/graphile.sql', import.meta.url))
     const airlockSql = await Deno.readTextFile(new URL('../../../services/airlock/airlock.sql', import.meta.url))
     await db.exec(graphileSql)
     await db.exec(`${scheduleSql}\n${airlockSql}`)
@@ -290,7 +290,7 @@ Deno.test('createEdgeAirlock settles a job Graphile gave up on as unknown', asyn
   const db = await createDatabase({})
   try {
     const scheduleSql = await Deno.readTextFile(new URL('../../../services/ticker/schedule.sql', import.meta.url))
-    const graphileSql = await Deno.readTextFile(new URL('../../../services/airlock/graphile.sql', import.meta.url))
+    const graphileSql = await Deno.readTextFile(new URL('../../../services/durex/graphile.sql', import.meta.url))
     const airlockSql = await Deno.readTextFile(new URL('../../../services/airlock/airlock.sql', import.meta.url))
     await db.exec(graphileSql)
     await db.exec(`${scheduleSql}\n${airlockSql}`)
@@ -335,7 +335,7 @@ Deno.test('Graphile announces each insert on "jobs:insert", and drains asked for
   const db = await createDatabase({})
   try {
     const scheduleSql = await Deno.readTextFile(new URL('../../../services/ticker/schedule.sql', import.meta.url))
-    const graphileSql = await Deno.readTextFile(new URL('../../../services/airlock/graphile.sql', import.meta.url))
+    const graphileSql = await Deno.readTextFile(new URL('../../../services/durex/graphile.sql', import.meta.url))
     const airlockSql = await Deno.readTextFile(new URL('../../../services/airlock/airlock.sql', import.meta.url))
     await db.exec(graphileSql)
     await db.exec(`${scheduleSql}\n${airlockSql}`)
@@ -397,7 +397,7 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
   const db = await createDatabase({})
   try {
     const scheduleSql = await Deno.readTextFile(new URL('../../../services/ticker/schedule.sql', import.meta.url))
-    const graphileSql = await Deno.readTextFile(new URL('../../../services/airlock/graphile.sql', import.meta.url))
+    const graphileSql = await Deno.readTextFile(new URL('../../../services/durex/graphile.sql', import.meta.url))
     const airlockSql = await Deno.readTextFile(new URL('../../../services/airlock/airlock.sql', import.meta.url))
     await db.exec(graphileSql)
     await db.exec(`${scheduleSql}\n${airlockSql}`)

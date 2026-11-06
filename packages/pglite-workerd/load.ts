@@ -69,9 +69,16 @@ export async function load(dir: string, send: Send, { reset = false, concurrency
     return JSON.parse(text)
   }
   const post = (route: string, body?: BodyInit) => call(route, { method: 'POST', body })
+  let resetUncertain = false
   for (let resumed = 0; ; resumed++) {
     try {
+      if (reset && resetUncertain && (await call('status')).complete === false) {
+        const nodes = await call('state') as Node[]
+        if (nodes.every(node => node.path === '/' && node.dir === true && node.size === 0)) reset = false
+      }
       if (reset) {
+        // Ending the reset's object can cut its acknowledgement after the deletion committed.
+        resetUncertain = true
         await post('reset')
         reset = false
       }

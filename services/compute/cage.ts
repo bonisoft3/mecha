@@ -17,6 +17,7 @@ const EXPORTS = ["finish", "plan", "queries", "reads"];
 type Module = {
   reads: unknown;
   queries: unknown;
+  queryStages?: unknown;
   plan: (inputs: unknown, seed: number, outputs: unknown) => unknown;
   finish: (inputs: unknown, outputs: unknown) => unknown;
 };
@@ -36,14 +37,14 @@ addEventListener("message", async (event) => {
       const { file } = data;
       const { namespace } = await compartment(file, data.source, data.endowments, "a computation").import(file);
       const names = Object.keys(namespace).sort();
-      if (names.join() !== EXPORTS.join()) {
+      if (names.filter(name => name !== "queryStages").join() !== EXPORTS.join()) {
         throw new TypeError(`${file} must export exactly ${EXPORTS.join(", ")}; it exports ${names.join(", ")}`);
       }
       if (typeof namespace.plan !== "function" || typeof namespace.finish !== "function") {
         throw new TypeError(`${file}: plan and finish must be functions`);
       }
       module = namespace as Module;
-      postMessage({ reads: module.reads, queries: module.queries });
+      postMessage({ reads: module.reads, queries: module.queries, ...(Object.hasOwn(module, "queryStages") ? { queryStages: module.queryStages } : {}) });
     } else if ("inputs" in data) {
       inputs = harden(data.inputs);
       seed = data.seed;

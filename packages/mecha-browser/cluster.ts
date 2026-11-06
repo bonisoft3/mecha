@@ -18,8 +18,10 @@ import { createClock, hasSchedules, serviceCrud } from './clock.ts'
 import { createDrains, type Drain, type Drains } from './drains.ts'
 import { browserTier } from './fence.ts'
 import { createShapes } from './shapes.ts'
+import { createSnapshotCoordinator, NOTIFY_CHANNEL, type CoordinatorConfig } from '../compute-snapshot/src/index.ts'
 
 export interface ClusterConfig {
+  compute?: Pick<CoordinatorConfig, 'computations' | 'machine' | 'execute'>
   db: PGlite
   /** The database's scripts in order, each run through the browser tier's
    * fence: the bundler's are the edge's (pronto's edge-scripts.ts), mecha's
@@ -99,6 +101,24 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
   }
 
   const drains = await createDrains({ db, drains: cfg.drains ?? [], serialize, log })
+  const compute = cfg.compute ? await createSnapshotCoordinator({ ...cfg.compute, db, serialize }) : null
+  let computeTimer: ReturnType<typeof setTimeout> | null = null
+  let computeStopped = false
+  let computeRunning = false
+  const computeError = (error: unknown) => fail(error instanceof Error ? error : new Error(String(error)))
+  const armCompute = async () => {
+    if (!compute || computeStopped || computeRunning) return
+    const due = await compute.wakeAt()
+    if (computeStopped || computeRunning) return
+    if (computeTimer !== null) clearTimeout(computeTimer)
+    computeTimer = due === null ? null : setTimeout(() => {
+      computeTimer = null
+      computeRunning = true
+      void compute.resume().catch((e) => log(`compute retry: ${String(e)}`)).finally(() => { computeRunning = false }).then(armCompute).catch(computeError)
+    }, Math.max(0, due - Date.now()))
+  }
+  const unlistenCompute = compute ? await db.listen(NOTIFY_CHANNEL, () => { void armCompute().catch(computeError) }) : null
+  await armCompute()
 
   // The sweep writes through crud as the service role, as the ticker does.
   const crudAsService = serviceCrud(async (req) => {
@@ -170,6 +190,10 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     swept: () => clock.settled(),
     stop: async () => {
       stopped = true
+      computeStopped = true
+      if (computeTimer !== null) clearTimeout(computeTimer)
+      await unlistenCompute?.()
+      await compute?.stop()
       clearTimer()
       await clock.settled()
       clearTimer()

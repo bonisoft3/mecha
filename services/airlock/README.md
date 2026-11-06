@@ -1,9 +1,15 @@
 # airlock
 
-The one way out of a cluster. A machine state *invokes* an external effect; the
+Airlock handles external integrations. It is the one way out of a cluster:
+a machine state *invokes* an effect; the
 airlock performs it against the effect's sink and returns the answer as the
 machine's next event. Like an airlock, it never has both doors open: the claim
 commits before the call.
+
+Its direction follows Camel's integration boundary: declared destinations,
+transport adapters and routing. The built contract below provides restricted
+effect handlers and sinks. [[../durex/docs/index|Durex]] owns internal durable
+execution, retries and transactional completion for Cortex machines.
 
 Why the design has this shape, what it rejected and what it measured, is
 pronto's [external effects](../../../../plugins/pronto/docs/decisions/2026-10-03-external-effects.md).
@@ -32,7 +38,7 @@ This file is the contract.
 - [dapr.yaml](dapr.yaml): the airlock daprd's configuration, the bindings API
   and nothing else.
 - [[../activepieces/README|Activepieces runner]]: standard pieces in application container hatches.
-- [graphile.sql](graphile.sql), written by [graphile_sql.ts](graphile_sql.ts)
+- [[../durex/graphile.sql|Graphile's shared schema]], written by [[../durex/graphile_sql.ts|its generator]]
   (`task generate:graphile`): Graphile Worker's schema as one initdb step.
 
 ```sh

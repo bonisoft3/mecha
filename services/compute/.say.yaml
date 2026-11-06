@@ -1,0 +1,30 @@
+say:
+  doctor:
+    rulemap:
+      compute:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "mise x -- deno --version"
+          - do: "initdb --version"
+          - do: "pg_ctl --version"
+          - do: "docker info --format '{{.ServerVersion}}'"
+  build:
+    do: "mise x -- deno check --frozen main.ts portable.integration.ts *_test.ts"
+  lint:
+    rulemap:
+      compute:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "mise x -- deno lint ."
+  test:
+    rulemap:
+      compute:
+        priority: -1
+        stop: true
+        cmds:
+          - do: "mise x -- deno run --frozen --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts"
+          - do: "mise x -- deno test --frozen --unstable-worker-options --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys ."
+  integrate:
+    do: "mise x -- deno test --frozen --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys portable.integration.ts"

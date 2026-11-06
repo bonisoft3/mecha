@@ -28,11 +28,10 @@ output:
         output:
           reject: ${! error() }
       # An invalidation says the named tables changed since the last run, and
-      # a run reads a fresh snapshot, so one run answers every invalidation
-      # pending before it. What arrives within a period goes out as one, its
-      # tables united; while a run is in flight the next batch waits, and what
-      # arrives meanwhile waits in the stream for the batch after. A batch is
-      # acknowledged only once compute accepts it.
+      # the receiver durably merges them before acknowledging. Each period
+      # sends the union of changed tables; compute's PostgreSQL ledger keeps
+      # one pending successor while a claimed calculation runs. A stream
+      # acknowledgment means durable acceptance, not finished statistics.
       #
       # Compute answers a failed delivery 500, the error in the body, and keeps
       # serving; the batch is retried here as the one message it became, with

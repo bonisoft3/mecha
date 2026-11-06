@@ -102,6 +102,24 @@ none, since the release's drains may name a table its migration creates. A
 failed call's retry stands at the alarm, which calls it within the alarm, so
 an eviction does not lose it.
 
+## Computation
+
+A release with computations binds private Query and Compute Workers, each with
+its own Durable Object. Query execution uses the statically packaged DuckDB
+runtime; pure JavaScript and WASM run in the separate SES execution realm.
+No compute Container is required. The release packager emits and the publisher
+deploys both companions before updating the database binding.
+
+The object owns the [[../compute-snapshot/docs/index|durable snapshot coordinator]]:
+source transactions record changes, and the alarm captures consistent source
+rows, executes outside the database queue, then publishes typed sinks and the
+completion receipt atomically. A pending alarm survives eviction; failed runs
+retain their captured input and retry. Filter-table edits use the same path.
+
+Companions have neither database credentials nor public execution routes. They
+accept packaged computation names and versions and return the exact capture
+identity. See [[../../docs/compute#cloudflare-snapshot-execution|the computation contract]] for isolation, deployment ordering and per-isolate capacity limits.
+
 ## The clock
 
 The object runs [the ticker's](../../services/ticker/README.md) sweep
@@ -161,7 +179,7 @@ reruns to it.
 
 For a frozen archive, `edgeObject({ clock: 'disabled', ... })` runs no
 clock: boot and alarm delivery clear any standing alarm but a failed drain's
-retry, a poke is refused (409), and the schedule rows are kept as they were. The default is
+retry or pending computation, a poke is refused (409), and the schedule rows are kept as they were. The default is
 `clock: 'ticker'`. Alarms do not boot an incomplete data directory. Reset
 deletes the alarm before replacing the directory.
 

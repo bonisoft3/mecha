@@ -1,0 +1,22 @@
+--- a/cpp/src/arrow/CMakeLists.txt
++++ b/cpp/src/arrow/CMakeLists.txt
+@@ -359,6 +359,8 @@
+ endmacro()
+ 
+ # Write out compile-time configuration constants
++set(ARROW_RECORDED_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
++string(REGEX REPLACE "-f(file|debug)-prefix-map=[^ ]+( |$)" "" ARROW_RECORDED_CXX_FLAGS "${ARROW_RECORDED_CXX_FLAGS}")
+ configure_file("util/config.h.cmake" "util/config.h" ESCAPE_QUOTES)
+ configure_file("util/config_internal.h.cmake" "util/config_internal.h" ESCAPE_QUOTES)
+ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/util/config.h"
+--- a/cpp/src/arrow/util/config.h.cmake
++++ b/cpp/src/arrow/util/config.h.cmake
+@@ -27,7 +27,7 @@
+ 
+ #define ARROW_CXX_COMPILER_ID "@CMAKE_CXX_COMPILER_ID@"
+ #define ARROW_CXX_COMPILER_VERSION "@CMAKE_CXX_COMPILER_VERSION@"
+-#define ARROW_CXX_COMPILER_FLAGS "@CMAKE_CXX_FLAGS@"
++#define ARROW_CXX_COMPILER_FLAGS "@ARROW_RECORDED_CXX_FLAGS@"
+ 
+ #define ARROW_BUILD_TYPE "@UPPERCASE_BUILD_TYPE@"
+ 

@@ -2,24 +2,24 @@
 // own state directory, for tests. restart() kills wrangler and its workerd and
 // starts them again on the same state: a fresh isolate and object, and an
 // eviction without a clean shutdown.
+import { wranglerTools } from './wrangler-tools.ts'
+
 const here = new URL('.', import.meta.url).pathname
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-async function output(cmd: string, args: string[]): Promise<string> {
-  const r = await new Deno.Command(cmd, { args, cwd: here, stderr: 'inherit' }).output()
+async function output(cmd: string, args: string[], env?: Record<string, string>): Promise<string> {
+  const r = await new Deno.Command(cmd, { args, cwd: here, env, stderr: 'inherit' }).output()
   if (!r.success) throw new Error(`${cmd} ${args.join(' ')} exited ${r.code}`)
   return new TextDecoder().decode(r.stdout).trim()
 }
 
-// By path: mise puts the npm backend's bin/ on PATH, where a bare `wrangler`
-// can resolve to another install.
-const wrangler = `${await output('mise', ['where', 'npm:wrangler'])}/node_modules/.bin/wrangler`
+const { wrangler, env } = await wranglerTools()
 // A Worker here bundles mecha's edge sources, whose clock reads cron through
 // the ticker's node_modules (services/ticker/deno.json): wrangler's bundler
 // resolves no npm: specifier, and the release's edge.ts installs it the same way.
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/ticker/deno.json`])
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/airlock/deno.json`])
-await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../mecha-edge/deno.json`])
+await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../mecha-edge/deno.json`], { DENO_NO_PACKAGE_JSON: '1' })
 
 function freePort(): number {
   const l = Deno.listen({ port: 0, hostname: '127.0.0.1' })
@@ -42,7 +42,7 @@ export interface Worker {
 
 /** Starts `wrangler dev --config <config>`, keeping state in `state` and its
  * output in `<state>.log{,.err}`. */
-export async function startWorker(config: URL, state: string): Promise<Worker> {
+export async function startWorker(config: URL, state: string, companions: URL[] = []): Promise<Worker> {
   const dir = new URL('.', config).pathname
   const port = freePort()
   const log = `${state}.log`
@@ -59,7 +59,8 @@ export async function startWorker(config: URL, state: string): Promise<Worker> {
     const out = await Deno.open(log, { write: true, create: true, truncate: true })
     const err = await Deno.open(`${log}.err`, { write: true, create: true, truncate: true })
     child = new Deno.Command(wrangler, {
-      args: ['dev', '--test-scheduled', '--config', config.pathname, '--port', String(port), '--inspector-port', String(freePort()), '--persist-to', state],
+      args: ['dev', '--test-scheduled', '--config', config.pathname, ...companions.flatMap(c => ['--config', c.pathname]), '--port', String(port), '--inspector-port', String(freePort()), '--persist-to', state],
+      env,
       cwd: dir,
       stdout: 'piped',
       stderr: 'piped',

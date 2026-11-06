@@ -187,3 +187,44 @@ Nothing runs on another cloud, and no stream processing runs on any cloud.
 - **App Runner as the door on AWS.** It is closed to new customers.
 - **Electric Cloud as the sync service's managed equivalent.** It wound down in
   August 2026.
+
+## Duckstream query engines
+
+[[compute|Compute]] selects the engine per deployment. The authored Feldera SQL
+and pure computation remain the same; deployment selects native incremental
+view maintenance or generated DuckDB snapshot queries.
+
+Native programs compile and initialize sequentially before compute becomes
+healthy. Optimized compilation has a 20-minute deadline; starting and stopping
+a pipeline retain their 10-minute deadlines. Compose gives each native program
+30 minutes of startup grace, so a deployment with two programs has 60 minutes.
+This grace does not suppress initialization errors; it prevents the container
+healthcheck from expiring while a later program is still starting.
+
+| Deployment | Query engine | Current support |
+| --- | --- | --- |
+| Local/container stack | Feldera or DuckDB snapshot | `state.duckstreamEngine` selects the service topology; `DUCKSTREAM_ENGINE=duckdb-snapshot` can override native execution. |
+| Pages | DuckDB snapshot | The export computes derived rows in a disposable stack without Feldera and embeds them in the page. |
+| Cloudflare free hosting | Snapshot/static frontend, or external backend | No native Feldera process in the free Workers runtime. |
+| Cloudflare Containers | Potential native host | Paid plan required; no Cloudflare Feldera deployment or recovery test is implemented. |
+| GCP/container host | Potential native host | The pinned Linux image is available; this change validates local Compose only. |
+
+The native connector reads `FELDERA_DATABASE_URL` in the Feldera process. Compose
+gives it the compute service's `DATABASE_URL`. Kubernetes and GKE releases strip
+both resolved Compose URIs from release metadata and reconstruct them using
+the same CloudNativePG postgres password Secret; generated manifests contain
+the Secret reference and environment substitution, never the resolved URI.
+
+Cloudflare's [Containers pricing](https://developers.cloudflare.com/containers/platform/pricing/)
+lists no free-plan allocation and requires the Workers Paid plan. Memory is
+billed by provisioned size while a container runs, so a continuously maintained
+pipeline is different from an occasional request handler. Free frontend hosting
+can call an externally hosted backend; that does not make the engine free.
+
+The native adapter uses Feldera OSS as recomputable state. It deliberately
+rebuilds a complete baseline after process loss. Feldera's
+[fault tolerance documentation](https://docs.feldera.com/pipelines/fault-tolerance/)
+reserves checkpoints for Enterprise; a persistent container disk alone does not
+provide the missing relational checkpoint. The adapter does not claim a managed
+CDC checkpoint/resume contract. Source snapshot cost, baseline duration and
+query state size still require capacity measurements for each application.

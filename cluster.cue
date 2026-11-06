@@ -60,7 +60,7 @@ _airlockLock: _ @embed(file="services/airlock/deno.lock", type=text)
 #InitdbDir: "/docker-entrypoint-initdb.d"
 
 // Where the migrate image holds the pgroll migrations it applies, as
-// <name>.json.
+// <name>.json, and idempotent reconciliations as <name>.sql.
 #PgRollDir: "/pgroll"
 
 #ConduitSlot: {app: string, name: "\(strings.Replace(app, "-", "_", -1))_conduit_slot"}
@@ -106,6 +106,8 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 #PostgresArgs: [
 	"-c", "session_preload_libraries=pg_ivm",
 	"-c", "wal_level=logical",
+	"-c", "max_replication_slots=128",
+	"-c", "max_wal_senders=128",
 	"-c", "fsync=off",
 	"-c", "synchronous_commit=off",
 	"-c", "full_page_writes=off",
@@ -307,21 +309,50 @@ _devElectricSecret:        "dev-electric-secret"
 _devElectricPassword:      "dev-electric-password"
 _devAuthenticatorPassword: "dev-authenticator-password"
 
+#ComputationField: {
+	name: string & !=""
+	type: string
+	required: *true | bool
+	precision?: int & >=1 & <=38
+	scale?: int & >=0
+	if type == "decimal" {
+		precision!: int
+		scale!: int & <=precision
+	}
+}
+
 #Cluster: X={
 	state: {
+		duckstreamEngine: *"duckdb-snapshot" | "feldera"
 		migrations: [...string] & list.UniqueItems()
 		// Changes to a schema that already exists, in pgroll's own grammar and
 		// keyed by the version each creates. `migrations` build the schema on a
 		// fresh volume; these carry a volume that outlived a change forward, and
 		// a fresh one too, once initdb has run.
 		pgroll: [grammar.#Name]: grammar.#Migration
+		// Idempotent SQL restated after ledger migrations on every release.
+		reconcile: [=~"^[a-z][a-z0-9_]*$"]: string & !=""
 		// Materialized JSON, one <name>.json per vetted pgroll value, relative to the app.
 		pgrollDir?: string & !=""
 		pipelines: [...{name: string, file: string}]
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
-		computations: [...{name: string, file: string, to: [...string] & [_, ...], wasm: [...string], onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$", endowments: *[] | [...#CageEndowment]}]
+		computations: [...{
+			name: string
+			file: string
+			feldera?: string & !=""
+			steps?: string & !=""
+			to: [...string] & [_, ...]
+			sinkWrites?: [string]: "replace" | "upsert"
+			wasm: [...string]
+			onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$"
+			endowments: *[] | [...#CageEndowment]
+			types?: {types: [string]: {...}, aliases: [string]: string}
+			queryTypes?: [string]: [...#ComputationField]
+			sinkTypes?: [string]: [...#ComputationField]
+			declaredReads?: [...string]
+		}]
 		// Names only: the cluster needs to know whether any schedule exists,
 		// never what it says. One brings the ticker, its clock and the table
 		// they sweep (#ScheduleMigration); the caller's migrations seed it.
@@ -413,7 +444,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	}
 	// A migration given to a cluster with no database is one nothing applies.
 	if !X.capabilities.server {
-		state: pgroll: [string]: _|_
+		state: {pgroll: [string]: _|_, reconcile: [string]: _|_}
 	}
 
 	// Every step postgres runs at initdb, keyed by the three digits its name
@@ -457,9 +488,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// migrations that carry it forward when there are any. A migration that
 	// fails therefore stops every reader from starting, rather than leaving
 	// them to serve the schema it did not reach.
+	// Eager OR closes a build-schema cycle when pgroll already exists; the
+	// conditional list resolves that branch before reading reconciliation.
 	_schemaReady: {
 		database: _healthy
-		if len(X.state.pgroll) > 0 {migrate: _completed}
+		if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {migrate: _completed}
 		if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
 		if len(X.state.timers) > 0 {"timer-check": _completed}
 	}
@@ -549,8 +582,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// apply it at initdb, in name order, on a fresh data directory; the
 		// steps that ran there are the files the image carries. The pgroll
 		// migrations are baked into the migrate image, whose one-shot run
-		// records that schema as pgroll's baseline and applies every migration
-		// the ledger lacks — on a fresh volume and on one that outlived a
+		// applies migrations the ledger lacks and restates SQL reconciliations
+		// on every run — on a fresh volume and on one that outlived a
 		// change alike. Anything that applies this schema elsewhere, inspects
 		// what it built, or reproduces it needs the facts below, and reading
 		// them here is how it avoids keeping a second copy of this layout that
@@ -562,7 +595,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				target: "database"
 				// The directory the image applies from.
 				initdb: #InitdbDir
-				if len(X.state.pgroll) > 0 {
+				if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {
 					pgroll: {
 						// The target that applies them, named the same way.
 						target: "migrate"
@@ -645,10 +678,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						if len(X.state.effects) > 0 {networks: ["default", "airlock"]}
 					}
 				}
-				// Only a cluster given pgroll migrations gets a runner: one with
-				// none has nothing to carry forward, and its first migration
-				// baselines whatever volume it meets.
-				if len(X.state.pgroll) > 0 {
+				// Permissions are reconciled even when no ledger migration is due.
+				if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {
 					migrate: X._image & {
 						if X.state.pgrollDir != _|_ {
 							srcs: globs: [for n, _ in X.state.pgroll {"\(X.state.pgrollDir)/\(n).json"}]
@@ -663,7 +694,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							if X.state.pgrollDir != _|_ {
 								copy: [for n, _ in X.state.pgroll {srcs: ["\(X.state.pgrollDir)/\(n).json"], dst: "\(#PgRollDir)/\(n).json"}]
 							}
-							epilogue: [if X.state.pgrollDir == _|_ for n, m in X.state.pgroll {
+							epilogue: list.Concat([[if X.state.pgrollDir == _|_ for n, m in X.state.pgroll {
 								let jsonText = json.Marshal(m)
 								if len(jsonText) <= 8192 {
 									"COPY <<'PGROLL' \(#PgRollDir)/\(n).json\n\(jsonText)\nPGROLL"
@@ -673,7 +704,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 									let chunks = [for i in list.Range(0, len(encoded), 8192) {"\(strings.ByteSlice(encoded, i, list.Min([i+8192, len(encoded)])))"}]
 									"COPY <<'PGROLL' /tmp/\(n).json.parts\n\(strings.Join(chunks, "\n"))\nPGROLL\nRUN mkdir -p \(#PgRollDir) && base64 -d < /tmp/\(n).json.parts > \(#PgRollDir)/\(n).json && rm /tmp/\(n).json.parts"
 								}
-							}]
+							}],
+								[for n, sql in X.state.reconcile {
+									"COPY <<'RECONCILE' \(#PgRollDir)/\(n).sql\n\(sql)\nRECONCILE"
+								}],
+							])
 						}
 						compose: {
 							depends_on: {
@@ -721,7 +756,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						compose: {
 							depends_on: {
 								database: _healthy
-								if len(X.state.pgroll) > 0 {migrate: _completed}
+								if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {migrate: _completed}
 								if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
 							}
 							environment: {
@@ -1084,13 +1119,13 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
 						epilogue: list.Concat([
 							["COPY <<'CDCTRACE' /cdc-trace.yaml\n\(_cdcTrace)\nCDCTRACE"],
-							[if len(X.state.computations) > 0 {"COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"}],
+							[if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"}],
 						])
-						cmd: list.Concat([["streams", "--no-api", "-r", "/cdc-trace.yaml"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 {"/compute-events.yaml"}]])
+						cmd: list.Concat([["streams", "--no-api", "-r", "/cdc-trace.yaml"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"/compute-events.yaml"}]])
 					}
 					compose: {
 						depends_on: {redis: _healthy, crud: _healthy}
-						if len(X.state.computations) > 0 {
+						if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {
 							depends_on: compute: _healthy
 						}
 						environment: {
@@ -1098,7 +1133,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// injection would clobber the pipelines' merge-duplicates upserts.
 							CRUD_URL:  "http://crud:3000"
 							REDIS_URL: "redis://redis:6379"
-							if len(X.state.computations) > 0 {COMPUTE_GROUP: "\(X.meta.app)-compute"}
+							if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {COMPUTE_GROUP: "\(X.meta.app)-compute"}
 							if X.capabilities.auth {
 								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
 							}
@@ -1116,44 +1151,76 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			}
 
 			// The numeric stage: an app's computations, each reading the lake
-			// the service publishes from Postgres, writing back through crud
-			// as the service role, the path every pipeline writes by.
+			// the service captures from Postgres, publishing all sinks atomically
+			// under the service role through the durable batch coordinator.
 			if len(X.state.computations) > 0 {
 				// Two computations may share a wasm module; it ships once.
 				let _wasm = [for w, _ in {for c in X.state.computations for w in c.wasm {(w): true}} {file: w, target: "/app/computations/\(path.Base(w, path.Unix))"}]
 				let _target = {for w in _wasm {(w.file): w.target}}
+				let _feldera = [for c in X.state.computations if c.feldera != _|_ {file: c.feldera, target: "/app/computations/\(c.name).feldera.json"}]
+				if X.state.duckstreamEngine == "feldera" {
+					feldera: bayt.healthcheck.http & X._image & {
+						healthcheck: {url: "http://127.0.0.1:8080/healthz", start_period: "120s"}
+						dockerfile: {
+							from: name: "images.feldera.com/feldera/pipeline-manager:0.367.0@sha256:42819714d16f7d5d37c17c87812ce98fb23efd2b1bfbf95b4889877f14693272"
+							workdir: "/home/ubuntu"
+							// Feldera clears Cargo environment overrides; config keeps stripping specific to test builds.
+							preamble: [#"RUN test ! -e /home/ubuntu/.cargo/config.toml && printf '%s\n' '[profile.unoptimized]' 'strip = "symbols"' > /home/ubuntu/.cargo/config.toml"#]
+						}
+						compose: {
+							restart: "on-failure"
+							environment: FELDERA_DATABASE_URL: X.surface.targets.compute.compose.environment.DATABASE_URL
+						}
+					}
+				}
 
-				// Healthy once it serves: its port opens after the bootstrap run, and an
-				// invalidation refused while that runs would spend its retries.
+				// Healthy after durable ingress starts; bootstrap calculations are
+				// queued and do not block capture of subsequent invalidations.
 				compute: bayt.healthcheck.tcp & X._image & {
 					healthcheck: {
 						port:           9997
 						interval:       "5s"
 						start_interval: "1s"
-						start_period:   "15m"
+						// Native programs compile and bootstrap sequentially before the listener opens.
+						if X.state.duckstreamEngine == "feldera" {start_period: "\(30 * len(X.state.computations))m"}
+						if X.state.duckstreamEngine == "duckdb-snapshot" {start_period: "15m"}
 					}
-					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}]])
+					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}], [for f in _feldera {f.file}]])
 					dockerfile: {
 						from: (_from & {in: X.meta.images.compute}).out
 						copy: list.Concat([
 							[for c in X.state.computations {srcs: [c.file], dst: "/app/computations/\(c.name).js"}],
 							[for w in _wasm {srcs: [w.file], dst: w.target}],
+							[for f in _feldera {srcs: [f.file], dst: f.target}],
 						])
 					}
 					compose: {
-						depends_on: {X._schemaReady, crud: _healthy, conduit: _healthy}
+						depends_on: {X._schemaReady, crud: _healthy}
+						if X.state.duckstreamEngine == "duckdb-snapshot" {depends_on: conduit: _healthy}
+						if X.state.duckstreamEngine == "feldera" {depends_on: feldera: _healthy}
 						environment: {
 							CRUD_URL:     "http://crud:3000"
 							DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
 							LAKE_DIR:     "/lake"
 							CDC_SLOT: (#ConduitSlot & {app: X.meta.app}).name
+							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-\(X.state.duckstreamEngine)}"
+							if X.state.duckstreamEngine == "feldera" {
+								FELDERA_URL: "http://feldera:8080"
+								FELDERA_COMPILATION_PROFILE: "${FELDERA_COMPILATION_PROFILE:-optimized}"
+							}
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
 								name: c.name
 								file: "/app/computations/\(c.name).js"
-								to:   c.to
+								if c.feldera != _|_ {feldera: "/app/computations/\(c.name).feldera.json"}
+								to: c.to
+								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
 								wasm: [for w in c.wasm {_target[w]}]
 								endowments: c.endowments
 								if c.onComplete != _|_ {onComplete: c.onComplete}
+								if c.types != _|_ {types: c.types}
+								if c.queryTypes != _|_ {queryTypes: c.queryTypes}
+								if c.sinkTypes != _|_ {sinkTypes: c.sinkTypes}
+								if c.declaredReads != _|_ {declaredReads: c.declaredReads}
 							}])
 							if X.capabilities.auth {
 								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
@@ -1165,6 +1232,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								action: "sync+restart"
 								path:   "../\(c.file)"
 								target: "/app/computations/\(c.name).js"
+							}],
+							[for f in _feldera {
+								action: "sync+restart"
+								path:   "../\(f.file)"
+								target: f.target
 							}],
 							[for w in _wasm {
 								action: "sync+restart"

@@ -315,7 +315,7 @@ Deno.test('PostgREST browser view reads discover invoker to-one computed relatio
     await test.step('the caller needs permission to execute a computed relationship', async () => {
       await db.exec('REVOKE EXECUTE ON FUNCTION game(team_campaign_point) FROM reader')
       const response = await request('select=id,game(slug)&id=eq.1')
-      assert.equal(response.status, 500)
+      assert.equal(response.status, 403)
       assert.match(await response.text(), /permission denied for function game/)
     })
   } finally {

@@ -15,7 +15,9 @@ self.addEventListener("message", (event) => {
   }
   try {
     const out = runWasm(modules[data.wasm], new TextEncoder().encode(data.input), data.wasm);
-    self.postMessage({ output: JSON.parse(new TextDecoder().decode(out)) });
+    const json = new TextDecoder().decode(out);
+    JSON.parse(json);
+    self.postMessage({ json });
   } catch (e) {
     self.postMessage({ error: e instanceof Error ? e.stack ?? e.message : String(e) });
   }

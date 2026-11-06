@@ -1,3 +1,4 @@
+// deno-lint-ignore no-import-prefix -- consumed through app-owned import maps
 import { load } from "npm:cheerio@1.2.0/slim";
 
 // Harden the capability, not the parser's mutable document or shared prototypes.

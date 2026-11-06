@@ -364,10 +364,9 @@ Deno.test('a change whose row cannot be read back fails the page, and every read
 })
 
 // Regression: a change whose row was gone by its read-back left the log
-// without waking the live requests waiting on that change, and each waited out
-// its 20 s timeout to answer 204. A TRUNCATE in the change's transaction
-// removes the row with no notification of its own to wake them.
-Deno.test('a change whose row is gone by its read-back answers the live request at once', async () => {
+// without waking live requests. TRUNCATE invalidates the entire shape, even
+// when a prior row notification is still waiting to read the removed row.
+Deno.test('truncate wakes a live request and invalidates queued row changes', async () => {
   const { db, get } = await scopedCluster()
   const first = await get('offset=-1')
   const at = `offset=${first.headers.get('electric-offset')}&handle=${first.headers.get('electric-handle')}`
@@ -377,7 +376,8 @@ Deno.test('a change whose row is gone by its read-back answers the live request 
   const started = Date.now()
   const waited = await live
   assert.ok(Date.now() - started < 5_000, 'the live request was answered when the change dropped, not at its timeout')
-  assert.equal(waited.status, 204)
+  assert.equal(waited.status, 409)
+  assert.deepEqual(await waited.json(), [{ headers: { control: 'must-refetch' } }])
   await db.close()
 })
 

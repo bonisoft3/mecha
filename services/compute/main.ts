@@ -9,7 +9,10 @@
 //            array of plain row objects: numbers as numbers (a BIGINT or
 //            HUGEINT beyond 2^53 fails the run), dates and times as DuckDB's
 //            ISO 8601 text in UTC, lists and structs as arrays and objects.
-//            Postgres's portable domains arrive as text, so a query casts;
+//            Postgres's portable domains arrive as text, so a query casts.
+//            Spec.queryTypes opts a query into the supplied portable type table;
+//            its exact strings and validated values then replace the numeric
+//            defaults above. Spec.sinkTypes validates every sink before writing;
 //   plan     (inputs, seed, outputs) => [{wasm, input}]: the jobs, each one
 //            call of a wasm module the computation ships, named by its file's
 //            stem; outputs[i] is what job i wrote. The host runs the jobs past
@@ -43,35 +46,26 @@
 // The service loads every computation at startup and dies on one it refuses;
 // admit.ts loads them as it does, for a lint to refuse them first.
 //
-// A job is its input as JSON on a WASI module's stdin, answered by its stdout
-// parsed as JSON, each in a fresh instance (wasi.ts), one job at a time in one
-// worker. Snapshot capture, calculation and publication are serialized in
-// this process; multiple compute replicas are not supported.
+// Cortex machines coalesce invalidations in PostgreSQL and invoke Durex work. A claimed run keeps its query inputs across retries; publication
+// commits all sinks, the completion hook and the work receipt together. New
+// invalidations remain pending while the claimed revision runs. The singleton
+// coordinator fences access to the process-local lake and Wasm worker.
 //
-// finish returns {sink table: [rows]} for exactly the tables its `to` names,
-// each row keyed by a text `id`, every row of a sink with the same columns,
-// no number NaN or infinite; each list is the sink's whole content: rows the
-// sink holds and the output lacks are deleted. Sink changes travel through
-// CDC too, invalidating computations that declare them in `reads`.
-//
-// All computations run at startup, then on CDC invalidations of their reads.
-// Each delivery takes a fresh snapshot, including a redelivery. Its output is
-// written in a rolled-back Postgres transaction, as crud will write it, before anything is
-// written; the writes then go through crud as the service role, the path every
-// pipeline writes by: changed rows upserted on id in every sink, then the rows
-// no longer produced deleted. Crud has no transaction across requests, so a
-// write failing past the check leaves a mix. A failed delivery answers 500 and
-// the service keeps serving: the Connect consumer resends it with backoff and,
-// past its retries, crashes (events.yaml). A resend reads a fresh snapshot and
-// rewrites every row of the sinks the failed write touched, which replaces the
-// mix and outlasts a deadlock or a row deleted mid-run.
-//
-// Environment: CRUD_URL, DATABASE_URL, CDC_SLOT, LAKE_DIR, COMPUTATIONS (JSON list of
-// {name, file, to, wasm, endowments?}, wasm being the module files it ships
-// and endowments what its module may use past the language, absent where it
-// declares none, as a cluster written before the field spells it);
-// SERVICE_JWT where the cluster has auth.
+// Environment: DATABASE_URL, CDC_SLOT, LAKE_DIR, COMPUTATIONS (Spec[]), and
+// SERVICE_JWT where the cluster has auth. Numerical work runs outside SQL
+// transactions; sink writes retain the service role's policies and triggers.
 
+import pg from "pg";
+import { NativeRuntime } from "./native-runtime.ts";
+import { compilationProfile } from "./native-feldera.ts";
+import { reconcileNativeResources } from "./native-cleanup.ts";
+import type { BatchSpec } from "./batches.ts";
+import { Feldera, type FelderaProgram } from "./feldera.ts";
+import { publish } from "./publication.ts";
+import { type SinkWrites, validateSinkWrites } from "../../packages/compute-snapshot/src/sink-writes.ts";
+import { PostgresJobCache } from "./job-cache.ts";
+import type { TypeTable } from "@mecha/client/types";
+import { bindBoundary, portableQuery, type TypeBoundary, type TypeSchemas, validateSchemas } from "./portable.ts";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -93,9 +87,6 @@ import {
 import type { ModuleSource } from "@endo/module-source";
 import { admit, Cage, IDENTIFIER, type Job, Runner, strictJson } from "./workers.ts";
 
-const BATCH = 1000;
-// Ids per DELETE: quoted uuids keep its URL near 8 KiB.
-const DELETES = 200;
 const RPC_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
 
 /** Where the image installed the lake's extensions (install.ts); a running
@@ -159,9 +150,16 @@ const PLAIN = createDuckDBValueConverter(BY_TYPE as Record<DuckDBTypeId, DuckDBV
 export type Spec = {
   name: string;
   file: string;
+  feldera?: string;
+  steps?: string;
   to: string[];
   wasm: string[];
+  declaredReads?: string[];
   onComplete?: string;
+  types?: TypeTable;
+  queryTypes?: TypeSchemas;
+  sinkTypes?: TypeSchemas;
+  sinkWrites?: SinkWrites;
   /** What the module may use past the language; absent, it declares none. */
   endowments?: string[];
 };
@@ -175,12 +173,14 @@ export interface Runnable {
 }
 
 export interface Reader {
-  query(sql: string): Promise<Row[]>;
+  query(sql: string, boundary?: TypeBoundary): Promise<Row[]>;
 }
 
 /** Queries on `con`, answered as the contract's plain rows. */
 export const readerOf = (con: DuckDBConnection): Reader => ({
-  query: async (sql) => (await con.runAndReadAll(sql)).convertRowObjects(PLAIN) as Row[],
+  query: async (sql, boundary) => boundary
+    ? await portableQuery(con, sql, boundary, PLAIN)
+    : (await con.runAndReadAll(sql)).convertRowObjects(PLAIN) as Row[],
 });
 
 /** The 32-bit seed of a computation's name: the first four bytes of its SHA-256. */
@@ -207,15 +207,29 @@ export class Computation implements Runnable {
     private runner: Runner,
     readonly onComplete: string | undefined,
     private endowments: string[],
+    readonly types: TypeTable | undefined,
+    private queryTypes: TypeSchemas | undefined,
+    readonly sinkTypes: TypeSchemas | undefined,
+    readonly sinkWrites: SinkWrites | undefined,
   ) {}
 
   static async load(spec: Spec, runner: Runner): Promise<Computation> {
+    validateSinkWrites(spec.to, spec.sinkWrites);
     if (spec.onComplete !== undefined && !RPC_IDENTIFIER.test(spec.onComplete)) {
       throw new Error(
         `computation ${spec.name}: onComplete is no SQL/PostgREST RPC identifier: ${spec.onComplete}`,
       );
     }
     const { compiled, reads, queries } = await admit(spec.file, spec.endowments ?? []);
+    if (spec.declaredReads !== undefined &&
+      !isDeepStrictEqual([...new Set(spec.declaredReads)].sort(), [...new Set(reads)].sort())) {
+      throw new Error(`computation ${spec.name}: module reads differ from declared Duckstream sources`);
+    }
+    if (spec.types !== undefined && spec.queryTypes === undefined && spec.sinkTypes === undefined) {
+      throw new Error("a portable type table requires query or sink schemas");
+    }
+    validateSchemas(spec.types, spec.queryTypes, Object.keys(queries));
+    validateSchemas(spec.types, spec.sinkTypes, spec.to, true);
     if (!spec.to.every((t) => IDENTIFIER.test(t))) {
       throw new Error(`computation ${spec.name}: a sink's table name is no identifier: ${spec.to}`);
     }
@@ -231,15 +245,67 @@ export class Computation implements Runnable {
       runner,
       spec.onComplete,
       spec.endowments ?? [],
+      spec.types,
+      spec.queryTypes,
+      spec.sinkTypes,
+      spec.sinkWrites,
     );
   }
 
-  async run(lake: Reader): Promise<unknown> {
+  async capture(lake: Reader): Promise<Record<string, Row[]>> {
     const inputs: Record<string, Row[]> = {};
-    for (const [name, sql] of Object.entries(this.queries)) inputs[name] = await lake.query(sql);
-    // One committed transaction can produce many CDC rows. Pure calculations
-    // may reuse their last answer, but every delivery still reads fresh inputs
-    // and retries publication and its completion hook.
+    for (const [name, sql] of Object.entries(this.queries)) {
+      const fields = this.queryTypes?.[name];
+      inputs[name] = await lake.query(sql, fields === undefined ? undefined : { fields, types: this.types! });
+    }
+    strictJson(inputs);
+    return inputs;
+  }
+
+  feldera(endpoint: string, program: FelderaProgram): Feldera {
+    if (
+      !isDeepStrictEqual(
+        Object.keys(program.outputs).sort(),
+        Object.keys(this.queries).sort(),
+      )
+    ) {
+      throw new Error(
+        `computation ${this.name}: Feldera outputs differ from declared queries`,
+      );
+    }
+    for (const [name, fields] of Object.entries(this.queryTypes ?? {})) {
+      const physical = program.outputs[name].fields;
+      bindBoundary({ fields, types: this.types! }).columns(physical.map((field) => field.name));
+      for (const field of fields) {
+        if (field.type !== "uuid" || physical.find((column) => column.name === field.name)?.type !== "VARCHAR") {
+          throw new Error(
+            `computation ${this.name}: typed Feldera query ${name}.${field.name} requires an admitted UUID string carrier`,
+          );
+        }
+      }
+    }
+    return new Feldera(endpoint, this.name, program);
+  }
+
+  async run(lake: Reader): Promise<unknown> {
+    return await this.calculate(await this.capture(lake));
+  }
+
+  async calculate(value: unknown): Promise<unknown> {
+    if (
+      !isRow(value) || Object.keys(value).sort().join() !== Object.keys(this.queries).sort().join() ||
+      !Object.values(value).every((rows) => Array.isArray(rows) && rows.every(isRow))
+    ) {
+      throw new Error(`computation ${this.name}: invalid retained query inputs`);
+    }
+    const inputs = value as Record<string, Row[]>;
+    for (const [name, fields] of Object.entries(this.queryTypes ?? {})) {
+      const normalized = bindBoundary({ fields, types: this.types! }).rows(inputs[name], "canonical");
+      if (!isDeepStrictEqual(normalized, inputs[name])) {
+        throw new Error(`computation ${this.name}: retained query ${name} is not canonical`);
+      }
+    }
+    // Replayed capture notifications may describe inputs already calculated.
     if (this.previous && isDeepStrictEqual(inputs, this.previous.inputs)) {
       return structuredClone(this.previous.out);
     }
@@ -298,6 +364,7 @@ export class Lake implements Reader {
     const db = await duckdb();
     const con = await db.connect();
     await con.run("LOAD postgres; LOAD ducklake");
+    await con.run("SET memory_limit = '512MiB'; SET threads = 2");
     await con.run(
       `ATTACH ${literal(`ducklake:${lakeDir}/catalog.ducklake`)} AS lake (DATA_PATH ${literal(`${lakeDir}/data/`)})`,
     );
@@ -310,7 +377,7 @@ export class Lake implements Reader {
   async attach() {
     await this.con.run("DETACH DATABASE IF EXISTS pg");
     await this.con.run(
-      `ATTACH ${literal(this.databaseUrl)} AS pg (TYPE postgres, READ_ONLY)`,
+      `ATTACH ${literal(this.databaseUrl)} AS pg (TYPE postgres, READ_ONLY, ISOLATION_LEVEL 'REPEATABLE READ')`,
     );
   }
 
@@ -346,28 +413,13 @@ export class Lake implements Reader {
     );
   }
 
-  query(sql: string): Promise<Row[]> {
-    return this.reader.query(sql);
+  query(sql: string, boundary?: TypeBoundary): Promise<Row[]> {
+    return this.reader.query(sql, boundary);
   }
 }
 
-/** `text` as a Postgres dollar-quoted literal. */
-export function dollar(text: string): string {
-  const tag = "$mecha$";
-  if (text.includes(tag)) throw new Error(`a value holds ${tag}`);
-  return `${tag}${text}${tag}`;
-}
-
-/** Upserts and deletions per table. */
-export type Plan = Record<string, [Row[], string[]]>;
-
-export interface Store {
-  ids(table: string): Promise<string[]>;
-  check(plan: Plan): Promise<void>;
-}
-
-/** The claims crud acts on for `jwt`; without one it answers as its anon
- * role, cluster.cue's PGRST_DB_ANON_ROLE. The signature is crud's to check. */
+/** The trusted deployment token supplies the same role and claims as crud;
+ * unauthenticated clusters use cluster.cue's PGRST_DB_ANON_ROLE. */
 export function crudClaims(jwt: string | undefined): Row {
   if (jwt === undefined) return { role: "anon" };
   const payload = jwt.split(".")[1].replaceAll("-", "+").replaceAll("_", "/");
@@ -376,256 +428,52 @@ export function crudClaims(jwt: string | undefined): Row {
   return claims;
 }
 
-/** Postgres as the sinks' check sees it: their ids, and a dry run. */
-export class Database implements Store {
-  private constructor(private con: DuckDBConnection, private claims: Row) {}
+/** Source catalog and capture readiness for durable batches. */
+export class Database {
+  private constructor(private con: DuckDBConnection) {}
 
-  /** `databaseUrl` connects as crud's authenticator does, which decides the
-   * settings crud applies for the claims' role. */
   static async open(databaseUrl: string, jwt: string | undefined): Promise<Database> {
     const con = await (await duckdb()).connect();
     await con.run("LOAD postgres");
     await con.run(`ATTACH ${literal(databaseUrl)} AS pg (TYPE postgres)`);
-    return new Database(con, crudClaims(jwt));
+    crudClaims(jwt);
+    return new Database(con);
   }
 
   /** Conduit's HTTP health can precede the source opening its slot. A
    * bootstrap snapshot taken earlier would leave a gap in change capture. */
   async requireCapture(slot: string) {
-    const rows = (await this.con.runAndReadAll(`SELECT * FROM postgres_query('pg', ${literal(
-      `SELECT slot_name FROM pg_replication_slots WHERE slot_name = ${literal(slot)}
+    const rows = (await this.con.runAndReadAll(`SELECT * FROM postgres_query('pg', ${
+      literal(
+        `SELECT slot_name FROM pg_replication_slots WHERE slot_name = ${literal(slot)}
        AND database = current_database() AND plugin = 'pgoutput' AND NOT temporary
        AND confirmed_flush_lsn IS NOT NULL AND wal_status <> 'lost'`,
-    )})`)).getRows();
-    if (rows.length !== 1) throw new Error(`CDC slot ${slot} is not ready; refusing a bootstrap snapshot before capture`);
-  }
-
-  /** What crud applies for the role: its transaction's isolation level and
-   * the settings it sets. Read per check, as crud rereads them when its
-   * config reloads. */
-  private async role(): Promise<[string, string[][]]> {
-    // PostgREST 12.2.3's queryRoleSettings (Postgres 15 and up), for one role:
-    // cluster-wide settings only, of roles the authenticator is a member of,
-    // that it may set; default_transaction_isolation is not set but read as
-    // the isolation level of every request's transaction (toIsolationLevel).
-    const rows = (await this.con.runAndReadAll(
-      `SELECT * FROM postgres_query('pg', ${literal(`
-        WITH role_setting AS (
-          SELECT r.rolname, unnest(r.rolconfig) AS setting
-          FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
-          WHERE member = current_user::regrole::oid
-        ), kv_settings AS (
-          SELECT rolname, substr(setting, 1, strpos(setting, '=') - 1) AS key,
-            lower(substr(setting, strpos(setting, '=') + 1)) AS value
-          FROM role_setting
-        )
-        SELECT kv.key, kv.value FROM kv_settings kv
-        JOIN pg_settings ps ON ps.name = kv.key
-          AND (ps.context = 'user' OR has_parameter_privilege(current_user::regrole::oid, ps.name, 'set'))
-        WHERE kv.rolname = ${literal(this.claims.role as string)}`)})`,
-    )).getRows() as string[][];
-    const level = rows.find(([key]) => key === "default_transaction_isolation")?.[1];
-    const isolation = level === "repeatable read" || level === "serializable" ? level : "read committed";
-    return [isolation, rows.filter(([key]) => key !== "default_transaction_isolation")];
-  }
-
-  async ids(table: string): Promise<string[]> {
-    return ((await this.con.runAndReadAll(`SELECT id::VARCHAR FROM pg.public.${table}`)).getRows() as string[][])
-      .map((r) => r[0]);
-  }
-
-  /** Apply `plan` in one transaction and roll it back: a row breaking a
-   * constraint, a validation, a reference or a grant or policy fails here,
-   * before crud writes anything. It is crud's request rehearsed: a
-   * transaction at the role's isolation level, the settings crud applies for
-   * the role (its statement and lock timeouts), set before the role as crud
-   * sets them, the role, claims and pre-request hook, every sink's upserts
-   * and then their deletions. */
-  async check(plan: Plan) {
-    const pg = (sql: string) => this.con.run("CALL postgres_execute('pg', ?)", [sql]);
-    const role = this.claims.role as string;
-    const [isolation, settings] = await this.role();
-    await this.con.run("BEGIN");
-    try {
-      await pg(`SET TRANSACTION ISOLATION LEVEL ${isolation}`);
-      for (const [name, value] of settings) await pg(`SELECT set_config(${literal(name)}, ${literal(value)}, true)`);
-      await pg(`SET LOCAL ROLE "${role.replaceAll('"', '""')}"`);
-      await pg(`SELECT set_config('request.jwt.claims', ${dollar(strictJson(this.claims))}, true)`);
-      await pg("SELECT public.app_pre_request()");
-      for (const [table, [rows]] of Object.entries(plan)) {
-        for (let i = 0; i < rows.length; i += BATCH) {
-          const batch = rows.slice(i, i + BATCH);
-          const names = Object.keys(batch[0]);
-          const columns = names.map((c) => `"${c}"`).join(", ");
-          const rest = names.filter((c) => c !== "id");
-          const update = rest.length > 0
-            ? `DO UPDATE SET (${rest.map((c) => `"${c}"`).join(", ")}) = ROW(${rest.map((c) => `EXCLUDED."${c}"`).join(", ")})`
-            : "DO NOTHING";
-          await pg(
-            `INSERT INTO public.${table} (${columns}) SELECT ${columns} FROM ` +
-              `json_populate_recordset(NULL::public.${table}, ${dollar(strictJson(batch))}) ON CONFLICT (id) ${update}`,
-          );
-        }
-      }
-      for (const [table, [, deletes]] of Object.entries(plan)) {
-        for (let i = 0; i < deletes.length; i += BATCH) {
-          await pg(
-            `DELETE FROM public.${table} WHERE id::text IN ` +
-              `(SELECT jsonb_array_elements_text(${dollar(strictJson(deletes.slice(i, i + BATCH)))}::jsonb))`,
-          );
-        }
-      }
-    } finally {
-      await this.con.run("ROLLBACK");
+      )
+    })`)).getRows();
+    if (rows.length !== 1) {
+      throw new Error(`CDC slot ${slot} is not ready; refusing a bootstrap snapshot before capture`);
     }
+  }
+
+  async schema(tables: string[]): Promise<unknown> {
+    const names = [...new Set(tables)].map(literal).join(",");
+    return (await this.con.runAndReadAll(`SELECT * FROM postgres_query('pg', ${
+      literal(`
+      SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod) AS type,
+        a.attnotnull, a.attgenerated, a.attidentity
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      JOIN pg_attribute a ON a.attrelid=c.oid
+      WHERE n.nspname='public' AND c.relname IN (${names || "NULL"})
+        AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum`)
+    })`)).getRows();
   }
 }
 
 const isRow = (row: unknown): row is Row =>
   typeof row === "object" && row !== null && Object.getPrototypeOf(row) === Object.prototype;
 
-/** What the sinks hold: per table, id -> the row's JSON as last written here,
- * null for a row this process has not written. The ids are the table's own,
- * read before each apply, so a row deleted by a cascade is written again. */
-export class Sinks {
-  held = new Map<string, Map<string, string | null>>();
-  private headers: Record<string, string>;
-
-  constructor(private database: Store, private crudUrl: string, jwt: string | undefined) {
-    this.headers = jwt ? { Authorization: `Bearer ${jwt}` } : {};
-  }
-
-  /** Refuse an output outside the contract; else what changes, per table. */
-  async plan(c: { name: string; to: string[] }, out: unknown) {
-    if (!isRow(out)) throw new Error(`computation ${c.name} returned no {sink: rows}`);
-    if ([...Object.keys(out)].sort().join() !== [...c.to].sort().join()) {
-      throw new Error(`computation ${c.name} returned ${Object.keys(out).sort()}, not its sinks ${[...c.to].sort()}`);
-    }
-    const plan: Record<string, [Row[], string[], Map<string, string>]> = {};
-    for (const [table, rows] of Object.entries(out)) {
-      if (!Array.isArray(rows) || !rows.every(isRow)) throw new Error(`computation ${c.name}: ${table} is no list of rows`);
-      const written = this.held.get(table) ?? new Map();
-      const held = new Map((await this.database.ids(table)).map((k) => [k, written.get(k) ?? null]));
-      this.held.set(table, held);
-      const now = new Map<string, string>();
-      const columns = rows.length > 0 ? Object.keys(rows[0]).sort().join() : "";
-      for (const row of rows) {
-        if (typeof row.id !== "string" || now.has(row.id)) {
-          throw new Error(`computation ${c.name}: ${table} row id ${JSON.stringify(row.id)} is not a unique text id`);
-        }
-        if (Object.keys(row).sort().join() !== columns) throw new Error(`computation ${c.name}: ${table} rows differ in columns`);
-        now.set(row.id, strictJson(row, true));
-      }
-      plan[table] = [
-        rows.filter((row) => (held.has(row.id as string) ? held.get(row.id as string) : "") !== now.get(row.id as string)),
-        [...held.keys()].filter((k) => !now.has(k)),
-        now,
-      ];
-    }
-    return plan;
-  }
-
-  async apply(c: { name: string; to: string[]; onComplete?: string }, out: unknown) {
-    if (c.onComplete !== undefined && !RPC_IDENTIFIER.test(c.onComplete)) {
-      throw new Error(`computation ${c.name}: onComplete is no SQL/PostgREST RPC identifier: ${c.onComplete}`);
-    }
-    const plan = await this.plan(c, out);
-    await this.database.check(Object.fromEntries(Object.entries(plan).map(([t, [rows, deletes]]) => [t, [rows, deletes]])));
-    try {
-      for (const [table, [rows]] of Object.entries(plan)) {
-        for (let i = 0; i < rows.length; i += BATCH) await this.send("POST", `${table}?on_conflict=id`, rows.slice(i, i + BATCH));
-      }
-      for (const [table, [, deletes]] of Object.entries(plan)) {
-        for (let i = 0; i < deletes.length; i += DELETES) {
-          const ids = deletes.slice(i, i + DELETES).map((k) => JSON.stringify(k)).join(",");
-          await this.send("DELETE", `${table}?id=in.(${encodeURIComponent(ids)})`);
-        }
-      }
-    } catch (e) {
-      // Some writes may have landed: what the sinks hold is unknown again, so
-      // the redelivery rewrites every row it produces.
-      for (const table of Object.keys(plan)) this.held.delete(table);
-      throw e;
-    }
-    for (const [table, [, , now]] of Object.entries(plan)) this.held.set(table, now);
-    if (c.onComplete !== undefined) {
-      await this.send("POST", `rpc/${c.onComplete}`, {}, "return=minimal");
-    }
-    return Object.fromEntries(
-      Object.entries(plan).map(([t, [rows, deletes, now]]) => [t, { rows: now.size, upserted: rows.length, deleted: deletes.length }]),
-    );
-  }
-
-  async send(method: string, path: string, body?: unknown, prefer = "resolution=merge-duplicates,return=minimal") {
-    const headers: Record<string, string> = { ...this.headers, Prefer: prefer };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    const res = await fetch(`${this.crudUrl}/${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : strictJson(body),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`${method} ${path}: ${res.status} ${text}`);
-  }
-}
-
-export interface Snapshots {
-  attach(): Promise<void>;
-  detach(): Promise<void>;
-  hold(tables: string[]): Promise<void>;
-}
-
-export class Service {
-  private active = false;
-
-  constructor(
-    private computations: Runnable[],
-    private lake: Snapshots & Reader,
-    private sinks: { apply(c: Runnable, out: unknown): Promise<unknown> },
-  ) {}
-
-  /** An overlapping HTTP retry must not start a second snapshot. Leave its
-   * delivery unacknowledged in the broker, rather than queueing it in memory. */
-  async refresh(tables?: string[]): Promise<boolean> {
-    if (this.active) return false;
-    this.active = true;
-    try {
-      for (const c of this.computations) {
-        if (tables === undefined || c.reads.some((t) => tables.includes(t))) {
-          await this.step(c);
-        }
-      }
-      return true;
-    } finally {
-      this.active = false;
-    }
-  }
-
-  private async step(c: Runnable) {
-    await this.lake.attach();
-    try {
-      await this.lake.hold(c.reads);
-    } catch (e) {
-      await this.lake.detach().catch((d) => {
-        throw new AggregateError([e, d], "a snapshot failed, and so did detaching Postgres");
-      });
-      throw e;
-    }
-    await this.lake.detach();
-    const started = performance.now();
-    const out = await c.run(this.lake);
-    const written = await this.sinks.apply(c, out);
-    console.log(JSON.stringify({
-      computation: c.name,
-      sinks: written,
-      seconds: Math.round(performance.now() - started) / 1000,
-    }));
-  }
-}
-
-/** Internal delivery endpoint. A 2xx means every affected output and hook
- * completed; a failure reaches serve's onError. */
-export function handler(service: Service, jwt: string | undefined) {
+/** Acknowledgment follows the receiver's durable acceptance boundary. */
+export function handler(service: { refresh(tables?: string[]): Promise<boolean> }, jwt: string | undefined) {
   return async (req: Request): Promise<Response> => {
     if (req.method !== "POST" || new URL(req.url).pathname !== "/invalidate") {
       return new Response(null, { status: 404 });
@@ -652,30 +500,145 @@ function need(name: string): string {
   return value;
 }
 
+export type QueryEngine = "duckdb-snapshot" | "feldera";
+
+export function queryEngine(value = "duckdb-snapshot"): QueryEngine {
+  if (value !== "duckdb-snapshot" && value !== "feldera") {
+    throw new Error(`unsupported DUCKSTREAM_ENGINE: ${value}`);
+  }
+  return value;
+}
+
+export async function computationVersion(
+  spec: Spec,
+  schema: unknown,
+  engine: QueryEngine = "duckdb-snapshot",
+): Promise<string> {
+  const hash = async (bytes: Uint8Array) =>
+    Array.from(
+      new Uint8Array(
+        await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>),
+      ),
+    )
+      .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const files = await Promise.all(
+    [spec.file, ...spec.wasm, ...(spec.feldera ? [spec.feldera] : [])]
+      .map(async (file) => await hash(await Deno.readFile(file))),
+  );
+  const contract = spec.feldera === undefined && engine === "duckdb-snapshot"
+    ? { protocol: 1, spec, schema, files }
+    : { protocol: engine === "feldera" ? 3 : 2, engine, spec, schema, files };
+  return await hash(new TextEncoder().encode(strictJson(contract, true)));
+}
+
 async function main() {
+  const { openBatches } = await import("./batches.ts");
   const specs: Spec[] = JSON.parse(need("COMPUTATIONS"));
+  const engine = queryEngine(Deno.env.get("DUCKSTREAM_ENGINE"));
+  const profile = compilationProfile(Deno.env.get("FELDERA_COMPILATION_PROFILE"));
+  if (engine === "feldera" && specs.some((spec) => !spec.feldera)) {
+    throw new Error(
+      "Feldera mode requires a compiled Feldera descriptor for every computation",
+    );
+  }
+
   const sinks = specs.flatMap((s) => s.to);
   if (new Set(sinks).size !== sinks.length) throw new Error(`two computations write one sink: ${sinks.sort()}`);
   const files = [...new Set(specs.flatMap((s) => s.wasm))];
   const stems = files.map(stem);
   if (new Set(stems).size !== stems.length) throw new Error(`two wasm modules share a name: ${files}`);
-  const modules = Object.fromEntries(
-    await Promise.all(files.map(async (f) => [stem(f), await WebAssembly.compile(await Deno.readFile(f))])),
-  );
-  const runner = new Runner(modules);
-  const computations: Runnable[] = [];
-  for (const spec of specs) computations.push(await Computation.load(spec, runner));
   const databaseUrl = need("DATABASE_URL");
+  await using jobCache = await PostgresJobCache.open(databaseUrl);
+  using runner = await Runner.cached(Object.fromEntries(
+    await Promise.all(files.map(async (f) => [stem(f), await Deno.readFile(f)])),
+  ), jobCache);
+  const computations: Computation[] = [];
+  for (const spec of specs) computations.push(await Computation.load(spec, runner));
   const jwt = Deno.env.get("SERVICE_JWT");
   const database = await Database.open(databaseUrl, jwt);
-  await database.requireCapture(need("CDC_SLOT"));
-  const service = new Service(
-    computations,
-    await Lake.open(databaseUrl, need("LAKE_DIR")),
-    new Sinks(database, need("CRUD_URL"), jwt),
-  );
-  await service.refresh();
-  await serve(service, jwt, 9997).finished;
+  if (engine === "duckdb-snapshot") await database.requireCapture(need("CDC_SLOT"));
+  let lake: Lake | undefined;
+  const claims = crudClaims(jwt);
+  const batches: BatchSpec[] = [];
+  const native: NativeRuntime[] = [];
+  const nativeDb = new pg.Pool({ connectionString: databaseUrl });
+  const engineFailure = Promise.withResolvers<unknown>();
+  for (let i = 0; i < computations.length; i++) {
+    const c = computations[i];
+    const spec = specs[i];
+    const version = await computationVersion(
+      spec,
+      await database.schema([...c.reads, ...c.to]),
+      engine,
+    );
+    if (engine === "feldera") {
+      const program = JSON.parse(await Deno.readTextFile(spec.feldera!));
+      c.feldera(need("FELDERA_URL"), program);
+      const runtime = new NativeRuntime(nativeDb, need("FELDERA_URL"), c,
+        program, version, databaseUrl, claims, profile);
+      native.push(runtime);
+      batches.push(runtime.spec);
+      continue;
+    }
+    batches.push({
+      name: c.name,
+      reads: c.reads,
+      to: c.to,
+      version,
+      async capture() {
+        // Open only after the coordinator owns the singleton lock: opening
+        // the ephemeral lake removes its previous files.
+        lake ??= await Lake.open(databaseUrl, need("LAKE_DIR"));
+        await lake.attach();
+        try {
+          await lake.hold(c.reads);
+        } catch (e) {
+          await lake.detach().catch((d) => {
+            throw new AggregateError([e, d], "capture and detach failed");
+          });
+          throw e;
+        }
+        await lake.detach();
+        return await c.capture(lake);
+      },
+      calculate: (input) => c.calculate(input),
+      async publish(client, out) {
+        const sinks = await publish(client, c, out, claims);
+        console.log(JSON.stringify({ computation: c.name, sinks }));
+      },
+    });
+  }
+  NativeRuntime.validateGraph(native);
+  const coordinator = await openBatches(databaseUrl, batches);
+  const service = {
+    async refresh(tables?: string[]) {
+      if (native.length) throw new Error("native CDC owns computation invalidation");
+      await coordinator.invalidate(tables);
+      return true;
+    },
+  };
+  await reconcileNativeResources(nativeDb, native.map((runtime) => runtime.spec.name), Deno.env.get("FELDERA_URL"));
+  for (const runtime of native) await runtime.initialize();
+  if (!native.length) await service.refresh();
+  let stopping = false;
+  const polling = (async () => {
+    while (!stopping && native.length) {
+      for (const runtime of native) {
+        if (await runtime.pending()) await coordinator.invalidateNames([runtime.spec.name]);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  })();
+  polling.catch((error) => engineFailure.resolve(error));
+  const server = serve(service, jwt, 9997);
+  try {
+    await Promise.race([server.finished, coordinator.promise, engineFailure.promise.then((error) => { throw error; })]);
+  } finally {
+    stopping = true;
+    await server.shutdown();
+    await coordinator.close();
+    await nativeDb.end();
+  }
 }
 
 /** An error as one line, each cause of an aggregate included. */
@@ -686,7 +649,11 @@ function said(error: unknown): string {
 
 /** The delivery server; a failed delivery is logged and answered 500 with its
  * message, which Connect's crash quotes once the retries run out. */
-export function serve(service: Service, jwt: string | undefined, port: number) {
+export function serve(
+  service: { refresh(tables?: string[]): Promise<boolean> },
+  jwt: string | undefined,
+  port: number,
+) {
   return Deno.serve({
     port,
     onError(error) {

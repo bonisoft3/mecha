@@ -75,10 +75,19 @@ recreates the container empty, and every service waiting on the database's
 health restarts with it.
 
 `surface.schema` publishes `{target: "database", initdb:
-"/docker-entrypoint-initdb.d"}`, and for a cluster given pgroll migrations
+"/docker-entrypoint-initdb.d"}`, and for a cluster given pgroll migrations or
+SQL reconciliation
 `pgroll: {target: "migrate", dir: "/pgroll", baseline: "00_initdb"}`, so
 anything that applies, inspects or reproduces the schema reads those services
 and directories instead of copying the layout.
+
+`state.reconcile` holds named idempotent SQL for release-time rules such as
+public write permissions. It enables the same `migrate` target as `state.pgroll`;
+readers wait for that target to succeed. The image puts these statements in
+`/pgroll/<name>.sql`, beside the ledger's JSON migrations. The runner applies
+pending JSON migrations first, then each SQL file in a transaction on every
+release, retaining the same pgroll baseline and history across restatements. This is native release
+reconciliation, not an exception to the edge tier's immutable script ledger.
 
 ## mecha's own tables, from protobuf
 

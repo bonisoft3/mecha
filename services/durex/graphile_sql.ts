@@ -7,7 +7,7 @@
 // The file is what Graphile's own install does: its bootstrap (migrate.js),
 // then every migration in order, each recorded in `migrations` with its
 // breaking flag. Graphile's next migrate check then finds the schema current;
-// docker_test.ts holds that, and that the result equals Graphile's own
+// Airlock's docker_test.ts holds that, and that the result equals Graphile's own
 // install. A graphile-worker bump fails graphile_sql_test.ts until this is
 // run again.
 //

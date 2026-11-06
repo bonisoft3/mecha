@@ -43,7 +43,7 @@
       {
         "from": null,
         "srcs": [
-          "services/airlock/graphile.sql"
+          "services/durex/graphile.sql"
         ],
         "dst": "/usr/share/mecha/initdb/011_graphile_worker.sql",
         "link": true,
@@ -106,6 +106,10 @@
       "-c",
       "wal_level=logical",
       "-c",
+      "max_replication_slots=128",
+      "-c",
+      "max_wal_senders=128",
+      "-c",
       "fsync=off",
       "-c",
       "synchronous_commit=off",
@@ -134,7 +138,7 @@
       "services/database/rls/rls.sql",
       "services/database/role_passwords.sh",
       "services/ticker/schedule.sql",
-      "services/airlock/graphile.sql",
+      "services/durex/graphile.sql",
       "services/airlock/airlock.sql",
       "services/migrate/migrate.sh"
     ],
@@ -226,7 +230,7 @@
           "services/database/rls/rls.sql",
           "services/database/role_passwords.sh",
           "services/ticker/schedule.sql",
-          "services/airlock/graphile.sql",
+          "services/durex/graphile.sql",
           "services/airlock/airlock.sql",
           "services/migrate/migrate.sh"
         ],

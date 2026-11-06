@@ -16,7 +16,7 @@ Deno.test('public SSR defers shape DDL until API access, before writes are admit
     const guests = await Promise.all([1, 2].map(() => cluster.handle(new Request('https://test/auth/guest', { method: 'POST' }))))
     for (const response of guests) assert.equal(response.status, 200)
     assert.equal(await installed(), true)
-    assert.equal((await db.query<{ count: number }>("SELECT count(*)::int AS count FROM pg_trigger WHERE tgname = 'shape_notify'")).rows[0].count, 2)
+    assert.equal((await db.query<{ count: number }>("SELECT count(DISTINCT tgrelid)::int AS count FROM pg_trigger WHERE tgfoid = 'shape_notify()'::regprocedure")).rows[0].count, 2)
     assert.equal((await db.query<{ count: number }>('SELECT count(*)::int AS count FROM app_user')).rows[0].count, 2)
   } finally { await db.close() }
 })

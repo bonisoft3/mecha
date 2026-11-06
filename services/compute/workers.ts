@@ -2,11 +2,32 @@
 // module, and one runner (job.ts) for every wasm job, all without permissions;
 // and the module's admission, compiled once and loaded in a cage.
 
+import { validateQueryStages, type StagedQueries } from "./query-stages.ts";
 import { ModuleSource } from "@endo/module-source";
 import { endowable } from "./language.ts";
 
+const sha256 = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
+  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+const hashText = (text: string) => sha256(new TextEncoder().encode(text));
+
+export async function executionVersion(): Promise<string> {
+  const host = await Promise.all(["./workers.ts", "./job.ts", "./wasi.ts", "./query-stages.ts"].map(async (file) =>
+    await sha256(await Deno.readFile(new URL(file, import.meta.url)))
+  ));
+  return await hashText(JSON.stringify({ protocol: 1, host, runtime: Deno.version, target: Deno.build.target }));
+}
+
 /** A job as the runner takes it: the wasm module's name and its stdin, JSON. */
 export type Job = { wasm: string; input: string };
+
+export interface JobCache {
+  get(keys: string[]): Promise<Map<string, string>>;
+  put(key: string, result: string): Promise<void>;
+}
+
+export const jobKey = (version: string, job: Job): Promise<string> =>
+  hashText(JSON.stringify([version, job.wasm, job.input]));
 
 const NONE = { type: "module", deno: { permissions: "none" } } as const;
 
@@ -51,9 +72,9 @@ export class Cage {
 
   /** The module, as `compile` made it, loaded with the endowments it declares:
    * its reads and queries, as data. */
-  async load(compiled: ModuleSource, endowments: string[]): Promise<{ reads: unknown; queries: unknown }> {
-    const { reads, queries } = await this.ask({ source: compiled, file: this.file, endowments });
-    return { reads, queries };
+  async load(compiled: ModuleSource, endowments: string[]): Promise<{ reads: unknown; queries: unknown; queryStages?: unknown }> {
+    const { reads, queries, queryStages } = await this.ask({ source: compiled, file: this.file, endowments });
+    return { reads, queries, ...(queryStages === undefined ? {} : { queryStages }) };
   }
 
   close() {
@@ -74,7 +95,7 @@ export function compile(file: string, source: string): ModuleSource {
 
 /** A module the cage admits: compiled, loaded, exporting the contract's
  * names, its reads table names and its queries SQL (main.ts). */
-export type Admitted = { compiled: ModuleSource; reads: string[]; queries: Record<string, string> };
+export type Admitted = { compiled: ModuleSource; reads: string[]; queries: Record<string, string>; queryStages?: StagedQueries };
 
 /** A table name the service quotes nowhere. */
 export const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -84,7 +105,7 @@ export const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export async function admit(file: string, endowments: string[]): Promise<Admitted> {
   const compiled = compile(file, await Deno.readTextFile(file));
   const cage = new Cage(file);
-  let declared: { reads: unknown; queries: unknown };
+  let declared: { reads: unknown; queries: unknown; queryStages?: unknown };
   try {
     declared = await cage.load(compiled, endowable(endowments, `computation ${file}`));
   } finally {
@@ -100,29 +121,69 @@ export async function admit(file: string, endowments: string[]): Promise<Admitte
   ) {
     throw new Error(`computation ${file}: exports no \`queries\` map of SQL`);
   }
-  return { compiled, reads, queries: queries as Record<string, string> };
+  const queryStages = validateQueryStages(declared.queryStages, queries as Record<string, string>);
+  return { compiled, reads, queries: queries as Record<string, string>, ...(queryStages ? { queryStages } : {}) };
 }
 
 /** The worker running wasm jobs, one at a time, each in a fresh instance.
  * Outputs are in job order. */
 export class Runner {
   private worker = new Worker(new URL("./job.ts", import.meta.url), NONE);
+  private memo?: { cache: JobCache; versions: Record<string, string> };
 
   constructor(modules: Record<string, WebAssembly.Module>) {
     this.worker.postMessage({ modules });
   }
 
+  static async cached(modules: Record<string, Uint8Array<ArrayBuffer>>, cache: JobCache): Promise<Runner> {
+    const engine = await executionVersion();
+    const entries = await Promise.all(Object.entries(modules).map(async ([name, bytes]) => {
+      const source = bytes.slice();
+      return {
+        name,
+        module: await WebAssembly.compile(source),
+        version: await hashText(JSON.stringify([engine, await sha256(source)])),
+      };
+    }));
+    const runner = new Runner(Object.fromEntries(entries.map(({ name, module }) => [name, module])));
+    runner.memo = { cache, versions: Object.fromEntries(entries.map(({ name, version }) => [name, version])) };
+    return runner;
+  }
+
   async run(jobs: Job[]): Promise<unknown[]> {
+    const memo = this.memo;
+    const keys = memo ? await Promise.all(jobs.map((job) => {
+      const version = memo.versions[job.wasm];
+      if (!version) throw new Error(`no WASM execution identity for ${job.wasm}`);
+      // argv[0] and the exact stdin bytes are observable by a WASI command.
+      return jobKey(version, job);
+    })) : [];
+    const retained = memo ? await memo.cache.get(keys) : new Map<string, string>();
     const outputs: unknown[] = [];
     for (const [index, job] of jobs.entries()) {
+      const key = keys[index];
+      if (retained.has(key)) {
+        outputs.push(JSON.parse(retained.get(key)!));
+        continue;
+      }
       const answer = await reply(this.worker, job);
       if ("error" in answer) throw new Error(`job ${index} (${job.wasm}): ${answer.error}`);
-      outputs.push(answer.output);
+      const json = answer.json as string;
+      const output = JSON.parse(json);
+      if (memo) {
+        await memo.cache.put(key, json);
+        retained.set(key, json);
+      }
+      outputs.push(output);
     }
     return outputs;
   }
 
   close() {
     this.worker.terminate();
+  }
+
+  [Symbol.dispose]() {
+    this.close();
   }
 }

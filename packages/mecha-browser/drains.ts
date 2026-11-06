@@ -90,22 +90,26 @@ export async function createDrains(cfg: DrainsConfig): Promise<Drains> {
   })
   const tables = [...new Set(states.flatMap((s) => s.drain.on))]
 
-  // A row trigger, not a statement's: a statement that changes no row must
-  // not wake a drain, or a queue drain's empty UPDATE would never sleep. A
-  // truncate empties the table whole, so it wakes once, per statement. A
-  // table no drain names any more, since a release dropped its drain, loses
-  // its triggers here: the edge's directory keeps them across releases.
+  // Empty transition tables must not wake a queue drain's own empty UPDATE.
   await serialize(async () => {
-    const stale = (await db.query<{ t: string }>(
-      `SELECT DISTINCT c.relname AS t FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
-       WHERE g.tgname IN ('drain_notify', 'drain_truncate') AND NOT (c.relname = ANY($1))`, [tables],
-    )).rows.map((r) => r.t)
-    if (tables.length === 0 && stale.length === 0) return
+    const installed = (await db.query<{ schema: string; table: string; trigger: string }>(`
+      SELECT n.nspname AS schema, c.relname AS table, g.tgname AS trigger
+      FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE g.tgfoid = to_regprocedure('drain_notify()') AND NOT g.tgisinternal`)).rows
+    if (tables.length === 0 && installed.length === 0) return
+    const drop = installed.map(r => `DROP TRIGGER ${ident(r.trigger)} ON ${ident(r.schema)}.${ident(r.table)};`).join('\n')
     await db.exec(`CREATE OR REPLACE FUNCTION drain_notify() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN PERFORM pg_notify('drain', TG_TABLE_NAME); RETURN NULL; END $$;` +
-      stale.map((t) => `DROP TRIGGER IF EXISTS drain_notify ON ${ident(t)}; DROP TRIGGER IF EXISTS drain_truncate ON ${ident(t)};`).join('\n') +
-      tables.map((t) => `DROP TRIGGER IF EXISTS drain_notify ON ${ident(t)}; DROP TRIGGER IF EXISTS drain_truncate ON ${ident(t)};
-        CREATE TRIGGER drain_notify AFTER INSERT OR UPDATE OR DELETE ON ${ident(t)} FOR EACH ROW EXECUTE FUNCTION drain_notify();
+      BEGIN
+        IF TG_OP <> 'TRUNCATE' THEN
+          IF NOT EXISTS (SELECT 1 FROM changed_rows) THEN RETURN NULL; END IF;
+        END IF;
+        PERFORM pg_notify('drain', TG_TABLE_NAME); RETURN NULL;
+      END $$;` +
+      drop +
+      tables.map((t) => `
+        CREATE TRIGGER drain_inserted AFTER INSERT ON ${ident(t)} REFERENCING NEW TABLE AS changed_rows FOR EACH STATEMENT EXECUTE FUNCTION drain_notify();
+        CREATE TRIGGER drain_updated AFTER UPDATE ON ${ident(t)} REFERENCING NEW TABLE AS changed_rows FOR EACH STATEMENT EXECUTE FUNCTION drain_notify();
+        CREATE TRIGGER drain_deleted AFTER DELETE ON ${ident(t)} REFERENCING OLD TABLE AS changed_rows FOR EACH STATEMENT EXECUTE FUNCTION drain_notify();
         CREATE TRIGGER drain_truncate AFTER TRUNCATE ON ${ident(t)} FOR EACH STATEMENT EXECUTE FUNCTION drain_notify();`).join('\n'))
   })
   if (states.length === 0) return { retryAt: () => null, retryDue: () => Promise.resolve(), idle: () => Promise.resolve(), stop: () => Promise.resolve() }
@@ -178,6 +182,8 @@ export async function createDrains(cfg: DrainsConfig): Promise<Drains> {
         failed = true
         log(`drain ${s.drain.name} failed (${s.failures} in a row): ${e instanceof Error ? e.message : String(e)}`)
       }
+      // Resolved PGlite promises alone never admit the host's pending requests.
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
     }
     busy = false
     if (failed) armRetry()

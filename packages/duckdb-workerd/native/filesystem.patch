@@ -1,0 +1,157 @@
+--- a/lib/include/duckdb/web/io/buffered_filesystem.h
++++ b/lib/include/duckdb/web/io/buffered_filesystem.h
+@@ -29,7 +29,8 @@
+ 
+    public:
+     /// Constructor
+-    BufferedFileHandle(duckdb::FileSystem &file_system, std::shared_ptr<FilePageBuffer::FileRef> file_buffers);
++    BufferedFileHandle(duckdb::FileSystem &file_system, std::shared_ptr<FilePageBuffer::FileRef> file_buffers,
++                       FileOpenFlags flags);
+     /// Move Constructor
+     explicit BufferedFileHandle(BufferedFileHandle &&) = delete;
+     /// Destructor
+--- a/lib/include/duckdb/web/io/file_page_defaults.h
++++ b/lib/include/duckdb/web/io/file_page_defaults.h
+@@ -7,7 +7,7 @@
+ namespace web {
+ namespace io {
+ 
+-constexpr size_t DEFAULT_FILE_PAGE_CAPACITY = 10000;
++constexpr size_t DEFAULT_FILE_PAGE_CAPACITY = 256;
+ constexpr size_t DEFAULT_FILE_PAGE_SHIFT = 14;  // 16KB pages
+ 
+ }  // namespace io
+--- a/lib/include/duckdb/web/io/web_filesystem.h
++++ b/lib/include/duckdb/web/io/web_filesystem.h
+@@ -133,8 +133,8 @@
+ 
+        public:
+         /// Constructor
+-        WebFileHandle(std::shared_ptr<WebFile> file)
+-            : duckdb::FileHandle(file->GetFileSystem(), file->GetFileName(), FileOpenFlags::FILE_FLAGS_READ),
++        WebFileHandle(std::shared_ptr<WebFile> file, FileOpenFlags flags = FileOpenFlags::FILE_FLAGS_READ)
++            : duckdb::FileHandle(file->GetFileSystem(), file->GetFileName(), flags),
+               file_(file),
+               readahead_(nullptr),
+               position_(0) {
+--- a/lib/js-stubs.js
++++ b/lib/js-stubs.js
+@@ -67,6 +67,7 @@
+     duckdb_web_fs_file_exists: function (path, pathLen) {
+         return globalThis.DUCKDB_RUNTIME.checkFile(Module, path, pathLen);
+     },
++    duckdb_web_fs_file_remove__sig: 'vpi',
+     duckdb_web_fs_file_remove: function (path, pathLen) {
+         return globalThis.DUCKDB_RUNTIME.removeFile(Module, path, pathLen);
+     },
+--- a/lib/src/io/buffered_filesystem.cc
++++ b/lib/src/io/buffered_filesystem.cc
+@@ -42,8 +42,8 @@
+ 
+ /// Constructor
+ BufferedFileHandle::BufferedFileHandle(duckdb::FileSystem &file_system,
+-                                       std::shared_ptr<FilePageBuffer::FileRef> file_buffers)
+-    : duckdb::FileHandle(file_system, std::string{file_buffers->GetPath()}, FileOpenFlags::FILE_FLAGS_READ),
++                                       std::shared_ptr<FilePageBuffer::FileRef> file_buffers, FileOpenFlags flags)
++    : duckdb::FileHandle(file_system, std::string{file_buffers->GetPath()}, flags),
+       file_ref_(std::move(file_buffers)),
+       file_position_(0) {}
+ 
+@@ -99,7 +99,9 @@
+         return nullptr;
+     }
+ 
+-    return std::make_unique<BufferedFileHandle>(*this, std::move(file));
++    auto handle = std::make_unique<BufferedFileHandle>(*this, std::move(file), flags);
++    if (flags.OpenForAppending()) handle->file_position_ = handle->GetFile()->GetSize();
++    return handle;
+ }
+ 
+ /// Read exactly nr_bytes from the specified location in the file. Fails if nr_bytes could not be read.
+@@ -242,7 +244,9 @@
+ /// Remove a file from disk
+ void BufferedFileSystem::RemoveFile(const std::string &raw_filename, optional_ptr<FileOpener> opener) {
+     auto filename = PatchFilenameOwned(raw_filename);
+-    // XXX Invalidate buffer manager!
++    if (!file_page_buffer_->TryDropFile(filename)) {
++        throw duckdb::IOException("Cannot remove buffered file while open: %s", filename.c_str());
++    }
+     return filesystem_.RemoveFile(filename);
+ }
+ 
+--- a/lib/src/io/file_page_buffer.cc
++++ b/lib/src/io/file_page_buffer.cc
+@@ -637,8 +637,10 @@
+     auto file_guard = Lock(Exclusive);
+     // Open the file with the new flags first
+     auto new_handle = buffer_.filesystem->OpenFile(file_->path, flags);
++    if (!new_handle) throw duckdb::IOException("Cannot reopen file: %s", file_->path.c_str());
+     // Swap the file handles
+     std::swap(new_handle, file_->handle);
++    file_->file_flags = flags;
+ }
+ 
+ /// Buffers a file at a path.
+--- a/lib/src/io/web_filesystem.cc
++++ b/lib/src/io/web_filesystem.cc
+@@ -121,6 +121,9 @@
+     infos.handles.erase(file_id);
+ });
+ RT_FN(void duckdb_web_fs_file_drop_file(const char *fileName, size_t pathLen), {});
++RT_FN(void duckdb_web_fs_file_remove(const char *path, size_t pathLen), {
++    NATIVE_FS->RemoveFile(std::string{path, pathLen});
++});
+ RT_FN(void duckdb_web_fs_file_truncate(size_t file_id, double new_size), { GetOrOpen(file_id).Truncate(new_size); });
+ RT_FN(time_t duckdb_web_fs_file_get_last_modified_time(size_t file_id), {
+     auto &file = GetOrOpen(file_id);
+@@ -646,7 +649,7 @@
+     } else {
+         file = iter->second;
+     }
+-    auto handle = std::make_unique<WebFileHandle>(file);
++    auto handle = std::make_unique<WebFileHandle>(file, flags);
+ 
+     // Lock the file
+     fs_guard.unlock();
+@@ -733,6 +736,10 @@
+         }
+     }
+ 
++    if (flags.OpenForAppending()) {
++        handle->position_ = file->file_size_.value_or(0);
++    }
++
+     // Build the handle
+     return handle;
+ }
+@@ -1005,7 +1012,29 @@
+     return duckdb_web_fs_file_exists(filename.c_str(), filename.size());
+ }
+ /// Remove a file from disk
+-void WebFileSystem::RemoveFile(const std::string &filename, optional_ptr<FileOpener> opener) {}
++void WebFileSystem::RemoveFile(const std::string &filename, optional_ptr<FileOpener> opener) {
++    std::shared_ptr<WebFile> file;
++    {
++        std::unique_lock<LightMutex> fs_guard{fs_mutex_};
++        auto iter = files_by_name_.find(filename);
++        if (iter != files_by_name_.end()) {
++            file = iter->second;
++            if (file->handle_count_ > 0) {
++                throw duckdb::IOException("Cannot remove open file: %s", filename.c_str());
++            }
++        }
++    }
++    duckdb_web_fs_file_remove(filename.c_str(), filename.size());
++    if (file) {
++        std::unique_lock<SharedMutex> file_guard{file->file_mutex_};
++        InvalidateReadAheads(file->file_id_, file_guard);
++        std::unique_lock<LightMutex> fs_guard{fs_mutex_};
++        files_by_name_.erase(filename);
++        if (file->data_url_) files_by_url_.erase(file->data_url_.value());
++        files_by_id_.erase(file->file_id_);
++    }
++    IncrementCacheEpoch();
++}
+ 
+ /// Sync a file handle to disk
+ void WebFileSystem::FileSync(duckdb::FileHandle &handle) {

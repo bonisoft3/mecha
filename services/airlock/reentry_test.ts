@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { type Effect, outcome, parseManifest, step, undeployed } from "./reentry.ts";
+import { type Effect, ledgerKeySql, outcome, parseManifest, step, undeployed } from "./reentry.ts";
 
 const effect = (over: Partial<Effect> = {}): Effect => ({
   table: "payment",
@@ -8,6 +8,7 @@ const effect = (over: Partial<Effect> = {}): Effect => ({
   onDone: "settled",
   onError: "failed",
   row: ["id"],
+  key: ["id"],
   idempotent: false,
   reentry: "reconcile",
   attempts: 5,
@@ -50,6 +51,7 @@ Deno.test("a manifest the airlock would misread is refused", () => {
     const [e, why, name] of [
       [{ table: 'payment"; drop table x; --' }, "not an identifier"],
       [{ row: [] }, "row"],
+      [{ key: [] }, "key"],
       [{ idempotent: true }, "declares no reentry"],
       // The reason for a repeat is the program's note, never a field on the wire.
       [{ reentry: { repeat: "the partner keeps the first and drops the rest" } }, "reentry"],
@@ -112,4 +114,12 @@ Deno.test("a bridge names release targets as DNS labels, and whether it is simul
   for (const bad of [{ name: "mail", targets: ["local"], simulated: false }, { name: "Mail", targets: [], simulated: false }, { name: "mail", targets: [] }, { name: "mail", targets: [1], simulated: false }, "mail"]) {
     assertThrows(() => parseManifest(manifest(bad)), Error, "bridge");
   }
+});
+
+// The guard spells a ledger key as pronto's emit.cue #ledgerKeySql does; a
+// settle compares a row's current fields with it, so the two must agree.
+Deno.test("a row's current key is spelled as the guard spells the ledger's", () => {
+  assertEquals(ledgerKeySql("draw", effect({ key: ["id"] })), `('draw:' || "id"::text)`);
+  assertEquals(ledgerKeySql("draw", effect({ key: ["id", "run"] })), `('draw:' || jsonb_build_array("id"::text, "run"::text)::text)`);
+  assertThrows(() => ledgerKeySql("draw'; --", effect()), Error, "DNS label");
 });

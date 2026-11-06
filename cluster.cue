@@ -52,6 +52,7 @@ _blobsBinding: """
 	    - {name: decodeBase64, value: "true"}
 	"""
 _whiteBackgroundTs: _ @embed(file="services/airlock/white-background.ts", type=text)
+_aiModelsTs: _ @embed(file="services/airlock/ai-models.ts", type=text)
 _airlockPackage: _ @embed(file="services/airlock/package.json", type=text)
 _airlockLock: _ @embed(file="services/airlock/deno.lock", type=text)
 
@@ -1417,6 +1418,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							preamble: [
 								"COPY <<'TSBIFROST' /app/airlock/tsbifrost.ts\n\(_tsbifrostTs)\nTSBIFROST",
 								"COPY <<'WHITE_BACKGROUND' /app/airlock/white-background.ts\n\(_whiteBackgroundTs)\nWHITE_BACKGROUND",
+								"COPY <<'AI_MODELS' /app/airlock/ai-models.ts\n\(_aiModelsTs)\nAI_MODELS",
 								"COPY <<'PACKAGE' /app/airlock/package.json\n\(_airlockPackage)\nPACKAGE",
 								"COPY <<'LOCK' /app/airlock/deno.lock\n\(_airlockLock)\nLOCK",
 								"RUN deno cache --frozen --node-modules-dir=auto tsbifrost.ts",

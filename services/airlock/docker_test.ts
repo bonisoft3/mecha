@@ -115,7 +115,7 @@ const EFFECTS: Record<string, { effect: Effect; source: string }> = {
 function base(over: Partial<Effect>): Effect {
   return {
     table: "", field: "status", state: "charging", onDone: "settled", onError: "failed",
-    row: ["id"], idempotent: false, attempts: 5, handler: "", ...over,
+    row: ["id"], key: ["id"], idempotent: false, attempts: 5, handler: "", ...over,
   };
 }
 
@@ -464,6 +464,19 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       await redelivered();
       assertEquals(await state("charge", "p1"), undefined);
       assertEquals(calls("charge:p1"), 1);
+    });
+
+    await t.step("a late outcome moves only the invocation its key names, never the row back in its state for another", async () => {
+      // A machine whose key fields go past its primary key (snapcards' card
+      // art: id, run, redraws) puts a row back in its invoking state under a
+      // new key; a late delivery for the old key used to move it, and the new
+      // invocation's own outcome then found the row gone from its state.
+      await db!.query("ALTER TABLE pay_charge DISABLE TRIGGER guard; INSERT INTO pay_charge (id, amount, status) VALUES ('pz', 1, 'charging'); ALTER TABLE pay_charge ENABLE TRIGGER guard");
+      await db!.query(`INSERT INTO airlock.external_effect_ledger (key, effect, row, input, entered, outcome)
+        VALUES ('charge:earlier', 'charge', '{"id":"pz"}', '{}', 1, '{"target":"settled","kind":"done","data":{},"reconciled":false}')`);
+      await db!.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'charge:earlier'), job_key => 'charge:earlier')");
+      await until("the late delivery done", async () => (await db!.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE key = 'charge:earlier'")).rows[0].n === 0);
+      assertEquals((await db!.query("SELECT status FROM pay_charge WHERE id = 'pz'")).rows[0].status, "charging");
     });
 
     await t.step("the dead sweep moves a row whose recorded outcome never landed, and one key it cannot settle stops no other", async () => {

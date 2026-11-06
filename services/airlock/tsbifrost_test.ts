@@ -5,6 +5,8 @@ import {
   DEFAULT_AI_MODELS,
   mergeExtra,
   PASSTHROUGH_HEADER,
+  providerKey,
+  providerKeyGroups,
   resolveModelSpec,
 } from "./tsbifrost.ts";
 
@@ -496,4 +498,15 @@ Deno.test("an override that names another model leaves the params behind", () =>
   assert.deepEqual(resolveModelSpec(config, "cloudflare", "image", "heavy").params, { guidance: 4 });
   assert.equal(resolveModelSpec(config, "gcp", "image", "heavy").params, undefined);
   assert.equal(resolveModelSpec(config, "cloudflare", "image", "heavy", { AI_IMAGE_HEAVY_MODEL: "@cf/other" }).params, undefined);
+});
+
+// The dispatcher's keys were read off `targets.cloudflare` alone: a global
+// `models` override naming Google deployed a keyless dispatcher, and an app
+// holding only GOOGLE_API_KEY, which the Google calls read too, was refused.
+Deno.test("providerKeyGroups names the keys every declared tier's resolved provider reads", () => {
+  assert.deepEqual(providerKeyGroups({ text: ["cheap"], image: ["heavy"] }, "cloudflare"), [], "Workers AI needs no key");
+  assert.deepEqual(providerKeyGroups({ image: ["heavy"], models: { image: { heavy: { provider: "google", model: "imagen-4.0-ultra-generate-001" } } } }, "cloudflare"), [["GEMINI_API_KEY", "GOOGLE_API_KEY"]]);
+  assert.deepEqual(providerKeyGroups({ text: ["cheap", "heavy"], targets: { cloudflare: { text: { cheap: { provider: "openai", model: "gpt" } } } } }, "cloudflare"), [["OPENAI_API_KEY"]]);
+  assert.deepEqual(providerKeyGroups({ text: ["browser"] }, "cloudflare"), [], "a browser tier calls no backend");
+  assert.deepEqual(providerKey("google", { GOOGLE_API_KEY: "g" }), "g");
 });

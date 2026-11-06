@@ -37,3 +37,7 @@
 * [@mecha/lake](../packages/lake/README.md) - reference: The browser-side consumer of a published DuckLake.
 
 * [[../services/activepieces/README|Activepieces runner]] — app-selected standard pieces, scoped actions and process isolation; optional [[../pieces/mail/README|mail piece]].
+
+# Archive
+
+* [The edge airlock's dispatcher Worker](archive/2026-11-06-edge-airlock-dispatcher.md) - decision, built: Runs Cloudflare effects in a queue-consuming Worker apart from the Durable Object holding the database, which claims, leases and settles them, so rendering and commits never wait on an effect's network.

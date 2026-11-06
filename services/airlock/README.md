@@ -244,7 +244,11 @@ Graphile's row stays as the record. Each key is its own attempt, so one the
 sweep cannot settle is reported and tried again at the next.
 
 **The move, delivered again, finds the row the program's.** An outcome's move
-is repeated after a crash past the outcome; a row no longer in the invoking
-state was moved by the earlier delivery and then by the program, wherever that
-took it, deletion included, and the delivery is done. Only a row still in the
-state refuses: its move was refused.
+is repeated after a crash past the outcome, and it moves only the invocation
+its ledger key names: a row whose key fields, as the guard spells the key
+(`ledgerKeySql` in [reentry.ts](reentry.ts)), still make that key. A row no
+longer in the invoking state, or back in it for another invocation, was moved
+by the earlier delivery and then by the program, wherever that took it,
+deletion included, and the delivery is done. Only a row still in the state
+under this key refuses: its move was refused. The manifest carries each
+effect's `key` fields for this.

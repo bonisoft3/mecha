@@ -13,6 +13,7 @@ const effect: Effect = {
   onDone: "settled",
   onError: "failed",
   row: ["id"],
+  key: ["id"],
   idempotent: false,
   reentry: "reconcile",
   attempts: 5,

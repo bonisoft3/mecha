@@ -5,7 +5,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 
 const EFFECT = {
   table: "payment", field: "status", state: "charging", onDone: "settled", onError: "failed",
-  row: ["id"], idempotent: true, attempts: 5, handler: "effects/charge.js",
+  row: ["id"], key: ["id"], idempotent: true, attempts: 5, handler: "effects/charge.js",
 };
 const ISSUE = `export async function issue(request, sink) { return { done: (await sink.fetch("/c")).body }; }`;
 

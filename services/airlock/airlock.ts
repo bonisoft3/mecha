@@ -20,7 +20,7 @@
 import { run, type Runner, type Task } from "graphile-worker";
 import { EventEmitter } from "node:events";
 import pg from "pg";
-import { type Answer, type Effect, outcome, type Outcome, step, undeployed } from "./reentry.ts";
+import { type Answer, type Effect, ledgerKeySql, outcome, type Outcome, step, undeployed } from "./reentry.ts";
 import type { Handler, Transport } from "./handler.ts";
 import { type BlobStore, stowed } from "./blobs.ts";
 
@@ -108,19 +108,22 @@ async function settle(a: Airlock, key: string, l: { row: Record<string, unknown>
     "UPDATE airlock.external_effect_ledger SET outcome = $2, settled_at = clock_timestamp() WHERE key = $1 AND outcome IS NULL",
     [key, settled],
   );
-  const match = effect.row.map((c, i) => `${q(c)}::text = $${i + 3}`).join(" AND ");
-  const args = [settled.target, effect.state, ...effect.row.map((c) => String(l.row[c]))];
+  const match = effect.row.map((c, i) => `${q(c)}::text = $${i + 4}`).join(" AND ");
+  const keyed = ledgerKeySql(key.slice(0, key.indexOf(":")), effect);
+  const args = [settled.target, effect.state, key, ...effect.row.map((c) => String(l.row[c]))];
   const moved = await a.db.query(
-    `UPDATE ${q(effect.table)} SET ${q(effect.field)} = $1 WHERE ${q(effect.field)} = $2 AND ${match}`,
+    `UPDATE ${q(effect.table)} SET ${q(effect.field)} = $1 WHERE ${q(effect.field)} = $2 AND ${keyed} = $3 AND ${match}`,
     args,
   );
   if (moved.rowCount !== 1) {
     // The guard holds a row in its invoking state until the outcome lands,
-    // so a row still there was not moved by this outcome; one anywhere else,
-    // or gone, was moved by an earlier delivery of it and then by the program.
-    const where = effect.row.map((c, i) => `${q(c)}::text = $${i + 1}`).join(" AND ");
-    const { rows: [row] } = await a.db.query(`SELECT ${q(effect.field)} AS at FROM ${q(effect.table)} WHERE ${where}`, args.slice(2));
-    if (row?.at === effect.state) {
+    // so a row still there under this key was not moved by this outcome; one
+    // anywhere else, gone, or back in the state for another invocation, was
+    // moved by an earlier delivery of it and then by the program.
+    const where = effect.row.map((c, i) => `${q(c)}::text = $${i + 2}`).join(" AND ");
+    const { rows: [row] } = await a.db.query(
+      `SELECT ${q(effect.field)} AS at, ${keyed} = $1 AS ours FROM ${q(effect.table)} WHERE ${where}`, [key, ...args.slice(3)]);
+    if (row?.at === effect.state && row.ours) {
       throw new Error(`${key}: ${effect.table} ${JSON.stringify(l.row)} stays in ${effect.state}: its move to ${settled.target} was refused`);
     }
   }

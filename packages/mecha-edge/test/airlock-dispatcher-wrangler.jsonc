@@ -1,0 +1,26 @@
+{
+  "name": "mecha-edge-airlock-dispatcher-test",
+  "main": "airlock-dispatcher.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CLUSTER",
+        "class_name": "Cluster",
+        "script_name": "mecha-edge-airlock-test"
+      }
+    ]
+  },
+  "queues": {
+    "consumers": [
+      {
+        "queue": "mecha-edge-airlock-test",
+        "max_retries": 0,
+        "max_batch_size": 1
+      }
+    ]
+  }
+}

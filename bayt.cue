@@ -275,7 +275,7 @@ _mecha: bayt.#project & _where & {
 		"activepieces-image": (activepieces.#Target & {source: "services/activepieces"}).target
 		// The handler cage imports compute's realm through its sibling directory.
 		"airlock-image": _image & {
-			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "tsbifrost.ts", "white-background.ts", "package.json", "dapr.yaml"]
+			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "tsbifrost.ts", "ai-models.ts", "white-background.ts", "package.json", "dapr.yaml"]
 			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts", "query-stages.ts"]
 			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
 			dockerfile: {

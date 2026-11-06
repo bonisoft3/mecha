@@ -10,7 +10,8 @@
 // A hatch's sweep runs on the poke, whatever an alarm does.
 // The environment: CLUSTER, the object's namespace; JWT_SECRET, the tokens'
 // secret; IMPORT_TOKEN, the bearer /import/* takes; CF_VERSION_METADATA, the
-// Worker's version; ASSETS, the static files, where it has any.
+// Worker's version; ASSETS, the static files, where it has any; AIRLOCK_QUEUE,
+// the queue an effect's run is handed to the dispatcher Worker on (dispatch.ts).
 import { DurableObject } from 'cloudflare:workers'
 import type { PGlite } from '@electric-sql/pglite'
 import { type Assets, DataDirectory } from '../../pglite-workerd/src/data-directory.ts'
@@ -19,10 +20,9 @@ import { createEdgeCluster, type EdgeCluster, type EdgeClusterConfig } from './c
 import { type Clock, createClock, hasSchedules, serviceCrud } from './clock.ts'
 import type { Drain } from '../../mecha-browser/drains.ts'
 import { type EdgeFunctions, type EdgeMachines, installEngines, installHostStep } from './machines.ts'
-import { createEdgeAirlock, type EdgeAirlock, type EdgeEffects } from './airlock.ts'
+import { createEdgeAirlock, die, type EdgeAirlock, type EdgeEffectDeclarations } from './airlock.ts'
+import type { ClaimedRun, DispatchedRun, RunAnswer } from './dispatch.ts'
 import { hatchAt, type EdgeHatch } from './hatches.ts'
-import type { AiCapabilitiesConfig } from '../../../services/airlock/tsbifrost.ts'
-import type { BlobStore } from '../../../services/airlock/blobs.ts'
 import { applyScripts, ChangedScript, NoLedger, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
 import type { BatchMachine, Computation, Output } from '../../compute-snapshot/src/index.ts'
@@ -38,11 +38,11 @@ export interface EdgeEnv {
   ASSETS?: Fetcher
   COMPUTE_READER?: DurableObjectNamespace<InstanceType<ReturnType<typeof computeReader>>>
   COMPUTE_COORDINATOR?: DurableObjectNamespace<import('./compute-coordinator.ts').ComputeCoordinator>
-  AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> }
   /** The edge's blob storage, and the URL a stored key is served at (the same
    * variable a container cluster's airlock reads). */
   BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown> }
   BLOB_URL?: string
+  AIRLOCK_QUEUE?: { send(body: DispatchedRun): Promise<unknown> }
 }
 
 export interface EdgeOptions {
@@ -55,10 +55,8 @@ export interface EdgeOptions {
   machines?: EdgeMachines
   /** The app's database functions by name, each the module its migration declares. */
   functions?: EdgeFunctions
-  /** The app's external effects by name, each bound to its handler and target. */
-  effects?: EdgeEffects
-  /** The app's AI tier and model configuration (shell.json). */
-  ai?: AiCapabilitiesConfig
+  /** The app's external effects by name: each declaration and target, the handlers being the dispatcher Worker's. */
+  effects?: EdgeEffectDeclarations
   /** A frozen archive retains its schedules and runs none. */
   clock?: 'ticker' | 'disabled'
   drains?: Drain[]
@@ -75,7 +73,7 @@ export class DataDirectoryLoading extends Error {
 const earliest = (a: number | null, b: number | null): number | null =>
   a === null ? b : b === null ? a : Math.min(a, b)
 
-export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, functions = {}, effects = {}, ai, clock: clockMode = 'ticker', drains = [], hatches = [], compute }: EdgeOptions) {
+export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, functions = {}, effects = {}, clock: clockMode = 'ticker', drains = [], hatches = [], compute }: EdgeOptions) {
   if (compute?.physicalSnapshots && !compute.reader) throw new Error('physical snapshots require an immutable reader owner')
   // pgl_step reaches the step through the isolate: one set of machines per Worker.
   installHostStep(machines, functions)
@@ -118,15 +116,18 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
           // boot; a fresh object is that boot.
           retry: () => { clock.arm().catch((e) => this.ctx.abort(String(e))) },
         })
+        // Effects with no queue to the dispatcher would never run: the object
+        // refuses to boot rather than hold them.
+        const queue = hasAirlock ? this.env.AIRLOCK_QUEUE ?? die('effects need AIRLOCK_QUEUE, the dispatcher Worker\'s queue') : undefined
         const airlock = createEdgeAirlock({
           db,
           serialize: (fn, priority) => cluster.serialize(fn, priority),
           effects,
-          ai,
-          env: this.env as unknown as Record<string, unknown>,
+          // The object never waits on an effect's network: a run is enqueued
+          // for the dispatcher Worker, and its answer arrives as effectAnswer.
+          dispatch: async (run) => { await queue!.send(run) },
           log: console.error,
           retry: () => { clock.arm().catch((e) => this.ctx.abort(String(e))) },
-          blobs: imagePlane(this.env),
         })
         // The alarm, at what the schedules owe and a failed drain's or effect's retry.
         // A frozen archive's stands at the retry alone.
@@ -330,6 +331,38 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       return errors
     }
 
+    /** The object as the dispatcher reaches it: booted with the drains and
+     * computations installed, since a claim or an answer settles rows, and the
+     * pass a job's notice wakes may settle others, as on every path that
+     * writes. The drains settle on a timer after the call returns, so the
+     * object stays until they have. */
+    async #effects<T>(use: (airlock: EdgeAirlock) => Promise<T>): Promise<T> {
+      const { cluster, airlock } = await this.#boot()
+      await cluster.compute()
+      const drains = await cluster.drains()
+      try {
+        return await use(airlock)
+      } finally {
+        this.ctx.waitUntil(drains.idle())
+      }
+    }
+
+    /** The dispatcher's claim on a run it was handed (dispatch.ts). While a
+     * directory loads no run is the ledger's: the run is skipped, and the
+     * loaded directory's own lease dispatches what it still owes. */
+    async effectClaim(key: string, token: string, claimant: string): Promise<ClaimedRun | null> {
+      if (this.#resetting || !this.#dir.complete || !this.#dir.storageReady) return null
+      return await this.#effects((airlock) => airlock.claim(key, token, claimant))
+    }
+
+    /** The dispatcher's answer for a run, settled here in the object's
+     * database. While a directory loads the answer is refused, and the
+     * dispatcher holds it until its run's lease would end. */
+    async effectAnswer(key: string, entered: number, answer: RunAnswer): Promise<void> {
+      if (this.#resetting || !this.#dir.complete || !this.#dir.storageReady) throw new DataDirectoryLoading()
+      await this.#effects((airlock) => airlock.answer(key, entered, answer))
+    }
+
     override async alarm(): Promise<void> {
       if (!this.#dir.complete || !this.#dir.storageReady) return
       // A frozen archive with no drains or effects owes nothing an alarm could
@@ -482,15 +515,5 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       }
       return json({ error: `no route for ${path}` }, 404)
     }
-  }
-}
-
-// An answer's bytes go where every other object is, served by the same route.
-function imagePlane(env: EdgeEnv): BlobStore | undefined {
-  const bucket = env.BLOB_OBJECTS
-  if (bucket === undefined || env.BLOB_URL === undefined) return undefined
-  return {
-    put: async (key, bytes, type) => { await bucket.put(key, bytes, { httpMetadata: { contentType: type } }) },
-    url: (key) => `${env.BLOB_URL}${key}`,
   }
 }

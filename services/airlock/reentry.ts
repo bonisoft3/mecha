@@ -20,6 +20,10 @@ export type Effect = {
   onDone: string;
   onError: string;
   row: string[];
+  /** The fields the ledger key is made of: the instance's primary key and
+   * whatever else names one invocation of it, so a row back in its invoking
+   * state for another invocation is that one's. */
+  key: string[];
   idempotent: boolean;
   reentry?: "reconcile" | "unknown" | "repeat";
   attempts: number;
@@ -121,6 +125,17 @@ export function sinkHeaders(headers: unknown, host: string[] = []): Record<strin
 /** The effect's name is also its Dapr binding's. */
 const ENDPOINT = /^[a-z][a-z0-9-]*$/;
 
+/** The ledger key a row's current fields make, as the guard's claim spells it
+ * (pronto's emit.cue #ledgerKeySql): one field as it is, several as a JSON
+ * array, so a ':' in a value cannot make two instances read as one. A settle
+ * moves only the row whose key is still the ledger's, never one that entered
+ * the invoking state again for another invocation. */
+export function ledgerKeySql(name: string, effect: Effect): string {
+  if (!ENDPOINT.test(name)) throw new Error(`effect ${JSON.stringify(name)} is not a DNS label`);
+  const fields = effect.key.map((f) => `"${f.replaceAll('"', '""')}"::text`);
+  return fields.length === 1 ? `('${name}:' || ${fields[0]})` : `('${name}:' || jsonb_build_array(${fields.join(", ")})::text)`;
+}
+
 /** effects.json, checked: the airlock dies on a manifest it would misread. */
 export function parseManifest(text: string): Record<string, Effect> {
   const doc = JSON.parse(text);
@@ -136,6 +151,7 @@ export function parseManifest(text: string): Record<string, Effect> {
     for (const k of ["table", "field"] as const) if (!IDENTIFIER.test(e[k])) bad(`${k} ${JSON.stringify(e[k])} is not an identifier`);
     for (const k of ["state", "onDone", "onError", "handler"] as const) if (typeof e[k] !== "string" || e[k] === "") bad(`no ${k}`);
     if (!Array.isArray(e.row) || e.row.length === 0 || !e.row.every((c) => IDENTIFIER.test(c))) bad("row is not a list of identifiers");
+    if (!Array.isArray(e.key) || e.key.length === 0 || !e.key.every((c) => IDENTIFIER.test(c))) bad("key is not a list of identifiers");
     if (typeof e.idempotent !== "boolean") bad("idempotent is not a boolean");
     if (e.idempotent && e.reentry !== undefined) bad("an idempotent sink declares no reentry");
     if (!e.idempotent) {

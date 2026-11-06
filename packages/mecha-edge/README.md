@@ -102,6 +102,52 @@ none, since the release's drains may name a table its migration creates. A
 failed call's retry stands at the alarm, which calls it within the alarm, so
 an eviction does not lose it.
 
+## Effects
+
+An app's effects run in two Workers. The object claims each due run through
+Graphile, settles in place what needs no call — an outcome already recorded, a
+bridge not deployed on `cloudflare`, a run the reentry policy settles `unknown`
+— and leases the rest with a Graphile job keyed by the ledger key, then, after
+that commit and outside any transaction, enqueues it on `AIRLOCK_QUEUE` as
+`{key, token}`. The token is the lease job's id and revision, which Graphile
+bumps each time the key is scheduled again, so a later lease, renewal or
+backoff makes it stale ([`airlock.ts`](src/airlock.ts)). An object whose
+program declares effects and has no `AIRLOCK_QUEUE` refuses to boot.
+
+A sent run waits one lease to be claimed, the handler's bound and a minute;
+each resend of a run still unclaimed waits twice the last, up to an hour, so a
+queue backlog is waited out rather than fed. A send that fails, or never
+happens because the object was evicted after the commit, spends no run: the
+lease sends it again under a new token, and the job that tried ends there.
+
+The dispatcher Worker, the queue's consumer, calls the object's
+`effectClaim(key, token, claimant)`, the claimant naming that delivery: while
+the token is the key's current dispatch and the key unsettled, the claim counts
+the run in `entered`, decides it against the reentry policy as the container
+does when a run begins, and renews its lease for as long as the run can still
+call its sink (reconcile where asked, issue, and storing its bytes, each
+bounded by the handler's bound), returning the instant that lease ends. The
+same claimant asking again for the same dispatch, as after a lost reply, gets
+the run it counted; any other claimant, as a second delivery of the message,
+gets null and counts nothing.
+
+The dispatcher runs the handler with the container's sink and cage, stows
+answered bytes in `BLOB_OBJECTS`, and calls `effectAnswer` with the outcome or
+the error, fenced by the run's number ([`dispatch.ts`](src/dispatch.ts)). Both
+calls are tried again briefly on what Cloudflare marks retryable, never on a
+refusal, and an effect the dispatcher does not know is the run's error. While
+a directory loads a claim is no run's, and an answer is refused: the
+dispatcher holds it until the run's lease would end, then fails loudly. Both
+calls reach the object with its drains and computations installed, since a
+claim or an answer settles rows, as on every path that writes, and the object
+stays until the drains have settled. An outcome is recorded once and moves only
+the invocation its ledger key names (Airlock's
+[move rule](../../services/airlock/README.md#in-a-cluster)); an error of the
+current run schedules the next after Graphile's backoff, or settles `unknown`
+on the last attempt. The queue never redelivers: a run whose answer never comes
+is sent again when its lease runs out, and counted when that run is claimed
+([the record](../../docs/archive/2026-11-06-edge-airlock-dispatcher.md)).
+
 ## Computation
 
 A release with computations binds private Query and Compute Workers, each with

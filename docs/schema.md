@@ -33,13 +33,16 @@ put both in one order. These steps are mecha's own, and their digits are taken:
   ledger**, where the cluster declares an effect
   ([the airlock](../services/airlock/README.md#in-a-cluster)). The image
   stages them outside the initdb directory and the `database` target places
-  them there, on the first digits after the steps a caller opens with
-  (pronto's 000-010, the machines last). An interpreter resolves
+  them there, by default on the first digits after the steps a caller opens
+  with (pronto's 000-010, the machines last). A caller whose own steps hold
+  those digits names others in `state.steps`, the queue's before the ledger's;
+  the names keep their suffixes, and a page or edge release places them where
+  `.pronto/cluster.json` says. An interpreter resolves
   `graphile_worker.add_job` and the ledger only when it runs, and every
-  caller step that can write a row is numbered above them, so a row written
-  into an invoking state, held seed included, finds both. A caller step on
-  011 or 012 is refused where an effect is declared, as two steps sharing
-  digits always are. The ledger lives in the `airlock` schema, which only its
+  caller step that can write a row into an invoking state is numbered above
+  them, so such a row, held seed included, finds both. A caller step on their
+  digits is refused where an effect is declared, as two steps sharing digits
+  always are. The ledger lives in the `airlock` schema, which only its
   owner may use: a grant over `public`, the form a caller's grants take,
   reaches nothing there whichever side of these steps it runs on, and the
   revoke in `012_airlock.sql` removes what default privileges gave the schema

@@ -114,18 +114,22 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 ]
 
 // Graphile Worker's schema and the airlock's tables, placed where an effect
-// is declared, on the first digits after the steps a caller opens with
-// (pronto's 000-010: extensions, roles, grants, types, tables, policies,
+// is declared, by default on the first digits after the steps a caller opens
+// with (pronto's 000-010: extensions, roles, grants, types, tables, policies,
 // publication, validations, and the machines, whose guards are plpgsql and
-// resolve add_job and the ledger only when they run). Every caller step that
-// can write a row, a held seed included, is numbered above them, since a row
-// written into an invoking state claims the ledger and enqueues as it is
-// written; a caller step on these digits is refused where effects are
-// declared, as any two steps sharing digits are. The ledger's schema is its
-// own (services/airlock/airlock.sql), so no grant over `public`, made before
-// these steps or after, reaches it.
+// resolve add_job and the ledger only when they run). A caller whose own steps
+// hold those digits places both elsewhere (state.steps), keeping the ledger
+// before the airlock. Every caller step that can write a row into an invoking
+// state, a held seed included, is numbered above them, since such a row claims
+// the ledger and enqueues as it is written; a caller step on their digits is
+// refused where effects are declared, as any two steps sharing digits are.
+// The ledger's schema is its own (services/airlock/airlock.sql), so no grant
+// over `public`, made before these steps or after, reaches it. These are also
+// the names the database image stages them under.
 #GraphileMigration: "011_graphile_worker.sql"
 #AirlockMigration:  "012_airlock.sql"
+#GraphileStep:      =~"^[0-7][0-9]{2}_graphile_worker\\.sql$"
+#AirlockStep:       =~"^[0-7][0-9]{2}_airlock\\.sql$"
 
 #PostgresLiteral: {
 	text: string
@@ -326,6 +330,13 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 
 		// The container endpoints those effects reach through (#Bridge).
 		bridges: *[] | [...#Bridge]
+
+		// Where the effect steps run (#GraphileMigration), the ledger first.
+		steps: {
+			graphile: *#GraphileMigration | #GraphileStep
+			airlock:  *#AirlockMigration | #AirlockStep
+			_ledgerFirst: true & (graphile < airlock)
+		}
 	}
 
 	capabilities: {
@@ -414,8 +425,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			(strings.SliceRunes(#ScheduleMigration, 0, 3)): #ScheduleMigration
 		}
 		if len(X.state.effects) > 0 {
-			(strings.SliceRunes(#GraphileMigration, 0, 3)): #GraphileMigration
-			(strings.SliceRunes(#AirlockMigration, 0, 3)):  #AirlockMigration
+			(strings.SliceRunes(X.state.steps.graphile, 0, 3)): X.state.steps.graphile
+			(strings.SliceRunes(X.state.steps.airlock, 0, 3)):  X.state.steps.airlock
 		}
 		for m in X.state.migrations {(strings.SliceRunes(path.Base(m, path.Unix), 0, 3)): m}
 		if len(tenancy) > 1 {
@@ -489,7 +500,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	_staged: list.Concat([
 		[if X.capabilities.server {{src: #RolePasswordsStep, dst: #RolePasswordsStep}}],
 		[if len(X.state.schedules) > 0 {{src: #ScheduleStaged, dst: #ScheduleMigration}}],
-		[if len(X.state.effects) > 0 for m in [#GraphileMigration, #AirlockMigration] {{src: m, dst: m}}],
+		[if len(X.state.effects) > 0 {{src: #GraphileMigration, dst: X.state.steps.graphile}}],
+		[if len(X.state.effects) > 0 {{src: #AirlockMigration, dst: X.state.steps.airlock}}],
 	])
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"

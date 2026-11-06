@@ -13,25 +13,30 @@ export interface EdgeMachine {
   execute(input: unknown): unknown
 }
 export type EdgeMachines = Record<string, EdgeMachine>
+/** A database function (pronto's database-functions.ts): its migration declares
+ * `pronto_functions.<name>` as the tier's engine, reached here under `fn:<name>`
+ * so no machine's name can answer for it. */
+export type EdgeFunctions = Record<string, EdgeMachine>
 
 export type HostStep = (name: string, json: string) => string
 
 /** What pgl_step calls: the machine by name, its answer as JSON text, or a
  * failure after '!', the one way back into PostgreSQL's frames that keeps
  * their cleanup (modules/pgl_step/pgl_step.c raises it). */
-export function hostStep(machines: EdgeMachines): HostStep {
+export function hostStep(machines: EdgeMachines, functions: EdgeFunctions = {}): HostStep {
   return (name, json) => {
-    if (!Object.hasOwn(machines, name)) return `!pgl_step: no machine ${name}`
+    const [table, key, kind] = name.startsWith('fn:') ? [functions, name.slice(3), 'function'] : [machines, name, 'machine']
+    if (!Object.hasOwn(table, key)) return `!pgl_step: no ${kind} ${key}`
     try {
-      return JSON.stringify(machines[name].execute(JSON.parse(json)))
+      return JSON.stringify(table[key].execute(JSON.parse(json)))
     } catch (e) {
       return `!${e instanceof Error ? e.message : String(e)}`
     }
   }
 }
 
-export function installHostStep(machines: EdgeMachines) {
-  ;(globalThis as { __pgliteStep?: HostStep }).__pgliteStep = hostStep(machines)
+export function installHostStep(machines: EdgeMachines, functions: EdgeFunctions = {}) {
+  ;(globalThis as { __pgliteStep?: HostStep }).__pgliteStep = hostStep(machines, functions)
 }
 
 const NAME = /^[a-z][a-z0-9_]{0,30}$/
@@ -39,8 +44,8 @@ const NAME = /^[a-z][a-z0-9_]{0,30}$/
 /** The engines the migrations left to this tier, created the first time the
  * data directory opens here: pgl_step itself, and each machine's engine over
  * it. A machine the migrations do not declare has no schema to hold one. */
-export async function installEngines(db: PGlite, machines: string[]): Promise<void> {
-  if (machines.length === 0) return
+export async function installEngines(db: PGlite, machines: string[], functions: string[] = []): Promise<void> {
+  if (machines.length === 0 && functions.length === 0) return
   const statements: string[] = []
   const present = async (signature: string) =>
     (await db.query<{ present: boolean }>(`SELECT to_regprocedure($1) IS NOT NULL AS present`, [signature])).rows[0].present
@@ -56,6 +61,14 @@ export async function installEngines(db: PGlite, machines: string[]): Promise<vo
     statements.push(
       `CREATE FUNCTION hybrid_${name}.engine(input jsonb) RETURNS jsonb LANGUAGE sql STRICT AS $engine$ SELECT public.pgl_step('${name}', input) $engine$;`,
       `REVOKE ALL ON FUNCTION hybrid_${name}.engine(jsonb) FROM PUBLIC;`,
+    )
+  }
+  for (const name of functions) {
+    if (!NAME.test(name)) throw new Error(`invalid function name ${name}`)
+    if (await present(`pronto_functions.${name}(jsonb)`)) continue
+    statements.push(
+      `CREATE FUNCTION pronto_functions.${name}(input jsonb) RETURNS jsonb LANGUAGE sql STRICT AS $engine$ SELECT public.pgl_step('fn:${name}', input) $engine$;`,
+      `REVOKE ALL ON FUNCTION pronto_functions.${name}(jsonb) FROM PUBLIC;`,
     )
   }
   if (statements.length) await db.exec(statements.join('\n'))

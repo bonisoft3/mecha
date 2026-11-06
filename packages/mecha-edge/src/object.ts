@@ -18,7 +18,7 @@ import type { StorageFormat } from '../../pglite-workerd/src/storage-block.ts'
 import { createEdgeCluster, type EdgeCluster, type EdgeClusterConfig } from './cluster.ts'
 import { type Clock, createClock, hasSchedules, serviceCrud } from './clock.ts'
 import type { Drain } from '../../mecha-browser/drains.ts'
-import { type EdgeMachines, installEngines, installHostStep } from './machines.ts'
+import { type EdgeFunctions, type EdgeMachines, installEngines, installHostStep } from './machines.ts'
 import { createEdgeAirlock, type EdgeAirlock, type EdgeEffects } from './airlock.ts'
 import { hatchAt, type EdgeHatch } from './hatches.ts'
 import type { AiCapabilitiesConfig } from '../../../services/airlock/tsbifrost.ts'
@@ -47,6 +47,8 @@ export interface EdgeOptions {
   storageFormat?: StorageFormat
   /** The app's machines by name, each the step its migration declares. */
   machines?: EdgeMachines
+  /** The app's database functions by name, each the module its migration declares. */
+  functions?: EdgeFunctions
   /** The app's external effects by name, each bound to its handler and target. */
   effects?: EdgeEffects
   /** The app's AI tier and model configuration (shell.json). */
@@ -66,9 +68,9 @@ export class DataDirectoryLoading extends Error {
 const earliest = (a: number | null, b: number | null): number | null =>
   a === null ? b : b === null ? a : Math.min(a, b)
 
-export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, effects = {}, ai, clock: clockMode = 'ticker', drains = [], hatches = [] }: EdgeOptions) {
+export function edgeObject({ assets, tables, schema, storageFormat, machines = {}, functions = {}, effects = {}, ai, clock: clockMode = 'ticker', drains = [], hatches = [] }: EdgeOptions) {
   // pgl_step reaches the step through the isolate: one set of machines per Worker.
-  installHostStep(machines)
+  installHostStep(machines, functions)
   const hasAirlock = Object.keys(effects).length > 0
   return class Cluster extends DurableObject<EdgeEnv> {
     readonly #dir = new DataDirectory(this.ctx.storage, storageFormat)
@@ -86,7 +88,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         // container tier's default, which this one connection states for
         // every request.
         await db.exec(`SET default_transaction_isolation TO 'read committed'`)
-        await installEngines(db, Object.keys(machines))
+        await installEngines(db, Object.keys(machines), Object.keys(functions))
         const ticks = clockMode === 'ticker' && await hasSchedules(db)
         const cluster = await createEdgeCluster({
           db, tables, schema, secret: this.env.JWT_SECRET, log: console.error, drains,

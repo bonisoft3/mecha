@@ -31,6 +31,10 @@ export type Effect = {
   credential?: { header: string; scheme?: string; secret: string };
   /** What the handler may use past the language (compute's language.ts). */
   endowments?: string[];
+  /** The bridge the sink is: the release targets its container runs on, and
+   * whether the local stack runs a simulator in its place. Anywhere else no
+   * call is made and the effect fails. */
+  bridge?: { name: string; targets: string[]; simulated: boolean };
 };
 
 export type Step = "issue" | "reconcile" | "unknown";
@@ -65,6 +69,21 @@ export function outcome(effect: Effect, answer: Answer | "unknown", reconciled: 
   if ("done" in answer) return { target: effect.onDone, kind: "done", data: answer.done, reconciled };
   if ("failed" in answer) return { target: effect.onError, kind: "failed", data: answer.failed, reconciled };
   throw new Error("an absent answer is no outcome: the sink has no record, so the effect is issued");
+}
+
+/** The target the local stack's airlock stands on: launch's and the checks'. */
+export const LOCAL = "local";
+
+/** The outcome of an effect whose bridge is not deployed on `target`, or
+ * null where it is: a permanent failure, settled without a handler or sink
+ * call, so it spends no run and leaves no dead letter. On the local stack a
+ * bridge is deployed as its simulator; on a release target, where it names
+ * that target. */
+export function undeployed(effect: Effect, target: string | undefined): Outcome | null {
+  if (effect.bridge === undefined) return null;
+  if (target === undefined) throw new Error(`the bridge ${effect.bridge.name} names its targets, and this airlock is told none`);
+  if (target === LOCAL ? effect.bridge.simulated : effect.bridge.targets.includes(target)) return null;
+  return { target: effect.onError, kind: "failed", data: { bridge: effect.bridge.name, target, reason: "not deployed" }, reconciled: false };
 }
 
 /** A name the shell quotes into SQL: what the manifest may hold, and nothing
@@ -125,6 +144,15 @@ export function parseManifest(text: string): Record<string, Effect> {
     }
     if (!Number.isInteger(e.attempts) || e.attempts < 1) bad("attempts is not a positive integer");
     if (e.endowments !== undefined) endowable(e.endowments, `effects.json: effect ${name}`);
+    if (e.bridge !== undefined) {
+      const b = e.bridge;
+      if (
+        typeof b !== "object" || b === null || !ENDPOINT.test(b.name) || typeof b.simulated !== "boolean" ||
+        !Array.isArray(b.targets) || !b.targets.every((t) => typeof t === "string" && ENDPOINT.test(t) && t !== LOCAL)
+      ) {
+        bad("bridge is not {name, targets, simulated}: DNS labels, release targets only, and a boolean");
+      }
+    }
     if (e.secrets !== undefined && (!Array.isArray(e.secrets) || !e.secrets.every((s) => typeof s === "string" && SECRET.test(s)))) {
       bad("secrets is not a list of environment variables' names");
     }

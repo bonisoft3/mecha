@@ -110,6 +110,7 @@ const EFFECTS: Record<string, { effect: Effect; source: string }> = {
   live: { effect: base({ reentry: "reconcile" }), source: RECONCILING },
   vaulted: { effect: base({ idempotent: true, reentry: undefined, credential: { header: "Authorization", scheme: "Bearer", secret: "VAULT_KEY" } }), source: HANDLER },
   dead: { effect: base({ reentry: "reconcile" }), source: RECONCILING },
+  absent: { effect: base({ idempotent: true, reentry: undefined, bridge: { name: "sofascore", targets: ["cloudflare"], simulated: false } }), source: HANDLER },
 };
 function base(over: Partial<Effect>): Effect {
   return {
@@ -180,7 +181,9 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       await Deno.writeTextFile(file, source);
       handlers[name] = await Handler.admit(name, file, effects[name]);
     }
-    const airlock = { connectionString, db, effects, handlers, transport: bindingsTransport(mesh), secrets: {}, headers: { vaulted: { Authorization: "Bearer vk-3f9a" } } };
+    // This airlock stands on the local stack, where the `absent` effect's
+    // bridge has no simulator, so its real container never runs.
+    const airlock = { connectionString, db, effects, handlers, transport: bindingsTransport(mesh), secrets: {}, headers: { vaulted: { Authorization: "Bearer vk-3f9a" } }, target: "local" };
     const charging = async (effect: string, id: string, amount: number) => {
       await db!.query(`INSERT INTO pay_${effect} VALUES ($1, 'pending', $2)`, [id, amount]);
       await db!.query(`UPDATE pay_${effect} SET status = 'charging' WHERE id = $1`, [id]);
@@ -317,6 +320,14 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
     await t.step("a sink that refuses settles it in onError, as failed", async () => {
       await charging("charge", "p2", 402);
       assertEquals(await settled("charge", "p2"), { status: "failed", entered: 1, kind: "failed", reconciled: false });
+    });
+
+    await t.step("a bridge with no simulator settles onError at once on the local stack, calling neither handler nor sink", async () => {
+      await charging("absent", "p1", 1250);
+      assertEquals(await settled("absent", "p1"), { status: "failed", entered: 0, kind: "failed", reconciled: false });
+      const { rows: [l] } = await db!.query("SELECT outcome->'data' AS data FROM airlock.external_effect_ledger WHERE key = 'absent:p1'");
+      assertEquals(l.data, { bridge: "sofascore", target: "local", reason: "not deployed" });
+      assertEquals(calls("absent:p1"), 0);
     });
 
     await t.step("after a crash past the call, reconcile finds the charge and nothing is sent again", async () => {

@@ -10,7 +10,7 @@ import { ENDOWABLE } from "./services/compute/language.ts";
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
 type Effect = { name: string; origin?: string; bridge?: string; ai?: "text" | "image"; tier?: "cheap" | "heavy"; handler?: string; endpoint?: string; secrets?: string[] };
-type Bridge = { name: string; container: string; port?: number };
+type Bridge = { name: string; container: string; port?: number; targets?: string[]; simulator?: Record<string, unknown> };
 type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
@@ -362,7 +362,9 @@ Deno.test("a secret reaches the airlock as a required variable, with no default,
   }
 });
 
-const MAIL: Bridge = { name: "mail", container: "smtp" };
+// `{}`: the container itself is the local stand-in, as for a runner whose
+// SMTP server a test points inside the stack.
+const MAIL: Bridge = { name: "mail", container: "smtp", simulator: {} };
 const CONFIRM: Effect = { name: "confirm", bridge: "mail" };
 const activepiecesConfig = { image: {name: "img"}, source: "activepieces/integrations", secrets: ["SMTP_AUTH_JSON"] };
 const activepiecesTarget = (config = activepiecesConfig) => `(#ActivepiecesContainer & ${JSON.stringify(config)}).target`;
@@ -393,6 +395,33 @@ Deno.test("Activepieces is an ordinary container serving an Airlock bridge", asy
   assert.equal(t["airlock-mesh"].compose.environment.AIRLOCK_ORIGINS, "https://sink.example.test");
 });
 
+Deno.test("the local stack runs a bridge only as its simulator, and tells the airlock it stands on local", async () => {
+  const live = await runtimeWith({effects: [PROBE, CONFIRM], bridges: [MAIL]}, `{smtp: ${activepiecesTarget()}}`);
+  assert.equal(live.ok, true, live.stderr);
+  assert.equal(live.value.airlock.compose.environment.AIRLOCK_TARGET, "local");
+  // A simulator replaces the fields it names and keeps the rest of the
+  // container: its name, port, environment and bridge networks.
+  const stub = await runtimeWith(
+    {effects: [CONFIRM], bridges: [{ ...MAIL, simulator: {dockerfile: {from: {name: "stub@sha256:fixture"}}} }]},
+    `{smtp: {dockerfile: from: name: "real@sha256:fixture", compose: environment: {PORT: "8080"}}}`,
+  );
+  assert.equal(stub.ok, true, stub.stderr);
+  assert.equal(stub.value.smtp.dockerfile.from.name, "stub@sha256:fixture");
+  assert.deepEqual(stub.value.smtp.compose.environment, {PORT: "8080"});
+  assert.deepEqual(stub.value.smtp.compose.networks, {"airlock-out": {aliases: ["smtp"]}, "bridge-mail-egress": {aliases: ["smtp"]}});
+  // Without a simulator the real container never starts locally: none wired,
+  // none waited on, though the release's container is declared.
+  const bare = await runtimeWith({effects: [PROBE, CONFIRM], bridges: [{ name: "mail", container: "smtp" }]}, `{smtp: ${activepiecesTarget()}}`);
+  assert.equal(bare.ok, true, bare.stderr);
+  assert.equal(bare.value.smtp, undefined);
+  assert.equal(bare.value["airlock-mesh"].compose.environment.AIRLOCK_BRIDGES, "");
+  assert.deepEqual(bare.value["airlock-mesh"].compose.depends_on, {});
+  assert.equal(bare.value.airlock.compose.environment.AIRLOCK_TARGET, "local");
+  const none = await runtimeWith({effects: [PROBE]}, "{}");
+  assert.equal(none.ok, true, none.stderr);
+  assert.equal(none.value.airlock.compose.environment.AIRLOCK_TARGET, undefined);
+});
+
 Deno.test("Activepieces container requires valid secret names", async () => {
   for (const secret of ["smtp_auth", "1KEY", ""]) {
     const got = await evaluated(activepiecesTarget({...activepiecesConfig, secrets: [secret]}));
@@ -401,7 +430,7 @@ Deno.test("Activepieces container requires valid secret names", async () => {
 });
 
 Deno.test("a custom acquisition container gets the bridge role without mail configuration or implicit database access", async () => {
-  const state = {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", port: 9090}]};
+  const state = {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", port: 9090, simulator: {}}]};
   const got = await runtimeWith(state, `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture", cmd: ["crawl"]}, compose: environment: {CALLBACK_TOKEN: "restricted"}}}`);
   assert.equal(got.ok, true, got.stderr);
   assert.deepEqual(got.value.crawler.dockerfile.cmd, ["crawl"]);

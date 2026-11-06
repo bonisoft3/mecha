@@ -79,7 +79,8 @@ _cluster: cluster.#Cluster & {
 			{name: "confirm", bridge: "mail", handler: "effects/confirm.js", endpoint: "dapr/confirm.yaml", secrets: ["CONFIRM_SIGNING_KEY"]},
 		]
 		effectInterpreters: ${JSON.stringify(interpreters.join("\n\n"))}
-		bridges: [{name: "mail", container: "bridge-mail", action: "sendMail"}]
+		// The runner itself is the local stand-in: the test points its SMTP inside the stack.
+		bridges: [{name: "mail", container: "bridge-mail", action: "sendMail", simulator: {}}]
 	}
 	capabilities: auth: true
 	surface: targets: "bridge-mail": (cluster.#ActivepiecesContainer & {

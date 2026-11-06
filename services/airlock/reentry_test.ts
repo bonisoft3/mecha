@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { type Effect, outcome, parseManifest, step } from "./reentry.ts";
+import { type Effect, outcome, parseManifest, step, undeployed } from "./reentry.ts";
 
 const effect = (over: Partial<Effect> = {}): Effect => ({
   table: "payment",
@@ -87,4 +87,29 @@ Deno.test("an effect's endowments are drawn from what the cage can endow", () =>
   const manifest = (endowments: unknown) => JSON.stringify({ effects: { charge: { ...effect(), endowments } } });
   assertEquals(parseManifest(manifest(["Crypto", "TextEncoder"])).charge.endowments, ["Crypto", "TextEncoder"]);
   for (const bad of [["Intl"], ["Deno"], "Crypto"]) assertThrows(() => parseManifest(manifest(bad)), Error, "endowments");
+});
+
+Deno.test("a bridge not deployed on this target fails at once, to onError, saying which and where", () => {
+  const released = effect({ bridge: { name: "sofascore", targets: ["cloudflare"], simulated: false } });
+  assertEquals(undeployed(released, "cloudflare"), null);
+  assertEquals(undeployed(released, "gcp"), {
+    target: "failed",
+    kind: "failed",
+    data: { bridge: "sofascore", target: "gcp", reason: "not deployed" },
+    reconciled: false,
+  });
+  // The local stack never runs the real container: only a simulator.
+  assertEquals(undeployed(released, "local")?.data, { bridge: "sofascore", target: "local", reason: "not deployed" });
+  assertEquals(undeployed(effect({ bridge: { name: "sofascore", targets: [], simulated: true } }), "local"), null);
+  assertEquals(undeployed(effect(), undefined), null);
+  // A bridge that names its targets cannot be judged by an airlock told none.
+  assertThrows(() => undeployed(released, undefined), Error, "told none");
+});
+
+Deno.test("a bridge names release targets as DNS labels, and whether it is simulated", () => {
+  const manifest = (bridge: unknown) => JSON.stringify({ effects: { charge: { ...effect(), bridge } } });
+  assertEquals(parseManifest(manifest({ name: "mail", targets: [], simulated: true })).charge.bridge, { name: "mail", targets: [], simulated: true });
+  for (const bad of [{ name: "mail", targets: ["local"], simulated: false }, { name: "Mail", targets: [], simulated: false }, { name: "mail", targets: [] }, { name: "mail", targets: [1], simulated: false }, "mail"]) {
+    assertThrows(() => parseManifest(manifest(bad)), Error, "bridge");
+  }
 });

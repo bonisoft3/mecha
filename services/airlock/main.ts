@@ -21,6 +21,8 @@ if (import.meta.main) {
   const mesh = required("MESH_URL");
   const dir = required("AIRLOCK_DIR");
   const { effects, handlers } = await admitAll(`${dir}/effects.json`, dir);
+  // Where a bridge names its targets, the release names this one.
+  const target = Object.values(effects).some((e) => e.bridge !== undefined) ? required("AIRLOCK_TARGET") : undefined;
   // Read once here and handed to the handler at each call; written nowhere, not
   // the manifest and not the ledger.
   const secrets = Object.fromEntries(
@@ -44,7 +46,7 @@ if (import.meta.main) {
   // Set where the cluster has a blob plane: the URL a stored key is served at.
   const blobUrl = Deno.env.get("BLOB_URL");
   const blobs = blobUrl === undefined ? undefined : daprBlobs(mesh, blobUrl);
-  const runner = await start({ connectionString, db, effects, handlers, transport: bindingsTransport(mesh), secrets, headers, blobs }, key);
+  const runner = await start({ connectionString, db, effects, handlers, transport: bindingsTransport(mesh), secrets, headers, blobs, target }, key);
   Deno.serve({ port: 9997, onListen() {} }, (req) => new Response(null, { status: new URL(req.url).pathname === "/healthz" ? 204 : 404 }));
   await runner.promise;
   // On a signal Graphile returns its jobs and ends the process itself; a

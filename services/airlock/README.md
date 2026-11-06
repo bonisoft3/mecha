@@ -118,6 +118,21 @@ export async function reconcile(input, sink) {
   reach the ledger or a row: inline, a level's pictures outgrew the edge's in-memory
   database. A cluster with no blob plane refuses the answer.
 
+## A bridge not deployed
+
+An effect whose sink is a bridge carries where the bridge runs in `effects.json`
+(`bridge: {name, targets, simulated}`): the release targets its container is
+deployed on, and whether the local stack runs a simulator in its place. The
+airlock knows its own target: `AIRLOCK_TARGET` in a cluster, which compose sets to
+`local`, and `cloudflare` at the edge. An airlock told none refuses to start
+where any bridge names its targets. Locally a bridge is deployed as its
+simulator; on a release target, where it names that target. Where it is not, a
+claimed effect settles at once, before
+its run is counted: outcome `failed`, data
+`{bridge, target, reason: "not deployed"}`, target `onError`. Neither handler nor
+sink is called, the ledger's `entered` stays 0 and no dead letter follows
+(`undeployed` in [reentry.ts](reentry.ts)).
+
 ## After a crash
 
 Graphile locks a running job under its pool's id, random per process, and on its own

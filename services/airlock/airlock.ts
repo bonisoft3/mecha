@@ -20,7 +20,7 @@
 import { run, type Runner, type Task } from "graphile-worker";
 import { EventEmitter } from "node:events";
 import pg from "pg";
-import { type Answer, type Effect, outcome, type Outcome, step } from "./reentry.ts";
+import { type Answer, type Effect, outcome, type Outcome, step, undeployed } from "./reentry.ts";
 import type { Handler, Transport } from "./handler.ts";
 import { type BlobStore, stowed } from "./blobs.ts";
 
@@ -36,7 +36,9 @@ export type Airlock = {
    * the handler never holds it. */
   headers: Record<string, Record<string, string>>;
   /** The cluster's blob plane, where an answer's bytes go; absent without one. */
-  blobs?: BlobStore;
+  blobs?: BlobStore;  /** The release target this airlock runs on, which a bridge naming its
+   * targets is checked against. */
+  target?: string;
 };
 
 const q = (name: string) => `"${name}"`;
@@ -197,7 +199,7 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
     );
     if (l === undefined) throw new Error(`airlock.external_effect_ledger holds no ${key}`);
     const effect = a.effects[l.effect] ?? die(`${key}: effect ${l.effect} is not in effects.json`);
-    let settled = l.outcome;
+    let settled = l.outcome ?? undeployed(effect, a.target);
     if (settled === null) {
       const { rows: [c] } = await a.db.query(
         "UPDATE airlock.external_effect_ledger SET entered = entered + 1 WHERE key = $1 RETURNING entered",

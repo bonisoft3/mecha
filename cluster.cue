@@ -184,6 +184,17 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	container: =~#EffectName
 	action?: =~"^[a-zA-Z][a-zA-Z0-9_]*$"
 	port:      *8080 | int & >=1 & <=65535
+	// The release targets the container is deployed on. On any other, the
+	// airlock settles the effect failed without calling it
+	// (services/airlock/README.md#a-bridge-not-deployed).
+	targets: *[] | [...=~#EffectName]
+	// What the compose cluster, the local stack launch and the checks bring up,
+	// runs in the container's place: its fields replace the container target's
+	// of the same name, so it serves under the container's name, port and
+	// networks. `{}` runs the container itself, for one that reaches nothing
+	// outside the stack. Without one the local stack starts no container for
+	// the bridge and its effects settle as not deployed on `local`.
+	simulator?: {...}
 }
 
 // Container bridge HTTP port.
@@ -473,7 +484,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	}}]
 	_aiOn: len(_aiEffects) > 0 || X.capabilities.ai != _|_
 	_bridgeNames: [for b in X.state.bridges {b.name}]
-	_bridges: [for b in X.state.bridges {
+	_bridges: [for b in X.state.bridges if b.simulator != _|_ {
 		name: [if regexp.Match(#EffectName, b.name) {b.name}][0]
 		container: [if regexp.Match(#EffectName, b.container) {b.container}][0]
 		port: b.port
@@ -1256,6 +1267,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							DATABASE_URL: databaseUrl
 							MESH_URL:     "http://airlock-mesh:3500"
 							AIRLOCK_DIR:  "/airlock"
+							if len(X.state.bridges) > 0 {AIRLOCK_TARGET: "local"}
 							// An answer's bytes go to the blob plane, served by imgproxy
 							// (services/airlock/blobs.ts).
 							if X.capabilities.blobs {BLOB_URL: "/img/insecure/plain/s3://mecha-objects/"}
@@ -1561,16 +1573,28 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	_networks: N={
 		name: string
 		t:    _
-		_bridges: [for b in R.cluster.state.bridges if b.container == N.name {b}]
+		_bridges: [for b in R.cluster.state.bridges if b.container == N.name if b.simulator != _|_ {b}]
 		_base: [if N.t.compose.networks != _|_ {N.t.compose.networks}, if len(_bridges) > 0 {[]}, ["default"]][0]
 		out: [for nw, _ in {for n in list.Concat([_base, [if len(_bridges) > 0 {"airlock-out"}], [for b in _bridges {"bridge-\(b.name)-egress"}]]) {(n): true}} {nw}]
 	}
+	// A bridge's container runs here only as its simulator.
+	_bridged: {for b in R.cluster.state.bridges {(b.container): true}}
+	_simulators: {for b in R.cluster.state.bridges if b.simulator != _|_ {(b.container): b.simulator}}
+	_local: {for n, t in R._live if R._bridged[n] == _|_ {(n): t}
+		for n, sim in R._simulators {(n): {
+			for f, v in R._live[n] if sim[f] == _|_ {(f): v}
+			for f, v in sim {(f): v}
+		}}
+	}
 	targets: {
-		for b in R.cluster.state.bridges {
-			let source = R._live[b.container].dockerfile.from
-			(b.container): dockerfile: from: [if source.name != _|_ {source}, if source.ref != _|_ {source}][0]
+		// Every bridge's container is declared and built, run here or not: a
+		// release deploys the real one.
+		for b in R.cluster.state.bridges if R._live[b.container].dockerfile.from != null {}
+		for n, _ in R._simulators {
+			let source = R._local[n].dockerfile.from
+			(n): dockerfile: from: [if source.name != _|_ {source}, if source.ref != _|_ {source}][0]
 		}
-		for n, t in R._live {
+		for n, t in R._local {
 			(n): {
 				for f, v in t if f != "compose" && f != "deps" {(f): v}
 
@@ -1586,9 +1610,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		}
 	}
 	_dangling: [
-		for b in R.cluster.state.bridges if !list.Contains([for m, _ in R._live {m}], b.container) {"bridge \(b.name) references missing container \(b.container)"},
-		for n, t in R._live for k, _ in (R._waits & {"t": t}).out
-		if !list.Contains([for m, _ in R._live {m}], k) {"\(n) waits on \(k)"},
+		for b in R.cluster.state.bridges if b.simulator != _|_ if !list.Contains([for m, _ in R._live {m}], b.container) {"bridge \(b.name) references missing container \(b.container)"},
+		for b in R.cluster.state.bridges if b.simulator != _|_
+		for o in R.cluster.state.bridges if o.container == b.container if o.simulator != _|_ if o.name != b.name {"bridges \(b.name) and \(o.name) both simulate container \(b.container)"},
+		for n, t in R._local for k, _ in (R._waits & {"t": t}).out
+		if !list.Contains([for m, _ in R._local {m}], k) {"\(n) waits on \(k)"},
 	]
 	_dangling: []
 }

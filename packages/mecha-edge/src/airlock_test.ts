@@ -432,3 +432,59 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
     await db.close()
   }
 })
+
+// A bridge is a container the edge does not run: its effect settles failed at
+// once, saying which bridge is not deployed here, and nothing is dialed.
+Deno.test('a bridge not deployed on cloudflare settles onError without a handler or fetch', async () => {
+  const db = await createDatabase({})
+  try {
+    const scheduleSql = await Deno.readTextFile(new URL('../../../services/ticker/schedule.sql', import.meta.url))
+    const graphileSql = await Deno.readTextFile(new URL('../../../services/airlock/graphile.sql', import.meta.url))
+    const airlockSql = await Deno.readTextFile(new URL('../../../services/airlock/airlock.sql', import.meta.url))
+    await db.exec(graphileSql)
+    await db.exec(`${scheduleSql}\n${airlockSql}`)
+    await db.exec(`
+      CREATE TABLE sofa_request (id text PRIMARY KEY, status text NOT NULL DEFAULT 'acquiring');
+      INSERT INTO sofa_request (id, status) VALUES ('r1', 'acquiring');
+      INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('acquire:r1', 'acquire', '{"id":"r1"}', '{}');
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => 'acquire:r1');
+    `)
+    let issued = 0
+    let dialed = 0
+    const effects: EdgeEffects = {
+      acquire: {
+        declaration: {
+          table: 'sofa_request', field: 'status', state: 'acquiring', onDone: 'applied', onError: 'failed',
+          row: ['id'], idempotent: false, reentry: 'repeat', attempts: 5, handler: 'effects/acquire.js',
+          bridge: { name: 'sofascore', targets: [], simulated: true },
+        },
+        target: { kind: 'bridge', bridge: 'sofascore' },
+        issue() {
+          issued++
+          return { done: {} }
+        },
+      },
+    }
+    let chain = Promise.resolve()
+    const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+      const next = chain.then(fn, fn)
+      chain = next.then(() => {}, () => {})
+      return next
+    }
+    const fetcher = (() => {
+      dialed++
+      throw new Error('dialed')
+    }) as unknown as typeof fetch
+    const airlock = createEdgeAirlock({ db, serialize, effects, fetcher, log: () => {}, retry: () => {} })
+    assert.equal(await airlock.drain(), 1)
+    const { rows: [row] } = await db.query<{ status: string; entered: number; kind: string; data: unknown }>(
+      `SELECT r.status, l.entered, l.outcome->>'kind' AS kind, l.outcome->'data' AS data
+         FROM sofa_request r JOIN airlock.external_effect_ledger l ON l.key = 'acquire:' || r.id WHERE r.id = 'r1'`,
+    )
+    assert.deepEqual(row, { status: 'failed', entered: 0, kind: 'failed', data: { bridge: 'sofascore', target: 'cloudflare', reason: 'not deployed' } })
+    assert.equal(issued, 0)
+    assert.equal(dialed, 0)
+  } finally {
+    await db.close()
+  }
+})

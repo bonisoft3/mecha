@@ -9,7 +9,7 @@ import {
   type CloudflareAiBinding,
   createTsBifrost,
 } from '../../../services/airlock/tsbifrost.ts'
-import { type Answer, CALL_TIMEOUT_MS, type Effect, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
+import { type Answer, CALL_TIMEOUT_MS, type Effect, outcome, type Outcome, sinkHeaders, step, undeployed } from '../../../services/airlock/reentry.ts'
 import { type BlobStore, stowed } from '../../../services/airlock/blobs.ts'
 import { Logger, runOnce } from 'graphile-worker'
 import type { EventEmitter } from 'node:events'
@@ -22,7 +22,9 @@ export interface EdgeSink {
 
 export interface EdgeEffect {
   declaration: Effect
-  target: { kind: 'tsbifrost' | 'origin'; url?: string }
+  /** A bridge is a container the edge does not run yet, so its effect fails
+   * here without a call. */
+  target: { kind: 'tsbifrost'; url?: string } | { kind: 'origin'; url?: string } | { kind: 'bridge'; bridge: string }
   issue(input: unknown, sink: EdgeSink, secrets: Record<string, string>): Promise<unknown> | unknown
   reconcile?(input: unknown, sink: EdgeSink, secrets: Record<string, string>): Promise<unknown> | unknown
 }
@@ -181,13 +183,15 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
                 ...(payload !== undefined ? { body: payload } : {}),
               }),
             )
-          } else {
+          } else if (spec.target.kind === 'origin') {
             const url = new URL(path, spec.target.url)
             res = await fetcher(url.href, {
               method,
               headers,
               ...(payload !== undefined ? { body: payload } : {}),
             })
+          } else {
+            throw new Error(`${key}: bridge ${spec.target.bridge} is not deployed on cloudflare and has no sink here`)
           }
           return { status: res.status, text: await res.text() }
         })())
@@ -355,7 +359,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
             ), 'low')
           if (l === undefined) throw new Error(`airlock.external_effect_ledger holds no ${key}`)
           const spec = effects[l.effect] ?? die(`${key}: effect ${l.effect} is not in effects.json`)
-          let answer = l.outcome
+          let answer = l.outcome ?? undeployed(spec.declaration, 'cloudflare')
           if (answer === null) {
             const { rows: [c] } = await serialize(() =>
               db.query<{ entered: number }>(

@@ -36,6 +36,7 @@
       "/pgroll",
       "00_initdb"
     ],
+    "copy": [],
     "epilogue": [
       "COPY <<'PGROLL' /pgroll/01_hello_mood.json\n{\"operations\":[{\"add_column\":{\"table\":\"Hello\",\"column\":{\"name\":\"mood\",\"type\":\"text\",\"nullable\":true}}}]}\nPGROLL"
     ],
@@ -43,7 +44,6 @@
     "mounts": [],
     "secrets": {},
     "extra_hosts": [],
-    "copy": [],
     "healthcheck": null,
     "expose": [],
     "incremental": false

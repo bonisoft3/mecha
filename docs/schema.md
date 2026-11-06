@@ -149,8 +149,12 @@ and a failure rolls back both the column change and trigger refresh. Stop the
 previous application and worker before upgrading a retained volume; old worker
 binaries must not run against the new ledger contract.
 
-Each migration is written into the migrate image from the value, as a heredoc
-in its Dockerfile, so the image holds exactly what `cue vet` accepted. The
+Pronto emits each vetted migration as JSON under `services/database/pgroll`.
+It sets the cluster's `state.pgrollDir` to that directory, and the migrate
+image copies the named files. Keeping the payload in files prevents large
+engine migrations from exceeding BuildKit's request limit. A cluster supplied
+only `state.pgroll` embeds its values in Dockerfile heredocs; when `pgrollDir`
+is supplied, its `<name>.json` files must contain those same vetted values. The
 runner, [`services/migrate/migrate.sh`](../services/migrate/migrate.sh), runs
 `pgroll init`, records the schema initdb built as the baseline `00_initdb` once,
 whether the volume is fresh or predates the runner, then runs

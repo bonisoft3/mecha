@@ -125,9 +125,16 @@ opponents) in a single atomic transaction.
 
 Pronto's `#MechaReducerMachine` executes bounded pure reductions in Mecha and
 uses the existing `#MechaAction` compiler for relational effects, `spawn`,
-`send`, named SQL hatches, notifications and rejection. `#HybridMachine` is a compatibility
-alias; incoming browser events do not transfer authoritative write ownership.
-The current registry remains `state.hybrids`.
+`send`, named SQL hatches, notifications and rejection. Incoming browser events
+do not transfer authoritative write ownership. `state.mecha.reducers` holds
+reducer declarations (`machine`, `rules`), and
+`state.mecha.rows` holds transactional row declarations (`entity`). Both belong
+to Mecha; their execution bindings remain separate, avoiding a CUE disjunction
+over two independently derived machine schemas.
+
+The persisted `hybrid_<name>` PostgreSQL schemas and their protocol markers are
+storage identifiers retained for existing databases. They do not name another
+kind of machine; changing them requires a database migration.
 
 A transition's `requires: {sql, reason}` checks its relational precondition
 under the declared locks. A false or null result records a refusal without

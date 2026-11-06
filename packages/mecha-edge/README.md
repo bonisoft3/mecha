@@ -75,7 +75,7 @@ renderer and experiments are described in [[../../../../plugins/omnishell/docs/n
 
 ## Machines
 
-An app's machines (pronto's hybrid machines,
+An app's machines (pronto's mecha machines,
 emitted by pronto's `mecha-reducer.ts`) step in the object. Their migration
 declares each `hybrid_<name>.step` over a `hybrid_<name>.engine` it leaves to
 the tier: PostgreSQL's is plv8, inside the migration's `-- tier: container`

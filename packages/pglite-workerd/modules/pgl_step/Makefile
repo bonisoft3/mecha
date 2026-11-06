@@ -1,4 +1,4 @@
-# The hybrid step as a host import: linked into the workerd backend
+# The mecha step as a host import: linked into the workerd backend
 # (wasm.nu's MODULES), never a loadable module.
 MODULE_big = pgl_step
 OBJS = pgl_step.o

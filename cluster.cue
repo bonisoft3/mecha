@@ -300,6 +300,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// fresh volume; these carry a volume that outlived a change forward, and
 		// a fresh one too, once initdb has run.
 		pgroll: [grammar.#Name]: grammar.#Migration
+		// Materialized JSON, one <name>.json per vetted pgroll value, relative to the app.
+		pgrollDir?: string & !=""
 		pipelines: [...{name: string, file: string}]
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
@@ -625,6 +627,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// baselines whatever volume it meets.
 				if len(X.state.pgroll) > 0 {
 					migrate: X._image & {
+						if X.state.pgrollDir != _|_ {
+							srcs: globs: [for n, _ in X.state.pgroll {"\(X.state.pgrollDir)/\(n).json"}]
+						}
 						dockerfile: {
 							// The database's own image, run as the runner.
 							from: (_from & {in: X.meta.images.database}).out
@@ -632,7 +637,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							cmd: [#PgRollDir, grammar.#Baseline]
 							// Docker's heredoc parser limits each input line to 64 KiB.
 							// Base64 keeps each chunk ASCII and preserves the vetted JSON.
-							epilogue: [for n, m in X.state.pgroll {
+							if X.state.pgrollDir != _|_ {
+								copy: [for n, _ in X.state.pgroll {srcs: ["\(X.state.pgrollDir)/\(n).json"], dst: "\(#PgRollDir)/\(n).json"}]
+							}
+							epilogue: [if X.state.pgrollDir == _|_ for n, m in X.state.pgroll {
 								let jsonText = json.Marshal(m)
 								if len(jsonText) <= 8192 {
 									"COPY <<'PGROLL' \(#PgRollDir)/\(n).json\n\(jsonText)\nPGROLL"

@@ -8,7 +8,7 @@
 import type { PGlite } from '@electric-sql/pglite'
 
 export interface EdgeMachine {
-  /** The step: hybrid-runtime.js over the machine's rules. A throw is a
+  /** The step: mecha-runtime.js over the machine's rules. A throw is a
    * failed step, which becomes the error the step's transaction aborts on. */
   execute(input: unknown): unknown
 }

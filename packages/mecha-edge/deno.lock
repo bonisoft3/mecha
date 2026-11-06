@@ -1,12 +1,17 @@
 {
   "version": "5",
   "specifiers": {
+    "npm:@bufbuild/cel-spec@0.5.0": "0.5.0_@bufbuild+protobuf@2.14.1",
+    "npm:@bufbuild/cel@0.5.0": "0.5.0_@bufbuild+protobuf@2.14.1",
+    "npm:@bufbuild/protobuf@2.14.1": "2.14.1",
     "npm:@cloudflare/workers-types@5.20261015.1": "5.20261015.1",
     "npm:@electric-sql/pglite-icu-full@0.0.2": "0.0.2",
     "npm:@electric-sql/pglite-pg_ivm@0.0.9": "0.0.9_@electric-sql+pglite@0.5.8",
     "npm:@electric-sql/pglite@0.5.8": "0.5.8",
     "npm:@simplewebauthn/server@10.0.1": "10.0.1",
     "npm:@types/node@*": "22.20.5",
+    "npm:acorn-walk@8.3.4": "8.3.4",
+    "npm:acorn@8.14.0": "8.14.0",
     "npm:croner@10.0.1": "10.0.1",
     "npm:fast-png@6.4.0": "6.4.0",
     "npm:graphile-worker@0.18.0": "0.18.0",
@@ -23,6 +28,22 @@
     },
     "@babel/helper-validator-identifier@7.29.7": {
       "integrity": "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg=="
+    },
+    "@bufbuild/cel-spec@0.5.0_@bufbuild+protobuf@2.14.1": {
+      "integrity": "sha512-nYqgVUsw+5XmhwxKyWJz/uA1hEBCGd0Bg6o0vFA9C7taFTYMRfCl94ZDxObR6Qen6QMzj0b9Bhnqr9viKkFonw==",
+      "dependencies": [
+        "@bufbuild/protobuf"
+      ]
+    },
+    "@bufbuild/cel@0.5.0_@bufbuild+protobuf@2.14.1": {
+      "integrity": "sha512-LpSZGvGRMrC0FPKXmVIzNltoT/Q9SOuJ1cCWPcpol72AM1O24hv40COigZfwtaL+QEuOLHszqIohhXNxE/HZKg==",
+      "dependencies": [
+        "@bufbuild/cel-spec",
+        "@bufbuild/protobuf"
+      ]
+    },
+    "@bufbuild/protobuf@2.14.1": {
+      "integrity": "sha512-agRJn3+EJDUe8AvxTx/LnHA/GErvLE62pSaSk7+MwFOtOv8eWBu/qCq2qoZjBjVZ3C2aiFJCveuSs17KMkYGOw=="
     },
     "@cloudflare/workers-types@5.20261015.1": {
       "integrity": "sha512-ef6KOceBMzxf1O/CelPF2ei8Mtlaw+7vQ9cdaUKFG8CC0xAe8/SuPdRpmbogEE18u6JbfFWWAOGQLaav8UTFWg=="
@@ -149,6 +170,16 @@
     },
     "@types/semver@7.8.0": {
       "integrity": "sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ=="
+    },
+    "acorn-walk@8.3.4": {
+      "integrity": "sha512-ueEepnujpqee2o5aIYnvHU6C0A42MNdsIDeqy5BydrkuC5R1ZuUFnm27EeFJGoEHJQgn3uleRvmTXaJgfXbt4g==",
+      "dependencies": [
+        "acorn"
+      ]
+    },
+    "acorn@8.14.0": {
+      "integrity": "sha512-cl669nCJTZBsL97OF4kUQm5g5hC2uihk0NxY3WENAC0TYdILVkAyHymAntgxGkl7K+t0cXIrH5siy5S4XkFycA==",
+      "bin": true
     },
     "ansi-regex@5.0.1": {
       "integrity": "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ=="

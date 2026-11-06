@@ -19,6 +19,7 @@ type State = {
   effects?: Effect[];
   effectInterpreters?: string;
   pgroll?: Record<string, { operations: unknown[] }>;
+  pgrollDir?: string;
   bridges?: Bridge[];
 };
 
@@ -589,6 +590,24 @@ Deno.test("the migrate runner takes the database image", async () => {
   }).output();
   assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
   assert.deepEqual(JSON.parse(new TextDecoder().decode(out.stdout)), { from: { name: "img" }, entrypoint: ["/migrate.sh"] });
+});
+
+Deno.test("materialized migrations keep engine payloads out of the build request", async () => {
+  const pgroll = { "01_engine": { operations: [{ sql: { up: `SELECT '${"x".repeat(32_768)}';`, onComplete: true } }] } };
+  const state = { pgroll, pgrollDir: "services/database/pgroll" };
+  const got = await lowered(state, "targets.migrate");
+  assert.equal(got.ok, true, got.stderr);
+  assert.deepEqual(got.value.srcs.globs, ["services/database/pgroll/01_engine.json"]);
+  assert.deepEqual(got.value.dockerfile.copy, [{ srcs: ["services/database/pgroll/01_engine.json"], dst: "/pgroll/01_engine.json" }]);
+  assert.deepEqual(got.value.dockerfile.epilogue, []);
+  assert.ok(JSON.stringify(got.value).length < 4096);
+
+  const inline = await exported({ pgroll }, "surface.targets.migrate.dockerfile.epilogue");
+  assert.equal(inline.ok, true, inline.stderr);
+  assert.match(inline.value[0], /base64 -d/);
+
+  const invalid = await exported({ pgrollDir: state.pgrollDir, pgroll: { "01_engine": { operations: [{ unknown_operation: {} }] } } }, "state.pgroll");
+  assert.equal(invalid.ok, false, "selecting files must still validate the declared migration grammar");
 });
 
 // The schedule table is initdb's alone: a volume older than the cluster's

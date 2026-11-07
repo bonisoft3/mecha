@@ -85,7 +85,7 @@ _stack: cluster.#Cluster & {
 	}
 	state: {
 		// mecha's own schema, the identity table its auth plane keeps, then the
-		// validation-seat fixtures the crud smoke asserts against.
+		// validation-seat fixtures the crud smoke asserts against and pljs's unicode.
 		migrations: [
 			"services/database/migrations/000_extensions.sql",
 			"services/database/migrations/001_roles.sql",
@@ -95,6 +95,7 @@ _stack: cluster.#Cluster & {
 			"services/database/migrations/006_conduit_publication.sql",
 			"services/database/007_identity.sql",
 			"tests/008_validation_smoke.sql",
+			"tests/009_pljs_unicode.sql",
 		]
 		// A change to a table the migrations above built, so every boot of the
 		// stack runs the migrate target; services/migrate/migrate_test.ts

@@ -39,6 +39,9 @@ services:
       - action: rebuild
         path: ../tests/008_validation_smoke.sql
         target: /docker-entrypoint-initdb.d
+      - action: rebuild
+        path: ../tests/009_pljs_unicode.sql
+        target: /docker-entrypoint-initdb.d
     environment:
       PGPORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

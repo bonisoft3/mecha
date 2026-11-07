@@ -54,6 +54,13 @@ import (
 	sites:  6
 }
 
+// QuickJS's symbols stay inside pljs.so: the postgres executable defines some
+// of the same names, and an exported definition would bind QuickJS's own calls
+// to the backend's. An ELF link keeps the archive's symbols local; macOS,
+// whose linker has no --exclude-libs, compiles them hidden.
+#ElfLdflags:    "-Wl,--exclude-libs,ALL"
+#QuickjsCflags: "-fvisibility=hidden"
+
 // A value as one single-quoted sh word.
 #Sh: {
 	v:   string
@@ -82,7 +89,7 @@ import (
 		"test \"$(grep -c -F \((#Sh & {v: #Errors.marker}).out) /tmp/pljs/src/pljs.c)\" = \(#Errors.sites)",
 		for f in #Patches {"patch -d /tmp/pljs -p1 -i \(f)"},
 		"make -C /tmp/pljs/deps/quickjs -j\"$(nproc)\" libquickjs.a",
-		"make -C /tmp/pljs -j\"$(nproc)\" PG_CONFIG=\(pgConfig) with_llvm=no install",
+		"make -C /tmp/pljs -j\"$(nproc)\" PG_CONFIG=\(pgConfig) with_llvm=no PG_LDFLAGS=\"${PG_LDFLAGS:+$PG_LDFLAGS }\(#ElfLdflags)\" install",
 		"ext=\"$(\(pgConfig) --sharedir)/extension\"",
 		"printf '%s\\n' \(strings.Join([for l in #Control {(#Sh & {v: l}).out}], " ")) > \"$ext/plv8.control\"",
 		"sed \((#Sh & {v: "s/\(#Language.from)/\(#Language.to)/g"}).out) \"$ext/pljs--\(#Version).sql\" > \"$ext/plv8--\(#Version).sql\"",

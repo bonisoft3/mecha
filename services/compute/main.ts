@@ -91,7 +91,7 @@ const RPC_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
 
 /** Where the image installed the lake's extensions (install.ts); a running
  * service reaches no extension host. */
-export const EXTENSIONS = fileURLToPath(new URL("./extensions", import.meta.url));
+export const EXTENSIONS = Deno.env.get("DUCKDB_EXTENSIONS_DIR") ?? fileURLToPath(new URL("./extensions", import.meta.url));
 
 export type Row = Record<string, unknown>;
 export type Out = Record<string, Row[]>;
@@ -630,7 +630,7 @@ async function main() {
     }
   })();
   polling.catch((error) => engineFailure.resolve(error));
-  const server = serve(service, jwt, 9997);
+  const server = serve(service, jwt, Number(Deno.env.get("PORT") || 9997));
   try {
     await Promise.race([server.finished, coordinator.promise, engineFailure.promise.then((error) => { throw error; })]);
   } finally {
@@ -655,6 +655,7 @@ export function serve(
   port: number,
 ) {
   return Deno.serve({
+    hostname: ["local", "host"].includes(Deno.env.get("SAYT_PLATFORM") ?? "") ? "127.0.0.1" : "0.0.0.0",
     port,
     onError(error) {
       console.error(error);

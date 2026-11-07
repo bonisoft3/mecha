@@ -27,8 +27,15 @@ services:
         path: ../.certs
         target: /certs
     environment:
-      ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}
+      PORT: "8080"
       ORIGIN: ${ORIGIN:-http://localhost:${MECHA_DOOR_HOST_PORT:-8080}}
+      ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}
+      PRONTO_UPSTREAM_CRUD: crud:3000
+      PRONTO_UPSTREAM_ELECTRIC: electric:3000
+      PRONTO_UPSTREAM_AUTH: auth:9999
+      PRONTO_UPSTREAM_TICKER: ticker:9998
+      PRONTO_UPSTREAM_RCLONE_S3: rclone-s3:3900
+      PRONTO_UPSTREAM_IMGPROXY: imgproxy:8081
     healthcheck:
       test:
       - CMD

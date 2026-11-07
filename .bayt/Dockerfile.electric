@@ -100,6 +100,7 @@ end
 
 ELIXIR
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.electric.json ./.bayt/
+EXPOSE 3000
 RUN DATABASE_URL=postgresql://compile:compile@localhost/compile ELECTRIC_SECRET=compile-only /app/bin/entrypoint eval 'Code.eval_file("/tmp/electric-patch.exs")' && rm /tmp/electric-patch.exs
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS electric_bayt_ctxs

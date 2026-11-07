@@ -130,9 +130,7 @@
       "env": {},
       "visibility": "internal",
       "deps": [],
-      "transitiveDeps": [
-        "wasm_outs_srcs"
-      ],
+      "transitiveDeps": [],
       "transitiveCrossDeps": [],
       "chainedDeps": [],
       "cmds": [],
@@ -218,7 +216,7 @@
         "defaultExclude": null
       },
       "dockerfile": {
-        "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 install --frozen-lockfile --filter @electric-sql/pglite...",
+        "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 install --prefer-offline --frozen-lockfile --package-import-method copy --filter @electric-sql/pglite...",
         "mounts": [
           {
             "type": "cache",

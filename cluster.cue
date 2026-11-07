@@ -26,14 +26,28 @@ import (
 	"strings"
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
+	deno "github.com/bonisoft3/bayt/stacks/deno"
 	grammar "github.com/bonisoft3/mecha/pgroll"
 )
 
 _electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
 _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 _cdcTrace:      _ @embed(file="services/transform/cdc-trace.yaml", type=text)
+_redisStreams:  _ @embed(file="services/mesh/dapr/components/redis-streams.yaml", type=text)
 _tsbifrostTs:   _ @embed(file="services/airlock/tsbifrost.ts", type=text)
+_envSecretStore: """
+	apiVersion: dapr.io/v1alpha1
+	kind: Component
+	metadata:
+	  name: env
+	spec:
+	  type: secretstores.local.env
+	  version: v1
+	  metadata: []
+	"""
 _blobsBinding: """
+	\(_envSecretStore)
+	---
 	apiVersion: dapr.io/v1alpha1
 	kind: Component
 	metadata:
@@ -44,17 +58,19 @@ _blobsBinding: """
 	  metadata:
 	    - {name: bucket, value: mecha-objects}
 	    - {name: region, value: rclone}
-	    - {name: endpoint, value: "http://rclone-s3:3900"}
+	    - {name: endpoint, secretKeyRef: {name: BLOBS_S3_URL, key: BLOBS_S3_URL}}
 	    - {name: accessKey, value: GK000000000000000000000000}
 	    - {name: secretKey, value: "0000000000000000000000000000000000000000000000000000000000000000"}
 	    - {name: forcePathStyle, value: "true"}
 	    - {name: disableSSL, value: "true"}
 	    - {name: decodeBase64, value: "true"}
+	auth:
+	  secretStore: env
 	"""
 _whiteBackgroundTs: _ @embed(file="services/airlock/white-background.ts", type=text)
-_aiModelsTs: _ @embed(file="services/airlock/ai-models.ts", type=text)
-_airlockPackage: _ @embed(file="services/airlock/package.json", type=text)
-_airlockLock: _ @embed(file="services/airlock/deno.lock", type=text)
+_aiModelsTs:        _ @embed(file="services/airlock/ai-models.ts", type=text)
+_airlockPackage:    _ @embed(file="services/airlock/package.json", type=text)
+_airlockLock:       _ @embed(file="services/airlock/deno.lock", type=text)
 
 // Where postgres applies what an image carries, in name order, on a fresh data
 // directory.
@@ -185,7 +201,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 #Bridge: {
 	name:      =~#EffectName
 	container: =~#EffectName
-	action?: =~"^[a-zA-Z][a-zA-Z0-9_]*$"
+	action?:   =~"^[a-zA-Z][a-zA-Z0-9_]*$"
 	port:      *8080 | int & >=1 & <=65535
 	// The release targets the container is deployed on. On any other, the
 	// airlock settles the effect failed without calling it
@@ -222,17 +238,17 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	device?:   "webgpu" | "wasm" | "auto"
 	fallback?: string & !=""
 	// Merged into the provider call for this model only (services/airlock/tsbifrost.ts).
-	params?:   {[string]: _}
+	params?: {[string]: _}
 }
 
 #AiTierOverrides: {
-	text?:  [("browser" | "cheap" | "heavy")]: #AiModelSpec | (string & !="")
+	text?: [("browser" | "cheap" | "heavy")]:  #AiModelSpec | (string & !="")
 	image?: [("browser" | "cheap" | "heavy")]: #AiModelSpec | (string & !="")
 }
 
 #AiCapability: {
-	text?:   [...#AiTier]
-	image?:  [...#AiTier]
+	text?: [...#AiTier]
+	image?: [...#AiTier]
 	models?: #AiTierOverrides
 	targets?: [("browser" | "pages" | "docker" | "local" | "cloudflare" | "gcp" | "k8s" | "aws")]: #AiTierOverrides
 }
@@ -477,12 +493,60 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		}
 	}
 
+	#_renderClusterRef: R={
+		expose?: _
+		ref:     bayt.#portRef
+		if len(R.ref.port) > 0 {
+			let _peer = [if R.ref.peer != _|_ {R.ref.peer}, ""][0]
+			let _exp = [if _peer != "" {X.surface.targets[_peer].expose}, R.expose][0]
+			let _port = [
+				if _exp != _|_ if _exp[R.ref.port] != _|_ {"\(_exp[R.ref.port].port)"},
+				for b in X._bridges if b.container == _peer && R.ref.port == "http" {"\(b.port)"},
+			][0]
+			let _host = [if R.ref.host != _|_ {R.ref.host}, if _peer != "" {_peer}, "127.0.0.1"][0]
+			let _body = [
+				if R.ref.part == "host" {_host},
+				if R.ref.part == "port" {_port},
+				"\(_host):\(_port)",
+			][0]
+			out: "\(R.ref.prefix)\(_body)\(R.ref.suffix)"
+		}
+	}
+	#_renderClusterEnv: V={
+		expose?: _
+		val:     bayt.#envValue
+		out: [
+			if (V.val & string) != _|_ {V.val},
+			if V.val.port != _|_ {(#_renderClusterRef & {if V.expose != _|_ {expose: V.expose}, ref: V.val}).out},
+			if (V.val & string) == _|_ && V.val.port == _|_ {
+				strings.Join([for item in V.val {[
+					if (item & string) != _|_ {item},
+					if item.port != _|_ {(#_renderClusterRef & {if V.expose != _|_ {expose: V.expose}, ref: item}).out},
+				][0]}], "")
+			},
+		][0]
+	}
+
 	// No target runs a lifecycle command: the image is the recipe, the
 	// process is the base image's own entrypoint, and no toolchain
 	// activator wraps it — these images carry none.
-	_image: {
+	_image: T={
 		cmd: "builtin": null
 		activate: ""
+		if T.entrypoint != _|_ if T.entrypoint.after != _|_ {
+			compose: depends_on: {
+				for k, c in T.entrypoint.after {
+					(k): *{started: _started, healthy: _healthy, completed: _completed}[c] | {...}
+				}
+			}
+		}
+		if T.entrypoint != _|_ if T.entrypoint.env != _|_ {
+			compose: environment: {
+				for k, v in T.entrypoint.env if v != null {
+					(k): *(#_renderClusterEnv & {if T.expose != _|_ {expose: T.expose}, val: v}).out | string
+				}
+			}
+		}
 	}
 
 	// What a service that reads the schema waits on: the database, and the
@@ -492,10 +556,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// Eager OR closes a build-schema cycle when pgroll already exists; the
 	// conditional list resolves that branch before reading reconciliation.
 	_schemaReady: {
-		database: _healthy
-		if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {migrate: _completed}
-		if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
-		if len(X.state.timers) > 0 {"timer-check": _completed}
+		database: "healthy"
+		if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {migrate: "completed"}
+		if len(X.state.effects) > 0 {"airlock-upgrade": "completed"}
+		if len(X.state.timers) > 0 {"timer-check": "completed"}
 	}
 
 	// The effects as every target reads them. A field's pattern is checked
@@ -514,7 +578,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	_reached: [for e in X.state.effects if e.bridge != _|_ {[if list.Contains(_bridgeNames, e.bridge) {e.bridge}][0]}]
 	_aiEffects: [for e in X.state.effects if e.ai != _|_ {{
 		modality: [if regexp.Match("^(text|image)$", e.ai) {e.ai}][0]
-		tier:     [if regexp.Match("^(cheap|heavy)$", e.tier) {e.tier}][0]
+		tier: [if regexp.Match("^(cheap|heavy)$", e.tier) {e.tier}][0]
 	}}]
 	_aiOn: len(_aiEffects) > 0 || X.capabilities.ai != _|_
 	_bridgeNames: [for b in X.state.bridges {b.name}]
@@ -522,6 +586,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		name: [if regexp.Match(#EffectName, b.name) {b.name}][0]
 		container: [if regexp.Match(#EffectName, b.container) {b.container}][0]
 		port: b.port
+		if b.action != _|_ {action: b.action}
 	}]
 
 	// The secrets, each matched like the fields above. Read from the
@@ -550,6 +615,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	])
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
+	let databaseUrlEnv = ["postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}"]
 	let jwtSecret = "${PGRST_JWT_SECRET:-\(_devJwtSecret)}"
 
 	// The role's password and the userinfo of electric's DATABASE_URL at once,
@@ -627,10 +693,61 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						start_interval: "100ms"
 						start_period:   "5m"
 					}
-					expose: pg: port: 5432
+					expose: pg: {port: 5432, env: "PGPORT"}
+					"process-compose": {
+						activate: "mise x --"
+						shutdown: {signal: 2, timeout_seconds: 5}
+					}
 					entrypoint: {
-						do:  "docker-entrypoint.sh postgres \(strings.Join(#PostgresArgs, " "))"
-						env: compose.environment
+						shell: "nu"
+						do: strings.Join(list.Concat([
+							[
+								"if ('/docker-entrypoint-initdb.d' | path exists) { exec docker-entrypoint.sh postgres \(strings.Join(#PostgresArgs, " ")) }",
+								"let mecha = (if (($env.PRONTO_INITDB_SRC_DIR? | default '') != '') { $env.PRONTO_INITDB_SRC_DIR } else if ('services/database/rls/rls.sql' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) })",
+								"let initdb = (($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir) | path join 'initdb.d')",
+								"rm -rf $initdb; mkdir $initdb",
+								"cp -f ($mecha | path join 'services/database/rls/rls.sql') ($initdb | path join '\(#TenancyMigration)')",
+								"cp -f ($mecha | path join 'services/database/role_passwords.sh') ($initdb | path join '\(#RolePasswordsStep)')",
+							],
+							[if len(X.state.schedules) > 0 {
+								"cp -f ($mecha | path join 'services/ticker/schedule.sql') ($initdb | path join '\(#ScheduleMigration)')"
+							}],
+							[if len(X.state.effects) > 0 {
+								"cp -f ($mecha | path join 'services/durex/graphile.sql') ($initdb | path join '\(X.state.steps.graphile)')"
+							}],
+							[if len(X.state.effects) > 0 {
+								"[(open --raw ($mecha | path join 'services/ticker/schedule.sql')) (open --raw ($mecha | path join 'services/airlock/airlock.sql'))] | str join '' | save --raw -f ($initdb | path join '\(X.state.steps.airlock)')"
+							}],
+							[if len(X.state.migrations) > 0 {
+								"open .bayt/bayt.database.json | get dockerfile.copy.0.srcs | each {|s| cp -f $s ($initdb | path join ($s | path basename)) } | ignore"
+							}],
+							[
+								"exec nu ($mecha | path join 'services/database/entrypoint.nu') $initdb postgres \(strings.Join(#PostgresArgs, " "))",
+							],
+						]), "\n")
+						dockerfile: {
+							shell: "exec"
+							do:    "docker-entrypoint.sh postgres \(strings.Join(#PostgresArgs, " "))"
+						}
+						env: {
+							POSTGRES_USER:          "${POSTGRES_USER:-postgres}"
+							POSTGRES_PASSWORD:      "${POSTGRES_PASSWORD:-postgres}"
+							POSTGRES_DB:            "${POSTGRES_DB:-\(X.meta.app)}"
+							ELECTRIC_PASSWORD:      electricPassword
+							AUTHENTICATOR_PASSWORD: authenticatorPassword
+							// ORDER BY on text reaches a reader, so it sorts the way a
+							// dictionary does, not by byte: bytes put every accent past all
+							// of ASCII and split the alphabet by case, so "ana" follows "Zoe".
+							//
+							// `und` and not a language, because the collation is one per
+							// database and an app serves every locale it declares out of
+							// the same rows.
+							//
+							// ICU and not a libc locale: glibc reorders between versions and
+							// silently invalidates text indexes, where postgres records the
+							// ICU version and warns. --locale=C keeps ctype off libc too.
+							POSTGRES_INITDB_ARGS: "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
+						}
 					}
 					srcs: globs: X.state.migrations
 					dockerfile: {
@@ -654,25 +771,6 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					compose: {
 						ports: ["5432"]
-						environment: {
-							POSTGRES_USER:          "${POSTGRES_USER:-postgres}"
-							POSTGRES_PASSWORD:      "${POSTGRES_PASSWORD:-postgres}"
-							POSTGRES_DB:            "${POSTGRES_DB:-\(X.meta.app)}"
-							ELECTRIC_PASSWORD:      electricPassword
-							AUTHENTICATOR_PASSWORD: authenticatorPassword
-							// ORDER BY on text reaches a reader, so it sorts the way a
-							// dictionary does, not by byte: bytes put every accent past all
-							// of ASCII and split the alphabet by case, so "ana" follows "Zoe".
-							//
-							// `und` and not a language, because the collation is one per
-							// database and an app serves every locale it declares out of
-							// the same rows.
-							//
-							// ICU and not a libc locale: glibc reorders between versions and
-							// silently invalidates text indexes, where postgres records the
-							// ICU version and warns. --locale=C keeps ctype off libc too.
-							POSTGRES_INITDB_ARGS: "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
-						}
 						// One rebuild entry per migration: the list is the consumer's, and
 						// mecha's own stack keeps a fixture outside the migrations directory.
 						develop: watch: [for m in X.state.migrations {action: "rebuild", path: "../\(m)", target: "/docker-entrypoint-initdb.d"}]
@@ -684,6 +782,21 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					migrate: X._image & {
 						if X.state.pgrollDir != _|_ {
 							srcs: globs: [for n, _ in X.state.pgroll {"\(X.state.pgrollDir)/\(n).json"}]
+						}
+						"process-compose": activate: "mise x --"
+						entrypoint: {
+							shell: "nu"
+							do:    #"let os = (match $nu.os-info.name { 'macos' => 'macos', 'windows' => 'windows', _ => 'linux' }); let dir = (if (($env.PRONTO_REPLAY_PGROLL_DIR? | default '') != '') { $env.PRONTO_REPLAY_PGROLL_DIR } else if ('\#(#PgRollDir)' | path exists) { '\#(#PgRollDir)' } else { let d = (($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir) | path join 'pgroll'); rm -rf $d; mkdir $d; let m = (open .bayt/bayt.migrate.json | get dockerfile); ($m | get -o copy | default []) | each {|c| cp ($c.srcs.0) ($d | path join ($c.dst | path basename)) } | ignore; ($m | get -o epilogue | default []) | each {|e| let lines = ($e | lines); if ($lines.0 | str starts-with "COPY <<'PGROLL' /tmp/") { let name = ($lines.0 | parse "COPY <<'PGROLL' /tmp/{name}.parts" | get 0.name); ($lines | skip 1 | take while {|l| $l != "PGROLL" } | str join "" | decode base64) | save --raw -f ($d | path join $name) } else if ($lines.0 | str starts-with "COPY <<'PGROLL' /pgroll/") { let name = ($lines.0 | parse "COPY <<'PGROLL' /pgroll/{name}" | get 0.name); $lines.1 | save --raw -f ($d | path join $name) } else if ($lines.0 | str starts-with "COPY <<'RECONCILE' /pgroll/") { let name = ($lines.0 | parse "COPY <<'RECONCILE' /pgroll/{name}" | get 0.name); ($lines | skip 1 | drop 1 | str join "\n") | save --raw -f ($d | path join $name) } } | ignore; $d }); let script = (if (($env.PRONTO_MIGRATE_SH? | default '') != '') { $env.PRONTO_MIGRATE_SH } else if ('services/migrate/migrate.nu' | path exists) { 'services/migrate/migrate.nu' } else if ('/migrate.sh' | path exists) and ($os != 'windows') { '/migrate.sh' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/migrate/migrate.nu') }); if ($script | str ends-with '.nu') { ^nu $script $dir \#(grammar.#Baseline) } else { ^bash $script $dir \#(grammar.#Baseline) }"#
+							env: {
+								DATABASE_URL: ["postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"]
+								// The schedule step is initdb's alone, so a volume older
+								// than the cluster's first schedule lacks its table.
+								if len(X.state.schedules) > 0 {REQUIRED_TABLES: "schedule"}
+							}
+							after: {
+								database: "healthy"
+								if len(X.state.effects) > 0 {"airlock-upgrade": "completed"}
+							}
 						}
 						dockerfile: {
 							// The database's own image, run as the runner.
@@ -702,7 +815,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								}
 								if len(jsonText) > 8192 {
 									let encoded = '\(base64.Encode(null, jsonText))'
-									let chunks = [for i in list.Range(0, len(encoded), 8192) {"\(strings.ByteSlice(encoded, i, list.Min([i+8192, len(encoded)])))"}]
+									let chunks = [for i in list.Range(0, len(encoded), 8192) {"\(strings.ByteSlice(encoded, i, list.Min([i + 8192, len(encoded)])))"}]
 									"COPY <<'PGROLL' /tmp/\(n).json.parts\n\(strings.Join(chunks, "\n"))\nPGROLL\nRUN mkdir -p \(#PgRollDir) && base64 -d < /tmp/\(n).json.parts > \(#PgRollDir)/\(n).json && rm /tmp/\(n).json.parts"
 								}
 							}],
@@ -711,67 +824,69 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								}],
 							])
 						}
-						compose: {
-							depends_on: {
-								database: _healthy
-								if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
-							}
-							environment: {
-								DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
-								// The schedule step is initdb's alone, so a volume older
-								// than the cluster's first schedule lacks its table.
-								if len(X.state.schedules) > 0 {REQUIRED_TABLES: "schedule"}
-							}
-						}
+						compose: {}
 					}
 				}
 				if len(X.state.effects) > 0 {
 					"airlock-upgrade": X._image & {
+						"process-compose": {
+							activate: "mise x --"
+							env: PGPORT: {peer: "database", port: "pg", part: "port"}
+						}
+						entrypoint: {
+							shell: "nu"
+							do:    "open .bayt/bayt.airlock-upgrade.json | get dockerfile.epilogue.0 | lines | skip 1 | drop 1 | str join (char nl) | ^psql -X --set=ON_ERROR_STOP=1 --single-transaction"
+							env: {
+								PGHOST:     {peer: "database", port: "pg", part: "host"}
+								PGUSER:     "${POSTGRES_USER:-postgres}"
+								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
+							}
+							after: database: "healthy"
+						}
 						dockerfile: {
 							from: (_from & {in: X.meta.images.database}).out
 							entrypoint: ["psql"]
 							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/airlock-upgrade.sql"]
 							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\((#AirlockUpgradeSql & {interpreters: X.state.effectInterpreters}).sql)\nAIRLOCK"]
 						}
-						compose: {
-							depends_on: {
-								database: _healthy
-							}
-							environment: {
-								PGHOST:     "database"
-								PGUSER:     "${POSTGRES_USER:-postgres}"
-								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
-								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
-							}
-						}
+						compose: {}
 					}
 				}
 				if len(X.state.timers) > 0 {
 					"timer-check": X._image & {
+						"process-compose": {
+							activate: "mise x --"
+							env: PGPORT: {peer: "database", port: "pg", part: "port"}
+						}
+						entrypoint: {
+							shell: "nu"
+							do:    "open .bayt/bayt.timer-check.json | get dockerfile.epilogue.0 | lines | skip 1 | drop 1 | str join (char nl) | ^psql -X --set=ON_ERROR_STOP=1 --single-transaction"
+							env: {
+								PGHOST:     {peer: "database", port: "pg", part: "host"}
+								PGUSER:     "${POSTGRES_USER:-postgres}"
+								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
+							}
+							after: {
+								database: "healthy"
+								if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {migrate: "completed"}
+								if len(X.state.effects) > 0 {"airlock-upgrade": "completed"}
+							}
+						}
 						dockerfile: {
 							from: (_from & {in: X.meta.images.database}).out
 							entrypoint: ["psql"]
 							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/timer-check.sql"]
 							epilogue: ["COPY <<'TIMERS' /timer-check.sql\n\(X.state.timerCheck)\nTIMERS"]
 						}
-						compose: {
-							depends_on: {
-								database: _healthy
-								if [if len(X.state.pgroll) > 0 {true}, if len(X.state.pgroll) == 0 {len(X.state.reconcile) > 0}][0] {migrate: _completed}
-								if len(X.state.effects) > 0 {"airlock-upgrade": _completed}
-							}
-							environment: {
-								PGHOST:     "database"
-								PGUSER:     "${POSTGRES_USER:-postgres}"
-								PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
-								PGDATABASE: "${POSTGRES_DB:-\(X.meta.app)}"
-							}
-						}
+						compose: {}
 					}
 				}
 				crud: bayt.healthcheck.http & X._image & {
 					healthcheck: {
-						url:            "http://127.0.0.1:3001/ready"
+						port:           3001
+						path:           "/ready"
 						interval:       "5s"
 						start_interval: "500ms"
 						start_period:   "30s"
@@ -780,20 +895,18 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						from: name: "postgrest/postgrest:v16.4@sha256:d155c6718ed9a9f990d159a2ab7c0a3f16944dbb6d0a0344557421042acfe0df"
 					}
 					expose: {
-						http: port:  3000
-						admin: port: 3001
+						http: {port: 3000, env: "PGRST_SERVER_PORT"}
+						admin: {port: 3001, env: "PGRST_ADMIN_SERVER_PORT"}
 					}
+					"process-compose": activate: "mise x --"
 					entrypoint: {
-						do:  "postgrest"
-						env: compose.environment
-						after: database: "healthy"
-					}
-					compose: {
-						depends_on: X._schemaReady
-						environment: {
+						shell:      "nu"
+						do:         "with-env { PGRST_SERVER_HOST: '127.0.0.1' } { exec postgrest }"
+						dockerfile: {shell: "exec", do: "postgrest"}
+						env: {
 							// Not postgres: PostgREST applies a token role's settings (its
 							// statement_timeout among them) only to roles granted to its login.
-							PGRST_DB_URI:       "postgres://authenticator:\(authenticatorPassword)@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
+							PGRST_DB_URI:       ["postgres://authenticator:\(authenticatorPassword)@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}"]
 							PGRST_DB_SCHEMA:    "public"
 							PGRST_DB_ANON_ROLE: "anon"
 							// Called once per request, in the request's transaction, after the
@@ -802,17 +915,23 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// invisible -- the floor fails closed, so this is not optional.
 							PGRST_DB_PRE_REQUEST:    "public.app_pre_request"
 							PGRST_SERVER_HOST:       "*"
-							PGRST_SERVER_PORT:       "3000"
-							PGRST_ADMIN_SERVER_PORT: "3001"
+							PGRST_SERVER_PORT:       {port: "http", part: "port"}
+							PGRST_ADMIN_SERVER_PORT: {port: "admin", part: "port"}
 							if X._serviceToken {
 								PGRST_JWT_SECRET: jwtSecret
 							}
 						}
+						after: X._schemaReady
 					}
+					compose: {}
 				}
 			}
 			if X.capabilities.auth {
 				"auth": X._image & {
+					"process-compose": {
+						activate: "mise x --"
+						env?:     _
+					}
 					dockerfile: {
 						from: (_from & {in: X.meta.images.auth}).out
 						// deno runs `main.ts` from the working directory, and bayt
@@ -820,16 +939,16 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						workdir: "/app"
 						epilogue: ["RUN mkdir -p /monorepo"]
 					}
-					expose: http: port: 9999
+					expose: http: {port: 9999, env: "PORT"}
 					entrypoint: {
-						do:  "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts"
-						env: compose.environment
-						after: database: "healthy"
-					}
-					compose: {
-						depends_on: X._schemaReady
-						environment: {
-							DATABASE_URL:              databaseUrl
+						do:    "let app = (if (($env.AUTH_APP_DIR? | default '') != '') { $env.AUTH_APP_DIR } else if ('/app/main.ts' | path exists) { '/app' } else if ('services/auth/main.ts' | path exists) { 'services/auth' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/auth') }); exec deno run --allow-net --allow-env --config ($app | path join 'deno.json') ($app | path join 'main.ts')"
+						shell: "nu"
+						dockerfile: {
+							do:    "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts"
+							shell: "exec"
+						}
+						env: {
+							DATABASE_URL:              databaseUrlEnv
 							AUTH_STATEMENT_TIMEOUT_MS: "\(X.meta.bounds.authStatementMs)"
 							PGRST_JWT_SECRET:          jwtSecret
 							WEBAUTHN_RP_ID:            "${WEBAUTHN_RP_ID:-localhost}"
@@ -848,12 +967,16 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								}
 							}
 						}
+						after: X._schemaReady
 					}
+					compose: {}
 				}
 			}
 			caddy: bayt.healthcheck.http & X._image & {
+				"process-compose": activate: "mise x --"
 				healthcheck: {
-					url:            "http://127.0.0.1:8080/health"
+					port:           8080
+					path:           "/health"
 					interval:       "5s"
 					start_interval: "500ms"
 					start_period:   "10s"
@@ -923,36 +1046,59 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// browser's six-connections-per-origin cap only exists on
 				// HTTP/1.1, and a second front door is a path that only ever
 				// runs on a laptop (docs/proxy.md).
-				expose: door: {
-					port: X.meta.door.port
-					udp:  true
-					publish: environment: X.meta.door.env
-					if X.meta.door.host != _|_ {host: X.meta.door.host}
+				expose: {
+					http: {port: 8080, env: "PORT"}
+					door: {
+						port: X.meta.door.port
+						udp:  true
+						publish: environment: X.meta.door.env
+						if X.meta.door.host != _|_ {host: X.meta.door.host}
+					}
 				}
 				let validators = #"set -e -o pipefail; roots=$(caddy adapt --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile | awk '{ while (match($0, /"root":"[^"]*"/)) { print substr($0, RSTART + 8, RLENGTH - 9); $0 = substr($0, RSTART + RLENGTH) } }' | sort -u); if [ -n "$roots" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < "$f"); printf "$q%s$q" "${h%% *}" > "$f.etag"; done' sh '"' {} +; fi; "#
 
 				// An ORIGIN that is no origin stops the door as it starts: a
 				// template writes it into markup as it stands.
 				let admitted = #"case "${ORIGIN#http://}" in "$ORIGIN") h=${ORIGIN#https://};; *) h=${ORIGIN#http://};; esac; case "$h" in "$ORIGIN"|""|*[!A-Za-z0-9.:-]*) echo "ORIGIN '$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example" >&2; exit 1;; esac; "#
-				let scripts = [if X.meta.served != _|_ {"PRONTO_RELEASE_SCRIPTS=$(cat /etc/caddy/release-scripts 2>/dev/null || true); export PRONTO_RELEASE_SCRIPTS; printf 'PRONTO_RELEASE_SCRIPTS=%s\\n' \"$PRONTO_RELEASE_SCRIPTS\" >> /etc/caddy/env; "}, ""][0]
+				let scripts = [if X.meta.served != _|_ {#"PRONTO_RELEASE_SCRIPTS=$(cat /etc/caddy/release-scripts); export PRONTO_RELEASE_SCRIPTS; printf 'PRONTO_RELEASE_SCRIPTS=%s\n' "$PRONTO_RELEASE_SCRIPTS" >> /etc/caddy/env; "#}, ""][0]
 				let tlsEnv = #": > /etc/caddy/env; case "$h" in *:*) _p=${h##*:};; *) _p=8443;; esac; export CADDY_TLS_HOST_PORT="${CADDY_TLS_HOST_PORT:-$_p}"; printf 'CADDY_TLS_HOST_PORT=%s\n' "$CADDY_TLS_HOST_PORT" >> /etc/caddy/env; if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; printf 'CADDY_TLS=%s\n' "$CADDY_TLS" >> /etc/caddy/env; fi; "#
+				let hostScripts = [if X.meta.served != _|_ {#"let sfile = ($env.CADDY_SCRIPTS_FILE? | default (if (($env.BAYT_LOCAL_SERVED_DIR? | default "") != "") { ($env.BAYT_LOCAL_SERVED_DIR | path join "caddy/release-scripts") } else { "/etc/caddy/release-scripts" })); let rel = (if ($sfile | path exists) { open --raw $sfile | str trim } else { "" }); $env_lines = ($env_lines | append $"PRONTO_RELEASE_SCRIPTS=($rel)"); $extra_env = ($extra_env | merge { PRONTO_RELEASE_SCRIPTS: $rel }); "#}, ""][0]
 				entrypoint: {
-					do: "\(admitted)\(tlsEnv)\(scripts)\(validators)exec caddy run --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile"
-					shell: "sh"
-					env:   compose.environment
+					shell: "nu"
+					do:    #"let origin = ($env.ORIGIN? | default ""); let h = ($origin | str replace -r '^https?://' ''); if ($h == $origin) or ($h | is-empty) or ($h !~ '^[A-Za-z0-9.:-]+$') { print -e $"ORIGIN '($origin)' is no origin: set it to the scheme and host readers reach the door at, as https://app.example"; exit 1 }; let p = (if ($h | str contains ":") { $h | split row ":" | last } else { "8443" }); let tls_port = (if (($env.CADDY_TLS_HOST_PORT? | default "") != "") { $env.CADDY_TLS_HOST_PORT } else { $p }); let work = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let cdir = ($work | path join $"caddy-($nu.pid)-(random int 1000..9999)"); mkdir ($cdir | path join "data") ($cdir | path join "config"); let env_file = ($cdir | path join "env"); let certs = (($env.CADDY_CERT_DIR? | default ".certs") | path expand | str replace -a (char -u 5c) '/'); let served_dir = ($env.BAYT_LOCAL_SERVED_DIR? | default ""); let is_local = (($served_dir != "") and (($served_dir | path join "srv") | path exists)); let cfg_src = (if $is_local { '\#(X.meta.caddyfile)' } else { ($env.CADDY_CONFIG_FILE? | default (if ('\#(X.meta.caddyfile)' | path exists) { '\#(X.meta.caddyfile)' } else { "/etc/caddy/Caddyfile" })) }); mut env_lines = [$"CADDY_TLS_HOST_PORT=($tls_port)"]; mut extra_env = { XDG_DATA_HOME: ($cdir | path join "data"), XDG_CONFIG_HOME: ($cdir | path join "config"), CADDY_TLS_HOST_PORT: $tls_port }; if $is_local { let served_fwd = ($served_dir | path expand | str replace -a (char -u 5c) '/'); let srv_root = $"($served_fwd)/srv"; let omni_root = $"($served_fwd)/omnishell"; $env_lines = ($env_lines | append [$"CADDY_DOOR_PORT=($tls_port)" $"PRONTO_SRV_ROOT=($srv_root)" $"PRONTO_OMNISHELL_ROOT=($omni_root)"]); $extra_env = ($extra_env | merge { CADDY_DOOR_PORT: $tls_port, PRONTO_SRV_ROOT: $srv_root, PRONTO_OMNISHELL_ROOT: $omni_root }) }; if (($certs | path join "localhost.pem") | path exists) { let tv = $"($certs)/localhost.pem ($certs)/localhost-key.pem"; $env_lines = ($env_lines | append $"CADDY_TLS=($tv)"); $extra_env = ($extra_env | merge { CADDY_TLS: $tv }) }; \#(hostScripts)($env_lines | str join (char nl)) + (char nl) | save -f $env_file; with-env $extra_env { let adapted = (^caddy adapt --envfile $env_file --config $cfg_src --adapter caddyfile); let roots = ($adapted | split row "," | parse -r '"root":"(?<r>[^"]+)"' | get -o r | default [] | uniq); for r in $roots { if ($r | path exists) { glob ($r | path join "**/*" | str replace -a (char -u 5c) '/') | where ($it | path type) == "file" and (not ($it | str ends-with ".etag")) | each {|f| let etag = $"($f).etag"; if (not ($etag | path exists)) { let d = (open --raw $f | hash sha256); ((char dquote) + $d + (char dquote)) | save --raw -f $etag } } | ignore } }; exec caddy run --envfile $env_file --config $cfg_src --adapter caddyfile }"#
+					dockerfile: {
+						shell: "sh"
+						do:    "\(admitted)\(tlsEnv)\(scripts)\(validators)exec caddy run --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile"
+					}
+					env: {
+						// The Caddyfile substitutes this into the electric route, which is
+						// the only place the secret is added. Same default as the electric
+						// service reads, and both are overridden together or neither.
+						ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
+						ORIGIN:          ["${ORIGIN:-\(X.meta.door.scheme)://", {port: "door", host: "localhost"}, "}"]
+						if X.capabilities.server {
+							PRONTO_UPSTREAM_CRUD:     {peer: "crud", port: "http"}
+							PRONTO_UPSTREAM_ELECTRIC: {peer: "electric", port: "http"}
+						}
+						if X.capabilities.auth {
+							PRONTO_UPSTREAM_AUTH: {peer: "auth", port: "http"}
+						}
+						if X._wakes {
+							PRONTO_UPSTREAM_TICKER: {peer: "ticker", port: "http"}
+						}
+						if X.capabilities.blobs {
+							PRONTO_UPSTREAM_RCLONE_S3: {peer: "rclone-s3", port: "http"}
+							PRONTO_UPSTREAM_IMGPROXY:  {peer: "imgproxy", port: "http"}
+						}
+						...
+					}
 					if X.capabilities.server {
 						after: crud: "healthy"
 					}
 				}
 				compose: {
 					build: additional_contexts: root: strings.TrimSuffix("../\(X.meta.root)", "/")
-					// The Caddyfile substitutes this into the electric route, which is
-					// the only place the secret is added. Same default as the electric
-					// service reads, and both are overridden together or neither.
-					environment: {
-						ELECTRIC_SECRET: "${ELECTRIC_SECRET:-\(_devElectricSecret)}"
-						ORIGIN:          origin
-					}
+					environment: ORIGIN: origin
 					// Watch paths are from .bayt/ too, hence the ../ on each.
 					develop: watch: list.Concat([
 						[{action: "sync+restart", path: "../\(X.meta.caddyfile)", target: "/etc/caddy/Caddyfile"}],
@@ -973,21 +1119,33 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			}
 			if X.capabilities.server {
 				electric: X._image & {
-					dockerfile: {
-						from: name: "docker.io/electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
-						// Initialization must retain requests already waiting for the snapshot.
-						preamble: ["COPY <<'ELIXIR' /tmp/electric-patch.exs\n\(_electricPatch)\nELIXIR"]
-						epilogue: ["RUN DATABASE_URL=postgresql://compile:compile@localhost/compile ELECTRIC_SECRET=compile-only /app/bin/entrypoint eval 'Code.eval_file(\"/tmp/electric-patch.exs\")' && rm /tmp/electric-patch.exs"]
+					"process-compose": {
+						activate: "mise x --"
+						env: {
+							ADMIN_DATABASE_URL: databaseUrlEnv
+							PGRST_JWT_SECRET:   jwtSecret
+						}
 					}
-					compose: {
-						depends_on: X._schemaReady
-						environment: {
+					healthcheck: bayt.healthcheck.#http & {
+						port:         3000
+						path:         "/v1/health"
+						interval:     "1s"
+						timeout:      "5s"
+						retries:      60
+						start_period: "0s"
+					}
+					expose: http: {port: 3000, env: "PORT"}
+					entrypoint: {
+						shell:      "nu"
+						do:         "let mecha = (if ('services/electric/main.ts' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) }); let auth_dir = (if (($env.AUTH_APP_DIR? | default '') != '') { $env.AUTH_APP_DIR } else { ($mecha | path join 'services/auth') }); let elec_dir = (if (($env.ELECTRIC_APP_DIR? | default '') != '') { $env.ELECTRIC_APP_DIR } else { ($mecha | path join 'services/electric') }); exec deno run --allow-net --allow-env --allow-read --config ($auth_dir | path join 'deno.json') ($elec_dir | path join 'main.ts')"
+						dockerfile: null
+						env: {
 							// Its own role, holding BYPASSRLS as a stated attribute: without it
 							// current_scopes() is empty and every shape syncs empty, silently.
 							// Its password is the one the database's initdb step sets
 							// (#RolePasswordsStep): another container's connection
 							// authenticates by scram, as initdb trusts only loopback.
-							DATABASE_URL: "postgresql://electric:\(electricPassword)@database:5432/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"
+							DATABASE_URL: ["postgresql://electric:\(electricPassword)@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"]
 							// The proxy is the only way in: caddy runs forward_auth against the
 							// gatekeeper and then adds this, so a request that reaches electric
 							// without passing the gate has no secret to present.
@@ -997,6 +1155,15 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// ownership of every table it names.
 							ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
 						}
+						after: X._schemaReady
+					}
+					dockerfile: {
+						from: name: "docker.io/electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
+						// Initialization must retain requests already waiting for the snapshot.
+						preamble: ["COPY <<'ELIXIR' /tmp/electric-patch.exs\n\(_electricPatch)\nELIXIR"]
+						epilogue: ["RUN DATABASE_URL=postgresql://compile:compile@localhost/compile ELECTRIC_SECRET=compile-only /app/bin/entrypoint eval 'Code.eval_file(\"/tmp/electric-patch.exs\")' && rm /tmp/electric-patch.exs"]
+					}
+					compose: {
 						healthcheck: {
 							test: ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
 							interval:     "5s", timeout:         "5s", retries: 12
@@ -1007,18 +1174,42 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				}
 			}
 			if X.capabilities.capture {
-				redis: bayt.healthcheck.redis & X._image & {
-					healthcheck: {
-						interval:       "5s"
-						retries:        6
-						start_period:   "10s"
-						start_interval: "500ms"
+				redis: X._image & {
+					"process-compose": activate: "mise x --"
+					healthcheck: bayt.healthcheck.#tcp & {
+						port:         6379
+						interval:     "5s"
+						timeout:      "3s"
+						retries:      36
+						start_period: "0s"
+					}
+					expose: redis: {port: 6379, env: "REDIS_PORT"}
+					entrypoint: {
+						shell:      "nu"
+						do:         "exec redis-server --port ($env.REDIS_PORT? | default '6379') --save '' --appendonly no"
+						dockerfile: null
 					}
 					dockerfile: {
 						from: name: "redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933"
 						workdir: "/data"
+						healthcheck: {
+							test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+							interval:     "5s"
+							timeout:      "3s"
+							retries:      6
+							start_period: "10s"
+						}
 					}
-					compose: {}
+					compose: {
+						healthcheck: {
+							test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+							interval:       "5s"
+							timeout:        "3s"
+							retries:        6
+							start_period:   "10s"
+							start_interval: "500ms"
+						}
+					}
 				}
 				"mesh-events": bayt.healthcheck.tcp & X._image & {
 					healthcheck: {
@@ -1027,19 +1218,50 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						start_interval: "500ms"
 						start_period:   "30s"
 					}
-					dockerfile: from: (_from & {in: X.meta.images.mesh}).out
+					"process-compose": {
+						activate: "mise x --"
+						env: CADDY_PORT: {peer: "caddy", port: "http", part: "port"}
+					}
+					expose: {
+						http: {port: 3500, env: "DAPR_HTTP_PORT"}
+						grpc: {port: 50002, env: "DAPR_INTERNAL_GRPC_PORT"}
+					}
+					entrypoint: {
+						shell:      "nu"
+						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'mesh-events-($nu.pid)-(random int 1000..9999)'); mkdir $dir; let mdir = (if (($env.MECHA_MESH_DIR? | default '') != '') { $env.MECHA_MESH_DIR } else if ('services/mesh/dapr/components/resiliency.yaml' | path exists) { 'services/mesh' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/mesh') }); cp -f ($mdir | path join 'dapr/components/resiliency.yaml') ($dir | path join 'resiliency.yaml'); cp -f ($mdir | path join 'dapr/components/redis-streams.yaml') ($dir | path join 'redis-streams.yaml'); exec daprd --app-id mechaed --dapr-listen-addresses 127.0.0.1 --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path $dir --app-channel-address 127.0.0.1 --app-port $env.CADDY_PORT --dapr-http-port $env.DAPR_HTTP_PORT --dapr-grpc-port 0 --dapr-internal-grpc-port $env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0 --log-level info --enable-api-logging"
+						dockerfile: null
+						env: REDIS_HOST: {peer: "redis", port: "redis"}
+						after: {caddy: "started", redis: "started"}
+					}
+					dockerfile: {
+						from: (_from & {in: X.meta.images.mesh}).out
+						preamble: ["COPY <<'REDIS' /dapr/components/redis-streams.yaml\n\(_redisStreams)\nREDIS"]
+					}
 					compose: {
-						depends_on: {caddy: _started, redis: _started}
 						restart: "on-failure"
 					}
 				}
 				conduit: bayt.healthcheck.http & X._image & {
 					healthcheck: {
-						url:            "http://127.0.0.1:8080/healthz"
+						port:           8080
+						path:           "/healthz"
 						interval:       "5s"
 						retries:        20
 						start_period:   "120s"
 						start_interval: "500ms"
+					}
+					"process-compose": activate: "mise x --"
+					expose: http: {port: 8080, env: "CONDUIT_API_HTTP_ADDRESS_PORT"}
+					entrypoint: {
+						shell: "nu"
+						do:    "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'conduit-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'pipelines') ($dir | path join 'connectors'); let conn = (which conduit-connector-http | first | get path); cp -f $conn ($dir | path join 'connectors' ($conn | path basename)); open --raw '\(X.meta.conduitTemplate)' | str replace -a '${DATABASE_URL}' $env.DATABASE_URL | str replace -a '${MESH_EVENTS_URL}' $env.MESH_EVENTS_URL | save -f ($dir | path join 'pipelines/cdc-to-bus.yaml'); exec conduit run --db.type inmemory --pipelines.path ($dir | path join 'pipelines') --connectors.path ($dir | path join 'connectors') --api.http.address $\"127.0.0.1:($env.CONDUIT_API_HTTP_ADDRESS_PORT)\" --api.grpc.address '127.0.0.1:0'"
+						env: {
+							DATABASE_URL:    databaseUrlEnv
+							MESH_EVENTS_URL: {peer: "mesh-events", port: "http", prefix: "http://"}
+						}
+						// The database is named ahead of the embedding because key
+						// order is the order the waits are emitted in.
+						after: {database: "healthy", X._schemaReady, "mesh-events": "started"}
 					}
 					srcs: globs: [X.meta.conduitTemplate]
 					dockerfile: {
@@ -1054,12 +1276,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						cmd: ["sh", "-c", "mkdir -p /conduit/pipelines && envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml && exec /app/conduit run"]
 					}
 					compose: {
-						// The database is named ahead of the embedding because key
-						// order is the order the waits are emitted in.
-						depends_on: {database: _healthy, X._schemaReady, "mesh-events": _started}
 						develop: watch: [{action: "sync+restart", path: "../\(X.meta.conduitTemplate)", target: "/conduit/cdc-to-bus.yaml.tmpl"}]
 						environment: {
-							DATABASE_URL:           databaseUrl
 							CONDUIT_PIPELINES_PATH: "/conduit/pipelines"
 							CONDUIT_DB_TYPE:        "inmemory"
 						}
@@ -1070,12 +1288,25 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			if X.capabilities.blobs {
 				// rclone's own image: its entrypoint makes the bucket and serves it.
 				"rclone-s3": X._image & {
+					"process-compose": activate: "mise x --"
+					healthcheck: bayt.healthcheck.#tcp & {
+						port:         3900
+						interval:     "1s"
+						timeout:      "5s"
+						retries:      10
+						start_period: "0s"
+					}
+					expose: http: {port: 3900, env: "RCLONE_PORT"}
+					entrypoint: {
+						shell: "nu"
+						do:    "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'rclone-s3-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join $env.RCLONE_LOCAL_BUCKET); exec rclone serve s3 $\"--addr=127.0.0.1:($env.RCLONE_PORT? | default '3900')\" --vfs-cache-mode=off $dir"
+						env: RCLONE_LOCAL_BUCKET: "mecha-objects"
+					}
 					dockerfile: {
 						from: name: "rclone/rclone:1.71.0@sha256:fd635aecd9667ee3c3bf920d14118090d4f2a83a080c1fa77e0bafbd4587ca87"
 						entrypoint: ["sh", "-c", "mkdir -p \"/data/$RCLONE_LOCAL_BUCKET\" && exec rclone serve s3 --addr=0.0.0.0:3900 --vfs-cache-mode=off /data"]
 					}
 					compose: {
-						environment: RCLONE_LOCAL_BUCKET: "mecha-objects"
 						// The airlock stores an effect's bytes here through its daprd,
 						// which reaches only what stands on airlock-egress.
 						if len(X._effects) > 0 {networks: ["default", "airlock-egress"]}
@@ -1087,22 +1318,37 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 				}
 				imgproxy: X._image & {
-					dockerfile: from: name: "ghcr.io/imgproxy/imgproxy:v3.31.1@sha256:2b7a56dbf9c8a8e12e7109a5bdd27d31a8c1aa49f2116c927c6aedc37e18db98"
-					compose: {
-						depends_on: "rclone-s3": _started
-						environment: {
+					"process-compose": activate: "mise x --"
+					healthcheck: bayt.healthcheck.#http & {
+						port:         8081
+						path:         "/health"
+						interval:     "1s"
+						timeout:      "5s"
+						retries:      10
+						start_period: "0s"
+					}
+					expose: http: {port: 8081, env: "IMGPROXY_PORT"}
+					entrypoint: {
+						shell:      "nu"
+						do:         "if (which imgproxy | is-not-empty) { with-env { IMGPROXY_BIND: $\"127.0.0.1:($env.IMGPROXY_PORT? | default '8081')\" } { exec imgproxy } } else { exec deno eval \"Deno.serve({hostname:'127.0.0.1',port:Number(Deno.env.get('IMGPROXY_PORT')||8081)},async(req)=>{const u=new URL(req.url);if(u.pathname==='/health')return new Response('ok');const k=(u.pathname.split('s3://')[1]||u.pathname.split('s3:/')[1]||'').split('@')[0];if(k){const r=await fetch(Deno.env.get('IMGPROXY_S3_ENDPOINT')+'/'+k);return new Response(r.body,{status:r.status,headers:r.headers});}return new Response('not found',{status:404});})\" }"
+						dockerfile: null
+						env: {
 							IMGPROXY_USE_S3:      "true"
-							IMGPROXY_S3_ENDPOINT: "http://rclone-s3:3900"
+							IMGPROXY_S3_ENDPOINT: {peer: "rclone-s3", port: "http", prefix: "http://"}
 							// rclone serve s3 without auth keys accepts any credentials;
 							// imgproxy's S3 client still insists on having a pair.
 							AWS_ACCESS_KEY_ID:                  "${RCLONE_ACCESS_KEY:-GK000000000000000000000000}"
 							AWS_SECRET_ACCESS_KEY:              "${RCLONE_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000000}"
 							AWS_REGION:                         "rclone"
-							IMGPROXY_BIND:                      ":8081"
 							IMGPROXY_MAX_SRC_RESOLUTION:        "50"
 							IMGPROXY_SET_CANONICAL_HEADER:      "false"
 							IMGPROXY_CACHE_CONTROL_PASSTHROUGH: "true"
 						}
+						after: "rclone-s3": "started"
+					}
+					dockerfile: from: name: "ghcr.io/imgproxy/imgproxy:v3.31.1@sha256:2b7a56dbf9c8a8e12e7109a5bdd27d31a8c1aa49f2116c927c6aedc37e18db98"
+					compose: {
+						environment: IMGPROXY_BIND: ":8081"
 						healthcheck: {
 							test: ["CMD-SHELL", #"bash -c 'echo -e "GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n" > /dev/tcp/127.0.0.1/8081'"#]
 							interval:     "5s", timeout:         "5s", retries: 6
@@ -1114,6 +1360,38 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			}
 			if len(X.state.pipelines)+len(X.state.computations) > 0 {
 				transform: X._image & {
+					"process-compose": {
+						activate: "mise x --"
+						if len(X.state.computations) > 0 {
+							env: {
+								COMPUTE_URL:   {peer: "compute", port: "tcp", prefix: "http://"}
+								COMPUTE_GROUP: "\(X.meta.app)-compute"
+							}
+						}
+					}
+					entrypoint: {
+						shell: "nu"
+						do: strings.Join(list.Concat([
+							["let mecha = (if ('services/transform/cdc-trace.yaml' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) }); let tdir = (if (($env.MECHA_TRANSFORM_DIR? | default '') != '') { $env.MECHA_TRANSFORM_DIR } else { ($mecha | path join 'services/transform') }); let cdir = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else { ($mecha | path join 'services/compute') }); exec redpanda-connect streams --set 'http.enabled=false' --no-api -r ($tdir | path join 'cdc-trace.yaml')"],
+							[for p in X.state.pipelines {"'\(p.file)'"}],
+							[if len(X.state.computations) > 0 {"($cdir | path join 'events.yaml')"}],
+						]), " ")
+						env: {
+							// Straight to PostgREST: the proxy's client-facing Prefer
+							// injection would clobber the pipelines' merge-duplicates upserts.
+							CRUD_URL:  {peer: "crud", port: "http", prefix: "http://"}
+							REDIS_URL: {peer: "redis", port: "redis", prefix: "redis://"}
+							if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {COMPUTE_GROUP: "\(X.meta.app)-compute"}
+							if X.capabilities.auth {
+								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
+							}
+						}
+						after: {
+							redis: "healthy"
+							crud:  "healthy"
+							if len(X.state.computations) > 0 {compute: "healthy"}
+						}
+					}
 					srcs: globs: [for p in X.state.pipelines {p.file}]
 					dockerfile: {
 						from: name: "redpandadata/connect:4.114.0@sha256:481e8df48ed733f080623ae67f0dccc82d29ae509dfb3f957347a9e900e74910"
@@ -1125,20 +1403,6 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						cmd: list.Concat([["streams", "--no-api", "-r", "/cdc-trace.yaml"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"/compute-events.yaml"}]])
 					}
 					compose: {
-						depends_on: {redis: _healthy, crud: _healthy}
-						if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {
-							depends_on: compute: _healthy
-						}
-						environment: {
-							// Straight to PostgREST: the proxy's client-facing Prefer
-							// injection would clobber the pipelines' merge-duplicates upserts.
-							CRUD_URL:  "http://crud:3000"
-							REDIS_URL: "redis://redis:6379"
-							if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {COMPUTE_GROUP: "\(X.meta.app)-compute"}
-							if X.capabilities.auth {
-								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
-							}
-						}
 						restart: "on-failure"
 						if len(X.state.pipelines) > 0 {
 							develop: watch: [for p in X.state.pipelines {
@@ -1178,6 +1442,13 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// Healthy after durable ingress starts; bootstrap calculations are
 				// queued and do not block capture of subsequent invalidations.
 				compute: bayt.healthcheck.tcp & X._image & {
+					"process-compose": activate: "mise x --"
+					taskfile: {}
+					cmd: "duckdb": {
+						shell:      "nu"
+						dockerfile: null
+						do:         "let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '.installed-v1.5.6'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^mise x -- deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^mise x -- deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts')"
+					}
 					healthcheck: {
 						port:           9997
 						interval:       "5s"
@@ -1185,6 +1456,40 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// Native programs compile and bootstrap sequentially before the listener opens.
 						if X.state.duckstreamEngine == "feldera" {start_period: "\(30 * len(X.state.computations))m"}
 						if X.state.duckstreamEngine == "duckdb-snapshot" {start_period: "15m"}
+					}
+					expose: tcp: {port: 9997, env: "PORT"}
+					entrypoint: {
+						shell:      "nu"
+						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let lake = ($base | path join $'lake-($nu.pid)-(random int 1000..9999)'); mkdir $lake; let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '.installed-v1.5.6'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts'); with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir, LAKE_DIR: $lake } { exec deno run --unstable-worker-options --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"
+						dockerfile: null
+						env: {
+							CRUD_URL:          {peer: "crud", port: "http", prefix: "http://"}
+							DATABASE_URL:      ["postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}"]
+							CDC_SLOT:          (#ConduitSlot & {app: X.meta.app}).name
+							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-duckdb-snapshot}"
+							COMPUTATIONS: json.Marshal([for c in X.state.computations {
+								name:       c.name
+								file:       c.file
+								if c.feldera != _|_ {feldera: c.feldera}
+								to:         c.to
+								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
+								wasm:       c.wasm
+								endowments: c.endowments
+								if c.onComplete != _|_ {onComplete: c.onComplete}
+								if c.types != _|_ {types: c.types}
+								if c.queryTypes != _|_ {queryTypes: c.queryTypes}
+								if c.sinkTypes != _|_ {sinkTypes: c.sinkTypes}
+								if c.declaredReads != _|_ {declaredReads: c.declaredReads}
+							}])
+							if X.capabilities.auth {
+								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
+							}
+						}
+						after: {
+							X._schemaReady
+							crud:    "healthy"
+							conduit: "healthy"
+						}
 					}
 					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}], [for f in _feldera {f.file}]])
 					dockerfile: {
@@ -1196,17 +1501,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						])
 					}
 					compose: {
-						depends_on: {X._schemaReady, crud: _healthy}
-						if X.state.duckstreamEngine == "duckdb-snapshot" {depends_on: conduit: _healthy}
 						if X.state.duckstreamEngine == "feldera" {depends_on: feldera: _healthy}
 						environment: {
-							CRUD_URL:     "http://crud:3000"
-							DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
-							LAKE_DIR:     "/lake"
-							CDC_SLOT: (#ConduitSlot & {app: X.meta.app}).name
+							LAKE_DIR:          "/lake"
 							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-\(X.state.duckstreamEngine)}"
 							if X.state.duckstreamEngine == "feldera" {
-								FELDERA_URL: "http://feldera:8080"
+								FELDERA_URL:                 "http://feldera:8080"
 								FELDERA_COMPILATION_PROFILE: "${FELDERA_COMPILATION_PROFILE:-optimized}"
 							}
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
@@ -1223,9 +1523,6 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								if c.sinkTypes != _|_ {sinkTypes: c.sinkTypes}
 								if c.declaredReads != _|_ {declaredReads: c.declaredReads}
 							}])
-							if X.capabilities.auth {
-								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
-							}
 						}
 						restart: "on-failure"
 						develop: watch: list.Concat([
@@ -1254,26 +1551,34 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			// sends.
 			if X._wakes {
 				ticker: X._image & {
-					dockerfile: {
-						from: (_from & {in: X.meta.images.ticker}).out
-						workdir: "/app"
-					}
-					compose: {
-						depends_on: crud: _healthy
-						environment: {
+					"process-compose": activate: "mise x --"
+					expose: http: {port: 9998, env: "PORT"}
+					entrypoint: {
+						shell:      "nu"
+						do:         "let app = (if (($env.TICKER_APP_DIR? | default '') != '') { $env.TICKER_APP_DIR } else if ('services/ticker/main.ts' | path exists) { 'services/ticker' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/ticker') }); exec deno run --allow-net --allow-env --config ($app | path join 'deno.json') ($app | path join 'main.ts')"
+						dockerfile: null
+						env: {
 							// Straight to PostgREST, like the pipelines above.
-							CRUD_URL:        "http://crud:3000"
+							CRUD_URL:        {peer: "crud", port: "http", prefix: "http://"}
 							CALL_TIMEOUT_MS: "\(X.meta.bounds.tickerCallMs)"
 							// The units a tick needs up, each asleep at cloud tier:
 							// mesh-events, never mesh, the daprd bundled with the WAL
 							// reader and the pipeline worker; and the airlock, for the
 							// job an interpreter enqueued.
-							WAKE_URLS: strings.Join(list.Concat([
-								[if X.capabilities.capture {"http://mesh-events:3500/v1.0/healthz/outbound"}],
-								[if len(X.state.effects) > 0 {"http://airlock:9997/healthz"}],
-							]), ",")
+							WAKE_URLS: list.Concat([
+								[if X.capabilities.capture {{peer: "mesh-events", port: "http", prefix: "http://", suffix: "/v1.0/healthz/outbound"}}],
+								[if X.capabilities.capture && len(X.state.effects) > 0 {","}],
+								[if len(X.state.effects) > 0 {{peer: "airlock", port: "tcp", prefix: "http://", suffix: "/healthz"}}],
+							])
 							SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
 						}
+						after: crud: "healthy"
+					}
+					dockerfile: {
+						from: (_from & {in: X.meta.images.ticker}).out
+						workdir: "/app"
+					}
+					compose: {
 						// The airlock's health port, on a network holding the two alone.
 						if len(X.state.effects) > 0 {networks: ["default", "airlock-wake"]}
 						restart: "on-failure"
@@ -1282,15 +1587,21 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// What pokes the ticker. services/clock/clock.yaml states the
 				// pipeline and why the cadence is what it is.
 				clock: X._image & {
-					dockerfile: from: (_from & {in: X.meta.images.clock}).out
-					compose: {
-						depends_on: ticker: _started
-						environment: {
-							POKE_URL:      "http://ticker:9998"
+					"process-compose": activate: "mise x --"
+					entrypoint: {
+						shell:      "nu"
+						do:         "let yml = (if (($env.CLOCK_YAML? | default '') != '') { $env.CLOCK_YAML } else if ('services/clock/clock.yaml' | path exists) { 'services/clock/clock.yaml' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/clock/clock.yaml') }); exec redpanda-connect run --set 'http.enabled=false' $yml"
+						dockerfile: null
+						env: {
+							POKE_URL:      {peer: "ticker", port: "http", prefix: "http://"}
 							POKE_INTERVAL: "${POKE_INTERVAL:-60s}"
 							POKE_CALLER:   "compose"
 							SERVICE_JWT:   "${SERVICE_JWT:-\(_devServiceJwt)}"
 						}
+						after: ticker: "started"
+					}
+					dockerfile: from: (_from & {in: X.meta.images.clock}).out
+					compose: {
 						restart: "on-failure"
 					}
 				}
@@ -1307,6 +1618,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			// the cluster is.
 			if len(X.state.effects) > 0 {
 				airlock: bayt.healthcheck.tcp & X._image & {
+					"process-compose": activate: "mise x --"
 					// The port opens once every handler is admitted and the worker
 					// runs; it serves nothing.
 					healthcheck: {
@@ -1314,6 +1626,33 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						interval:       "5s"
 						start_interval: "500ms"
 						start_period:   "30s"
+					}
+					expose: tcp: {port: 9997, env: "PORT"}
+					entrypoint: {
+						shell: "nu"
+						do: strings.Join(list.Concat([
+							["let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'airlock-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'effects'); cp -f '\(X.meta.airlock)' ($dir | path join 'effects.json');"],
+							[for e in X._effects {"cp -f '\(e.handler)' ($dir | path join 'effects/\(e.name).js');"}],
+							["let app = (if (($env.AIRLOCK_APP_DIR? | default '') != '') { $env.AIRLOCK_APP_DIR } else if ('services/airlock/main.ts' | path exists) { 'services/airlock' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/airlock') }); with-env { AIRLOCK_DIR: $dir } { exec deno run --frozen --unstable-worker-options --allow-net --allow-read --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"],
+						]), " ")
+						env: {
+							// The owner, not `service`: the ledger is closed to every
+							// other role, and Graphile's migrate check, run at every
+							// start, alters its own schema after an upgrade.
+							DATABASE_URL: databaseUrlEnv
+							MESH_URL:     {peer: "airlock-mesh", port: "http", prefix: "http://"}
+							if len(X.state.bridges) > 0 {AIRLOCK_TARGET: "local"}
+							// An answer's bytes go to the blob plane, served by imgproxy
+							// (services/airlock/blobs.ts).
+							if X.capabilities.blobs {BLOB_URL: "/img/insecure/plain/s3://mecha-objects/"}
+
+							// A secret has no default: compose refuses to start without
+							// it rather than hand a handler a guessable one.
+							for k in X._secrets {
+								"\(k)": "${\(k):?\(k) is required: an effect declares it}"
+							}
+						}
+						after: {X._schemaReady, "airlock-mesh": "healthy"}
 					}
 					srcs: globs: list.Concat([[X.meta.airlock], [for e in X._effects {e.handler}]])
 					dockerfile: {
@@ -1332,24 +1671,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						cmd: ["run", "--frozen", "--unstable-worker-options", "--allow-net=database:5432,airlock-mesh:3500,0.0.0.0:9997", "--allow-read", "--allow-env", "--allow-sys", "main.ts"]
 					}
 					compose: {
-						depends_on: {X._schemaReady, "airlock-mesh": _healthy}
-						environment: {
-							// The owner, not `service`: the ledger is closed to every
-							// other role, and Graphile's migrate check, run at every
-							// start, alters its own schema after an upgrade.
-							DATABASE_URL: databaseUrl
-							MESH_URL:     "http://airlock-mesh:3500"
-							AIRLOCK_DIR:  "/airlock"
-							if len(X.state.bridges) > 0 {AIRLOCK_TARGET: "local"}
-							// An answer's bytes go to the blob plane, served by imgproxy
-							// (services/airlock/blobs.ts).
-							if X.capabilities.blobs {BLOB_URL: "/img/insecure/plain/s3://mecha-objects/"}
-							// A secret has no default: compose refuses to start without
-							// it rather than hand a handler a guessable one.
-							for k in X._secrets {
-								(k): "${\(k):?\(k) is required: an effect declares it}"
-							}
-						}
+						environment: AIRLOCK_DIR: "/airlock"
 						networks: ["airlock", "airlock-wake"]
 						restart: "on-failure"
 						develop: watch: list.Concat([
@@ -1369,6 +1691,50 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						start_interval: "500ms"
 						start_period:   "30s"
 					}
+					"process-compose": activate: "mise x --"
+					expose: {
+						http: {port: 3500, env: "DAPR_HTTP_PORT"}
+						api: {port: 50001, env: "DAPR_GRPC_PORT"}
+						grpc: {port: 50002, env: "DAPR_INTERNAL_GRPC_PORT"}
+					}
+					entrypoint: {
+						shell: "nu"
+						do: strings.Join(list.Concat([
+							["let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'airlock-mesh-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'airlock'); let app = (if (($env.AIRLOCK_APP_DIR? | default '') != '') { $env.AIRLOCK_APP_DIR } else if ('services/airlock/dapr.yaml' | path exists) { 'services/airlock' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/airlock') }); cp -f ($app | path join 'dapr.yaml') ($dir | path join 'config.yaml');"],
+							[if X.capabilities.blobs {"'\(base64.Encode(null, _blobsBinding))' | decode base64 | decode utf-8 | save -f ($dir | path join 'airlock/blobs.yaml');"}],
+							[if !X.capabilities.blobs {"'\(base64.Encode(null, _envSecretStore))' | decode base64 | decode utf-8 | save -f ($dir | path join 'airlock/env.yaml');"}],
+							[for e in X._effects {"cp -f '\(e.endpoint)' ($dir | path join 'airlock/\(e.name).yaml');"}],
+							["exec daprd --app-id airlock --dapr-listen-addresses 127.0.0.1 --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path ($dir | path join 'airlock') --config ($dir | path join 'config.yaml') --dapr-http-port $env.DAPR_HTTP_PORT --dapr-grpc-port $env.DAPR_GRPC_PORT --dapr-internal-grpc-port $env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0 --log-level info"],
+						]), " ")
+						// What this daprd may reach, on the container where an operator
+						// looks (daprd reads neither): the declared origins and bridges.
+						env: {
+							AIRLOCK_ORIGINS: strings.Join(X._origins, " ")
+							AIRLOCK_BRIDGES: strings.Join(list.Concat([[for b in X._bridges {b.name}], [if X._aiOn {"tsbifrost"}]]), " ")
+							if X._aiOn {
+								TSBIFROST_URL: {peer: "tsbifrost", port: "http", prefix: "http://"}
+							}
+							if X.capabilities.blobs {
+								BLOBS_S3_URL: {peer: "rclone-s3", port: "http", prefix: "http://"}
+							}
+							for b in X._bridges {
+								("BRIDGE_\(strings.ToUpper(strings.Replace(b.name, "-", "_", -1)))_URL"): {
+									peer:   b.container
+									port:   "http"
+									prefix: "http://"
+									if b.action != _|_ {suffix: "/actions/\(b.action)"}
+								}
+							}
+							for b in X.state.bridges if b.simulator == _|_ {
+								let _act = [if b.action != _|_ {"/actions/\(b.action)"}, ""][0]
+								("BRIDGE_\(strings.ToUpper(strings.Replace(b.name, "-", "_", -1)))_URL"): "http://\(b.container):\(b.port)\(_act)"
+							}
+						}
+						after: {
+							for b in X._bridges if list.Contains(X._reached, b.name) {(b.container): "started"}
+							if X._aiOn {tsbifrost: "started"}
+						}
+					}
 					srcs: globs: [for e in X._effects {e.endpoint}]
 					dockerfile: {
 						from: (_from & {in: X.meta.images.mesh}).out
@@ -1381,19 +1747,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						if X.capabilities.blobs {
 							preamble: ["COPY <<'BLOBS' /dapr/airlock/blobs.yaml\n\(_blobsBinding)\nBLOBS"]
 						}
+						if !X.capabilities.blobs {
+							preamble: ["COPY <<'ENV' /dapr/airlock/env.yaml\n\(_envSecretStore)\nENV"]
+						}
 						entrypoint: ["/daprd", "--app-id", "airlock", "--dapr-listen-addresses", "0.0.0.0", "--resources-path", "/dapr/airlock", "--config", "/dapr/config.yaml", "--dapr-http-port", "3500", "--log-level", "info"]
 					}
 					compose: {
-						depends_on: {
-							for b in X._bridges if list.Contains(X._reached, b.name) {(b.container): _started}
-							if X._aiOn {tsbifrost: _started}
-						}
-						// What this daprd may reach, on the container where an operator
-						// looks (daprd reads neither): the declared origins and bridges.
-						environment: {
-							AIRLOCK_ORIGINS: strings.Join(X._origins, " ")
-							AIRLOCK_BRIDGES: strings.Join(list.Concat([[for b in X._bridges {b.name}], [if X._aiOn {"tsbifrost"}]]), " ")
-						}
 						networks: ["airlock", "airlock-out", "airlock-egress"]
 						restart: "on-failure"
 						develop: watch: [for e in X._effects {action: "sync+restart", path: "../\(e.endpoint)", target: "/dapr/airlock/\(e.name).yaml"}]
@@ -1405,12 +1764,31 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// (Ollama, sd.cpp, Cloudflare Workers AI, Google Gemini/Imagen) and
 				// model tiers (`cheap`, `heavy`).
 				if X._aiOn {
-					tsbifrost: bayt.healthcheck.tcp & X._image & {
+					tsbifrost: bayt.healthcheck.tcp & X._image & (deno.#cache & {entrypoints: "--node-modules-dir=auto tsbifrost.ts"}).out & {
+						"process-compose": activate: "mise x --"
 						healthcheck: {
 							port:           #TsBifrostPort
 							interval:       "5s"
 							start_interval: "500ms"
 							start_period:   "30s"
+						}
+						expose: http: {port: #TsBifrostPort, env: "TSBIFROST_PORT"}
+						entrypoint: {
+							shell: "nu"
+							do:    "let app = (if (($env.AIRLOCK_APP_DIR? | default '') != '') { $env.AIRLOCK_APP_DIR } else if ('services/airlock/tsbifrost.ts' | path exists) { 'services/airlock' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/airlock') }); exec deno run --node-modules-dir=auto --allow-net --allow-env --config ($app | path join 'deno.json') ($app | path join 'tsbifrost.ts')"
+							env: {
+								AI_TARGET:            "${AI_TARGET:-${SAYT_PLATFORM:-docker}}"
+								AI_LOCAL_OLLAMA_HOST: *"${AI_LOCAL_OLLAMA_HOST:-http://127.0.0.1:11434}" | bayt.#envValue
+								AI_LOCAL_SDCPP_HOST:  *"${AI_LOCAL_SDCPP_HOST:-http://127.0.0.1:8000}" | bayt.#envValue
+								CF_ACCOUNT_ID:        "${CF_ACCOUNT_ID:-}"
+								CF_API_TOKEN:         "${CF_API_TOKEN:-}"
+								GEMINI_API_KEY:       "${GEMINI_API_KEY:-}"
+								GOOGLE_API_KEY:       "${GOOGLE_API_KEY:-}"
+								OPENAI_API_KEY:       "${OPENAI_API_KEY:-}"
+								if X.capabilities.ai != _|_ {
+									AI_MODELS: json.Marshal(X.capabilities.ai)
+								}
+							}
 						}
 						dockerfile: {
 							from: (_from & {in: X.meta.images.airlock}).out
@@ -1421,24 +1799,14 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								"COPY <<'AI_MODELS' /app/airlock/ai-models.ts\n\(_aiModelsTs)\nAI_MODELS",
 								"COPY <<'PACKAGE' /app/airlock/package.json\n\(_airlockPackage)\nPACKAGE",
 								"COPY <<'LOCK' /app/airlock/deno.lock\n\(_airlockLock)\nLOCK",
-								"RUN deno cache --frozen --node-modules-dir=auto tsbifrost.ts",
 							]
 							cmd: ["run", "--allow-net", "--allow-env", "/app/airlock/tsbifrost.ts"]
 						}
 						compose: {
 							environment: {
 								TSBIFROST_PORT:       "\(#TsBifrostPort)"
-								AI_TARGET:            "${AI_TARGET:-${SAYT_PLATFORM:-docker}}"
 								AI_LOCAL_OLLAMA_HOST: "${AI_LOCAL_OLLAMA_HOST:-http://host.docker.internal:11434}"
 								AI_LOCAL_SDCPP_HOST:  "${AI_LOCAL_SDCPP_HOST:-http://host.docker.internal:8000}"
-								CF_ACCOUNT_ID:        "${CF_ACCOUNT_ID:-}"
-								CF_API_TOKEN:         "${CF_API_TOKEN:-}"
-								GEMINI_API_KEY:       "${GEMINI_API_KEY:-}"
-								GOOGLE_API_KEY:       "${GOOGLE_API_KEY:-}"
-								OPENAI_API_KEY:       "${OPENAI_API_KEY:-}"
-								if X.capabilities.ai != _|_ {
-									AI_MODELS: json.Marshal(X.capabilities.ai)
-								}
 							}
 							networks: ["airlock-out", "default", "airlock-egress"]
 							restart: "on-failure"
@@ -1455,44 +1823,60 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					from: name: bayt.lock.images.busybox
 					cmd: ["tail", "-f", "/dev/null"]
 				}
-				compose: {
-					depends_on: {
-						caddy: _healthy
+				"process-compose": {
+					activate: "mise x --"
+					readiness_probe: {
+						exec: command: "nu -c exit"
+						period_seconds:    1
+						timeout_seconds:   5
+						failure_threshold: 10
+					}
+				}
+				entrypoint: {
+					shell: "nu"
+					do:    "loop { sleep 1hr }"
+					after: {
+						caddy: "healthy"
 						if X.capabilities.server {
-							database: _healthy
-							crud:     _healthy
-							electric: _healthy
+							database: "healthy"
+							crud:     "healthy"
+							electric: "healthy"
 						}
 						if X.capabilities.capture {
-							redis:         _healthy
-							"mesh-events": _healthy
-							conduit:       _healthy
+							redis:         "healthy"
+							"mesh-events": "healthy"
+							conduit:       "healthy"
 						}
 						if len(X.state.pipelines)+len(X.state.computations) > 0 {
-							transform: _started
+							transform: "started"
 						}
 						if len(X.state.computations) > 0 {
-							compute: _healthy
+							compute: "healthy"
 						}
 						if X.capabilities.auth {
-							auth: _started
+							auth: "started"
 						}
 						if X.capabilities.blobs {
-							"rclone-s3": _healthy
-							imgproxy:    _healthy
+							"rclone-s3": "healthy"
+							imgproxy:    "healthy"
 						}
 
 						// A clock absent from here is a clock nothing starts. It
 						// pulls the ticker in behind it.
 						if X._wakes {
-							clock: _started
+							clock: "started"
 						}
 						if len(X.state.effects) > 0 {
-							airlock: _healthy
+							airlock: "healthy"
 						}
 
 						// Consumer-added services (escape hatches) gate here by
 						// unification, which the closed definition would otherwise refuse.
+						...
+					}
+				}
+				compose: {
+					depends_on: {
 						...
 					}
 					healthcheck: {
@@ -1634,13 +2018,18 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	cluster: #Cluster
 
 	_live: {for n, t in R.cluster.surface.targets if t != null {(n): t}}
+	_afterCondition: {
+		service_started:                "started"
+		service_healthy:                "healthy"
+		service_completed_successfully: "completed"
+	}
 	// What a target waits on; a target that waits on nothing has no field.
 	_waits: W={
 		t: _
 		out: {
 			if W.t.compose != _|_ if W.t.compose.depends_on != _|_ {for k, v in W.t.compose.depends_on {(k): v}}
 			if W.t.entrypoint != _|_ if W.t.entrypoint.after != _|_ {
-				for k, _ in W.t.entrypoint.after {(k): _healthy}
+				for k, c in W.t.entrypoint.after {(k): {started: _started, healthy: _healthy, completed: _completed}[c]}
 			}
 		}
 	}
@@ -1666,11 +2055,36 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for b in R.cluster.state.bridges if R._live[b.container].dockerfile.from != null {}
 		for n, _ in R._simulators {
 			let source = R._local[n].dockerfile.from
-			(n): dockerfile: from: [if source.name != _|_ {source}, if source.ref != _|_ {source}][0]
+			(n): {
+				dockerfile: from: [if source.name != _|_ {source}, if source.ref != _|_ {source}][0]
+				if R._local[n].expose == _|_ {
+					for b in R.cluster.state.bridges if b.container == n {
+						expose: http: port: b.port
+					}
+				}
+			}
 		}
 		for n, t in R._local {
 			(n): {
-				for f, v in t if f != "compose" && f != "deps" {(f): v}
+				for f, v in t if f != "compose" && f != "deps" && f != "entrypoint" {(f): v}
+				if t.compose != _|_ if t.compose.restart != _|_ if t.compose.restart == "on-failure" {
+					"process-compose": availability: {
+						restart:         "on_failure"
+						backoff_seconds: 1
+						max_restarts:    15
+					}
+				}
+
+				if t.entrypoint != _|_ {
+					entrypoint: {
+						for ef, ev in t.entrypoint if ef != "after" {(ef): ev}
+						after: {
+							for k, v in (R._waits & {"t": t}).out if R._local[k].entrypoint != _|_ {
+								(k): _afterCondition[v.condition]
+							}
+						}
+					}
+				}
 
 				// What it waits on, and an image it copies from (a `from.ref`
 				// copy, which bayt does not read as a dependency).

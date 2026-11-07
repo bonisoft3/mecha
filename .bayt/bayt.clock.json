@@ -44,7 +44,36 @@
     "incremental": false,
     "cmd": null
   },
+  "entrypoint": {
+    "do": "let yml = (if (($env.CLOCK_YAML? | default '') != '') { $env.CLOCK_YAML } else if ('services/clock/clock.yaml' | path exists) { 'services/clock/clock.yaml' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/clock/clock.yaml') }); exec redpanda-connect run --set 'http.enabled=false' $yml",
+    "dockerfile": null,
+    "shell": "nu",
+    "env": {
+      "POKE_URL": {
+        "peer": "ticker",
+        "port": "http",
+        "part": "addr",
+        "prefix": "http://",
+        "suffix": ""
+      },
+      "POKE_INTERVAL": "${POKE_INTERVAL:-60s}",
+      "POKE_CALLER": "compose",
+      "SERVICE_JWT": "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
+    },
+    "after": {
+      "ticker": "started"
+    },
+    "host": true
+  },
   "name": "clock",
+  "process-compose": {
+    "activate": "mise x --",
+    "availability": {
+      "restart": "on_failure",
+      "backoff_seconds": 1,
+      "max_restarts": 15
+    }
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",
@@ -157,8 +186,7 @@
       "visibility": "internal",
       "deps": [],
       "transitiveDeps": [
-        "clock-image_srcs",
-        "ticker_outs_srcs"
+        "clock-image_srcs"
       ],
       "transitiveCrossDeps": [
         {

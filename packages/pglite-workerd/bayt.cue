@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
+	Pnpm "github.com/bonisoft3/bayt/stacks/pnpm"
 	ivm "github.com/bonisoft3/mecha/packages/incremental-views:incremental_views"
 )
 
@@ -99,8 +100,8 @@ _build: bayt.#project & {
 				"install": {
 					priority: -1
 					dockerfile: {
-						do: "pnpm -C \(_tree) install --frozen-lockfile --filter @electric-sql/pglite..."
-						mounts: [{type: "cache", target: "/root/.local/share/pnpm/store", scope: "global"}]
+						do:     "pnpm -C \(_tree) install \(Pnpm.installFlags) --filter @electric-sql/pglite..."
+						mounts: [Pnpm.storeMount]
 					}
 				}
 				"builtin": {

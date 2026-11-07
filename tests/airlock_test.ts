@@ -146,7 +146,7 @@ async function generate(dir: string) {
   ];
   for (const [from, to] of copies) await Deno.copyFile(`${MECHA}/${from}`, `${dir}/${to}`);
   // Caddy's startup hashes files under each declared root, including this fixture.
-  await Deno.writeTextFile(`${dir}/Caddyfile`, (await Deno.readTextFile(`${dir}/Caddyfile`)).replace(":8080 {", ":8080 {\n\troot * /usr/share/caddy"));
+  await Deno.writeTextFile(`${dir}/Caddyfile`, (await Deno.readTextFile(`${dir}/Caddyfile`)).replace(/:(\{\$PORT:)?8080\}? \{/, "$&\n\troot * /usr/share/caddy"));
   await Deno.writeTextFile(`${dir}/bayt.cue`, BAYT_CUE);
   const networks = JSON.parse(await must(run("cue", ["export", ".", "-e", "networks", "--out", "json"], { cwd: dir }), "cue export networks"));
   await Deno.writeTextFile(`${dir}/compose.networks.yaml`, JSON.stringify({ networks }));

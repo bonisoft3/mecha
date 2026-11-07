@@ -168,8 +168,12 @@
     "cmd": null
   },
   "entrypoint": {
-    "do": "docker-entrypoint.sh postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200",
-    "shell": "exec",
+    "do": "if ('/docker-entrypoint-initdb.d' | path exists) { exec docker-entrypoint.sh postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200 }\nlet mecha = (if (($env.PRONTO_INITDB_SRC_DIR? | default '') != '') { $env.PRONTO_INITDB_SRC_DIR } else if ('services/database/rls/rls.sql' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) })\nlet initdb = (($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir) | path join 'initdb.d')\nrm -rf $initdb; mkdir $initdb\ncp -f ($mecha | path join 'services/database/rls/rls.sql') ($initdb | path join '003_rls.sql')\ncp -f ($mecha | path join 'services/database/role_passwords.sh') ($initdb | path join '899_role_passwords.sh')\ncp -f ($mecha | path join 'services/ticker/schedule.sql') ($initdb | path join '800_schedule.sql')\nopen .bayt/bayt.database.json | get dockerfile.copy.0.srcs | each {|s| cp -f $s ($initdb | path join ($s | path basename)) } | ignore\nexec nu ($mecha | path join 'services/database/entrypoint.nu') $initdb postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200",
+    "dockerfile": {
+      "do": "docker-entrypoint.sh postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200",
+      "shell": "exec"
+    },
+    "shell": "nu",
     "env": {
       "POSTGRES_USER": "${POSTGRES_USER:-postgres}",
       "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-postgres}",
@@ -183,7 +187,8 @@
   },
   "expose": {
     "pg": {
-      "port": 5432
+      "port": 5432,
+      "env": "PGPORT"
     }
   },
   "healthcheck": {
@@ -199,6 +204,13 @@
     "start_period": "5m"
   },
   "name": "database",
+  "process-compose": {
+    "activate": "mise x --",
+    "shutdown": {
+      "signal": 2,
+      "timeout_seconds": 5
+    }
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",

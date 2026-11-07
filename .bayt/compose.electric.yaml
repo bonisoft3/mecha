@@ -21,6 +21,7 @@ services:
       libraries_mecha-migrate:
         condition: service_completed_successfully
     environment:
+      PORT: "3000"
       DATABASE_URL: >-
         postgresql://electric:${ELECTRIC_PASSWORD:-dev-electric-password}@database:5432/${POSTGRES_DB:-mecha}?sslmode=disable
       ELECTRIC_SECRET: ${ELECTRIC_SECRET:-dev-electric-secret}

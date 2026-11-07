@@ -20,7 +20,7 @@
         "redis-cli ping | grep PONG"
       ],
       "interval": "5s",
-      "timeout": "5s",
+      "timeout": "3s",
       "retries": 6,
       "start_period": "10s",
       "start_interval": "500ms"
@@ -39,7 +39,7 @@
         "redis-cli ping | grep PONG"
       ],
       "interval": "5s",
-      "timeout": "5s",
+      "timeout": "3s",
       "retries": 6,
       "start_period": "10s"
     },
@@ -54,7 +54,33 @@
     "incremental": false,
     "cmd": null
   },
+  "entrypoint": {
+    "do": "exec redis-server --port ($env.REDIS_PORT? | default '6379') --save '' --appendonly no",
+    "dockerfile": null,
+    "shell": "nu",
+    "env": {},
+    "after": {},
+    "host": true
+  },
+  "expose": {
+    "redis": {
+      "port": 6379,
+      "env": "REDIS_PORT"
+    }
+  },
+  "healthcheck": {
+    "template": "tcp",
+    "port": 6379,
+    "start_interval": "200ms",
+    "interval": "5s",
+    "timeout": "3s",
+    "retries": 36,
+    "start_period": "0s"
+  },
   "name": "redis",
+  "process-compose": {
+    "activate": "mise x --"
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",

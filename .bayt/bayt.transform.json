@@ -73,7 +73,41 @@
     "entrypoint": null,
     "incremental": false
   },
+  "entrypoint": {
+    "do": "let mecha = (if ('services/transform/cdc-trace.yaml' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) }); let tdir = (if (($env.MECHA_TRANSFORM_DIR? | default '') != '') { $env.MECHA_TRANSFORM_DIR } else { ($mecha | path join 'services/transform') }); let cdir = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else { ($mecha | path join 'services/compute') }); exec redpanda-connect streams --set 'http.enabled=false' --no-api -r ($tdir | path join 'cdc-trace.yaml') 'services/transform/passthrough.yaml'",
+    "shell": "nu",
+    "env": {
+      "CRUD_URL": {
+        "peer": "crud",
+        "port": "http",
+        "part": "addr",
+        "prefix": "http://",
+        "suffix": ""
+      },
+      "REDIS_URL": {
+        "peer": "redis",
+        "port": "redis",
+        "part": "addr",
+        "prefix": "redis://",
+        "suffix": ""
+      },
+      "SERVICE_JWT": "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
+    },
+    "after": {
+      "redis": "healthy",
+      "crud": "healthy"
+    },
+    "host": true
+  },
   "name": "transform",
+  "process-compose": {
+    "activate": "mise x --",
+    "availability": {
+      "restart": "on_failure",
+      "backoff_seconds": 1,
+      "max_restarts": 15
+    }
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",
@@ -183,10 +217,7 @@
       "env": {},
       "visibility": "internal",
       "deps": [],
-      "transitiveDeps": [
-        "redis_outs_srcs",
-        "crud_outs_srcs"
-      ],
+      "transitiveDeps": [],
       "transitiveCrossDeps": [],
       "chainedDeps": [],
       "cmds": [],

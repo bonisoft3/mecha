@@ -25,6 +25,7 @@ import (
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
 	apt "github.com/bonisoft3/bayt/distros/apt"
+	deno "github.com/bonisoft3/bayt/stacks/deno"
 	mise "github.com/bonisoft3/bayt/stacks/mise"
 	sayt "github.com/bonisoft3/bayt/stacks/sayt"
 	cluster "github.com/bonisoft3/mecha:cluster"
@@ -227,34 +228,35 @@ _mecha: bayt.#project & _where & {
 				]
 			}
 		}
-		"auth-image": _image & {
+		"auth-image": _image & (deno.#cache & {entrypoints: "main.ts", frozen: false}).out & {
 			srcs: globs: ["services/auth/deno.json", "services/auth/deno.lock", "services/auth/jwt.ts", "services/auth/main.ts", "services/auth/oidc.ts", "services/auth/schema.ts"]
 			dockerfile: {
 				from: name: _deno
 				// deno runs `main.ts` from the working directory.
 				workdir: "/app"
 				copy: [{srcs: ["services/auth/deno.json", "services/auth/deno.lock", "services/auth/jwt.ts", "services/auth/main.ts", "services/auth/oidc.ts", "services/auth/schema.ts"], dst: "/app/"}]
-				epilogue: ["RUN deno cache main.ts"]
 				expose: [9999]
 				cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
 			}
 		}
-		"ticker-image": _image & {
+		"ticker-image": _image & (deno.#cache & {entrypoints: "main.ts", frozen: false}).out & {
 			srcs: globs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/sweep.ts", "services/ticker/main.ts", "services/ticker/tick-id.ts", "services/ticker/crud.ts"]
 			dockerfile: {
 				from: name: _deno
 				workdir: "/app"
 				copy: [{srcs: ["services/ticker/deno.json", "services/ticker/deno.lock", "services/ticker/due.ts", "services/ticker/sweep.ts", "services/ticker/main.ts", "services/ticker/tick-id.ts", "services/ticker/crud.ts"], dst: "/app/"}]
-				epilogue: ["RUN deno cache main.ts"]
 				cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
 			}
 		}
 		// The extensions a computation's lake needs are installed at build: a
 		// running service reaches no extension host. Workers take no
 		// permissions of their own, an option Deno still calls unstable.
-		"compute-image": _image & {
+		"compute-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts job.ts", frozen: false}).out & {
 			let _files = ["deno.json", "deno.lock", "main.ts", "feldera.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "native-feldera.ts", "native-cleanup.ts", "native-sources.ts", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts"]
 			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts"]])
+			cmd: "duckdb": (deno.#duckdbContainerCmd & {
+				do: "deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts"
+			}).out
 			dockerfile: {
 				from: name: _deno
 				workdir: "/app"
@@ -265,19 +267,19 @@ _mecha: bayt.#project & _where & {
 					{srcs: ["packages/lake/src/lake-types.ts"], dst: "/packages/lake/src/"},
 					{srcs: ["packages/compute-snapshot/src/sink-writes.ts"], dst: "/packages/compute-snapshot/src/"},
 				]
-				epilogue: [
-					"RUN deno cache main.ts cage.ts job.ts",
-					"RUN deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts",
-				]
 				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "--allow-sys", "/app/main.ts"]
 			}
 		}
 		"activepieces-image": (activepieces.#Target & {source: "services/activepieces"}).target
 		// The handler cage imports compute's realm through its sibling directory.
-		"airlock-image": _image & {
+		"airlock-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts tsbifrost.ts"}).out & {
 			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "tsbifrost.ts", "ai-models.ts", "white-background.ts", "package.json", "dapr.yaml"]
 			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts", "query-stages.ts"]
 			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
+			cmd: "deno-install": (deno.#containerCmd & {
+				priority: -2
+				do:       "deno install --frozen"
+			}).out
 			dockerfile: {
 				from: name: _deno
 				workdir: "/app/airlock"
@@ -285,7 +287,6 @@ _mecha: bayt.#project & _where & {
 					{srcs: [for f in _airlock {"services/airlock/\(f)"}], dst: "/app/airlock/"},
 					{srcs: [for f in _compute {"services/compute/\(f)"}], dst: "/app/compute/"},
 				]
-				epilogue: ["RUN deno install --frozen", "RUN deno cache --frozen main.ts cage.ts tsbifrost.ts"]
 			}
 		}
 		"clock-image": _image & {

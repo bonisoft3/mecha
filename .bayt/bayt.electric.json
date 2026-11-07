@@ -62,7 +62,75 @@
     "incremental": false,
     "cmd": null
   },
+  "entrypoint": {
+    "do": "let mecha = (if ('services/electric/main.ts' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) }); let auth_dir = (if (($env.AUTH_APP_DIR? | default '') != '') { $env.AUTH_APP_DIR } else { ($mecha | path join 'services/auth') }); let elec_dir = (if (($env.ELECTRIC_APP_DIR? | default '') != '') { $env.ELECTRIC_APP_DIR } else { ($mecha | path join 'services/electric') }); exec deno run --allow-net --allow-env --allow-read --config ($auth_dir | path join 'deno.json') ($elec_dir | path join 'main.ts')",
+    "dockerfile": null,
+    "shell": "nu",
+    "env": {
+      "DATABASE_URL": [
+        "postgresql://electric:${ELECTRIC_PASSWORD:-dev-electric-password}@",
+        {
+          "peer": "database",
+          "port": "pg",
+          "part": "addr",
+          "prefix": "",
+          "suffix": ""
+        },
+        "/${POSTGRES_DB:-mecha}?sslmode=disable"
+      ],
+      "ELECTRIC_SECRET": "${ELECTRIC_SECRET:-dev-electric-secret}",
+      "ELECTRIC_MANUAL_TABLE_PUBLISHING": "true"
+    },
+    "after": {
+      "database": "healthy",
+      "migrate": "completed"
+    },
+    "host": true
+  },
+  "expose": {
+    "http": {
+      "port": 3000,
+      "env": "PORT"
+    }
+  },
+  "healthcheck": {
+    "template": "http",
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": 3000,
+    "path": "/v1/health",
+    "url": "http://127.0.0.1:3000/v1/health",
+    "authorization": null,
+    "headers": [],
+    "start_interval": "200ms",
+    "interval": "1s",
+    "timeout": "5s",
+    "retries": 60,
+    "start_period": "0s"
+  },
   "name": "electric",
+  "process-compose": {
+    "activate": "mise x --",
+    "env": {
+      "ADMIN_DATABASE_URL": [
+        "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@",
+        {
+          "peer": "database",
+          "port": "pg",
+          "part": "addr",
+          "prefix": "",
+          "suffix": ""
+        },
+        "/${POSTGRES_DB:-mecha}"
+      ],
+      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}"
+    },
+    "availability": {
+      "restart": "on_failure",
+      "backoff_seconds": 1,
+      "max_restarts": 15
+    }
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",

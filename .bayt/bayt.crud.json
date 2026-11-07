@@ -8,10 +8,10 @@
       "PGRST_DB_SCHEMA": "public",
       "PGRST_DB_ANON_ROLE": "anon",
       "PGRST_DB_PRE_REQUEST": "public.app_pre_request",
-      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "PGRST_SERVER_HOST": "*",
       "PGRST_SERVER_PORT": "3000",
-      "PGRST_ADMIN_SERVER_PORT": "3001"
+      "PGRST_ADMIN_SERVER_PORT": "3001",
+      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}"
     },
     "ports": [],
     "volumes": [],
@@ -86,33 +86,64 @@
     "cmd": null
   },
   "entrypoint": {
-    "do": "postgrest",
-    "shell": "exec",
+    "do": "with-env { PGRST_SERVER_HOST: '127.0.0.1' } { exec postgrest }",
+    "dockerfile": {
+      "do": "postgrest",
+      "shell": "exec"
+    },
+    "shell": "nu",
     "env": {
-      "PGRST_DB_URI": "postgres://authenticator:${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}@database:5432/${POSTGRES_DB:-mecha}",
+      "PGRST_DB_URI": [
+        "postgres://authenticator:${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}@",
+        {
+          "peer": "database",
+          "port": "pg",
+          "part": "addr",
+          "prefix": "",
+          "suffix": ""
+        },
+        "/${POSTGRES_DB:-mecha}"
+      ],
       "PGRST_DB_SCHEMA": "public",
       "PGRST_DB_ANON_ROLE": "anon",
       "PGRST_DB_PRE_REQUEST": "public.app_pre_request",
       "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "PGRST_SERVER_HOST": "*",
-      "PGRST_SERVER_PORT": "3000",
-      "PGRST_ADMIN_SERVER_PORT": "3001"
+      "PGRST_SERVER_PORT": {
+        "port": "http",
+        "part": "port",
+        "prefix": "",
+        "suffix": ""
+      },
+      "PGRST_ADMIN_SERVER_PORT": {
+        "port": "admin",
+        "part": "port",
+        "prefix": "",
+        "suffix": ""
+      }
     },
     "after": {
-      "database": "healthy"
+      "database": "healthy",
+      "migrate": "completed"
     },
     "host": true
   },
   "expose": {
     "http": {
-      "port": 3000
+      "port": 3000,
+      "env": "PGRST_SERVER_PORT"
     },
     "admin": {
-      "port": 3001
+      "port": 3001,
+      "env": "PGRST_ADMIN_SERVER_PORT"
     }
   },
   "healthcheck": {
     "template": "http",
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": 3001,
+    "path": "/ready",
     "url": "http://127.0.0.1:3001/ready",
     "authorization": null,
     "headers": [],
@@ -123,6 +154,9 @@
     "start_period": "30s"
   },
   "name": "crud",
+  "process-compose": {
+    "activate": "mise x --"
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",

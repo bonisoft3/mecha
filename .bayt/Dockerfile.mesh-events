@@ -1,8 +1,50 @@
 # generated from bayt.cue — do not edit
 FROM libraries_mecha-mesh-image AS mesh-events
 WORKDIR /monorepo/libraries/mecha
+COPY <<'REDIS' /dapr/components/redis-streams.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: env
+spec:
+  type: secretstores.local.env
+  version: v1
+  metadata: []
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: redis-streams
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      secretKeyRef:
+        name: REDIS_HOST
+        key: REDIS_HOST
+    - name: redisPassword
+      value: ""
+    - name: consumerID
+      value: "mecha"
+    - name: enableTLS
+      value: "false"
+    - name: processingTimeout
+      value: "30s"
+    - name: redeliverInterval
+      value: "5s"
+    - name: maxRetries
+      value: "5"
+    - name: concurrency
+      value: "1"
+auth:
+  secretStore: env
+
+REDIS
 COPY --chmod=755 --from=tarampampam/microcheck:1@sha256:79c187c05bfa67518078bf4db117771942fa8fe107dc79a905861c75ddf28dfa /bin/portcheck /usr/local/bin/portcheck
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.mesh-events.json ./.bayt/
+EXPOSE 3500
+EXPOSE 50002
 HEALTHCHECK --interval=5s --timeout=5s --retries=30 --start-period=30s CMD ["portcheck","--port","3500"]
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS mesh-events_ctxs

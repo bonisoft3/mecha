@@ -4,9 +4,10 @@
     "up": false,
     "manual": false,
     "environment": {
-      "DATABASE_URL": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",
       "CONDUIT_PIPELINES_PATH": "/conduit/pipelines",
-      "CONDUIT_DB_TYPE": "inmemory"
+      "CONDUIT_DB_TYPE": "inmemory",
+      "DATABASE_URL": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",
+      "MESH_EVENTS_URL": "http://mesh-events:3500"
     },
     "ports": [],
     "volumes": [],
@@ -109,7 +110,66 @@
     "entrypoint": null,
     "incremental": false
   },
+  "entrypoint": {
+    "do": "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'conduit-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'pipelines') ($dir | path join 'connectors'); let conn = (which conduit-connector-http | first | get path); cp -f $conn ($dir | path join 'connectors' ($conn | path basename)); open --raw 'services/cdc/pipelines/cdc-to-dapr.yaml' | str replace -a '${DATABASE_URL}' $env.DATABASE_URL | str replace -a '${MESH_EVENTS_URL}' $env.MESH_EVENTS_URL | save -f ($dir | path join 'pipelines/cdc-to-bus.yaml'); exec conduit run --db.type inmemory --pipelines.path ($dir | path join 'pipelines') --connectors.path ($dir | path join 'connectors') --api.http.address $\"127.0.0.1:($env.CONDUIT_API_HTTP_ADDRESS_PORT)\" --api.grpc.address '127.0.0.1:0'",
+    "shell": "nu",
+    "env": {
+      "DATABASE_URL": [
+        "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@",
+        {
+          "peer": "database",
+          "port": "pg",
+          "part": "addr",
+          "prefix": "",
+          "suffix": ""
+        },
+        "/${POSTGRES_DB:-mecha}"
+      ],
+      "MESH_EVENTS_URL": {
+        "peer": "mesh-events",
+        "port": "http",
+        "part": "addr",
+        "prefix": "http://",
+        "suffix": ""
+      }
+    },
+    "after": {
+      "database": "healthy",
+      "mesh-events": "started",
+      "migrate": "completed"
+    },
+    "host": true
+  },
+  "expose": {
+    "http": {
+      "port": 8080,
+      "env": "CONDUIT_API_HTTP_ADDRESS_PORT"
+    }
+  },
+  "healthcheck": {
+    "template": "http",
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "path": "/healthz",
+    "url": "http://127.0.0.1:8080/healthz",
+    "authorization": null,
+    "headers": [],
+    "interval": "5s",
+    "retries": 20,
+    "start_interval": "500ms",
+    "start_period": "120s",
+    "timeout": "5s"
+  },
   "name": "conduit",
+  "process-compose": {
+    "activate": "mise x --",
+    "availability": {
+      "restart": "on_failure",
+      "backoff_seconds": 1,
+      "max_restarts": 15
+    }
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",
@@ -228,10 +288,7 @@
       "visibility": "internal",
       "deps": [],
       "transitiveDeps": [
-        "conduit-image_srcs",
-        "database_outs_srcs",
-        "mesh-events_outs_srcs",
-        "migrate_outs_srcs"
+        "conduit-image_srcs"
       ],
       "transitiveCrossDeps": [],
       "chainedDeps": [],

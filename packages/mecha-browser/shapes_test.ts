@@ -53,7 +53,9 @@ for (const operation of ['INSERT', 'UPDATE', 'DELETE']) Deno.test(`bulk ${operat
     f.notifications.length = 0
     await f.write('UPDATE item SET value=0 WHERE false; DELETE FROM item WHERE false; INSERT INTO item SELECT 0,0 WHERE false')
     assert.equal(f.notifications.length, 0)
-    assert.equal((await f.serve(position(fresh))).status, 204)
+    const caughtUp = await f.serve(position(fresh))
+    assert.equal(caughtUp.status, 200)
+    assert.deepEqual(await caughtUp.json(), [{ headers: { control: 'up-to-date', global_last_seen_lsn: '0' } }])
   } finally { await f.close() }
 })
 
@@ -107,7 +109,9 @@ Deno.test('rollback emits nothing, while truncate resets even an empty table', a
     const before = await f.serve('offset=now')
     await f.write(`BEGIN; INSERT INTO item SELECT i,i FROM generate_series(1,${RETAINED + 1}) i; ROLLBACK`)
     assert.equal(f.notifications.length, 0)
-    assert.equal((await f.serve(position(before))).status, 204)
+    const caughtUp = await f.serve(position(before))
+    assert.equal(caughtUp.status, 200)
+    assert.deepEqual(await caughtUp.json(), [{ headers: { control: 'up-to-date', global_last_seen_lsn: '0' } }])
     await f.write('TRUNCATE item')
     await reset(await f.serve(position(before)))
     assert.deepEqual(f.notifications.map(x => x.op), ['RESET'])
@@ -233,3 +237,46 @@ Deno.test('shape upgrades remove retired row and statement triggers with qualifi
     [{ schema: 'public', relation: 'kept', triggers: 4 }])
   } finally { await db.close() }
 })
+
+Deno.test('keyed shape filters initial snapshot, subset snapshot, and live changes by column predicate', async () => {
+  const f = await fixture()
+  try {
+    await f.write("INSERT INTO item VALUES (1, 10, 'user:alice'), (2, 20, 'user:bob'), (3, 10, 'user:carol')")
+    const key = { column: 'value', value: '10' }
+    const snap = await f.shapes.serve(new Request('http://shape/?table=item&offset=-1'), () => Promise.resolve([]), key)
+    const snapRows = (await snap.json() as { value?: { id: string } }[]).filter(x => x.value).map(x => x.value!.id)
+    assert.deepEqual(snapRows, ['1', '3'])
+
+    const sub = await f.shapes.serve(new Request('http://shape/?table=item&subset__where="id"%20%3D%203'), () => Promise.resolve([]), key)
+    const subBody = await sub.json() as { data: { value: { id: string } }[] }
+    assert.deepEqual(subBody.data.map(x => x.value.id), ['3'])
+
+    await f.write("INSERT INTO item VALUES (4, 99, 'user:dave'), (5, 10, 'user:erin'); DELETE FROM item WHERE id = 1")
+    const changes = await f.shapes.serve(new Request('http://shape/?table=item&' + position(snap)), () => Promise.resolve([]), key)
+    const msgs = (await changes.json() as { value?: { id: string }; headers: { operation?: string } }[]).filter(x => x.value)
+    assert.deepEqual(msgs.map(m => ({ op: m.headers.operation, id: m.value!.id })), [
+      { op: 'insert', id: '5' },
+      { op: 'delete', id: '1' },
+    ])
+  } finally { await f.close() }
+})
+
+// Regression: when the first change to a shape is an insert/update whose row
+// is deleted before its read-back runs, splicing the superseded entry from
+// `entries` advanced `entries[0].offset` past 1 without evicting anything for
+// retention, causing a client at offset 0_0 to receive a false 409 must-refetch.
+Deno.test('a row inserted and deleted before read-back does not expire a client at offset 0_0', async () => {
+  const f = await fixture()
+  try {
+    const snap = await f.serve('offset=-1')
+    assert.equal(snap.headers.get('electric-offset'), '0_0')
+    await f.write("BEGIN; INSERT INTO item VALUES (1, 10, 'public:'); DELETE FROM item WHERE id = 1; COMMIT")
+    const changes = await f.serve(position(snap))
+    assert.equal(changes.status, 200)
+    const msgs = (await changes.json() as { value?: { id: string }; headers: { operation?: string } }[]).filter(x => x.value)
+    assert.deepEqual(msgs.map(m => ({ op: m.headers.operation, id: m.value!.id })), [
+      { op: 'delete', id: '1' },
+    ])
+  } finally { await f.close() }
+})
+

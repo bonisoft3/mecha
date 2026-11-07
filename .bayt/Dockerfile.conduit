@@ -5,6 +5,7 @@ COPY --chmod=755 --from=tarampampam/microcheck:1@sha256:79c187c05bfa67518078bf4d
 COPY services/cdc/pipelines/cdc-to-dapr.yaml /conduit/cdc-to-bus.yaml.tmpl
 COPY --parents services/cdc/pipelines/cdc-to-dapr.yaml ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.conduit.json ./.bayt/
+EXPOSE 8080
 CMD ["sh", "-c", "mkdir -p /conduit/pipelines && envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml && exec /app/conduit run"]
 HEALTHCHECK --interval=5s --timeout=5s --retries=20 --start-period=120s CMD ["httpcheck","http://127.0.0.1:8080/healthz"]
 

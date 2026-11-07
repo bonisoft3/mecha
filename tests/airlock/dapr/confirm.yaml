@@ -7,6 +7,10 @@ spec:
   version: v1
   metadata:
     - name: url
-      value: http://bridge-mail:8080/actions/sendMail
+      secretKeyRef:
+        name: BRIDGE_BRIDGE_MAIL_URL
+        key: BRIDGE_BRIDGE_MAIL_URL
     - name: errorIfNot2XX
       value: "false"
+auth:
+  secretStore: env

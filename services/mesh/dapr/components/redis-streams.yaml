@@ -1,13 +1,24 @@
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
+  name: env
+spec:
+  type: secretstores.local.env
+  version: v1
+  metadata: []
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
   name: redis-streams
 spec:
   type: pubsub.redis
   version: v1
   metadata:
     - name: redisHost
-      value: "redis:6379"
+      secretKeyRef:
+        name: REDIS_HOST
+        key: REDIS_HOST
     - name: redisPassword
       value: ""
     - name: consumerID
@@ -22,3 +33,5 @@ spec:
       value: "5"
     - name: concurrency
       value: "1"
+auth:
+  secretStore: env

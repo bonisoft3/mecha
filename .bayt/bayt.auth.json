@@ -52,10 +52,24 @@
     "cmd": null
   },
   "entrypoint": {
-    "do": "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts",
-    "shell": "exec",
+    "do": "let app = (if (($env.AUTH_APP_DIR? | default '') != '') { $env.AUTH_APP_DIR } else if ('/app/main.ts' | path exists) { '/app' } else if ('services/auth/main.ts' | path exists) { 'services/auth' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/auth') }); exec deno run --allow-net --allow-env --config ($app | path join 'deno.json') ($app | path join 'main.ts')",
+    "dockerfile": {
+      "do": "deno run --allow-net --allow-env --config /app/deno.json /app/main.ts",
+      "shell": "exec"
+    },
+    "shell": "nu",
     "env": {
-      "DATABASE_URL": "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}",
+      "DATABASE_URL": [
+        "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@",
+        {
+          "peer": "database",
+          "port": "pg",
+          "part": "addr",
+          "prefix": "",
+          "suffix": ""
+        },
+        "/${POSTGRES_DB:-mecha}"
+      ],
       "AUTH_STATEMENT_TIMEOUT_MS": "5000",
       "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "WEBAUTHN_RP_ID": "${WEBAUTHN_RP_ID:-localhost}",
@@ -63,16 +77,21 @@
       "OIDC_PROVIDERS": ""
     },
     "after": {
-      "database": "healthy"
+      "database": "healthy",
+      "migrate": "completed"
     },
     "host": true
   },
   "expose": {
     "http": {
-      "port": 9999
+      "port": 9999,
+      "env": "PORT"
     }
   },
   "name": "auth",
+  "process-compose": {
+    "activate": "mise x --"
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",
@@ -184,9 +203,7 @@
       "visibility": "internal",
       "deps": [],
       "transitiveDeps": [
-        "auth-image_srcs",
-        "database_outs_srcs",
-        "migrate_outs_srcs"
+        "auth-image_srcs"
       ],
       "transitiveCrossDeps": [
         {

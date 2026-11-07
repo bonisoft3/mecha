@@ -50,7 +50,34 @@
     "incremental": false,
     "cmd": null
   },
+  "entrypoint": {
+    "do": "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'rclone-s3-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join $env.RCLONE_LOCAL_BUCKET); exec rclone serve s3 $\"--addr=127.0.0.1:($env.RCLONE_PORT? | default '3900')\" --vfs-cache-mode=off $dir",
+    "shell": "nu",
+    "env": {
+      "RCLONE_LOCAL_BUCKET": "mecha-objects"
+    },
+    "after": {},
+    "host": true
+  },
+  "expose": {
+    "http": {
+      "port": 3900,
+      "env": "RCLONE_PORT"
+    }
+  },
+  "healthcheck": {
+    "template": "tcp",
+    "port": 3900,
+    "start_interval": "200ms",
+    "interval": "1s",
+    "timeout": "5s",
+    "retries": 10,
+    "start_period": "0s"
+  },
   "name": "rclone-s3",
+  "process-compose": {
+    "activate": "mise x --"
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",

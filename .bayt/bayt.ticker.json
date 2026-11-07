@@ -45,7 +45,50 @@
     "incremental": false,
     "cmd": null
   },
+  "entrypoint": {
+    "do": "let app = (if (($env.TICKER_APP_DIR? | default '') != '') { $env.TICKER_APP_DIR } else if ('services/ticker/main.ts' | path exists) { 'services/ticker' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/ticker') }); exec deno run --allow-net --allow-env --config ($app | path join 'deno.json') ($app | path join 'main.ts')",
+    "dockerfile": null,
+    "shell": "nu",
+    "env": {
+      "CRUD_URL": {
+        "peer": "crud",
+        "port": "http",
+        "part": "addr",
+        "prefix": "http://",
+        "suffix": ""
+      },
+      "CALL_TIMEOUT_MS": "35000",
+      "WAKE_URLS": [
+        {
+          "peer": "mesh-events",
+          "port": "http",
+          "part": "addr",
+          "prefix": "http://",
+          "suffix": "/v1.0/healthz/outbound"
+        }
+      ],
+      "SERVICE_JWT": "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
+    },
+    "after": {
+      "crud": "healthy"
+    },
+    "host": true
+  },
+  "expose": {
+    "http": {
+      "port": 9998,
+      "env": "PORT"
+    }
+  },
   "name": "ticker",
+  "process-compose": {
+    "activate": "mise x --",
+    "availability": {
+      "restart": "on_failure",
+      "backoff_seconds": 1,
+      "max_restarts": 15
+    }
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",
@@ -160,8 +203,7 @@
       "visibility": "internal",
       "deps": [],
       "transitiveDeps": [
-        "ticker-image_srcs",
-        "crud_outs_srcs"
+        "ticker-image_srcs"
       ],
       "transitiveCrossDeps": [
         {

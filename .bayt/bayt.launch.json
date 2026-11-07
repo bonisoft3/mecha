@@ -84,7 +84,38 @@
     "entrypoint": null,
     "incremental": false
   },
+  "entrypoint": {
+    "do": "loop { sleep 1hr }",
+    "shell": "nu",
+    "env": {},
+    "after": {
+      "caddy": "healthy",
+      "database": "healthy",
+      "crud": "healthy",
+      "electric": "healthy",
+      "redis": "healthy",
+      "mesh-events": "healthy",
+      "conduit": "healthy",
+      "transform": "started",
+      "auth": "started",
+      "rclone-s3": "healthy",
+      "imgproxy": "healthy",
+      "clock": "started"
+    },
+    "host": true
+  },
   "name": "launch",
+  "process-compose": {
+    "activate": "mise x --",
+    "readiness_probe": {
+      "exec": {
+        "command": "nu -c exit"
+      },
+      "period_seconds": 1,
+      "timeout_seconds": 5,
+      "failure_threshold": 10
+    }
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",

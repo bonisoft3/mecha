@@ -1,8 +1,9 @@
 {
 	admin off
+	auto_https disable_redirects
 }
 
-:8080 {
+:{$PORT:8080} {
 	handle /crud/* {
 		uri strip_prefix /crud
 		# Idempotent inserts by default — duplicate POSTs with the same
@@ -11,7 +12,7 @@
 		# boundary.
 		@post method POST
 		request_header @post Prefer "return=representation,resolution=ignore-duplicates"
-		reverse_proxy crud:3000
+		reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
 	}
 
 	# Electric's `table` and `where` are the authorization, so a request reaches
@@ -22,11 +23,11 @@
 	handle /electric/* {
 		uri strip_prefix /electric
 		route {
-			forward_auth auth:9999 {
+			forward_auth {$PRONTO_UPSTREAM_AUTH:auth:9999} {
 				uri /auth/shape/verify
 			}
 			uri query secret {$ELECTRIC_SECRET}
-			reverse_proxy electric:3000 {
+			reverse_proxy {$PRONTO_UPSTREAM_ELECTRIC:electric:3000} {
 				flush_interval -1
 				transport http {
 					read_timeout 300s
@@ -52,12 +53,12 @@
 
 	# Mounted WITH the prefix: the auth service's routes carry /auth.
 	handle /auth/* {
-		reverse_proxy auth:9999
+		reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}
 	}
 
 	handle /img/* {
 		uri strip_prefix /img
-		reverse_proxy imgproxy:8081 {
+		reverse_proxy {$PRONTO_UPSTREAM_IMGPROXY:imgproxy:8081} {
 			flush_interval -1
 		}
 	}
@@ -65,7 +66,7 @@
 	# Mounted WITH the prefix: the ticker answers POST /poke and 404s
 	# everything else, so stripping would 404 every poke.
 	handle /poke {
-		reverse_proxy ticker:9998
+		reverse_proxy {$PRONTO_UPSTREAM_TICKER:ticker:9998}
 	}
 
 	handle /health {

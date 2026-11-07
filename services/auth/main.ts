@@ -701,5 +701,5 @@ export async function handler(req: Request): Promise<Response> {
 
 if (import.meta.main) {
   await migrate();
-  Deno.serve({ port: 9999 }, handler);
+  Deno.serve({ hostname: ["local", "host"].includes(Deno.env.get("SAYT_PLATFORM") ?? "") ? "127.0.0.1" : "0.0.0.0", port: Number(Deno.env.get("PORT") || 9999) }, handler);
 }

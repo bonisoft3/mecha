@@ -30,10 +30,12 @@ services:
         path: ../services/cdc/pipelines/cdc-to-dapr.yaml
         target: /conduit/cdc-to-bus.yaml.tmpl
     environment:
-      DATABASE_URL: >-
-        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
+      CONDUIT_API_HTTP_ADDRESS_PORT: "8080"
       CONDUIT_PIPELINES_PATH: /conduit/pipelines
       CONDUIT_DB_TYPE: inmemory
+      DATABASE_URL: >-
+        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-mecha}
+      MESH_EVENTS_URL: http://mesh-events:3500
     healthcheck:
       test:
       - CMD

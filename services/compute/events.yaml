@@ -60,7 +60,7 @@ output:
                       max_retries: 12
                       output:
                         http_client:
-                          url: http://compute:9997/invalidate
+                          url: ${COMPUTE_URL:http://compute:9997}/invalidate
                           verb: POST
                           timeout: 30m
                           retries: 0

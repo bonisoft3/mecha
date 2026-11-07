@@ -8,7 +8,7 @@ pipelines:
         type: source
         plugin: "builtin:postgres"
         settings:
-          url: "postgres://postgres:postgres@database:5432/mecha"
+          url: "${DATABASE_URL}"
           tables: "Hello,GroupHello"
           cdcMode: "logrepl"
           snapshotMode: "never"
@@ -19,7 +19,7 @@ pipelines:
         type: destination
         plugin: "standalone:http"
         settings:
-          url: "http://mesh-events:3500/v1.0/publish/redis-streams/cdc-events"
+          url: "${MESH_EVENTS_URL}/v1.0/publish/redis-streams/cdc-events"
           validateConnection: "false"
     processors:
       - id: stringify-after

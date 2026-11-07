@@ -11,8 +11,14 @@
       "args": {}
     },
     "environment": {
+      "ORIGIN": "${ORIGIN:-http://localhost:${MECHA_DOOR_HOST_PORT}}",
       "ELECTRIC_SECRET": "${ELECTRIC_SECRET:-dev-electric-secret}",
-      "ORIGIN": "${ORIGIN:-http://localhost:${MECHA_DOOR_HOST_PORT}}"
+      "PRONTO_UPSTREAM_CRUD": "crud:3000",
+      "PRONTO_UPSTREAM_ELECTRIC": "electric:3000",
+      "PRONTO_UPSTREAM_AUTH": "auth:9999",
+      "PRONTO_UPSTREAM_TICKER": "ticker:9998",
+      "PRONTO_UPSTREAM_RCLONE_S3": "rclone-s3:3900",
+      "PRONTO_UPSTREAM_IMGPROXY": "imgproxy:8081"
     },
     "ports": [],
     "volumes": [],
@@ -118,11 +124,67 @@
     "cmd": null
   },
   "entrypoint": {
-    "do": "case \"${ORIGIN#http://}\" in \"$ORIGIN\") h=${ORIGIN#https://};; *) h=${ORIGIN#http://};; esac; case \"$h\" in \"$ORIGIN\"|\"\"|*[!A-Za-z0-9.:-]*) echo \"ORIGIN '$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example\" >&2; exit 1;; esac; : > /etc/caddy/env; case \"$h\" in *:*) _p=${h##*:};; *) _p=8443;; esac; export CADDY_TLS_HOST_PORT=\"${CADDY_TLS_HOST_PORT:-$_p}\"; printf 'CADDY_TLS_HOST_PORT=%s\\n' \"$CADDY_TLS_HOST_PORT\" >> /etc/caddy/env; if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; printf 'CADDY_TLS=%s\\n' \"$CADDY_TLS\" >> /etc/caddy/env; fi; set -e -o pipefail; roots=$(caddy adapt --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile | awk '{ while (match($0, /\"root\":\"[^\"]*\"/)) { print substr($0, RSTART + 8, RLENGTH - 9); $0 = substr($0, RSTART + RLENGTH) } }' | sort -u); if [ -n \"$roots\" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < \"$f\"); printf \"$q%s$q\" \"${h%% *}\" > \"$f.etag\"; done' sh '\"' {} +; fi; exec caddy run --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile",
-    "shell": "sh",
+    "do": "let origin = ($env.ORIGIN? | default \"\"); let h = ($origin | str replace -r '^https?://' ''); if ($h == $origin) or ($h | is-empty) or ($h !~ '^[A-Za-z0-9.:-]+$') { print -e $\"ORIGIN '($origin)' is no origin: set it to the scheme and host readers reach the door at, as https://app.example\"; exit 1 }; let p = (if ($h | str contains \":\") { $h | split row \":\" | last } else { \"8443\" }); let tls_port = (if (($env.CADDY_TLS_HOST_PORT? | default \"\") != \"\") { $env.CADDY_TLS_HOST_PORT } else { $p }); let work = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let cdir = ($work | path join $\"caddy-($nu.pid)-(random int 1000..9999)\"); mkdir ($cdir | path join \"data\") ($cdir | path join \"config\"); let env_file = ($cdir | path join \"env\"); let certs = (($env.CADDY_CERT_DIR? | default \".certs\") | path expand | str replace -a (char -u 5c) '/'); let served_dir = ($env.BAYT_LOCAL_SERVED_DIR? | default \"\"); let is_local = (($served_dir != \"\") and (($served_dir | path join \"srv\") | path exists)); let cfg_src = (if $is_local { 'services/proxy/Caddyfile' } else { ($env.CADDY_CONFIG_FILE? | default (if ('services/proxy/Caddyfile' | path exists) { 'services/proxy/Caddyfile' } else { \"/etc/caddy/Caddyfile\" })) }); mut env_lines = [$\"CADDY_TLS_HOST_PORT=($tls_port)\"]; mut extra_env = { XDG_DATA_HOME: ($cdir | path join \"data\"), XDG_CONFIG_HOME: ($cdir | path join \"config\"), CADDY_TLS_HOST_PORT: $tls_port }; if $is_local { let served_fwd = ($served_dir | path expand | str replace -a (char -u 5c) '/'); let srv_root = $\"($served_fwd)/srv\"; let omni_root = $\"($served_fwd)/omnishell\"; $env_lines = ($env_lines | append [$\"CADDY_DOOR_PORT=($tls_port)\" $\"PRONTO_SRV_ROOT=($srv_root)\" $\"PRONTO_OMNISHELL_ROOT=($omni_root)\"]); $extra_env = ($extra_env | merge { CADDY_DOOR_PORT: $tls_port, PRONTO_SRV_ROOT: $srv_root, PRONTO_OMNISHELL_ROOT: $omni_root }) }; if (($certs | path join \"localhost.pem\") | path exists) { let tv = $\"($certs)/localhost.pem ($certs)/localhost-key.pem\"; $env_lines = ($env_lines | append $\"CADDY_TLS=($tv)\"); $extra_env = ($extra_env | merge { CADDY_TLS: $tv }) }; ($env_lines | str join (char nl)) + (char nl) | save -f $env_file; with-env $extra_env { let adapted = (^caddy adapt --envfile $env_file --config $cfg_src --adapter caddyfile); let roots = ($adapted | split row \",\" | parse -r '\"root\":\"(?<r>[^\"]+)\"' | get -o r | default [] | uniq); for r in $roots { if ($r | path exists) { glob ($r | path join \"**/*\" | str replace -a (char -u 5c) '/') | where ($it | path type) == \"file\" and (not ($it | str ends-with \".etag\")) | each {|f| let etag = $\"($f).etag\"; if (not ($etag | path exists)) { let d = (open --raw $f | hash sha256); ((char dquote) + $d + (char dquote)) | save --raw -f $etag } } | ignore } }; exec caddy run --envfile $env_file --config $cfg_src --adapter caddyfile }",
+    "dockerfile": {
+      "do": "case \"${ORIGIN#http://}\" in \"$ORIGIN\") h=${ORIGIN#https://};; *) h=${ORIGIN#http://};; esac; case \"$h\" in \"$ORIGIN\"|\"\"|*[!A-Za-z0-9.:-]*) echo \"ORIGIN '$ORIGIN' is no origin: set it to the scheme and host readers reach the door at, as https://app.example\" >&2; exit 1;; esac; : > /etc/caddy/env; case \"$h\" in *:*) _p=${h##*:};; *) _p=8443;; esac; export CADDY_TLS_HOST_PORT=\"${CADDY_TLS_HOST_PORT:-$_p}\"; printf 'CADDY_TLS_HOST_PORT=%s\\n' \"$CADDY_TLS_HOST_PORT\" >> /etc/caddy/env; if [ -f /certs/localhost.pem ]; then export CADDY_TLS='/certs/localhost.pem /certs/localhost-key.pem'; printf 'CADDY_TLS=%s\\n' \"$CADDY_TLS\" >> /etc/caddy/env; fi; set -e -o pipefail; roots=$(caddy adapt --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile | awk '{ while (match($0, /\"root\":\"[^\"]*\"/)) { print substr($0, RSTART + 8, RLENGTH - 9); $0 = substr($0, RSTART + RLENGTH) } }' | sort -u); if [ -n \"$roots\" ]; then find $roots -type f ! -name '*.etag' -exec sh -c 'set -e; q=$1; shift; for f do h=$(sha256sum < \"$f\"); printf \"$q%s$q\" \"${h%% *}\" > \"$f.etag\"; done' sh '\"' {} +; fi; exec caddy run --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile",
+      "shell": "sh"
+    },
+    "shell": "nu",
     "env": {
       "ELECTRIC_SECRET": "${ELECTRIC_SECRET:-dev-electric-secret}",
-      "ORIGIN": "${ORIGIN:-http://localhost:${MECHA_DOOR_HOST_PORT}}"
+      "ORIGIN": [
+        "${ORIGIN:-http://",
+        {
+          "port": "door",
+          "part": "addr",
+          "host": "localhost",
+          "prefix": "",
+          "suffix": ""
+        },
+        "}"
+      ],
+      "PRONTO_UPSTREAM_AUTH": {
+        "peer": "auth",
+        "port": "http",
+        "part": "addr",
+        "prefix": "",
+        "suffix": ""
+      },
+      "PRONTO_UPSTREAM_CRUD": {
+        "peer": "crud",
+        "port": "http",
+        "part": "addr",
+        "prefix": "",
+        "suffix": ""
+      },
+      "PRONTO_UPSTREAM_ELECTRIC": {
+        "peer": "electric",
+        "port": "http",
+        "part": "addr",
+        "prefix": "",
+        "suffix": ""
+      },
+      "PRONTO_UPSTREAM_RCLONE_S3": {
+        "peer": "rclone-s3",
+        "port": "http",
+        "part": "addr",
+        "prefix": "",
+        "suffix": ""
+      },
+      "PRONTO_UPSTREAM_IMGPROXY": {
+        "peer": "imgproxy",
+        "port": "http",
+        "part": "addr",
+        "prefix": "",
+        "suffix": ""
+      },
+      "PRONTO_UPSTREAM_TICKER": {
+        "peer": "ticker",
+        "port": "http",
+        "part": "addr",
+        "prefix": "",
+        "suffix": ""
+      }
     },
     "after": {
       "crud": "healthy"
@@ -130,6 +192,10 @@
     "host": true
   },
   "expose": {
+    "http": {
+      "port": 8080,
+      "env": "PORT"
+    },
     "door": {
       "port": 8080,
       "udp": true,
@@ -141,6 +207,10 @@
   },
   "healthcheck": {
     "template": "http",
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "path": "/health",
     "url": "http://127.0.0.1:8080/health",
     "authorization": null,
     "headers": [],
@@ -151,6 +221,9 @@
     "start_period": "10s"
   },
   "name": "caddy",
+  "process-compose": {
+    "activate": "mise x --"
+  },
   "project": "libraries_mecha",
   "dir": "libraries/mecha",
   "activate": "",
@@ -258,9 +331,7 @@
       "env": {},
       "visibility": "internal",
       "deps": [],
-      "transitiveDeps": [
-        "crud_outs_srcs"
-      ],
+      "transitiveDeps": [],
       "transitiveCrossDeps": [],
       "chainedDeps": [],
       "cmds": [],

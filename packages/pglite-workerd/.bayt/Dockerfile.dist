@@ -6,7 +6,7 @@ COPY --from=libraries_mecha_packages_pglite-workerd-wasm_outs --parents /monorep
 COPY --parents patches/pglite.patch ./
 RUN git -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 apply "$PWD/patches/pglite.patch" && cp -R release /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/release
 RUN corepack enable pnpm && corepack install -g pnpm@9.7.0+sha512.dc09430156b427f5ecfc79888899e1c39d2d690f004be70e05230b72cb173d96839587545d09429b55ac3c429c801b4dc3c0e002f653830a420fa2dd4e3cf9cf
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store,id=/root/.local/share/pnpm/store,sharing=shared ["pnpm", "-C", "/src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5", "install", "--frozen-lockfile", "--filter", "@electric-sql/pglite..."]
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,id=/root/.local/share/pnpm/store,sharing=shared ["pnpm", "-C", "/src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5", "install", "--prefer-offline", "--frozen-lockfile", "--package-import-method", "copy", "--filter", "@electric-sql/pglite..."]
 RUN pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 -r --filter @electric-sql/pglite... build && cp -R /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/dist dist
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.dist.json ./.bayt/
 

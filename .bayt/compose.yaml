@@ -17,6 +17,18 @@ services:
       service: libraries_mecha-build
     profiles:
     - build
+  extensions-build:
+    extends:
+      file: ./compose.extensions-build.yaml
+      service: libraries_mecha-extensions-build
+    profiles:
+    - extensions-build
+  extensions-image:
+    extends:
+      file: ./compose.extensions-image.yaml
+      service: libraries_mecha-extensions-image
+    profiles:
+    - extensions-image
   database-image:
     extends:
       file: ./compose.database-image.yaml

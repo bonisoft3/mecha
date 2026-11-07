@@ -6,12 +6,16 @@ import "strings"
 // each (cd.yml's matrix lists the same) and prints each one's pin. A consumer
 // pins what it builds on: pronto holds the pins (clusters/mecha.cue), checked
 // against #Published.
-#Images: ["database", "mesh", "conduit", "auth", "ticker", "clock", "compute", "airlock", "activepieces"]
+#Images: ["database", "extensions", "mesh", "conduit", "auth", "ticker", "clock", "compute", "airlock", "activepieces"]
 
 // Those built from mecha's sources, which a consumer that builds them from a
 // checkout carries as each target's srcs view (bayt.cue holds this to the
 // targets).
-#Sourced: ["database", "mesh", "auth", "ticker", "clock", "compute", "airlock", "activepieces"]
+#Sourced: ["database", "extensions", "mesh", "auth", "ticker", "clock", "compute", "airlock", "activepieces"]
+
+// The targets an image builds from in a checkout, beside its own (bayt.cue):
+// a consumer that builds the image there declares these too.
+#Builds: {extensions: ["extensions-build"]}
 
 // A pin is an image a release pushed to Docker Hub, by version and digest. The
 // compose service and fragment an app builds from in the monorepo follow from

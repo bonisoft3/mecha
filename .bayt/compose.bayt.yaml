@@ -4,6 +4,10 @@ include:
   required: false
 - path: ./compose.build.yaml
   required: false
+- path: ./compose.extensions-build.yaml
+  required: false
+- path: ./compose.extensions-image.yaml
+  required: false
 - path: ./compose.database-image.yaml
   required: false
 - path: ./compose.mesh-image.yaml

@@ -675,7 +675,7 @@ Deno.test("a cluster requires the core published images; Activepieces is selecte
   assert.equal(out.success, true, new TextDecoder().decode(out.stderr));
   const { images, published } = JSON.parse(new TextDecoder().decode(out.stdout));
   assert.deepEqual([...images].sort(), published.filter((s: string) => s !== "activepieces").sort());
-  assert.deepEqual([...published].sort(), ["activepieces", "airlock", "auth", "clock", "compute", "conduit", "database", "mesh", "ticker"]);
+  assert.deepEqual([...published].sort(), ["activepieces", "airlock", "auth", "clock", "compute", "conduit", "database", "extensions", "mesh", "ticker"]);
 });
 
 // A provider's settings are the deployment's, over defaults the program may
@@ -783,4 +783,38 @@ Deno.test("an explicit tenancy baseline replaces the image floor once", async ()
   const collision = await copied({ migrations: [baseline, "other/003_rls.sql"] });
   assert.equal(collision.ok, false);
   assert.match(collision.stderr, /_initdb\."003": conflicting values/);
+});
+
+// Every docker app's appliance compiled the same toolchain in a stage of its
+// own, its server headers pinned apart from the server it ran: one image now,
+// against the appliance's one PostgreSQL version.
+Deno.test("the appliance's extensions build once, against the appliance's own PostgreSQL", async () => {
+  const out = await new Deno.Command("cue", { args: ["export", ".:cluster", "-e", "#AppliancePostgres"], cwd: MECHA, stdout: "piped" }).output();
+  assert.equal(out.success, true);
+  const version: string = JSON.parse(new TextDecoder().decode(out.stdout));
+  const build = await Deno.readTextFile(`${MECHA}.bayt/Dockerfile.extensions-build`);
+  for (const s of [`postgresql18-server-devel=${version}`, "github.com/plv8/pljs.git", "plv8.control", "sha256sum -c", "/pg-extensions/lib/"]) {
+    assert.ok(build.includes(s), `${s} missing from the extensions build`);
+  }
+  assert.ok(!build.includes("zig"), "a second toolchain");
+});
+
+// The published extensions image was its build stage: the toolchain every
+// appliance pulled to copy two libraries and their extension files.
+Deno.test("the published extensions image holds the extensions alone", async () => {
+  const dockerfile = await Deno.readTextFile(`${MECHA}.bayt/Dockerfile.extensions-image`);
+  const stage = dockerfile.split(/\n(?=FROM )/)[1];
+  assert.match(stage, /^FROM scratch AS extensions-image\n/);
+  assert.ok(stage.includes("COPY --link --from=libraries_mecha-extensions-build /pg-extensions /pg-extensions"), stage);
+  assert.ok(!/zypper|gcc|postgresql18-server-devel/.test(stage), `the toolchain ships: ${stage}`);
+});
+
+// A bridge's container built for the appliance lost its build dependencies
+// with the stack's waits: one copying from a sibling target built without it.
+Deno.test("a bridge's appliance build keeps its own dependencies, without the stack's waits", async () => {
+  const state = {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", targets: ["docker"], appliance: {srcs: ["/usr/local/bin/crawl"], command: ["/usr/local/bin/crawl"], port: 8091}}]};
+  const got = await runtimeWith(state, `{support: {dockerfile: from: name: "support@sha256:fixture", compose: {}}, crawler: {deps: [":support:outs"], dockerfile: {from: name: "crawler@sha256:fixture", copy: [{from: ref: ":support", srcs: ["/lib/x"], dst: "/lib/x"}]}}}`);
+  assert.equal(got.ok, true, got.stderr);
+  assert.deepEqual(got.value["crawler-appliance"].deps, [":support:outs"]);
+  assert.equal(got.value["crawler-appliance"].compose.manual, true);
 });

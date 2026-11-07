@@ -1,0 +1,35 @@
+# generated from bayt.cue — do not edit
+services:
+  libraries_mecha-extensions-build:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.extensions-build
+      target: extensions-build
+      tags:
+      - bayt-libraries_mecha-extensions-build:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-libraries_mecha-extensions-build:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+    image: bayt-libraries_mecha-extensions-build:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    scale: 0
+  libraries_mecha-extensions-build_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.extensions-build
+      target: extensions-build_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+    image: bayt-libraries_mecha-extensions-build_bayt:latest
+    scale: 0
+  libraries_mecha-extensions-build_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.extensions-build
+      target: extensions-build_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+    image: bayt-libraries_mecha-extensions-build_srcs:latest
+    scale: 0

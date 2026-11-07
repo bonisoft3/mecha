@@ -198,7 +198,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 
 // An Airlock endpoint supplied by a container hatch. The role grants no
 // database credential or protocol-specific confinement.
-#Bridge: {
+#Bridge: BR={
 	name:      =~#EffectName
 	container: =~#EffectName
 	action?:   =~"^[a-zA-Z][a-zA-Z0-9_]*$"
@@ -214,7 +214,44 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	// outside the stack. Without one the local stack starts no container for
 	// the bridge and its effects settle as not deployed on `local`.
 	simulator?: {...}
+	// How the `docker` release target's single-container appliance runs the
+	// bridge: `srcs` copied from the real container's image (built as the
+	// target `<container>-appliance`, which nothing starts) to the same paths
+	// in the appliance, and `command` run there as a process that serves
+	// `port` on localhost, where the airlock's daprd dials it under the
+	// container's name. The appliance's own services hold their ports
+	// (#AppliancePorts) on that one address.
+	appliance?: {
+		srcs: [string, ...string]
+		command: [string, ...string]
+		port: *BR.port | int & >=1 & <=65535
+	}
 }
+
+// The fixed ports the docker appliance's own processes listen on, one address
+// for all, by what holds them. The change feed's take the ports bayt assigns
+// the app, which the appliance's build checks a bridge against.
+#AppliancePort: {
+	door:         8080
+	crud:         3000
+	crudAdmin:    3001
+	database:     5432
+	auth:         9999
+	meshHttp:     3500
+	meshGrpc:     50001
+	meshInternal: 50002
+	airlock:      9997
+	ticker:       9998
+}
+#AppliancePorts: [for _, p in #AppliancePort {p}]
+
+// The marker compute's start leaves beside DuckDB's extensions once it has
+// installed them, so a later start installs none.
+#DuckdbExtensionsMarker: ".installed-v1.5.6"
+
+// The PostgreSQL the docker appliance runs, and the server headers its
+// extensions are compiled against: one version, so they cannot part.
+#AppliancePostgres: "18.6-160000.1.1"
 
 // Container bridge HTTP port.
 #BridgePort: 8080
@@ -318,6 +355,10 @@ _from: F={
 // {role: "service", sub: all-zeros uuid, exp: 2033-01-01}. Compose default
 // only — prod overrides both SERVICE_JWT and PGRST_JWT_SECRET together.
 _devServiceJwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4"
+
+// The pair a consumer that runs mecha's services outside compose defaults to,
+// the docker appliance among them.
+#DevServiceJwt: _devServiceJwt
 
 _devJwtSecret: "mecha-dev-secret-please-override-32ch"
 // The query parameter caddy adds after the gate and electric checks; one
@@ -861,7 +902,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						}
 						entrypoint: {
 							shell: "nu"
-							do:    "open .bayt/bayt.timer-check.json | get dockerfile.epilogue.0 | lines | skip 1 | drop 1 | str join (char nl) | ^psql -X --set=ON_ERROR_STOP=1 --single-transaction"
+							// The script its build file states.
+							do: "open .bayt/bayt.timer-check.json | get dockerfile.epilogue.0 | lines | skip 1 | drop 1 | str join (char nl) | ^psql -X --set=ON_ERROR_STOP=1 --single-transaction"
 							env: {
 								PGHOST:     {peer: "database", port: "pg", part: "host"}
 								PGUSER:     "${POSTGRES_USER:-postgres}"
@@ -1447,7 +1489,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					cmd: "duckdb": {
 						shell:      "nu"
 						dockerfile: null
-						do:         "let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '.installed-v1.5.6'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^mise x -- deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^mise x -- deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts')"
+						do:         "let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '\(#DuckdbExtensionsMarker)'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^mise x -- deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^mise x -- deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts')"
 					}
 					healthcheck: {
 						port:           9997
@@ -1460,7 +1502,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					expose: tcp: {port: 9997, env: "PORT"}
 					entrypoint: {
 						shell:      "nu"
-						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let lake = ($base | path join $'lake-($nu.pid)-(random int 1000..9999)'); mkdir $lake; let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '.installed-v1.5.6'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts'); with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir, LAKE_DIR: $lake } { exec deno run --unstable-worker-options --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"
+						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let lake = ($base | path join $'lake-($nu.pid)-(random int 1000..9999)'); mkdir $lake; let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '\(#DuckdbExtensionsMarker)'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts'); with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir, LAKE_DIR: $lake } { exec deno run --unstable-worker-options --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"
 						dockerfile: null
 						env: {
 							CRUD_URL:          {peer: "crud", port: "http", prefix: "http://"}
@@ -1954,7 +1996,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// app in the monorepo, pinned names where the images are pulled.
 		images: {
 			database: #From
-			mesh:     #From
+			// pljs and pg_ivm for the docker appliance's own PostgreSQL.
+			extensions: #From
+			mesh:       #From
 			conduit:  #From
 			auth:     #From
 			ticker:   #From
@@ -2062,6 +2106,24 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						expose: http: port: b.port
 					}
 				}
+			}
+		}
+		// A bridge the docker appliance deploys runs there only in its appliance
+		// form, whichever effect calls it.
+		for b in R.cluster.state.bridges if list.Contains(b.targets, "docker") if b.appliance == _|_ {
+			("\(b.container)-appliance"): error("bridge \(b.name) names docker but declares no appliance form: how the docker appliance runs it")
+		}
+		for b in R.cluster.state.bridges if b.appliance != _|_ if list.Contains(#AppliancePorts, b.appliance.port) {
+			("\(b.container)-appliance"): error("bridge \(b.name)'s appliance port is one the docker appliance's own services hold (#AppliancePorts): name another")
+		}
+		// The real container, built for the appliance to copy from and never
+		// started: the local stack runs only a bridge's simulator.
+		for b in R.cluster.state.bridges if b.appliance != _|_ {
+			("\(b.container)-appliance"): {
+				for f, v in R._live[b.container] if f != "compose" && f != "deps" {(f): v}
+				// Its own build's dependencies, without the stack's waits.
+				if R._live[b.container].deps != _|_ {deps: R._live[b.container].deps}
+				compose: manual: true
 			}
 		}
 		for n, t in R._local {

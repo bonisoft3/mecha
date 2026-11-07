@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        service: [database, mesh, conduit, auth, ticker, clock, compute, airlock, activepieces]
+        service: [database, extensions, mesh, conduit, auth, ticker, clock, compute, airlock, activepieces]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

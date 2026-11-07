@@ -1,0 +1,195 @@
+{
+  "_generated_from": "bayt.cue (do not edit)",
+  "dockerfile": {
+    "preamble": [],
+    "preambleCopyContexts": [],
+    "from": null,
+    "copy": [
+      {
+        "from": {
+          "ref": ":extensions-build",
+          "name": "libraries_mecha-extensions-build"
+        },
+        "srcs": [
+          "/pg-extensions"
+        ],
+        "dst": "/pg-extensions",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      }
+    ],
+    "add": [],
+    "mounts": [],
+    "secrets": {},
+    "extra_hosts": [],
+    "epilogue": [],
+    "healthcheck": null,
+    "expose": [],
+    "entrypoint": null,
+    "incremental": false,
+    "cmd": null
+  },
+  "name": "extensions-image",
+  "project": "libraries_mecha",
+  "dir": "libraries/mecha",
+  "activate": "",
+  "srcs": {
+    "globs": [
+      "services/database/pljs/pins.cue"
+    ],
+    "exclude": []
+  },
+  "outs": {
+    "globs": [],
+    "exclude": []
+  },
+  "state": {
+    "globs": []
+  },
+  "env": {},
+  "synthetics": {
+    "bayt": {
+      "name": "extensions-image_bayt",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          ".bayt/compose.extensions-image.yaml",
+          ".bayt/Dockerfile.extensions-image",
+          ".bayt/bayt.extensions-image.json",
+          ".bayt/Taskfile.yml",
+          ".bayt/Taskfile.bayt.yml",
+          ".bayt/process-compose.yaml"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.extensions-image.yaml",
+        "libraries/mecha/.bayt/compose.extensions-build.yaml"
+      ]
+    },
+    "outs": {
+      "name": "extensions-image_outs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [],
+      "transitiveCrossDeps": [],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.extensions-image.yaml",
+        "libraries/mecha/.bayt/compose.extensions-build.yaml"
+      ]
+    },
+    "srcs": {
+      "name": "extensions-image_srcs",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "activate": "",
+      "srcs": {
+        "globs": [],
+        "exclude": []
+      },
+      "outs": {
+        "globs": [
+          "services/database/pljs/pins.cue"
+        ],
+        "exclude": []
+      },
+      "env": {},
+      "visibility": "public",
+      "deps": [],
+      "transitiveDeps": [
+        "extensions-build_srcs"
+      ],
+      "transitiveCrossDeps": [
+        {
+          "project": "libraries_mecha",
+          "name": "extensions-build_srcs",
+          "dir": "libraries/mecha",
+          "outs": {
+            "globs": [
+              "services/database/pljs/pins.cue"
+            ],
+            "exclude": []
+          }
+        }
+      ],
+      "chainedDeps": [],
+      "cmds": [],
+      "cache": {
+        "full": false,
+        "similar": false
+      },
+      "upClosure": [
+        "libraries/mecha/.bayt/compose.extensions-image.yaml",
+        "libraries/mecha/.bayt/compose.extensions-build.yaml"
+      ]
+    }
+  },
+  "visibility": "public",
+  "emitsSrcs": true,
+  "deps": [
+    "extensions-build"
+  ],
+  "sameProjectDeps": [
+    "extensions-build"
+  ],
+  "transitiveDeps": [
+    "extensions-build"
+  ],
+  "transitiveCrossDeps": [],
+  "upClosure": [
+    "libraries/mecha/.bayt/compose.extensions-image.yaml",
+    "libraries/mecha/.bayt/compose.extensions-build.yaml"
+  ],
+  "chainedDeps": [
+    {
+      "name": "extensions-build",
+      "project": "libraries_mecha",
+      "dir": "libraries/mecha",
+      "outs": {
+        "globs": [],
+        "exclude": []
+      }
+    }
+  ],
+  "cmds": [],
+  "cache": {
+    "full": false,
+    "similar": false
+  }
+}

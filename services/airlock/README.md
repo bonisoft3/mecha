@@ -215,6 +215,13 @@ configured hatch network is preserved; an undeclared default network is not
 added. The role does not confine the process or enforce its outbound domains.
 A missing, removed or unbuilt target fails runtime lowering.
 
+**One container holds them all in pronto's docker appliance.** The airlock, its
+daprd and each docker bridge run there as processes on one loopback address
+under their compose names, so the walls above are not there: the daprd's
+bindings-only API and the airlock's `--allow-net` remain, and a bridge's own
+destination policy carries the rest
+([[../../../../plugins/pronto/docs/release-targets#docker|the docker target]]).
+
 Mecha's `#ActivepiecesContainer` supplies the generic action runner. Pronto
 instantiates it from a container hatch's `activepieces` definition and scopes
 each bridge to one action alias. Applications select local or pinned catalogue

@@ -1,0 +1,26 @@
+# generated from bayt.cue — do not edit
+FROM scratch AS extensions-image
+WORKDIR /monorepo/libraries/mecha
+COPY --link --from=libraries_mecha-extensions-build /pg-extensions /pg-extensions
+COPY --parents services/database/pljs/pins.cue ./
+COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.extensions-image.json ./.bayt/
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS extensions-image_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents services/database/pljs/pins.cue ./
+COPY --from=libraries_mecha-extensions-build_srcs /monorepo /monorepo
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS extensions-image_srcs
+COPY --from=extensions-image_ctxs /monorepo /monorepo
+
+FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS extensions-image_bayt_ctxs
+WORKDIR /monorepo/libraries/mecha
+COPY --parents .bayt/compose.extensions-image.yaml .bayt/Dockerfile.extensions-image .bayt/bayt.extensions-image.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/process-compose.yaml ./
+COPY --from=libraries_mecha-extensions-build_bayt /monorepo /monorepo
+ARG SOURCE_DATE_EPOCH
+ARG BAYT_CLAMP=1
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+FROM scratch AS extensions-image_bayt
+COPY --from=extensions-image_bayt_ctxs /monorepo /monorepo

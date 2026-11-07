@@ -25,12 +25,13 @@ import (
 
 	bayt "github.com/bonisoft3/bayt/core:bayt"
 	apt "github.com/bonisoft3/bayt/distros/apt"
+	zypper "github.com/bonisoft3/bayt/distros/zypper"
 	deno "github.com/bonisoft3/bayt/stacks/deno"
 	mise "github.com/bonisoft3/bayt/stacks/mise"
 	sayt "github.com/bonisoft3/bayt/stacks/sayt"
 	cluster "github.com/bonisoft3/mecha:cluster"
 	activepieces "github.com/bonisoft3/mecha/services/activepieces:activepieces"
-	ivm "github.com/bonisoft3/mecha/packages/incremental-views:incremental_views"
+	pljs "github.com/bonisoft3/mecha/services/database/pljs"
 )
 
 _postgres: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
@@ -63,6 +64,7 @@ _stack: cluster.#Cluster & {
 		app: "mecha"
 		images: {
 			database: {ref: ":database-image"}
+			extensions: {ref: ":extensions-image"}
 			mesh: {ref: ":mesh-image"}
 			conduit: {ref: ":conduit-image"}
 			auth: {ref: ":auth-image"}
@@ -141,31 +143,58 @@ _mecha: bayt.#project & _where & {
 
 		// ---- The images -------------------------------------------------
 
+		// pljs as `plv8` and pg_ivm for the docker appliance's PostgreSQL, which
+		// Leap ships without either, from the recipe the database image runs,
+		// against that server's own headers (cluster.#AppliancePostgres), built
+		// once for every app's appliance.
+		"extensions-build": {
+			// Public, as the image it builds for: a consumer's compose resolves it.
+			visibility: "public"
+			cmd: "builtin": null
+			activate: ""
+			srcs: globs: ["services/database/pljs/pins.cue"]
+			dockerfile: bayt.nubox & {
+				defaultPreamble: "zypper-pg-extensions": (zypper.#install & {
+					pkgs: [
+						"postgresql18-server-devel=\(cluster.#AppliancePostgres)",
+						"gcc=15-160000.2.2",
+						"make=4.4.1-160000.3.2",
+						"git=2.51.0-160000.1.2",
+						"patch=2.7.6-160000.4.1",
+						"perl=5.42.0-160000.3.1",
+					]
+					then: list.Concat([
+						(pljs.#Build & {pgConfig: "/usr/lib/postgresql18/bin/pg_config", fetch: "curl -fsSL -o"}).steps,
+						[
+							"mkdir -p /pg-extensions/lib /pg-extensions/extension",
+							#"cp "$(/usr/lib/postgresql18/bin/pg_config --pkglibdir)/pljs.so" "$(/usr/lib/postgresql18/bin/pg_config --pkglibdir)/pg_ivm.so" /pg-extensions/lib/"#,
+							#"cp "$(/usr/lib/postgresql18/bin/pg_config --sharedir)"/extension/pljs* "$(/usr/lib/postgresql18/bin/pg_config --sharedir)"/extension/plv8* "$(/usr/lib/postgresql18/bin/pg_config --sharedir)"/extension/pg_ivm* /pg-extensions/extension/"#,
+						],
+					])
+				}).out
+			}
+		}
+		// What an appliance copies, its libraries and extension files
+		// (/pg-extensions), without the toolchain that built them.
+		"extensions-image": _image & {
+			srcs: globs: ["services/database/pljs/pins.cue"]
+			deps: [":extensions-build"]
+			dockerfile: {
+				from: null
+				copy: [{from: ref: ":extensions-build", srcs: ["/pg-extensions"], dst: "/pg-extensions"}]
+			}
+		}
 		"database-image": _image & {
 			srcs: globs: ["services/database/rls/rls.sql", "services/database/role_passwords.sh", "services/ticker/schedule.sql", "services/durex/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
 			dockerfile: {
 				from: name: _postgres
-				// plv8 hosts a Jessie validation inside the write's transaction.
-				// PGDG apt carries no plv8: the artifact is Pigsty's, fetched by
-				// exact name and checked against its published sha256 per
-				// architecture, inside the same RUN so the .deb and the fetch
-				// tooling leave no layer behind.
+				// QuickJS's pljs hosts the database's Jessie as the `plv8` language
+				// (services/database/pljs), built from the pinned tag inside the
+				// same RUN as pg_ivm so its sources and toolchain leave no layer.
 				defaultPreamble: extensions: (apt.#install & {
-					pkgs: ["ca-certificates", "wget", "build-essential", "postgresql-server-dev-18"]
-					then: [
-						"arch=$(dpkg --print-architecture)",
-						"case \"$arch\" in amd64) sum=969ca7bbf2341ea747f8ffa99226f0ae7ce2cd74353d12e9d13b09cc2362c47f;; arm64) sum=52bb956d95a3e51262250316cb3124e5cfd38aaeef60379cba615b0c5aedd05a;; *) echo \"no plv8 artifact for $arch\" >&2; exit 1;; esac",
-						"wget -qO /tmp/plv8.deb \"https://repo.pigsty.io/apt/pgsql/trixie/pool/main/p/plv8/postgresql-18-plv8_3.2.5-1PGSTY~trixie_$arch.deb\"",
-						"echo \"$sum  /tmp/plv8.deb\" | sha256sum -c -",
-						"dpkg -i /tmp/plv8.deb",
-						"rm /tmp/plv8.deb",
-						"wget -qO /tmp/pg_ivm.tar.gz '\(ivm.#Source.url)'",
-						"echo '\(ivm.#Source.sha256)  /tmp/pg_ivm.tar.gz' | sha256sum -c -",
-						"mkdir /tmp/pg_ivm && tar -xzf /tmp/pg_ivm.tar.gz --strip-components=1 -C /tmp/pg_ivm",
-						"make -C /tmp/pg_ivm PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config && make -C /tmp/pg_ivm PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config install",
-						"rm -rf /tmp/pg_ivm /tmp/pg_ivm.tar.gz",
-					]
-					purge: ["wget", "ca-certificates", "build-essential", "postgresql-server-dev-18"]
+					pkgs: ["ca-certificates", "wget", "git", "build-essential", "postgresql-server-dev-18"]
+					then: (pljs.#Build & {pgConfig: "/usr/lib/postgresql/18/bin/pg_config"}).steps
+					purge: ["wget", "git", "ca-certificates", "build-essential", "postgresql-server-dev-18"]
 				}).out
 				// The data directory lives on the container's writable layer.
 				preamble: ["ENV PGDATA=/postgresql-data"]
@@ -252,7 +281,7 @@ _mecha: bayt.#project & _where & {
 		// running service reaches no extension host. Workers take no
 		// permissions of their own, an option Deno still calls unstable.
 		"compute-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts job.ts", frozen: false}).out & {
-			let _files = ["deno.json", "deno.lock", "main.ts", "feldera.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "native-feldera.ts", "native-cleanup.ts", "native-sources.ts", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts"]
+			let _files = ["deno.json", "deno.lock", "main.ts", "feldera.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "native-feldera.ts", "native-cleanup.ts", "native-sources.ts", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts", "events.yaml"]
 			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts"]])
 			cmd: "duckdb": (deno.#duckdbContainerCmd & {
 				do: "deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts"

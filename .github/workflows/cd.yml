@@ -184,16 +184,20 @@ jobs:
             libraries_mecha-extensions-build.cache-from=type=gha,version=2,scope=extensions-build
             libraries_mecha-extensions-build.cache-to=type=gha,version=2,mode=max,scope=extensions-build
 
+      # Bake's metadata reaches the script as a heredoc, not an environment
+      # variable: it can exceed ARG_MAX.
       - name: Pin
         if: startsWith(github.ref, 'refs/tags/')
         env:
           SERVICE: ${{ matrix.service }}
           VERSION: ${{ steps.meta.outputs.version }}
           DIGEST: ${{ steps.build.outputs.digest }}
-          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
         run: |
           if [ -z "$DIGEST" ]; then
-            DIGEST="$(jq -r '."libraries_mecha-extensions-image"."containerimage.digest" // empty' <<<"$BAKE_METADATA")"
+            cat > "$RUNNER_TEMP/bake-metadata.json" <<'BAKE_METADATA_EOF'
+          ${{ steps.bake.outputs.metadata }}
+          BAKE_METADATA_EOF
+            DIGEST="$(jq -r '."libraries_mecha-extensions-image"."containerimage.digest" // empty' "$RUNNER_TEMP/bake-metadata.json")"
           fi
           [ -n "$DIGEST" ] || { echo "::error::no digest for ${SERVICE}"; exit 1; }
           echo "\"${SERVICE}\": \"bonitao/mecha-${SERVICE}:${VERSION}@${DIGEST}\"" >> "$GITHUB_STEP_SUMMARY"

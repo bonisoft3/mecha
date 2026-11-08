@@ -1,5 +1,5 @@
-import type pg from "pg";
-import type { TypeTable } from "@mecha/client/types";
+import type pg from "npm:pg@8.16.3";
+import type { TypeTable } from "./portable-contract.ts";
 import { postgresRows, type TypeSchemas, validateSchemas } from "./portable.ts";
 import {
   type SinkWrites,

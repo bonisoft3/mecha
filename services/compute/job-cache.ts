@@ -1,4 +1,4 @@
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import type { JobCache } from "./workers.ts";
 
 /** Disposable pure-function answers; Durex retains the invocation and publication receipt. */

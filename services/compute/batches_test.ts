@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { type BatchSpec, computationGraph, openBatches } from "./batches.ts";
 import { pgTest, postgres } from "./pg-machine-test.ts";
 import { publish } from "./publication.ts";

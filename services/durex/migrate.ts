@@ -1,4 +1,4 @@
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 
 export async function migrateWork(
   connectionString: string,

@@ -1,4 +1,4 @@
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { getWork, openWork, settleWork } from "../durex/work.ts";
 import { strictJson } from "./workers.ts";
 

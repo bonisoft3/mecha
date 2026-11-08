@@ -3,7 +3,7 @@
 // and the module's admission, compiled once and loaded in a cage.
 
 import { validateQueryStages, type StagedQueries } from "./query-stages.ts";
-import { ModuleSource } from "@endo/module-source";
+import { ModuleSource } from "npm:@endo/module-source@1.4.0";
 import { endowable } from "./language.ts";
 
 const sha256 = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>

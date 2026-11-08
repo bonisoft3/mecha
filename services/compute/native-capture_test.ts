@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { NativeFeldera } from "./native-feldera.ts";
 import { DeltaStore } from "./deltas.ts";
 import { type IncrementalProgram, installSources } from "./native-sources.ts";

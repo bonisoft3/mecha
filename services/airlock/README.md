@@ -46,8 +46,8 @@ task test:airlock        # from libraries/mecha: the pure suites
 task integrate:airlock   # postgres, Graphile, the cluster's daprd and a sink; needs Docker
 ```
 
-`tests/airlock_test.ts` generates a bayt project holding a cluster with two
-effects and boots the plane bayt lowers for it, below.
+pronto's `mecha-airlock.integration.test.ts` generates a bayt project holding
+a cluster with two effects and boots the plane bayt lowers for it, below.
 
 ## Contract
 

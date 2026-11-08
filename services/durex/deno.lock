@@ -357,9 +357,7 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@std/assert@1.0.8",
-      "npm:graphile-worker@0.18.0",
-      "npm:pg@8.16.3"
+      "jsr:@std/assert@1.0.8"
     ]
   }
 }

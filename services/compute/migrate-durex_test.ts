@@ -1,6 +1,6 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { runMigrations } from "graphile-worker";
-import pg from "pg";
+import { runMigrations } from "npm:graphile-worker@0.18.0";
+import pg from "npm:pg@8.16.3";
 import { openBatches } from "./batches.ts";
 import { migrateComputeWork } from "./migrate-durex.ts";
 import { pgTest, postgres } from "./pg-machine-test.ts";

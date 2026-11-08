@@ -1,4 +1,4 @@
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { type BatchSpec, computationGraph } from "./batches.ts";
 import { type DeltaStep, DeltaStore } from "./deltas.ts";
 import { type CompilationProfile, NativeFeldera } from "./native-feldera.ts";

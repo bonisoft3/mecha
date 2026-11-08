@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { pgTest, postgres } from "../compute/pg-test.ts";
 import { getWork, openWork, settleWork, type Work } from "./work.ts";
 

@@ -1,4 +1,4 @@
-import type pg from "pg";
+import type pg from "npm:pg@8.16.3";
 import { sqlIdentifier } from "./native-sources.ts";
 
 const delay = () => new Promise((resolve) => setTimeout(resolve, 100));

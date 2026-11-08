@@ -1,4 +1,4 @@
-import type pg from "pg";
+import type pg from "npm:pg@8.16.3";
 import type { FelderaProgram } from "./feldera.ts";
 
 export type IncrementalProgram = FelderaProgram & {

@@ -55,7 +55,7 @@
 // SERVICE_JWT where the cluster has auth. Numerical work runs outside SQL
 // transactions; sink writes retain the service role's policies and triggers.
 
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { NativeRuntime } from "./native-runtime.ts";
 import { compilationProfile } from "./native-feldera.ts";
 import { reconcileNativeResources } from "./native-cleanup.ts";
@@ -64,7 +64,7 @@ import { Feldera, type FelderaProgram } from "./feldera.ts";
 import { publish } from "./publication.ts";
 import { type SinkWrites, validateSinkWrites } from "../../packages/compute-snapshot/src/sink-writes.ts";
 import { PostgresJobCache } from "./job-cache.ts";
-import type { TypeTable } from "@mecha/client/types";
+import type { TypeTable } from "./portable-contract.ts";
 import { bindBoundary, portableQuery, type TypeBoundary, type TypeSchemas, validateSchemas } from "./portable.ts";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -83,8 +83,8 @@ import {
   numberFromValue,
   objectFromStructValue,
   stringFromValue,
-} from "@duckdb/node-api";
-import type { ModuleSource } from "@endo/module-source";
+} from "npm:@duckdb/node-api@1.5.6-r.1";
+import type { ModuleSource } from "npm:@endo/module-source@1.4.0";
 import { admit, Cage, IDENTIFIER, type Job, Runner, strictJson } from "./workers.ts";
 
 const RPC_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;

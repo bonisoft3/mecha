@@ -3,7 +3,7 @@
 // language. A cage (this service's cage.ts, the airlock's) imports it first and
 // builds its Compartment from CagedDate, the realm's Math and LANGUAGE.
 
-import "ses";
+import "npm:ses@1.15.0";
 
 const { apply, construct } = Reflect;
 

@@ -16,4 +16,4 @@ The harness builds a cached fixture layer for the selected standard piece. Tests
 cover plain/HTML/calendar MIME hierarchy and decoded payloads, UTF-8 filenames,
 identity, Bcc privacy, actual SMTP replies and recipient outcomes, single attempts,
 authentication, trusted/untrusted TLS and (in the container) hostname mismatch.
-`../airlock_test.ts` additionally exercises generated Compose and ledger delivery.
+pronto's `mecha-airlock.integration.test.ts` additionally exercises generated Compose and ledger delivery.

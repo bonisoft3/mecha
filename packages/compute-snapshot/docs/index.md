@@ -157,7 +157,9 @@ version starts a fresh batch. A blocked producer also blocks its dependents.
 
 ## Validation
 
-Run `deno test --no-config --node-modules-dir=none -A test/`
-from this package. The tests execute the original Cortex runtime, machine, and
-rules against PGlite, including publication rollback, replay, restart,
-overlapping source writes, and late responses.
+The coordinator runs a batch machine it is handed, and pronto compiles the one
+it ships (`compute/machine.ts`), so the suite is pronto's:
+`mecha-snapshot.test.ts` and `mecha-snapshot-materialize.test.ts` there run
+that machine against PGlite, including publication rollback, replay, restart,
+overlapping source writes, late responses and materialization in physical
+ranges.

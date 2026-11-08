@@ -1,6 +1,6 @@
 import { bindBoundary, type PortableType, typedSql, type TypeBoundary } from "./portable-contract.ts";
 export { bindBoundary, postgresRows, validateSchemas, type TypeBoundary, type TypeSchemas } from "./portable-contract.ts";
-import { type DuckDBConnection, DuckDBTypeId as SQL, type DuckDBValueConverter } from "@duckdb/node-api";
+import { type DuckDBConnection, DuckDBTypeId as SQL, type DuckDBValueConverter } from "npm:@duckdb/node-api@1.5.6-r.1";
 
 type Row = Record<string, unknown>;
 

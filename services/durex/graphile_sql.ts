@@ -18,7 +18,7 @@ export const FILE = new URL("./graphile.sql", import.meta.url);
 
 /** graphile.sql's text, from the pinned graphile-worker. */
 export async function render(): Promise<string> {
-  const index = import.meta.resolve("graphile-worker");
+  const index = import.meta.resolve("npm:graphile-worker@0.18.0");
   const { version } = JSON.parse(await Deno.readTextFile(new URL("../package.json", index)));
   const { migrations } = await import(new URL("./generated/sql.js", index).href) as { migrations: Record<string, string> };
   const steps = Object.entries(migrations).map(([file, text]) => {

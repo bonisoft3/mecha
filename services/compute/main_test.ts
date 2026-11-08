@@ -5,7 +5,7 @@
 // the image installs them at build; without initdb they are ignored.
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import pgDriver from "pg";
+import pgDriver from "npm:pg@8.16.3";
 import { Computation, computationVersion, crudClaims, Database, handler, Lake, queryEngine, seedOf, serve } from "./main.ts";
 import { executionVersion, type Job, type JobCache, jobKey, Runner } from "./workers.ts";
 import { pgTest, postgres } from "./pg-test.ts";

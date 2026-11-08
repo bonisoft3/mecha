@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { pgTest, postgres } from "./pg-test.ts";
 import { reconcileNativeResources } from "./native-cleanup.ts";
 

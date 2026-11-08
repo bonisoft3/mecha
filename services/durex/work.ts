@@ -1,6 +1,6 @@
-import { run, runMigrations, type Runner } from "graphile-worker";
+import { run, runMigrations, type Runner } from "npm:graphile-worker@0.18.0";
 import { EventEmitter } from "node:events";
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 
 export type WorkSpec = {
   name: string;

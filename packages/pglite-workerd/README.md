@@ -201,11 +201,11 @@ The opt-in compression probe loaded a newer 7,341,424,680-byte archive into
 1,951,252,480 bytes of actual Cloudflare SQLite storage: 73.4% smaller, with
 56,995 block rows. All 2,937 source chunks verified before PostgreSQL opened.
 Players, Flamengo rating history and table counts matched the original archive
-on initial, warm and post-abort reads. [[spikes/compression-results.json]] records
+on initial, warm and post-abort reads. The compression probe recorded
 the original measurements. That build's warm players query used 3,212 ms CPU and
 3,941 ms object wall time; warm Flamengo rating history used 5 ms each.
 
-The matched follow-up in [[spikes/query-memory-results.json]] found that 1 MiB
+The matched query-memory follow-up found that 1 MiB
 `work_mem` spilled 900 temporary pages. The current 8 MiB setting removed those
 spills for this query. Two warm round trips took 481–570 ms with raw storage and
 650 ms with compressed storage and the decoded-block cache. Results matched the
@@ -243,13 +243,13 @@ checks the npm backend's current installation layout.
 
 ## Compression probe
 
-[[spikes/compression-wrangler.jsonc]] deploys an isolated, authenticated archive
+The probe's wrangler configuration deploys an isolated, authenticated archive
 copy using compressed 128 KiB blocks. Set its `PROBE_TOKEN` secret before use.
-[[spikes/compression-load.ts]] takes the probe origin, a closed data directory,
+The probe's loader takes the probe origin, a closed data directory,
 and a private token file. It compresses upload chunks in transit and uses the
 normal resumable import and complete-directory hash verification.
 
-[[spikes/compression-check.ts]] has two modes: `reference <pgdata-copy> <json>`
+The probe's checker has two modes: `reference <pgdata-copy> <json>`
 records public player and rating queries from a disposable local archive copy;
 `remote <origin> <json> <token-file>` compares them with the deployed database
 cold, warm, and after an object abort. The probe exposes storage allocation;

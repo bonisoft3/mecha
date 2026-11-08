@@ -1,7 +1,7 @@
-import type pg from "pg";
+import type pg from "npm:pg@8.16.3";
 import { dropOwnedSlots } from "./native-cleanup.ts";
 import { rows as normalizeRows } from "./feldera.ts";
-import { xxhash3 } from "hash-wasm";
+import { xxhash3 } from "npm:hash-wasm@4.12.0";
 import type { Row } from "./main.ts";
 import type { DeltaStep } from "./deltas.ts";
 import {

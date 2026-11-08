@@ -1,6 +1,7 @@
 {
   "nodeModulesDir": "none",
   "imports": {
+    "@bonisoft3/mecha/": "../../",
     "@tanstack/db": "npm:@tanstack/db@0.8.0",
     "@tanstack/electric-db-collection": "npm:@tanstack/electric-db-collection@0.4.0",
     "@electric-sql/client": "npm:@electric-sql/client@1.5.27",

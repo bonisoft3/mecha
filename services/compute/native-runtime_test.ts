@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import pg from "pg";
+import pg from "npm:pg@8.16.3";
 import { type Batches, openBatches } from "./batches.ts";
 import type { DeltaStep } from "./deltas.ts";
 import { NativeRuntime } from "./native-runtime.ts";

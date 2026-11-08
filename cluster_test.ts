@@ -10,7 +10,7 @@ import { ENDOWABLE } from "./services/compute/language.ts";
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
 type Effect = { name: string; origin?: string; bridge?: string; ai?: "text" | "image"; tier?: "cheap" | "heavy"; handler?: string; endpoint?: string; secrets?: string[] };
-type Bridge = { name: string; container: string; port?: number; targets?: string[]; simulator?: Record<string, unknown> };
+type Bridge = { name: string; container: string; port?: number; action?: string; targets?: string[]; simulator?: Record<string, unknown>; appliance?: Record<string, unknown> };
 type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
@@ -443,6 +443,63 @@ Deno.test("a custom acquisition container gets the bridge role without mail conf
   const explicit = await runtimeWith(state, `{crawler: {dockerfile: from: name: "crawler", compose: networks: ["callbacks"]}}`);
   assert.equal(explicit.ok, true, explicit.stderr);
   assert.deepEqual(explicit.value.crawler.compose.networks.callbacks, {aliases: ["crawler"]});
+});
+
+// Cloudflare ships the container's own image, so the real container is built
+// here without the docker appliance's form, and a container that only pulls
+// its image is refused: the publish would have nothing to build.
+Deno.test("a bridge on cloudflare builds its real container and needs a Dockerfile", async () => {
+  const state = {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", targets: ["cloudflare"], simulator: {}}]};
+  const got = await runtimeWith(state, `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture", cmd: ["crawl"]}, compose: environment: {CALLBACK_TOKEN: "restricted"}}}`);
+  assert.equal(got.ok, true, got.stderr);
+  assert.deepEqual(got.value["crawler-appliance"].dockerfile.cmd, ["crawl"]);
+  assert.equal(got.value["crawler-appliance"].compose.manual, true);
+  const pulled = await runtimeWith(state, `{crawler: {dockerfile: from: null, compose: image: "ghcr.io/example/crawler:1"}}`);
+  assert.equal(pulled.ok, false);
+  assert.match(pulled.stderr, /builds no image from a Dockerfile/);
+});
+
+// The appliance target kept the container's `entrypoint.after` without the
+// waits' deps, which bayt refuses, and dropped `compose.environment`, which
+// the cloudflare publish reads from the compose file bayt renders for it.
+Deno.test("a bridge's real container keeps its entrypoint and environment and none of the stack's waits", async () => {
+  const state = {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", targets: ["cloudflare"], simulator: {}}]};
+  const got = await runtimeWith(state, `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture", cmd: ["crawl"]}, entrypoint: {do: "crawl", env: {MODE: "live"}, after: {database: "healthy"}}, expose: http: {port: 8080, env: "PORT"}, compose: {environment: {CALLBACK_TOKEN: "restricted"}, build: args: {PROFILE: "release"}, depends_on: {database: {condition: "service_healthy"}}}}}`);
+  assert.equal(got.ok, true, got.stderr);
+  const appliance = got.value["crawler-appliance"];
+  assert.equal(appliance.entrypoint.after, undefined);
+  assert.deepEqual(appliance.entrypoint.env, {MODE: "live"});
+  assert.equal(appliance.expose.http.env, "PORT");
+  // The build args ride along: bayt renders them into the compose file the
+  // publish forwards as the image's build variables.
+  assert.deepEqual(appliance.compose, {manual: true, environment: {CALLBACK_TOKEN: "restricted"}, build: {args: {PROFILE: "release"}}});
+  assert.equal(appliance.deps, undefined);
+});
+
+Deno.test("a container on cloudflare states its process in its Dockerfile, not in compose", async () => {
+  const state = {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", targets: ["cloudflare"], simulator: {}}]};
+  for (const compose of [`command: ["crawl"]`, `entrypoint: ["/bin/crawl"]`]) {
+    const got = await runtimeWith(state, `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture"}, compose: {${compose}}}}`);
+    assert.equal(got.ok, false, compose);
+    assert.match(got.stderr, /compose.command or compose.entrypoint/);
+  }
+  const docker = await runtimeWith({...state, bridges: [{name: "crawl", container: "crawler", targets: ["docker"], appliance: {srcs: ["/bin/crawl"], command: ["/bin/crawl"], port: 8090}}]}, `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture"}, compose: {command: ["crawl"]}}}`);
+  assert.equal(docker.ok, true, docker.stderr);
+});
+
+// Two bridges on one container unified two ports onto its one `expose`, and
+// on cloudflare built two containers from one image.
+Deno.test("bridges share a container on one port, and on cloudflare a container is one bridge's", async () => {
+  const effects = [{name: "fetch", bridge: "crawl"}, {name: "scan", bridge: "scrape"}];
+  const crawler = `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture"}, compose: {}}}`;
+  const shared = await runtimeWith({effects, bridges: [{name: "crawl", container: "crawler", simulator: {}}, {name: "scrape", container: "crawler"}]}, crawler);
+  assert.equal(shared.ok, true, shared.stderr);
+  const ports = await runtimeWith({effects, bridges: [{name: "crawl", container: "crawler", simulator: {}}, {name: "scrape", container: "crawler", port: 8081}]}, crawler);
+  assert.equal(ports.ok, false);
+  assert.match(ports.stderr, /on different ports/);
+  const cloudflare = await runtimeWith({effects, bridges: [{name: "crawl", container: "crawler", targets: ["cloudflare"], simulator: {}}, {name: "scrape", container: "crawler"}]}, crawler);
+  assert.equal(cloudflare.ok, false);
+  assert.match(cloudflare.stderr, /which cloudflare runs as one bridge's container/);
 });
 
 Deno.test("a bridge cannot refer to an absent, removed or unbuilt container", async () => {

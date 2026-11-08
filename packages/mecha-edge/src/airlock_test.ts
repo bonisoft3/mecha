@@ -355,6 +355,98 @@ Deno.test('a bridge not deployed on cloudflare settles onError without dispatch'
   }
 })
 
+// A bridge on cloudflare is the dispatcher's own container: the object counts
+// and sends its run like any sink's, and the dispatcher's answer settles it.
+const SOFA_REQUEST = `
+  CREATE TABLE sofa_request (id text PRIMARY KEY, status text NOT NULL DEFAULT 'acquiring');
+  INSERT INTO sofa_request (id) VALUES ('r1');
+  INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('acquire:r1', 'acquire', '{"id":"r1"}', '{}');
+  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => 'acquire:r1');
+`
+const acquire = (attempts: number, issue: EdgeEffects[string]['issue']): EdgeEffects => ({
+  acquire: {
+    declaration: {
+      table: 'sofa_request', field: 'status', state: 'acquiring', onDone: 'applied', onError: 'failed',
+      row: ['id'], key: ['id'], idempotent: false, reentry: 'repeat', attempts, handler: 'effects/acquire.js',
+      bridge: { name: 'sofascore', targets: ['cloudflare'], simulated: true },
+    },
+    target: { kind: 'container', bridge: 'sofascore', binding: 'BRIDGE_SOFASCORE' },
+    issue,
+  },
+})
+/** A container binding whose one stub answers every call as told. */
+const stub = (answer: () => Promise<Response>, asked: string[] = []) => ({
+  getByName: (name: string) => ({ fetch: (request: Request) => { asked.push(`${name} ${request.method} ${request.url}`); return answer() } }),
+})
+const judge: EdgeEffects[string]['issue'] = async (_input, sink) => {
+  const res = await sink.fetch('/acquire', { method: 'POST', body: { path: '/x' } })
+  return res.status === 200 ? { done: res.body } : { failed: { status: res.status } }
+}
+
+Deno.test('a bridge deployed on cloudflare as a container is dispatched', async () => {
+  const db = await ledger(SOFA_REQUEST)
+  try {
+    const asked: string[] = []
+    const { airlock, queued, deliver } = harness(db, acquire(5, judge), { env: { BRIDGE_SOFASCORE: stub(() => Promise.resolve(new Response('{"accepted":true}', { status: 200 })), asked) } })
+    await airlock.drain()
+    assert.equal(queued.length, 1)
+    assert.equal(await status(db, 'sofa_request', 'r1'), 'acquiring')
+    await deliver()
+    assert.deepEqual(asked, ['sofascore POST http://sofascore/acquire'])
+    assert.equal(await status(db, 'sofa_request', 'r1'), 'applied')
+    assert.equal(await entered(db, 'acquire:r1'), 1)
+  } finally {
+    await db.close()
+  }
+})
+
+// @cloudflare/containers answered a first deploy's provisioning as a 503 the
+// handler judged, so the effect settled failed on its first run; the stub
+// (bridge.ts) now rejects what the infrastructure fails at, and the object
+// treats it as an origin's transport error: counted, backed off, run again,
+// unknown when the attempts run out.
+Deno.test("a container the infrastructure cannot provide is the run's error, retried and unknown at the last attempt", async () => {
+  const db = await ledger(SOFA_REQUEST)
+  try {
+    let calls = 0
+    const provisioning = stub(() => { calls++; return Promise.reject(new Error('there is no container instance that can be provided to this durable object')) })
+    const { airlock, deliver, lines } = harness(db, acquire(2, judge), { env: { BRIDGE_SOFASCORE: provisioning } })
+    await airlock.drain()
+    await deliver()
+    assert.equal(calls, 1)
+    assert.ok(lines.some(l => l.includes('run 1 failed') && l.includes('no container instance that can be provided')), JSON.stringify(lines))
+    assert.deepEqual(await job(db, 'acquire:r1'), { attempts: 0, later: true })
+    assert.equal(await status(db, 'sofa_request', 'r1'), 'acquiring')
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'acquire:r1'`)
+    await airlock.drain()
+    await deliver()
+    assert.equal(calls, 2)
+    const { rows: [l] } = await db.query<{ kind: string; entered: number }>(`SELECT outcome->>'kind' AS kind, entered FROM airlock.external_effect_ledger WHERE key = 'acquire:r1'`)
+    assert.deepEqual(l, { kind: 'unknown', entered: 2 })
+    assert.equal(await status(db, 'sofa_request', 'r1'), 'failed')
+    assert.equal(await job(db, 'acquire:r1'), undefined)
+  } finally {
+    await db.close()
+  }
+})
+
+// What the container itself answers is the sink's answer, for the handler to
+// judge as it judges any sink's.
+Deno.test("a container's own 500 is the handler's to judge", async () => {
+  const db = await ledger(SOFA_REQUEST)
+  try {
+    const { airlock, deliver } = harness(db, acquire(5, judge), { env: { BRIDGE_SOFASCORE: stub(() => Promise.resolve(new Response('no such page', { status: 500 }))) } })
+    await airlock.drain()
+    await deliver()
+    const { rows: [l] } = await db.query<{ kind: string; data: unknown; entered: number }>(`SELECT outcome->>'kind' AS kind, outcome->'data' AS data, entered FROM airlock.external_effect_ledger WHERE key = 'acquire:r1'`)
+    assert.deepEqual(l, { kind: 'failed', data: { status: 500 }, entered: 1 })
+    assert.equal(await status(db, 'sofa_request', 'r1'), 'failed')
+    assert.equal(await job(db, 'acquire:r1'), undefined)
+  } finally {
+    await db.close()
+  }
+})
+
 const secondsLeft = async (db: PGlite, key: string) =>
   (await db.query<{ s: number }>(`SELECT extract(epoch FROM run_at - now())::float AS s FROM graphile_worker._private_jobs WHERE key = $1`, [key])).rows[0].s
 

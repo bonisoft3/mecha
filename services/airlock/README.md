@@ -132,12 +132,14 @@ deployed on, and whether the local stack runs a simulator in its place. The
 airlock knows its own target: `AIRLOCK_TARGET` in a cluster, which compose sets to
 `local`, and `cloudflare` at the edge. An airlock told none refuses to start
 where any bridge names its targets. Locally a bridge is deployed as its
-simulator; on a release target, where it names that target. Where it is not, a
-claimed effect settles at once, before
-its run is counted: outcome `failed`, data
-`{bridge, target, reason: "not deployed"}`, target `onError`. Neither handler nor
-sink is called, the ledger's `entered` stays 0 and no dead letter follows
-(`undeployed` in [reentry.ts](reentry.ts)).
+simulator; on a release target, where it names that target: as a process of
+the docker appliance, or as a Cloudflare Container of the edge's dispatcher
+Worker, called through its binding
+([container bridges](../../../../plugins/pronto/docs/container-bridges.md#targets)).
+Where it is not, a claimed effect settles at once, before its run is counted:
+outcome `failed`, data `{bridge, target, reason: "not deployed"}`, target
+`onError`. Neither handler nor sink is called, the ledger's `entered` stays 0
+and no dead letter follows (`undeployed` in [reentry.ts](reentry.ts)).
 
 ## After a crash
 

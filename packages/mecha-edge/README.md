@@ -133,7 +133,16 @@ gets null and counts nothing.
 
 The dispatcher runs the handler with the container's sink and cage, stows
 answered bytes in `BLOB_OBJECTS`, and calls `effectAnswer` with the outcome or
-the error, fenced by the run's number ([`dispatch.ts`](src/dispatch.ts)). Both
+the error, fenced by the run's number ([`dispatch.ts`](src/dispatch.ts)). A
+sink is tsbifrost, a declared origin, or a bridge deployed on `cloudflare`: a
+Cloudflare Container the dispatcher owns as a Durable Object class, `Bridge<Name>`
+bound as `BRIDGE_<NAME>` ([`bridge.ts`](src/bridge.ts)), whose stub the sink's
+call goes to under the bridge's name, on the port the class holds. The
+container's answer is the sink's; what the infrastructure fails at, as no
+instance while a first deploy provisions it, the stub throws, and the run errs
+as on an origin's transport
+([container bridges](../../../../plugins/pronto/docs/container-bridges.md#cloudflare)).
+Both
 calls are tried again briefly on what Cloudflare marks retryable, never on a
 refusal, and an effect the dispatcher does not know is the run's error. While
 a directory loads a claim is no run's, and an answer is refused: the

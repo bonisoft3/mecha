@@ -205,7 +205,10 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	port:      *8080 | int & >=1 & <=65535
 	// The release targets the container is deployed on. On any other, the
 	// airlock settles the effect failed without calling it
-	// (services/airlock/README.md#a-bridge-not-deployed).
+	// (services/airlock/README.md#a-bridge-not-deployed). `cloudflare` ships
+	// the container's own image, built from its Dockerfile by the publish, as
+	// a Cloudflare Container the airlock's dispatcher Worker owns; a container
+	// pulled rather than built is refused there.
 	targets: *[] | [...=~#EffectName]
 	// What the compose cluster, the local stack launch and the checks bring up,
 	// runs in the container's place: its fields replace the container target's
@@ -216,7 +219,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	simulator?: {...}
 	// How the `docker` release target's single-container appliance runs the
 	// bridge: `srcs` copied from the real container's image (built as the
-	// target `<container>-appliance`, which nothing starts) to the same paths
+	// target `<container>-appliance`, which nothing starts here) to the same paths
 	// in the appliance, and `command` run there as a process that serves
 	// `port` on localhost, where the airlock's daprd dials it under the
 	// container's name. The appliance's own services hold their ports
@@ -2116,14 +2119,43 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for b in R.cluster.state.bridges if b.appliance != _|_ if list.Contains(#AppliancePorts, b.appliance.port) {
 			("\(b.container)-appliance"): error("bridge \(b.name)'s appliance port is one the docker appliance's own services hold (#AppliancePorts): name another")
 		}
-		// The real container, built for the appliance to copy from and never
-		// started: the local stack runs only a bridge's simulator.
-		for b in R.cluster.state.bridges if b.appliance != _|_ {
+		// Cloudflare runs the image `wrangler deploy` builds from the container's
+		// Dockerfile, so a container that only pulls one has nothing to ship.
+		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare") if R._live[b.container].dockerfile.from == null {
+			("\(b.container)-appliance"): error("bridge \(b.name) names cloudflare but its container \(b.container) builds no image from a Dockerfile: Cloudflare Containers ships what the publish builds")
+		}
+		// Bridges share a container on its one port; on cloudflare a container
+		// is one bridge's, since each bridge is a class with a container of its
+		// own, and two would build two containers from one image.
+		for b in R.cluster.state.bridges
+		for o in R.cluster.state.bridges if o.container == b.container if o.name != b.name if o.port != b.port {
+			(b.container): error("bridges \(b.name) and \(o.name) name container \(b.container) on different ports: a container serves its bridges on one port")
+		}
+		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare")
+		for o in R.cluster.state.bridges if o.container == b.container if o.name != b.name {
+			(b.container): error("bridges \(b.name) and \(o.name) both name container \(b.container), which cloudflare runs as one bridge's container")
+		}
+		// Cloudflare runs the image's ENTRYPOINT and CMD: a command only the
+		// compose service would run is not what ships.
+		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare") if R._live[b.container].compose != _|_ if R._live[b.container].compose.command != _|_ || R._live[b.container].compose.entrypoint != _|_ {
+			("\(b.container)-appliance"): error("bridge \(b.name) names cloudflare but its container \(b.container) sets compose.command or compose.entrypoint, which only compose runs: state the process in dockerfile.entrypoint or dockerfile.cmd")
+		}
+		// The real container, built and never started here: the docker appliance
+		// copies from it and the cloudflare publish ships it. The local stack
+		// runs only a bridge's simulator. It keeps its own build's dependencies
+		// and its environment, which bayt resolves into its compose file for
+		// the publish to read, and none of the stack's waits.
+		for b in R.cluster.state.bridges if b.appliance != _|_ || list.Contains(b.targets, "cloudflare") {
+			let live = R._live[b.container]
 			("\(b.container)-appliance"): {
-				for f, v in R._live[b.container] if f != "compose" && f != "deps" {(f): v}
-				// Its own build's dependencies, without the stack's waits.
-				if R._live[b.container].deps != _|_ {deps: R._live[b.container].deps}
-				compose: manual: true
+				for f, v in live if f != "compose" && f != "deps" && f != "entrypoint" {(f): v}
+				if live.deps != _|_ {deps: live.deps}
+				if live.entrypoint != _|_ {entrypoint: {for ef, ev in live.entrypoint if ef != "after" {(ef): ev}}}
+				compose: {
+					manual: true
+					if live.compose != _|_ if live.compose.environment != _|_ {environment: live.compose.environment}
+					if live.compose != _|_ if live.compose.build != _|_ {build: live.compose.build}
+				}
 			}
 		}
 		for n, t in R._local {

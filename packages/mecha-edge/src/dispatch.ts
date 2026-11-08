@@ -17,11 +17,23 @@ export interface EdgeSink {
   fetch(path: unknown, init?: unknown): Promise<{ status: number; body: unknown }>
 }
 
+/** A bridge's container on cloudflare: a Durable Object namespace of this
+ * Worker whose stub (bridge.ts) starts the container and proxies to its
+ * port, and rejects what the infrastructure fails at. */
+export interface ContainerBinding {
+  getByName(name: string): { fetch(request: Request): Promise<Response> }
+}
+
 export interface EdgeEffect {
   declaration: Effect
-  /** A bridge is a container the edge does not run yet, so the object settles
-   * its effect failed without dispatching it. */
-  target: { kind: 'tsbifrost'; url?: string } | { kind: 'origin'; url?: string } | { kind: 'bridge'; bridge: string }
+  /** A `container` is a bridge deployed here, called through its binding; a
+   * `bridge` is one deployed elsewhere, whose effect the object settles failed
+   * without dispatching it. */
+  target:
+    | { kind: 'tsbifrost'; url?: string }
+    | { kind: 'origin'; url?: string }
+    | { kind: 'bridge'; bridge: string }
+    | { kind: 'container'; bridge: string; binding: string }
   issue(input: unknown, sink: EdgeSink, secrets: Record<string, string>): Promise<unknown> | unknown
   reconcile?(input: unknown, sink: EdgeSink, secrets: Record<string, string>): Promise<unknown> | unknown
 }
@@ -126,6 +138,14 @@ export interface PerformConfig {
   blobs?: BlobStore
 }
 
+function containerStub(env: Record<string, unknown> | undefined, binding: string, bridge: string) {
+  const namespace = env?.[binding] as ContainerBinding | undefined
+  if (typeof namespace?.getByName !== 'function') {
+    throw new Error(`${binding} is not a Durable Object binding of this dispatcher: the bridge ${bridge} is on cloudflare and its container is not bound`)
+  }
+  return namespace.getByName(bridge)
+}
+
 function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, aiBinding }: ReturnType<typeof extractEnv>): EdgeSink {
   const { fetcher = fetch, callTimeoutMs = CALL_TIMEOUT_MS } = cfg
   const tsbifrost = createTsBifrost({ target: 'cloudflare', config: cfg.ai, env: strings, aiBinding, fetcher })
@@ -162,6 +182,14 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
           res = await tsbifrost(new Request(`http://tsbifrost:${TSBIFROST_PORT}${path}`, { method, headers, ...(payload !== undefined ? { body: payload } : {}) }))
         } else if (spec.target.kind === 'origin') {
           res = await fetcher(new URL(path, spec.target.url).href, { method, headers, ...(payload !== undefined ? { body: payload } : {}) })
+        } else if (spec.target.kind === 'container') {
+          // The stub dials the class's own port, so the URL names only the
+          // bridge. What the container answers is the sink's answer; what the
+          // infrastructure fails at (no instance while a first deploy
+          // provisions, a port never ready, a connection lost mid-flight) the
+          // stub rejects, and the run errs as on an origin's transport.
+          const { bridge, binding } = spec.target
+          res = await containerStub(cfg.env, binding, bridge).fetch(new Request(`http://${bridge}${path}`, { method, headers, ...(payload !== undefined ? { body: payload } : {}) }))
         } else {
           throw new Error(`${key}: bridge ${spec.target.bridge} is not deployed on cloudflare and has no sink here`)
         }
@@ -267,6 +295,8 @@ export interface DispatcherEnv {
   AI?: unknown
   BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown> }
   BLOB_URL?: string
+  /** A bridge's container, BRIDGE_<NAME> (pronto's edge-bridges.ts). */
+  [binding: `BRIDGE_${string}`]: ContainerBinding | undefined
 }
 
 /** Where an answer's bytes go: the bucket every other object is in, served by

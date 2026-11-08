@@ -1,4 +1,24 @@
 {
+  "version": "5",
+  "specifiers": {
+    "npm:@bufbuild/cel-spec@0.5.0": "0.5.0_@bufbuild+protobuf@2.14.1",
+    "npm:@bufbuild/cel@0.5.0": "0.5.0_@bufbuild+protobuf@2.14.1",
+    "npm:@bufbuild/protobuf@2.14.1": "2.14.1",
+    "npm:@cloudflare/containers@0.3.7": "0.3.7",
+    "npm:@cloudflare/workers-types@5.20261015.1": "5.20261015.1",
+    "npm:@duckdb/duckdb-wasm@1.33.1-dev57.0": "1.33.1-dev57.0",
+    "npm:@electric-sql/pglite-icu-full@0.0.2": "0.0.2",
+    "npm:@electric-sql/pglite-pg_ivm@0.0.9": "0.0.9_@electric-sql+pglite@0.5.8",
+    "npm:@electric-sql/pglite@0.5.8": "0.5.8",
+    "npm:@simplewebauthn/server@10.0.1": "10.0.1",
+    "npm:@types/node@*": "22.20.5",
+    "npm:acorn-walk@8.3.4": "8.3.4",
+    "npm:acorn@8.14.0": "8.14.0",
+    "npm:croner@10.0.1": "10.0.1",
+    "npm:fast-png@6.4.0": "6.4.0",
+    "npm:graphile-worker@0.18.0": "0.18.0",
+    "npm:jpeg-js@0.4.4": "0.4.4"
+  },
   "npm": {
     "@babel/code-frame@7.29.7": {
       "integrity": "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==",
@@ -26,6 +46,9 @@
     },
     "@bufbuild/protobuf@2.14.1": {
       "integrity": "sha512-agRJn3+EJDUe8AvxTx/LnHA/GErvLE62pSaSk7+MwFOtOv8eWBu/qCq2qoZjBjVZ3C2aiFJCveuSs17KMkYGOw=="
+    },
+    "@cloudflare/containers@0.3.7": {
+      "integrity": "sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw=="
     },
     "@cloudflare/workers-types@5.20261015.1": {
       "integrity": "sha512-ef6KOceBMzxf1O/CelPF2ei8Mtlaw+7vQ9cdaUKFG8CC0xAe8/SuPdRpmbogEE18u6JbfFWWAOGQLaav8UTFWg=="
@@ -151,12 +174,6 @@
     },
     "@types/ms@2.1.0": {
       "integrity": "sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA=="
-    },
-    "@types/node@20.19.43": {
-      "integrity": "sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==",
-      "dependencies": [
-        "undici-types"
-      ]
     },
     "@types/node@22.20.5": {
       "integrity": "sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA==",
@@ -737,27 +754,9 @@
       ]
     }
   },
-  "specifiers": {
-    "npm:@bufbuild/cel-spec@0.5.0": "0.5.0_@bufbuild+protobuf@2.14.1",
-    "npm:@bufbuild/cel@0.5.0": "0.5.0_@bufbuild+protobuf@2.14.1",
-    "npm:@bufbuild/protobuf@2.14.1": "2.14.1",
-    "npm:@cloudflare/workers-types@5.20261015.1": "5.20261015.1",
-    "npm:@duckdb/duckdb-wasm@1.33.1-dev57.0": "1.33.1-dev57.0",
-    "npm:@electric-sql/pglite-icu-full@0.0.2": "0.0.2",
-    "npm:@electric-sql/pglite-pg_ivm@0.0.9": "0.0.9_@electric-sql+pglite@0.5.8",
-    "npm:@electric-sql/pglite@0.5.8": "0.5.8",
-    "npm:@simplewebauthn/server@10.0.1": "10.0.1",
-    "npm:@types/node@*": "22.20.5",
-    "npm:acorn-walk@8.3.4": "8.3.4",
-    "npm:acorn@8.14.0": "8.14.0",
-    "npm:croner@10.0.1": "10.0.1",
-    "npm:fast-png@6.4.0": "6.4.0",
-    "npm:graphile-worker@0.18.0": "0.18.0",
-    "npm:jpeg-js@0.4.4": "0.4.4"
-  },
-  "version": "5",
   "workspace": {
     "dependencies": [
+      "npm:@cloudflare/containers@0.3.7",
       "npm:@cloudflare/workers-types@5.20261015.1",
       "npm:@electric-sql/pglite-icu-full@0.0.2",
       "npm:@electric-sql/pglite-pg_ivm@0.0.9",

@@ -97,32 +97,50 @@ export async function reconcile(input, sink) {
   tsbifrost's `X-Bf-Passthrough-Extra-Params`: names daprd forwards (uppercase first),
   never one HTTP or the host sets, and visible ASCII values (`sinkHeaders` in
   `reentry.ts`, which the edge airlock applies too).
-- The host sends the request as a call of the effect's output binding on daprd,
-  `/v1.0/bindings/<effect>`, with the path, the handler's headers, the `Idempotency-Key`
-  and the content type as the binding's metadata. The binding's `url` is
-  the declared origin, and daprd answers the sink's status in `Metadata.statuscode`
-  (the binding is declared with `errorIfNot2XX` off). A credential the sink reads from a
+- The host sends the request as an invocation of the effect's HTTPEndpoint on daprd,
+  `/v1.0/invoke/<effect>/method/<path>`, with the handler's headers, the `Idempotency-Key`
+  and the content type as its own. The endpoint's `baseUrl` is the declared origin, and
+  daprd hands the body, the headers and the sink's status through unchanged, so a refusal
+  is an answer. A credential the sink reads from a
   header is the effect's `credential: {header, scheme?, secret}`: the airlock reads the
   variable once and adds the header to every call, and the handler never holds it. A
   client certificate is not declared yet.
+- A sink that takes no JSON declares `contentType`, and its handler sends the body already
+  encoded, as a string, which arrives as it was sent.
+- daprd's own failure is also a 500, told from a sink's by `errorCode: ERR_DIRECT_INVOKE`. An
+  open breaker called nothing, so it ends the run, gives the ledger's count back and leaves the
+  queue's backoff to bring the job again; it spends no attempt. Any other daprd failure may
+  have reached the sink and counts as a throw. A breaker met after a call in the same run has
+  reached the sink is a throw too.
 - The third argument holds the values of the environment variables the effect declares
   in `secrets`, read by the host at startup and written nowhere, not the manifest and
   not the ledger; the cluster refuses to start the airlock without them.
 - Past the language a handler reaches only what its effect declares in `endowments`
   (`../compute/language.ts`'s `ENDOWABLE`), as an omnishell module declares `Intl`: a
   handler that signs declares `Crypto`, WebCrypto's operations that are deterministic by
-  their specification (`../compute/crypto.ts`), and `TextEncoder`. An endowment it uses
-  without declaring throws where it is used.
+  their specification (`../compute/crypto.ts`), and `TextEncoder`; one that writes a PDF
+  declares `Pdf` ([pdf.ts](pdf.ts)). An endowment it uses without declaring throws where
+  it is used.
 - A throw, or no answer within 60 seconds, is no answer.
-- Bytes are answered as `{"$blob": {base64, type}}` anywhere in the answer (`blobs.ts`):
-  PNG, JPEG or WebP. Before the outcome settles, the host stores each in the cluster's
-  blob plane under a key derived from the ledger key and the blob's place in the answer,
-  so a retried run rewrites the same object, and the outcome carries the URL the plane
+- Bytes are answered as `{"$blob": {base64, type}}` anywhere in the answer (`blobs.ts`),
+  or as `{"$blob": {bytes, type}}` with a `Uint8Array` a handler made itself, since the
+  cage has no `btoa`: PNG, JPEG or WebP, or a PDF, which only the raw route serves. Before the outcome settles, the host stores each in the cluster's
+  blob plane under its content key, `effects/<sha256 hex>.<extension>`, which a later
+  effect reads with `sink.blob` once a row carries it, and the outcome carries the URL the plane
   serves it at: `/img/insecure/plain/s3://mecha-objects/<key>` through imgproxy in
   compose, written over the airlock daprd's `blobs` binding (dapr's S3 binding on
   rclone-s3); the same URL on the Worker's R2 bucket at the edge. Bytes never
   reach the ledger or a row: inline, a level's pictures outgrew the edge's in-memory
   database. A cluster with no blob plane refuses the answer.
+- Bytes are read with `sink.blob(key)`, and only by a content key,
+  `[effects/]<sha256 hex>[-<suffix>].<extension>` ([the record](../../docs/decisions/2026-11-05-content-addressed-blobs.md)):
+  the host reads the plane (the same binding's `get`, R2 at the edge) and fails the run
+  when the bytes do not hash to the key, so the input carries keys and a repeated run
+  reads what the first one read. Bytes a handler puts in a JSON body are sent as base64.
+- `sink.origin` is the release's origin, for a sink that links or calls back: the door's
+  `ORIGIN` in a container cluster, `https://<domain>` at the edge. It never follows the host
+  a request came by, so every run of a release names the same one; a release without one
+  fails the run that reads it.
 
 ## A bridge not deployed
 
@@ -187,25 +205,29 @@ the service token the ticker writes with:
 | | |
 |---|---|
 | `airlock` | This service, FROM mecha's `airlock-image`, with the program's `effects.json` and handlers copied to `/airlock` and watched. Its own `--allow-net` is the database, its daprd and port 9997, the healthcheck's and the ticker's wake (`GET /healthz`). |
-| `airlock-mesh` | Its daprd, holding one HTTP output binding per effect and nothing else: no Redis component and no resiliency policy, so a call is made once and `entered` counts every attempt. It runs under [dapr.yaml](dapr.yaml), the bindings API alone over HTTP and gRPC, and goes out on `airlock-egress`, a network nothing else joins. |
+| `airlock-mesh` | Its daprd, holding one HTTPEndpoint per effect, the wall, and a breaker per endpoint (`#AirlockResiliency`). Declaring a policy turns off daprd's built-in retries, so a call is made once and `entered` counts every attempt; a sink's 4xx counts toward the trip, which no policy can filter. It runs under [dapr.yaml](dapr.yaml) and goes out on `airlock-egress`, a network nothing else joins. |
 | Bridge container | `state.bridges` names an existing container target and its HTTP port (default 8080). The daprd waits on that target and calls `http://<container>:<port>`. Runtime lowering attaches the target to `airlock-out` and `bridge-<name>-egress`; it grants no default network, database credential or callback permission. |
 | `011_graphile_worker.sql`, `012_airlock.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`, staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its interpreter re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
 
-**The wall is the allowlist.** The airlock stands on the internal `airlock`
+**The wall keeps mistakes in.** Its purpose is that declared destinations are the
+only ones reached by accident; it guards against mistakes in trusted code and is
+not a security boundary. The airlock stands on the internal `airlock`
 network with the database and its daprd, so it reaches the world
 only through that daprd, and on `airlock-wake` with the ticker alone, whose
-wake reaches its health port and nothing of its daprd. The daprd offers the bindings API alone, over HTTP
-and over the gRPC it always serves: service invocation, which would forward a
-full URL to any origin, does not exist on it, nor do state, pubsub, secrets,
-metadata or shutdown. It goes out on `airlock-egress`, which nothing else
+wake reaches its health port and nothing of its daprd. daprd forwards an
+invocation whose target is a full URL, with no setting to turn that off, so a
+`routerchecker` rule (`#AirlockWall`) passes only `/v1.0/invoke/<a declared
+effect>/method/...`, the blob plane's binding and daprd's health, and `api.allowed`
+removes every other Dapr API. It does not stop a deliberate `dapr-app-id` header on
+an allowed path, which was measured reaching an undeclared host, and gRPC proxying
+under that metadata was not settled. It goes out on `airlock-egress`, which nothing else
 joins, and stands nowhere on the default network, where every other service
-is, so no other service can call its bindings and perform an effect with no
-claim. Its bindings are the program's
-declarations, so the only traffic it can originate is a call of a declared
-binding. An origin is spelt as an https DNS name of two labels or more, which
+is, so no other service can call it and perform an effect with no
+claim. Its endpoints are the program's
+declarations, so what it reaches by accident is a declared endpoint. An origin is spelt as an https DNS name of two labels or more, which
 refuses `database` and an address; a declared name that resolves inward is not
-refused, since the daprd dials what its binding names, nor is a redirect a
-declared sink answers, which the HTTP binding follows; those are the residual
+refused, since the daprd dials what its endpoint names, nor is a redirect a
+declared sink answers, which daprd follows; those are the residual
 pronto's record states. bayt writes no network, so a consumer
 declares the cluster's `surface.networks` in its compose model; pronto writes
 them to `compose.networks.yaml`, which every closure and the root include.

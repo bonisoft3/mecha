@@ -14,7 +14,7 @@ import {
   verifyRegistrationResponse,
 } from '@simplewebauthn/server'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
-import { shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
+import { isSession, PUBLIC_WHERE, shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
 import { prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
@@ -84,8 +84,9 @@ const now = () => Math.floor(Date.now() / 1000)
 export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeCluster> {
   const { db, secret, log } = cfg
   const lane = lanes()
-  // Interactive API work takes the api lane; background shape tokens, subset snapshots and
-  // prefetches take the low one.
+  // Interactive API work takes the api lane, a shape's reach among it: a screen mounts only once
+  // its shapes answer, and in the low lane that waited behind every render and background drain.
+  // Subset snapshots and prefetches take the low one.
   const serialize = <T>(fn: () => Promise<T>, priority: 'high' | 'low' = 'high'): Promise<T> =>
     lane(fn, priority === 'high' ? 'api' : 'low')
   const serializeLow = <T>(fn: () => Promise<T>): Promise<T> => serialize(fn, 'low')
@@ -197,7 +198,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   /** A session's claims, or null: a shape token is no session. */
   async function session(req: Request): Promise<Claims | null> {
     const claims = await bearer(req)
-    return claims && claims.role === 'app_user' && typeof claims.sub === 'string' ? claims : null
+    return isSession(claims) ? claims : null
   }
 
   async function guest(): Promise<Response> {
@@ -398,7 +399,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const table = body.table
     const scopes = publicCache.get(table) === true
       ? ['public:']
-      : await serialize(async () => (await publicOnly(table)) ? ['public:'] : await scopesOf(claims.sub as string), 'low')
+      : await serialize(async () => (await publicOnly(table)) ? ['public:'] : await scopesOf(claims.sub as string))
     const where = shapeWhere(scopes)
     const token = await signJwt(secret, { typ: 'shape', table, where, sub: claims.sub, exp: now() + SHAPE_TOKEN_TTL_S })
     return json(200, { token, table, where, expires_in: SHAPE_TOKEN_TTL_S })
@@ -409,14 +410,21 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   // subject's scopes now, read where the log is filtered.
   async function shape(req: Request): Promise<Response> {
     const claims = await bearer(req)
-    if (!claims || claims.typ !== 'shape' || typeof claims.sub !== 'string') return json(401, { error: 'invalid shape token' })
     const p = new URL(req.url).searchParams
+    // A session stands for its own public shapes, as the auth service's gate admits them.
+    if (isSession(claims)) {
+      const table = p.get('table')
+      if (!table || !shapes.has(table)) return json(403, { error: 'table not authorized' })
+      if (p.get('where') !== PUBLIC_WHERE) return json(403, { error: 'where not authorized' })
+      return shapes.serve(req, () => Promise.resolve(['public:']))
+    }
+    if (!claims || claims.typ !== 'shape' || typeof claims.sub !== 'string') return json(401, { error: 'invalid shape token' })
     if (p.get('table') !== claims.table) return json(403, { error: 'table not authorized' })
     if (p.get('where') !== claims.where) return json(403, { error: 'where not authorized' })
     const table = claims.table as string
     const reachOf = () => publicCache.get(table) === true
       ? Promise.resolve(['public:'])
-      : serialize(async () => (await publicOnly(table)) ? ['public:'] : await scopesOf(claims.sub as string), 'low')
+      : serialize(async () => (await publicOnly(table)) ? ['public:'] : await scopesOf(claims.sub as string))
     return shapes.serve(req, reachOf)
   }
 

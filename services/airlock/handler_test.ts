@@ -3,8 +3,9 @@
 // answers are accepted.
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { bindingsTransport, Handler, sinkPath, type Transport } from "./handler.ts";
-import type { Effect } from "./reentry.ts";
+import { BreakerOpen, Handler, meshTransport, sinkPath, type Transport } from "./handler.ts";
+import { type Effect, encodedBody } from "./reentry.ts";
+import type { BlobStore } from "./blobs.ts";
 
 const effect: Effect = {
   table: "payment",
@@ -181,7 +182,7 @@ Deno.test("a credential's header reaches the transport on every call, and the ha
   const rec = recording(() => ({ status: 200, body: null }));
   const answer = await h.call("issue", { amount: 1 }, "k", rec.transport, {}, { Authorization: "Bearer vk" });
   assertEquals(rec.calls.map((c) => c.headers), [{ Authorization: "Bearer vk" }]);
-  assertEquals(answer, { done: { secrets: [], sink: ["key", "fetch"] } });
+  assertEquals(answer, { done: { secrets: [], sink: ["key", "origin", "fetch", "blob"] } });
 });
 
 Deno.test("an effect that declares no secrets hands its handler none, and the sink signs nothing", async () => {
@@ -201,20 +202,71 @@ Deno.test("a handler reaches Crypto only where its effect declares it", async ()
   await assertRejects(() => Handler.admit("charge", "unused.js", { ...idempotent, endowments: ["Intl"] }), Error, "are not a list drawn from");
 });
 
-Deno.test("the bindings transport sends the host's metadata last, so a credential names neither the path nor the key", async () => {
-  const sent: unknown[] = [];
+async function meshCall(answer: Response, call: (transport: Transport) => Promise<unknown>) {
+  const sent: { url: string; init: RequestInit }[] = [];
   const fetched = globalThis.fetch;
-  globalThis.fetch = (_url, init) => {
-    sent.push(JSON.parse(init!.body as string));
-    return Promise.resolve(new Response("{}", { status: 200, headers: { "metadata.statuscode": "200", "metadata.content-type": "application/json" } }));
+  globalThis.fetch = (url, init) => {
+    sent.push({ url: String(url), init: init! });
+    return Promise.resolve(answer);
   };
   try {
-    const transport = bindingsTransport("http://mesh");
-    await transport("charge", "/v1/charges", { method: "POST", body: { amount: 1 } }, "charge:p1", { path: "/elsewhere", "Idempotency-Key": "other", "X-Api-Key": "vk" });
-    assertEquals(sent, [{ operation: "post", data: { amount: 1 }, metadata: { "X-Api-Key": "vk", path: "/v1/charges", "Idempotency-Key": "charge:p1", "Content-Type": "application/json" } }]);
+    return { sent, result: await call(meshTransport("http://mesh")) };
   } finally {
     globalThis.fetch = fetched;
   }
+}
+
+Deno.test("the mesh transport invokes the effect's endpoint, the host's key last, so a credential cannot name it", async () => {
+  const { sent } = await meshCall(Response.json({}), (t) => t("charge", "/v1/charges?x=1", { method: "POST", body: { amount: 1 } }, "charge:p1", { "Idempotency-Key": "other", "X-Api-Key": "vk" }));
+  assertEquals(sent[0].url, "http://mesh/v1.0/invoke/charge/method/v1/charges?x=1");
+  assertEquals(sent[0].init.method, "POST");
+  assertEquals(sent[0].init.body, '{"amount":1}');
+  assertEquals(sent[0].init.headers, { Accept: "application/json", "X-Api-Key": "vk", "Idempotency-Key": "charge:p1", "Content-Type": "application/json" });
+});
+
+Deno.test("the mesh transport sends a declared content type's string as it is", async () => {
+  const { sent } = await meshCall(new Response("ok"), (t) => t("form", "/v1/sessions", { method: "POST", body: "a=1&b=2", contentType: "application/x-www-form-urlencoded" }, "k", {}));
+  assertEquals(sent[0].init.body, "a=1&b=2");
+  assertEquals((sent[0].init.headers as Record<string, string>)["Content-Type"], "application/x-www-form-urlencoded");
+});
+
+Deno.test("a sink's own 500 is its answer; daprd's is not", async () => {
+  const sink = await meshCall(Response.json({ error: "down" }, { status: 500 }), (t) => t("charge", "/x", { method: "GET" }, "k", {}));
+  assertEquals(sink.result, { status: 500, body: { error: "down" } });
+  const refused = { status: 402, body: "declined" };
+  assertEquals((await meshCall(new Response("declined", { status: 402 }), (t) => t("charge", "/x", { method: "GET" }, "k", {}))).result, refused);
+  const daprd = (message: string) => Response.json({ errorCode: "ERR_DIRECT_INVOKE", message }, { status: 500 });
+  await assertRejects(() => meshCall(daprd('failed to invoke, id: charge, err: Post "https://x": EOF'), (t) => t("charge", "/x", { method: "POST", body: {} }, "k", {})), Error, "daprd answered");
+  // The daprd's refusal at any status is the mesh's error, never read as the sink's answer.
+  const walled = Response.json({ errorCode: "ERR_API_NOT_ALLOWED", message: "the API is not allowed" }, { status: 403 });
+  await assertRejects(() => meshCall(walled, (t) => t("charge", "/x", { method: "POST", body: {} }, "k", {})), Error, "daprd answered");
+  await assertRejects(() => meshCall(daprd("failed to invoke, id: charge, err: circuit breaker is open"), (t) => t("charge", "/x", { method: "POST", body: {} }, "k", {})), BreakerOpen);
+});
+
+Deno.test("an open breaker ends the call past the handler, unless the handler already reached the sink", async () => {
+  const path = await file(`export const issue = async (input, sink) => {
+    for (const p of ["/a", "/b"]) {
+      try { await sink.fetch(p, { method: "POST", body: {} }); } catch (e) { return { done: "caught " + e.message }; }
+    }
+    return { done: "both" };
+  };`);
+  const h = await Handler.admit("charge", path, idempotent);
+  const open = () => {
+    throw new BreakerOpen("open");
+  };
+  await assertRejects(() => h.call("issue", {}, "k", open), BreakerOpen);
+  let n = 0;
+  const second: Transport = () => n++ === 0 ? Promise.resolve({ status: 200, body: null }) : Promise.reject(new BreakerOpen("open"));
+  assertEquals(await h.call("issue", {}, "k", second), { done: "caught open" });
+  // A call still in flight may have reached the sink: one beside it that meets
+  // the breaker is the handler's throw, not a run given back.
+  const both = await file(`export const issue = async (input, sink) => {
+    try { await Promise.all([sink.fetch("/a", { method: "POST", body: {} }), sink.fetch("/b", { method: "POST", body: {} })]); } catch (e) { return { done: "caught " + e.message }; }
+    return { done: "both" };
+  };`);
+  let m = 0;
+  const beside: Transport = () => m++ === 0 ? new Promise((resolve) => setTimeout(() => resolve({ status: 200, body: null }), 20)) : Promise.reject(new BreakerOpen("open"));
+  assertEquals(await (await Handler.admit("charge", both, idempotent)).call("issue", {}, "k", beside), { done: "caught open" });
 });
 
 Deno.test("a declared Cheerio endowment parses without opening another network door", async () => {
@@ -245,6 +297,43 @@ Deno.test("a declared Cheerio endowment parses without opening another network d
 	}
 });
 
+// A whole 1×1 JPEG, as the print checkout stores each card's artwork.
+const JPEG = Uint8Array.from(
+  atob("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="),
+  (c) => c.charCodeAt(0),
+);
+
+Deno.test("a handler reads its input's blobs by content key, sends a PDF of them as base64, and knows its door", async () => {
+  const key = `${[...new Uint8Array(await crypto.subtle.digest("SHA-256", JPEG))].map((b) => b.toString(16).padStart(2, "0")).join("")}.jpg`;
+  const reads: string[] = [];
+  const blobs: BlobStore = {
+    put: () => Promise.reject(new Error("unexpected put")),
+    get: (k) => (reads.push(k), Promise.resolve(JPEG)),
+    url: (k) => k,
+  };
+  const path = await file(`export async function issue(input, sink) {
+    const jpeg = await sink.blob(input.artwork[0]);
+    const pdf = await Pdf.fromJpegs({ size: { width: 10, height: 10 }, pages: [{ jpeg, x: 0, y: 0, width: 10, height: 10 }] });
+    const r = await sink.fetch("/send", { method: "POST", body: { attachments: [{ content: pdf, type: "application/pdf" }] } });
+    return { done: { body: r.body, origin: sink.origin } };
+  }`);
+  try {
+    const handler = await Handler.admit("mail", path, { ...idempotent, endowments: ["Pdf"] });
+    const { transport, calls } = recording(() => ({ status: 200, body: "sent" }));
+    assertEquals(await handler.call("issue", { artwork: [key] }, "mail:1", transport, {}, {}, { blobs, origin: "https://app.example" }), { done: { body: "sent", origin: "https://app.example" } });
+    assertEquals(reads, [key]);
+    const sent = JSON.parse(encodedBody(undefined, calls[0].init.body));
+    const pdf = Uint8Array.from(atob(sent.attachments[0].content), (c) => c.charCodeAt(0));
+    assertEquals(new TextDecoder().decode(pdf.subarray(0, 5)), "%PDF-");
+    await assertRejects(() => handler.call("issue", { artwork: ["a.jpg"] }, "mail:2", transport, {}, {}, { blobs }), Error, "only a content key");
+    // Regression: the airlock refused to start without ORIGIN, so a Cloud Run
+    // release that gives it none ran no effect at all; only a link back needs it.
+    await assertRejects(() => handler.call("issue", { artwork: [key] }, "mail:3", transport, {}, {}, { blobs }), Error, "names no origin");
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
 Deno.test("a handler sets its own headers on a sink call, never one the host or HTTP sets", async () => {
   const asking = (headers: unknown) => file(`export const issue = async (input, sink) => {
     await sink.fetch("/v1/images/generations", { method: "POST", body: {}, headers: ${JSON.stringify(headers)} });
@@ -254,9 +343,9 @@ Deno.test("a handler sets its own headers on a sink call, never one the host or 
   const h = await Handler.admit("charge", await asking({ "X-Bf-Passthrough-Extra-Params": "true" }), idempotent);
   await h.call("issue", {}, "k", rec.transport, {}, { Authorization: "Bearer vk" });
   assertEquals(rec.calls.map((c) => [c.init.headers, c.headers]), [[{ "X-Bf-Passthrough-Extra-Params": "true" }, { Authorization: "Bearer vk" }]]);
-  // A lowercase name daprd would drop, the ledger key, the binding's path and
-  // the credential would each let the handler unsay what the host says.
-  for (const refused of [{ "x-lower": "1" }, { "Idempotency-Key": "other" }, { path: "/elsewhere" }, { Authorization: "Bearer mine" }, { "X-Bad": "a\nb" }, ["X-A"]]) {
+  // A lowercase name, the ledger key, a target of daprd's own and the credential
+  // would each let the handler unsay what the host says.
+  for (const refused of [{ "x-lower": "1" }, { "Idempotency-Key": "other" }, { "Dapr-App-Id": "elsewhere" }, { path: "/elsewhere" }, { Authorization: "Bearer mine" }, { "X-Bad": "a\nb" }, ["X-A"]]) {
     const none = recording(() => ({ status: 200, body: null }));
     const bad = await Handler.admit("charge", await asking(refused), idempotent);
     await assertRejects(() => bad.call("issue", {}, "k", none.transport, {}, { Authorization: "Bearer vk" }), Error, "sink header");
@@ -264,18 +353,18 @@ Deno.test("a handler sets its own headers on a sink call, never one the host or 
   }
 });
 
-Deno.test("the bindings transport sends a handler's headers as metadata, before the host's", async () => {
+Deno.test("a declared content type reaches the sink's call, and its body is the handler's own string", async () => {
+  const dir = await Deno.makeTempDir();
+  const file = `${dir}/form.js`;
+  await Deno.writeTextFile(file, `export async function issue(input, sink) { return { done: (await sink.fetch("/v1/sessions", { method: "POST", body: input.form })).body }; }`);
   const sent: unknown[] = [];
-  const fetched = globalThis.fetch;
-  globalThis.fetch = (_url, init) => {
-    sent.push(JSON.parse(init!.body as string));
-    return Promise.resolve(new Response("{}", { status: 200, headers: { "metadata.statuscode": "200", "metadata.content-type": "application/json" } }));
+  const transport: Transport = (_e, _p, init) => {
+    sent.push(init);
+    return Promise.resolve({ status: 200, body: "ok" });
   };
-  try {
-    const transport = bindingsTransport("http://mesh");
-    await transport("illustrate", "/v1/images/generations", { method: "POST", body: {}, headers: { "X-Bf-Passthrough-Extra-Params": "true" } }, "k", {});
-    assertEquals(sent, [{ operation: "post", data: {}, metadata: { "X-Bf-Passthrough-Extra-Params": "true", path: "/v1/images/generations", "Idempotency-Key": "k", "Content-Type": "application/json" } }]);
-  } finally {
-    globalThis.fetch = fetched;
-  }
+  const handler = await Handler.admit("form", file, { ...idempotent, contentType: "application/x-www-form-urlencoded" });
+  await handler.call("issue", { form: "a=1&b=2" }, "form:1", transport);
+  assertEquals(sent, [{ method: "POST", body: "a=1&b=2", headers: {}, contentType: "application/x-www-form-urlencoded" }]);
+  await Deno.remove(dir, { recursive: true });
 });
+

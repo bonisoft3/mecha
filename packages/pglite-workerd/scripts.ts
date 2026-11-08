@@ -59,9 +59,10 @@ export function pgrollSql(name: string, { operations }: PgRollMigration): string
   }).join(';\n')
 }
 
-/** The pgroll set as scripts; one pgroll alone runs keeps its name and no SQL. */
+/** The pgroll set as scripts in key order, as pgroll runs them; one pgroll
+ * alone runs keeps its name and no SQL. */
 export function pgrollScripts(set: Record<string, PgRollMigration>): Script[] {
-  return Object.entries(set).map(([name, migration]) => {
+  return Object.entries(set).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, migration]) => {
     try {
       return { name, sql: pgrollSql(name, migration) }
     } catch (error) {

@@ -232,8 +232,6 @@ Deno.test('a run the reentry policy settles unknown is settled in the object wit
   }
 })
 
-// A job the queue gave up on settles as the container airlock settles it: unknown,
-// the queue's last error as its data, and the row moved out of its invoking state.
 Deno.test('a job Graphile gave up on settles unknown without dispatch', async () => {
   const db = await ledger(`
     CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
@@ -307,7 +305,7 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
       },
     }
     const { airlock, deliver } = harness(db, effects, {
-      blobs: { put: (key, bytes) => Promise.resolve(void objects.set(key, bytes)), url: (key) => `/img/insecure/plain/s3://bucket/${key}` },
+      blobs: { put: (key, bytes) => Promise.resolve(void objects.set(key, bytes)), get: () => Promise.reject(new Error('unexpected get')), url: (key) => `/img/insecure/plain/s3://bucket/${key}` },
     })
     await airlock.drain()
     await deliver()
@@ -318,6 +316,81 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
     assert.equal(await status(db, 'card', 'c1'), 'drawn')
   } finally {
     await db.close()
+  }
+})
+
+// Regression: every sink call went out as JSON, which Stripe's form API refuses.
+Deno.test('a declared content type goes out with the handler\'s own encoded body', async () => {
+  const db = await ledger(`
+    CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
+    INSERT INTO generation_draft (id) VALUES ('d1');
+    INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}');
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => 'e:d1');
+  `)
+  try {
+    const sent: { type: string | null; body: string }[] = []
+    const fetcher = ((_url: string, init: RequestInit) => {
+      sent.push({ type: new Headers(init.headers).get('content-type'), body: init.body as string })
+      return Promise.resolve(Response.json({ ok: true }))
+    }) as unknown as typeof fetch
+    const form = draft(3, async (_input, sink) => ({ done: (await sink.fetch('/v1/sessions', { method: 'POST', body: 'a=1&b=2' })).body }), { contentType: 'application/x-www-form-urlencoded' })
+    const { airlock, deliver } = harness(db, { e: { ...form, target: { kind: 'origin', url: 'https://sink.example.test' } } }, { fetcher })
+    await airlock.drain()
+    await deliver()
+    assert.deepEqual(sent, [{ type: 'application/x-www-form-urlencoded', body: 'a=1&b=2' }])
+  } finally {
+    await db.close()
+  }
+})
+
+// The container airlock's read, on the edge: a handler names a content key, and
+// the bytes reach it only when they hash to it.
+Deno.test('a handler reads a blob by content key, and bytes that do not hash to it fail the run', async () => {
+  const bytes = new TextEncoder().encode('artwork')
+  const hex = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((b) => b.toString(16).padStart(2, '0')).join('')
+  const db = await ledger(`
+    CREATE TABLE card (id text PRIMARY KEY, status text NOT NULL DEFAULT 'mailing');
+    INSERT INTO card (id) VALUES ('good'), ('bad');
+    INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES
+      ('mail:good', 'mail', '{"id":"good"}', '{"art":"${hex}.jpg"}'),
+      ('mail:bad', 'mail', '{"id":"bad"}', '{"art":"${'0'.repeat(64)}.jpg"}');
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', k), job_key => k) FROM unnest(ARRAY['mail:good', 'mail:bad']) k;
+  `)
+  try {
+    const mail = draft(1, async (input, sink) => ({ done: { size: (await sink.blob((input as { art: string }).art)).length } }), { table: 'card', state: 'mailing', onDone: 'mailed', handler: 'effects/mail.js' })
+    const { airlock, deliver } = harness(db, { mail }, {
+      blobs: { put: () => Promise.reject(new Error('unexpected put')), get: () => Promise.resolve(bytes), url: (key) => key },
+    })
+    await airlock.drain()
+    await deliver()
+    const { rows } = await db.query<{ id: string; status: string }>(`SELECT id, status FROM card ORDER BY id`)
+    assert.deepEqual(rows.map((r) => [r.id, r.status]), [['bad', 'failed'], ['good', 'mailed']])
+  } finally {
+    await db.close()
+  }
+})
+
+// The origin once came from the last request to reach the object, so a release
+// answering on its domain and on workers.dev linked back to whichever was last.
+Deno.test('sink.origin is the release\'s, and a release without one fails the run that reads it', async () => {
+  for (const [origin, status] of [['https://cards.example', 'mailed'], [undefined, 'failed']] as const) {
+    const db = await ledger(`
+      CREATE TABLE card (id text PRIMARY KEY, status text NOT NULL DEFAULT 'mailing');
+      INSERT INTO card (id) VALUES ('c');
+      INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('mail:c', 'mail', '{"id":"c"}', '{}');
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'mail:c'), job_key => 'mail:c');
+    `)
+    try {
+      const mail = draft(1, (_input, sink) => Promise.resolve({ done: { link: `${sink.origin}/orders/c` } }), { table: 'card', state: 'mailing', onDone: 'mailed', handler: 'effects/mail.js' })
+      const { airlock, deliver } = harness(db, { mail }, { origin })
+      await airlock.drain()
+      await deliver()
+      const { rows } = await db.query<{ status: string; link: string | null }>(
+        `SELECT status, l.outcome->'data'->>'link' AS link FROM card, airlock.external_effect_ledger l`)
+      assert.deepEqual(rows, [{ status, link: origin ? `${origin}/orders/c` : null }])
+    } finally {
+      await db.close()
+    }
   }
 })
 

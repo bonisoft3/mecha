@@ -39,3 +39,19 @@ Deno.test('a turn that fails frees the connection for the next', async () => {
   assert.equal(await failed.catch(e => e.message), 'refused')
   assert.equal(await next, 'ran')
 })
+
+Deno.test('turns taken while a lane was empty owe it nothing', async () => {
+  // A prefetch arriving after a run of API turns preempted the render queued with it.
+  const serialize = lanes()
+  for (let i = 0; i < 6; i++) await serialize(async () => {}, 'api')
+  const ran: string[] = []
+  let release!: () => void
+  const held = serialize(() => new Promise<void>(resolve => { release = resolve }), 'api')
+  await Promise.resolve()
+  await Promise.resolve()
+  const all = [serialize(async () => { ran.push('low') }, 'low'), serialize(async () => { ran.push('render') }, 'render')]
+  release()
+  await held
+  await Promise.all(all)
+  assert.deepEqual(ran, ['render', 'low'])
+})

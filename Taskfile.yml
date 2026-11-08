@@ -189,7 +189,7 @@ tasks:
     desc: "airlock end to end: postgres, Graphile, the cluster's daprd and a sink, across crashes; the mail bridge against Mailpit"
     dir: services/airlock
     cmds:
-      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-net --allow-run=docker docker_test.ts
+      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-net --allow-run=docker,cue docker_test.ts
       - task: integrate:mail
 
   integrate:mail:

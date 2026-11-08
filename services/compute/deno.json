@@ -5,6 +5,7 @@
     "@babel/generator": "npm:@babel/generator@7.29.8",
     "@mecha/compute/": "./",
     "@mecha/client/types": "./portable-contract.ts",
+    "@pdfme/pdf-lib": "npm:@pdfme/pdf-lib@6.2.8",
     "@std/assert": "jsr:@std/assert@1.0.8"
   },
   "lock": true,

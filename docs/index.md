@@ -21,7 +21,8 @@
 
 # Decisions
 
-* [An authorized blob plane](decisions/2026-10-08-authorized-blob-plane.md) - decision, unbuilt: Closes the blob plane at the proxy, publishes images only through signed imgproxy URLs computed in SQL, and lets row policy own attachment, so an app needs no media service of its own.
+* [An authorized blob plane](decisions/2026-10-08-authorized-blob-plane.md) - decision, partially built: Closes the blob plane at the proxy, publishes images only through signed imgproxy URLs computed in SQL, and lets row policy own attachment, so an app needs no media service of its own.
+* [Content-addressed blobs](decisions/2026-11-05-content-addressed-blobs.md) - decision, provisional: A blob key may name its bytes by their SHA-256, and the airlock reads only such keys, checking the bytes against the key, so a handler's repeated run reads what the first one read or stops. Built for the print order's artwork alone; write-time checks and sharing a key across orders are left to improve.
 
 # Service and package contracts
 

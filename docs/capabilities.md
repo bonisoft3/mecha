@@ -55,10 +55,12 @@ which the airlock stores them before an outcome settles ([the airlock](../servic
 
 What bites:
 
-- **Nothing on the plane authorizes.** Anyone who reaches `/blobs` can list,
-  read, overwrite and delete every object. Anyone who reaches `/img` can make
-  imgproxy fetch and transform any of them. [An authorized blob
-  plane](decisions/2026-10-08-authorized-blob-plane.md) is proposed.
+- **Nothing here authorizes; pronto's door does.** Anyone who reaches rclone-s3 can
+  list, read, overwrite and delete every object, so a door stands before it. Pronto's
+  takes a write only from the session that claimed the key, and offers no listing and
+  no delete ([what is built](decisions/2026-10-08-authorized-blob-plane.md)). A raw read
+  by key stays open. Anyone who reaches `/img` can make imgproxy fetch and transform any
+  object.
 - **A blob is outside the database.** No row-level policy covers it and no
   change is captured for it. A row carries the object's key, and a key is safe
   to put on the bus where a credential is not.

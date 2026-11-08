@@ -12,6 +12,8 @@ import {
 } from "jsr:@std/assert@1.0.13";
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from "@simplewebauthn/server/helpers";
 import { admittedOrigin, ceremonyOrigin, handler, issueUserToken, links, migrate, signJwt, sql, verifyJwt } from "./main.ts";
+import { PUBLIC_WHERE } from "./jwt.ts";
+import { PUBLIC_WHERE as CLIENT_PUBLIC_WHERE } from "../../packages/client/src/public-where.ts";
 
 await sql`CREATE TABLE IF NOT EXISTS app_user (
   id uuid primary key,
@@ -685,14 +687,22 @@ Deno.test({
 });
 
 Deno.test({
-  name: "a user token is not a shape token, and vice versa",
+  name: "a session opens a table's public rows and nothing wider; a shape token is no session",
   ...opts,
   async fn() {
-    const { res, userToken } = await mint("article");
-    const { token, where } = await res.json();
-    const uri = `/v1/shape?table=article&where=${encodeURIComponent(where)}`;
-    // The session token says nothing about a shape.
-    assertEquals((await handler(shapeReq(userToken, uri))).status, 401);
+    const { res, userToken, uid } = await mint("article");
+    const { token } = await res.json();
+    const shape = (table: string, where: string) =>
+      handler(shapeReq(userToken, `/v1/shape?table=${table}&where=${encodeURIComponent(where)}`));
+    // Every subject's scopes open with public:, so the session reaches no row
+    // a minted token would not, and a screen mounts without a mint per table.
+    assertEquals(PUBLIC_WHERE, CLIENT_PUBLIC_WHERE);
+    assertEquals((await shape("article", PUBLIC_WHERE)).status, 200);
+    assertEquals((await shape("scoped_article", PUBLIC_WHERE)).status, 200);
+    // Its own rows still need the mint, which reads the subject's scopes.
+    assertEquals((await shape("scoped_article", `scope_id IN ('public:','user:${uid}')`)).status, 403);
+    assertEquals((await shape("article", "true")).status, 403);
+    assertEquals((await shape("article; drop table article", PUBLIC_WHERE)).status, 403);
     // And the shape token cannot stand in for a session.
     const mintWithShape = await handler(
       new Request("http://auth:9999/auth/shape", {

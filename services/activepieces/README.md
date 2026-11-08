@@ -1,6 +1,6 @@
 # Activepieces runner
 
-This service exposes admitted Activepieces actions through `POST /actions/<alias>/`.
+This service exposes admitted Activepieces actions through `POST /actions/<alias>`, with or without the trailing slash daprd drops.
 The request is a closed JSON object containing `props` and requires a nonempty
 `Idempotency-Key` header. Fixed properties and the configured identity property
 cannot be supplied by the caller. The response contains `result`, or a safe error

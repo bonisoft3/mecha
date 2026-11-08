@@ -9,7 +9,7 @@ import { ENDOWABLE } from "./services/compute/language.ts";
 
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
-type Effect = { name: string; origin?: string; bridge?: string; ai?: "text" | "image"; tier?: "cheap" | "heavy"; handler?: string; endpoint?: string; secrets?: string[] };
+type Effect = { name: string; origin?: string; bridge?: string; ai?: "text" | "image"; tier?: "cheap" | "heavy"; handler?: string; endpoint?: string; secrets?: string[]; simulated?: true };
 type Bridge = { name: string; container: string; port?: number; action?: string; targets?: string[]; simulator?: Record<string, unknown>; appliance?: Record<string, unknown> };
 type State = {
   migrations: string[];
@@ -249,7 +249,7 @@ Deno.test("an effect places the airlock and its daprd, and the ticker and clock 
   assert.equal(t.ticker.compose.environment?.WAKE_URLS, "http://airlock:9997/healthz");
   assert.equal((await targets({ schedules: ["tick"] })).ticker.compose.environment?.WAKE_URLS, "http://mesh-events:3500/v1.0/healthz/outbound");
   assert.equal((await targets({ schedules: ["tick"], effects: [PROBE] })).ticker.compose.environment?.WAKE_URLS, "http://mesh-events:3500/v1.0/healthz/outbound,http://airlock:9997/healthz");
-  assert.deepEqual(Object.keys(t.airlock.compose.environment ?? {}).sort(), ["AIRLOCK_DIR", "DATABASE_URL", "MESH_URL"]);
+  assert.deepEqual(Object.keys(t.airlock.compose.environment ?? {}).sort(), ["AIRLOCK_DIR", "DATABASE_URL", "MESH_URL", "ORIGIN"]);
   assert.deepEqual(t.airlock.dockerfile.cmd, [
     "run", "--frozen", "--unstable-worker-options", "--allow-net=database:5432,airlock-mesh:3500,0.0.0.0:9997",
     "--allow-read", "--allow-env", "--allow-sys", "main.ts",
@@ -353,6 +353,12 @@ Deno.test("an effect whose name is not a DNS label is refused", async () => {
     const got = await exported({ effects: [{ name, origin: PROBE.origin }] }, "surface.targets");
     assert.equal(got.ok, false, name);
   }
+});
+
+Deno.test("a key a simulator takes has a default, since no account stands behind it", async () => {
+  const t = await targets({ effects: [{ ...PROBE, simulated: true, secrets: ["SIMULATED_KEY"] }, { ...PROBE, name: "other", secrets: ["REAL_KEY"] }] });
+  assert.equal(t.airlock.compose.environment?.SIMULATED_KEY, "${SIMULATED_KEY:-simulator}");
+  assert.equal(t.airlock.compose.environment?.REAL_KEY, "${REAL_KEY:?REAL_KEY is required: an effect declares it}");
 });
 
 Deno.test("a secret reaches the airlock as a required variable, with no default, once however many effects name it", async () => {

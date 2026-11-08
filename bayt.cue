@@ -283,7 +283,8 @@ _mecha: bayt.#project & _where & {
 		// permissions of their own, an option Deno still calls unstable.
 		"compute-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts job.ts", frozen: false}).out & {
 			let _files = ["deno.json", "deno.lock", "main.ts", "feldera.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "native-feldera.ts", "native-cleanup.ts", "native-sources.ts", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts", "events.yaml"]
-			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts"]])
+			// endowments.ts imports the Pdf endowment from its sibling, the airlock.
+			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/airlock/pdf.ts", "services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts"]])
 			cmd: "duckdb": (deno.#duckdbContainerCmd & {
 				do: "deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts"
 			}).out
@@ -292,6 +293,7 @@ _mecha: bayt.#project & _where & {
 				workdir: "/app"
 				copy: [
 					{srcs: [for f in _files {"services/compute/\(f)"}], dst: "/app/"},
+					{srcs: ["services/airlock/pdf.ts"], dst: "/airlock/"},
 					{srcs: ["services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts"], dst: "/durex/"},
 					{srcs: ["packages/client/src/types.ts"], dst: "/packages/client/src/"},
 					{srcs: ["packages/lake/src/lake-types.ts"], dst: "/packages/lake/src/"},
@@ -303,7 +305,7 @@ _mecha: bayt.#project & _where & {
 		"activepieces-image": (activepieces.#Target & {source: "services/activepieces"}).target
 		// The handler cage imports compute's realm through its sibling directory.
 		"airlock-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts tsbifrost.ts"}).out & {
-			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "tsbifrost.ts", "ai-models.ts", "white-background.ts", "package.json", "dapr.yaml"]
+			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "blobs.ts", "pdf.ts", "tsbifrost.ts", "ai-models.ts", "white-background.ts", "package.json", "dapr.yaml"]
 			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts", "query-stages.ts"]
 			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
 			cmd: "deno-install": (deno.#containerCmd & {

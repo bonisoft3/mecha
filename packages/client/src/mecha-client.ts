@@ -10,6 +10,7 @@ import { unionCollectionOptions } from "./union.js"
 import { carriers, types } from "./types.js"
 import type { CarrierField, Carriers, CarrierTable, TypeField, Types, TypeTable } from "./types.js"
 import { createStorageAdapter } from "./storage.js"
+import { PUBLIC_WHERE } from "./public-where.js"
 
 /**
  * Mecha client v2 — the platform's at-least-once data plane for one app.
@@ -120,7 +121,12 @@ export type RowKey = { column: string; value: string }
  * header on the next poll rather than a new shape. The predicate is the
  * mint's own string, which is what the gate compares.
  */
-function shapeAuthority(authUrl: string, token: (() => string | null) | undefined, fetcher: typeof fetch) {
+function shapeAuthority(
+  authUrl: string,
+  token: (() => string | null) | undefined,
+  fetcher: typeof fetch,
+  publicTables: ReadonlySet<string>,
+) {
   type Held = { token: string; where: string; expiresAt: number }
   const held = new Map<string, Held>()
   const inflight = new Map<string, Promise<Held>>()
@@ -163,11 +169,27 @@ function shapeAuthority(authUrl: string, token: (() => string | null) | undefine
     return p
   }
 
+  // A public table's shape carries the session itself: its `where` is the same
+  // for every subject, so there is nothing to mint, and a screen mounts without
+  // a round trip per table.
+  const sessionOf = (table: string) => {
+    const session = token?.()
+    if (!session) throw new Error(`the public shape ${table} needs a session`)
+    return session
+  }
+  const open = (table: string, key?: RowKey) => key === undefined && publicTables.has(table)
+
   return {
-    authorization: (table: string, key?: RowKey) => async () => `Bearer ${(await current(table, key)).token}`,
-    where: (table: string, key?: RowKey) => async () => (await current(table, key)).where,
-    /** Drops a held token, so the next request mints. */
-    forget: (table: string, key?: RowKey) => void held.delete(JSON.stringify([token?.(), nameOf(table, key)])),
+    authorization: (table: string, key?: RowKey) => async () =>
+      `Bearer ${open(table, key) ? sessionOf(table) : (await current(table, key)).token}`,
+    where: (table: string, key?: RowKey) => async () => open(table, key) ? PUBLIC_WHERE : (await current(table, key)).where,
+    /** Drops a held token, so the next request mints; false when the shape
+     * carries the session, which a refusal leaves nothing to re-mint for. */
+    forget: (table: string, key?: RowKey) => {
+      if (open(table, key)) return false
+      held.delete(JSON.stringify([token?.(), nameOf(table, key)]))
+      return true
+    },
   }
 }
 
@@ -487,7 +509,12 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     fields.length === 0 ? row : typeTable().normalizeRow(fields, row, source)
   const electricUrl = resolveUrl(config.electricUrl ?? "/electric")
   const crudUrl = config.crudUrl ?? "/crud"
-  const shapes = shapeAuthority(config.authUrl, config.token, config.fetcher ?? fetch)
+  const shapes = shapeAuthority(
+    config.authUrl,
+    config.token,
+    config.fetcher ?? fetch,
+    new Set(config.tables.filter((t) => t.access?.scope === "public").map((t) => t.table)),
+  )
   const doFetch = config.fetcher ?? fetch
   const maxAge = config.maxTransactionAgeMs ?? 7 * 24 * 60 * 60 * 1000
 
@@ -553,10 +580,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         // into a 401, and the retry resolves the header afresh. Anything
         // else stops the stream, as it would unhandled.
         onError: (e: any) => {
-          if (e?.status === 401) {
-            shapes.forget(t.table, key)
-            return {}
-          }
+          if (e?.status === 401 && shapes.forget(t.table, key)) return {}
           throw e
         },
         // Every column a field declares arrives as Postgres's text and is
@@ -1050,10 +1074,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
           parser: parserOf(t),
           signal: controller.signal,
           onError: (error: any) => {
-            if (error?.status === 401 && identity() === subject) {
-              shapes.forget(t.table)
-              return {}
-            }
+            if (error?.status === 401 && identity() === subject && shapes.forget(t.table)) return {}
           },
         })
         const unsubscribe = stream.subscribe((messages) => {

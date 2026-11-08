@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { type Effect, ledgerKeySql, outcome, parseManifest, step, undeployed } from "./reentry.ts";
+import { type Effect, encodedBody, ledgerKeySql, outcome, parseManifest, step, undeployed } from "./reentry.ts";
 
 const effect = (over: Partial<Effect> = {}): Effect => ({
   table: "payment",
@@ -63,6 +63,15 @@ Deno.test("a manifest the airlock would misread is refused", () => {
     assertThrows(() => parseManifest(manifest(e, name)), Error, why);
   }
   assertThrows(() => parseManifest("{}"), Error, "no `effects` map");
+});
+
+Deno.test("a content type is a media type other than the default, and its body the handler's encoded string", () => {
+  const manifest = (contentType: unknown) => JSON.stringify({ effects: { charge: { ...effect(), contentType } } });
+  assertEquals(parseManifest(manifest("application/x-www-form-urlencoded")).charge.contentType, "application/x-www-form-urlencoded");
+  for (const bad of ["application/json", "form", "text/plain; charset=utf-8", 1]) assertThrows(() => parseManifest(manifest(bad)), Error, "contentType");
+  assertEquals(encodedBody(undefined, { a: 1 }), '{"a":1}');
+  assertEquals(encodedBody("application/x-www-form-urlencoded", "a=1"), "a=1");
+  assertThrows(() => encodedBody("application/x-www-form-urlencoded", { a: 1 }), TypeError, "encoded string");
 });
 
 Deno.test("secrets are named by environment variables", () => {

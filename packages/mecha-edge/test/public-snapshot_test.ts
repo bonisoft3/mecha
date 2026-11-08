@@ -263,9 +263,46 @@ Deno.test('interactive public snapshots jump ahead of background shape snapshots
 
     resume.resolve()
     await Promise.all([held, shapeSnap, ...lowSnapshots, ...highSnapshots])
-    assert.deepEqual(order.slice(0, 4), ['live-1:1', 'live-2:1', 'live-3:1', 'prefetch:1'])
+    assert.deepEqual(order.slice(0, 5), ['live-1:1', 'live-2:1', 'live-3:1', 'live-4:1', 'prefetch:1'])
     assert.equal(order.includes('shape:200'), true)
     assert.equal(order.includes('live-5:1'), true)
+  } finally {
+    resume.resolve()
+    await db.close()
+  }
+})
+
+// A screen mounts only once its shapes answer: a private table's token waited in
+// the low lane behind every queued prefetch, and a menu click timed out.
+Deno.test('a private shape token is answered ahead of queued background snapshots', async () => {
+  const db = await PGlite.create()
+  const resume = Promise.withResolvers<void>(), started = Promise.withResolvers<void>()
+  try {
+    await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+    await db.exec(await Deno.readTextFile(new URL('fixture.sql', import.meta.url)))
+    const cluster = await createEdgeCluster({ db, tables: ['board', 'note'], secret: 'test', log: line => { throw new Error(line) }, fail: error => { throw error } })
+    const guest = await (await cluster.handle(new Request('https://test/auth/guest', { method: 'POST' }))).json() as { token: string }
+    const held = cluster.publicSnapshot('generation', async () => {
+      started.resolve()
+      await resume.promise
+    })
+    await started.promise
+    const order: string[] = []
+    const prefetches = Array.from({ length: 8 }, () =>
+      cluster.publicSnapshot('generation', async () => {
+        // Held as a render holds the connection, outlasting the token's signing.
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        order.push('prefetch')
+      }, 'low'))
+    const token = cluster.handle(new Request('https://test/auth/shape', {
+      method: 'POST', headers: { authorization: 'Bearer ' + guest.token }, body: JSON.stringify({ table: 'note' }),
+    })).then((res) => { order.push(`token:${res.status}`) })
+    // The token's request reaches its lane while the render still holds the connection.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    resume.resolve()
+    await Promise.all([held, token, ...prefetches])
+    // At most the one prefetch the low lane is owed for its starved turns runs first.
+    assert.ok(order.indexOf('token:200') <= 1, order.join(','))
   } finally {
     resume.resolve()
     await db.close()

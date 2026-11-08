@@ -54,6 +54,14 @@ Deno.test('a pgroll set becomes scripts of its raw SQL that run, and an operatio
 })
 
 // A migration with "seed" anywhere in its name counted as a seed, so a kept directory never ran it.
+// A fresh directory ran the set in the order the program's export spelled it,
+// so a migration granting on a table ran before the one creating it.
+Deno.test('a pgroll set runs in key order, whatever order it was spelled in', () => {
+  const sql = (up: string) => ({ operations: [{ sql: { up } }] })
+  const names = pgrollScripts({ '021_guards': sql('SELECT 2'), '009_order': sql('SELECT 1'), '20261028_locks': sql('SELECT 3') }).map((s) => s.name)
+  assert.deepEqual(names, ['009_order', '021_guards', '20261028_locks'])
+})
+
 Deno.test('a seed is a script named so, not one that mentions the word', () => {
   assert.deepEqual(['900_seed.sql', '801_schedule_seed.sql', '20261102_seed_pictures_are_objects.sql'].map(isSeedScript), [true, true, false])
 })

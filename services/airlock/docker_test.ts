@@ -1,10 +1,9 @@
 // The airlock end to end: postgres with Graphile's schema as the initdb step
 // writes it (graphile.sql), airlock.sql after roles granted the way mecha's
 // and a caller's migrations grant them, a
-// guard of the shape pronto emits, the cluster's daprd holding one HTTP output
-// binding per effect under the bindings-only allowlist (dapr.yaml), and a sink
-// served from this process, so every call
-// that crossed the mesh is counted. The airlock's worker runs throughout, as
+// guard of the shape pronto emits, the cluster's daprd holding one HTTPEndpoint
+// per effect behind its wall (dapr.yaml, #AirlockWall), and a sink served from
+// this process, so every call that crossed the mesh is counted. The airlock's worker runs throughout, as
 // it does in a cluster. A crash is reproduced as the state it leaves, written
 // in the transition's own commit so the worker cannot take the job first: the
 // ledger counting a run begun, the job locked under a pool recorded against an
@@ -12,20 +11,19 @@
 // run reached.
 // Taskfile's integrate:airlock; it needs Docker.
 
-import { assertEquals, assertNotEquals } from "@std/assert";
-import grpc from "@grpc/grpc-js";
-import { Buffer } from "node:buffer";
+import { assertEquals, assertNotEquals, assertRejects } from "@std/assert";
 import { runMigrations } from "graphile-worker";
 import pg from "pg";
 import { hold, start } from "./airlock.ts";
-import { bindingsTransport, Handler } from "./handler.ts";
+import { BreakerOpen, Handler, meshTransport } from "./handler.ts";
 import type { Effect } from "./reentry.ts";
 
 const POSTGRES = "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8";
 const DAPRD = "daprio/daprd:1.16.1@sha256:b977660c4503fe9872b0a94a33067df0dfe0a84878dc054acd8caff82a8c4125";
+const CURL = "curlimages/curl:8.5.0@sha256:08e466006f0860e54fc299378de998935333e0e130a15f6f98482e9f8dab3058";
 
-async function run(cmd: string, args: string[]): Promise<string> {
-  const out = await new Deno.Command(cmd, { args, stdout: "piped", stderr: "piped" }).output();
+async function run(cmd: string, args: string[], cwd?: string): Promise<string> {
+  const out = await new Deno.Command(cmd, { args, cwd, stdout: "piped", stderr: "piped" }).output();
   if (!out.success) throw new Error(`${cmd} ${args.join(" ")}: ${new TextDecoder().decode(out.stderr)}`);
   return new TextDecoder().decode(out.stdout).trim();
 }
@@ -38,25 +36,36 @@ async function until(what: string, ready: () => Promise<boolean>) {
   throw new Error(`${what} did not become ready`);
 }
 
+/** Past daprd's default 4Mi, as an answer's pictures are. */
+const BIG = 5 * 1024 * 1024;
+
 /** The sink: POSTs recorded by idempotency key; an amount of 402 is refused and
  * one of 500 is a sink that answers nothing useful; GET ?key= reconciles. */
 function sink() {
   const posts: { key: string; body: unknown; authorization?: string }[] = [];
+  const paths: string[] = [];
   const server = Deno.serve({ port: 0, hostname: "0.0.0.0", onListen() {} }, async (req) => {
     const url = new URL(req.url);
+    paths.push(url.pathname);
+    if (url.pathname === "/v1/big") return new Response(new Uint8Array(BIG), { headers: { "content-type": "text/plain" } });
+    if (url.pathname === "/v1/length") return new Response(String((await req.arrayBuffer()).byteLength));
     if (req.method === "GET") {
       const key = url.searchParams.get("key");
       const found = posts.find((p) => p.key === key);
       return found ? Response.json({ id: `ch_${key}` }) : new Response("", { status: 404 });
     }
     const key = req.headers.get("idempotency-key") ?? "";
+    if (req.headers.get("content-type") === "application/x-www-form-urlencoded") {
+      posts.push({ key, body: await req.text() });
+      return Response.json({ id: `ch_${key}` });
+    }
     const body = await req.json();
     posts.push({ key, body, ...(req.headers.has("authorization") ? { authorization: req.headers.get("authorization")! } : {}) });
     if (body.amount === 402) return Response.json("card_declined", { status: 402 });
     if (body.amount === 500) return new Response("upstream down", { status: 500 });
     return Response.json({ id: `ch_${key}` });
   });
-  return { posts, server, port: server.addr.port };
+  return { posts, paths, server, port: server.addr.port };
 }
 
 const HANDLER = `
@@ -110,6 +119,8 @@ const EFFECTS: Record<string, { effect: Effect; source: string }> = {
   live: { effect: base({ reentry: "reconcile" }), source: RECONCILING },
   vaulted: { effect: base({ idempotent: true, reentry: undefined, credential: { header: "Authorization", scheme: "Bearer", secret: "VAULT_KEY" } }), source: HANDLER },
   dead: { effect: base({ reentry: "reconcile" }), source: RECONCILING },
+  broken: { effect: base({ reentry: "reconcile", attempts: 1 }), source: RECONCILING },
+  based: { effect: base({ idempotent: true, reentry: undefined }), source: HANDLER },
   absent: { effect: base({ idempotent: true, reentry: undefined, bridge: { name: "sofascore", targets: ["cloudflare"], simulated: false } }), source: HANDLER },
 };
 function base(over: Partial<Effect>): Effect {
@@ -123,14 +134,24 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
   const tag = crypto.randomUUID().slice(0, 8);
   const pgName = `airlock-pg-${tag}`, daprName = `airlock-daprd-${tag}`;
   const target = sink();
+  const undeclared = sink();
   const components = await Deno.makeTempDir();
   for (const name of Object.keys(EFFECTS)) {
     await Deno.writeTextFile(`${components}/${name}.yaml`, [
-      "apiVersion: dapr.io/v1alpha1", "kind: Component", `metadata: {name: ${name}}`,
-      "spec: {type: bindings.http, version: v1, metadata: [",
-      `  {name: url, value: "http://host.docker.internal:${target.port}"}, {name: errorIfNot2XX, value: "false"}]}`,
+      "apiVersion: dapr.io/v1alpha1", "kind: HTTPEndpoint", `metadata: {name: ${name}}`,
+      `spec: {baseUrl: "http://host.docker.internal:${target.port}${name === "based" ? "/actions/send" : ""}"}`,
     ].join("\n"));
   }
+  // The cluster's own wall and policy, for these effects.
+  const generated = (of: string) => run("cue", ["export", ".:cluster", "--out", "text", "-e", `(${of}).out`], new URL("../..", import.meta.url).pathname);
+  const names = JSON.stringify(Object.keys(EFFECTS));
+  await Deno.writeTextFile(`${components}/wall.yaml`, await generated(`#AirlockWall & {effects: ${names}, blobs: true}`));
+  await Deno.writeTextFile(`${components}/resiliency.yaml`, await generated(`#AirlockResiliency & {effects: ${names}}`));
+  // Stands in for the plane's S3 binding: the wall reads only its path.
+  await Deno.writeTextFile(`${components}/blobs.yaml`, [
+    "apiVersion: dapr.io/v1alpha1", "kind: Component", "metadata: {name: blobs}",
+    `spec: {type: bindings.http, version: v1, metadata: [{name: url, value: "http://host.docker.internal:${target.port}"}]}`,
+  ].join("\n"));
   let db: pg.Pool | undefined;
   let worker: { stop: () => Promise<void> } | undefined;
   try {
@@ -138,8 +159,8 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
     // Copied in, not bind-mounted: a mount names a path on the daemon's host,
     // which is not this one when the daemon runs in another container (dind).
     await run("docker", [
-      "create", "--rm", "--name", daprName, "--add-host=host.docker.internal:host-gateway", "-p", "127.0.0.1::3500", "-p", "127.0.0.1::50001", DAPRD,
-      "./daprd", "--app-id", "airlock", "--resources-path", "/components", "--config", "/dapr.yaml", "--dapr-http-port", "3500", "--dapr-grpc-port", "50001", "--mode", "standalone",
+      "create", "--rm", "--name", daprName, "--add-host=host.docker.internal:host-gateway", "-p", "127.0.0.1::3500", DAPRD,
+      "./daprd", "--app-id", "airlock", "--resources-path", "/components", "--config", "/dapr.yaml", "--dapr-http-port", "3500", "--max-body-size", "64Mi", "--mode", "standalone",
     ]);
     // The copy lands owned by root with the temp dir's 0700, which shuts out
     // daprd's nonroot user.
@@ -149,7 +170,6 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
     await run("docker", ["start", daprName]);
     const pgPort = (await run("docker", ["port", pgName, "5432"])).split(":").pop();
     const mesh = `http://127.0.0.1:${(await run("docker", ["port", daprName, "3500"])).split(":").pop()}`;
-    const meshGrpc = `127.0.0.1:${(await run("docker", ["port", daprName, "50001"])).split(":").pop()}`;
     const connectionString = `postgres://postgres:pw@127.0.0.1:${pgPort}/postgres`;
     await until("postgres", async () => (await run("docker", ["exec", pgName, "pg_isready", "-qU", "postgres"]), true));
     db = new pg.Pool({ connectionString });
@@ -183,7 +203,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
     }
     // This airlock stands on the local stack, where the `absent` effect's
     // bridge has no simulator, so its real container never runs.
-    const airlock = { connectionString, db, effects, handlers, transport: bindingsTransport(mesh), secrets: {}, headers: { vaulted: { Authorization: "Bearer vk-3f9a" } }, target: "local" };
+    const airlock = { connectionString, db, effects, handlers, transport: meshTransport(mesh), secrets: {}, headers: { vaulted: { Authorization: "Bearer vk-3f9a" } }, target: "local" };
     const charging = async (effect: string, id: string, amount: number) => {
       await db!.query(`INSERT INTO pay_${effect} VALUES ($1, 'pending', $2)`, [id, amount]);
       await db!.query(`UPDATE pay_${effect} SET status = 'charging' WHERE id = $1`, [id]);
@@ -415,32 +435,76 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       assertEquals(calls("live:v1"), 1);
     });
 
-    await t.step("the daprd offers the bindings API alone: no invoke, so no full URL to any origin", async () => {
-      for (const path of ["/v1.0/invoke/http://host.docker.internal:1/method/x", "/v1.0/invoke/charge/method/x", "/v1.0/state/x", "/v1.0/metadata"]) {
-        const res = await fetch(`${mesh}${path}`, { method: "POST" });
+    await t.step("the wall keeps a mistaken target from leaving, and lets the plane's binding and daprd's health through", async () => {
+      const other = `http://host.docker.internal:${undeclared.port}`;
+      for (const path of [`/v1.0/invoke/${other}/method/x`, `/v1.0/invoke/${encodeURIComponent(other)}/method/x`, "/v1.0/invoke/undeclared/method/x", "/x", "/v1.0/state/x", "/v1.0/metadata", "/v1.0/bindings/undeclared"]) {
+        const res = await fetch(`${mesh}${path}`, { method: "POST", body: "{}" });
         await res.body?.cancel();
-        assertEquals(res.status, 404, path);
+        assertEquals(res.status, 400, path);
       }
-      const res = await fetch(`${mesh}/v1.0/bindings/undeclared`, { method: "POST", body: JSON.stringify({ operation: "post" }) });
-      assertEquals(res.status >= 400, true, await res.text());
+      assertEquals(undeclared.paths, []);
+      const binding = await fetch(`${mesh}/v1.0/bindings/blobs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operation: "get", metadata: { path: "/v1/length" } }) });
+      await binding.body?.cancel();
+      assertEquals(binding.status, 200);
+      const health = await fetch(`${mesh}/v1.0/healthz`);
+      await health.body?.cancel();
+      assertEquals(health.status, 204);
     });
 
-    await t.step("over gRPC too, which daprd always serves, the daprd offers the bindings API alone", async () => {
-      // An empty message to each method's path: no proto needed to tell a
-      // method the allowlist removed (UNIMPLEMENTED) from one it kept.
-      const client = new grpc.Client(meshGrpc, grpc.credentials.createInsecure());
-      const call = (method: string) =>
-        new Promise<number>((resolve) =>
-          client.makeUnaryRequest(`/dapr.proto.runtime.v1.Dapr/${method}`, (b: Uint8Array) => Buffer.from(b), (b: Buffer) => b, new Uint8Array(0), (err) => resolve(err?.code ?? grpc.status.OK))
-        );
-      try {
-        for (const method of ["InvokeService", "GetMetadata", "GetState", "PublishEvent", "Shutdown"]) {
-          assertEquals(await call(method), grpc.status.UNIMPLEMENTED, method);
-        }
-        assertNotEquals(await call("InvokeBinding"), grpc.status.UNIMPLEMENTED);
-      } finally {
-        client.close();
+    await t.step("a sink's own Basic credential passes the wall", async () => {
+      const res = await fetch(`${mesh}/v1.0/invoke/charge/method/v1/length`, { method: "POST", headers: { Authorization: `Basic ${btoa("user:pass")}` }, body: "x" });
+      assertEquals(await res.text(), "1");
+    });
+
+    await t.step("over gRPC, which daprd always serves, invocation does not exist", async () => {
+      // A curl in the daprd's network: no proto is needed to tell a method the
+      // allowlist removed (status 12, UNIMPLEMENTED) from one it kept.
+      const status = async (method: string) =>
+        /grpc-status: (\d+)/.exec(await run("docker", ["run", "--rm", "--network", `container:${daprName}`, "--entrypoint", "sh", CURL, "-c",
+          `printf '\\0\\0\\0\\0\\0' | curl -si --max-time 5 --http2-prior-knowledge -H 'content-type: application/grpc' --data-binary @- http://127.0.0.1:50001/dapr.proto.runtime.v1.Dapr/${method}`]))?.[1];
+      for (const method of ["InvokeService", "GetMetadata", "GetState", "PublishEvent", "Shutdown"]) {
+        assertEquals(await status(method), "12", method);
       }
+      assertNotEquals(await status("InvokeBinding"), "12");
+    });
+
+    await t.step("a declared content type reaches the sink byte for byte, through the real daprd", async () => {
+      // The bindings API would deliver "a=1\\u0026b=2", quotes included.
+      const answer = await meshTransport(mesh)("charge", "/v1/form", { method: "POST", body: "a=1&b=2", contentType: "application/x-www-form-urlencoded" }, "form:raw", {});
+      assertEquals(answer, { status: 200, body: { id: "ch_form:raw" } });
+      assertEquals(target.posts.find((p) => p.key === "form:raw")?.body, "a=1&b=2");
+    });
+
+    await t.step("past daprd's default size, both ways", async () => {
+      const big = await meshTransport(mesh)("charge", "/v1/big", { method: "GET" }, "big", {});
+      assertEquals((big.body as string).length, BIG);
+      const sent = await meshTransport(mesh)("charge", "/v1/length", { method: "POST", body: "x".repeat(BIG) }, "big", {});
+      assertEquals(sent.body, String(BIG));
+    });
+
+    await t.step("an endpoint's base path stays beneath the handler's", async () => {
+      await meshTransport(mesh)("based", "/x", { method: "POST", body: { amount: 1 } }, "based:1", {});
+      assertEquals(target.paths.at(-1), "/actions/send/x");
+      // An Activepieces bridge's action is the endpoint itself.
+      await meshTransport(mesh)("based", "/", { method: "POST", body: { amount: 1 } }, "based:2", {});
+      assertEquals(target.paths.at(-1), "/actions/send");
+    });
+
+    await t.step("an open breaker calls nothing and spends no attempt, and the effect runs when it closes", async () => {
+      const fail = () => meshTransport(mesh)("broken", "/v1/charges", { method: "POST", body: { amount: 500 } }, "tripping", {});
+      for (let i = 0; i < 10; i++) assertEquals((await fail()).status, 500, "the sink's own answer, no retry behind it");
+      assertEquals(calls("tripping"), 10);
+      await assertRejects(fail, BreakerOpen);
+      assertEquals(calls("tripping"), 10);
+      // One attempt only: a run counted against an open breaker would settle unknown.
+      await charging("broken", "b1", 7);
+      await new Promise((r) => setTimeout(r, 2000));
+      assertEquals(await state("broken", "b1"), { status: "charging", entered: 0, kind: null, reconciled: null });
+      assertEquals(calls("broken:b1"), 0);
+      // The breaker's 30s and Graphile's backoff, exponential in the job's attempts.
+      for (let i = 0; i < 240 && (await state("broken", "b1")).status === "charging"; i++) await new Promise((r) => setTimeout(r, 1000));
+      assertEquals(await state("broken", "b1"), { status: "settled", entered: 1, kind: "done", reconciled: false });
+      assertEquals(calls("broken:b1"), 1);
     });
 
     await t.step("the job delivered again after its outcome calls nothing and moves nothing", async () => {
@@ -506,6 +570,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
     await worker?.stop();
     await db?.end();
     await target.server.shutdown();
+    await undeclared.server.shutdown();
     await new Deno.Command("docker", { args: ["rm", "-f", pgName, daprName], stdout: "null", stderr: "null" }).output();
   }
 } });

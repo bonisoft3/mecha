@@ -4,6 +4,7 @@ import { electricCollectionOptions } from "@tanstack/electric-db-collection"
 import { WebLocksLeader } from "@tanstack/offline-transactions"
 import { createMechaClient, type MechaClient, pageLeader, runsAlone, soleLeader } from "./mecha-client.js"
 import { fakeElectric } from "./fake-electric.js"
+import { PUBLIC_WHERE } from "./public-where.js"
 
 // Transport and delivery are exercised E2E against a live cluster (todo's
 // verify walk); these cover the config-level contracts only.
@@ -795,6 +796,59 @@ describe("a table synced on demand", () => {
     expect(sent.slice(1).filter((h) => h === "Bearer t1")).toEqual([])
     await first.cleanup()
     await second.cleanup()
+  })
+
+  // A screen mounted only once every shape it reads answered, each after a
+  // mint, though a public table's `where` is every subject's same one.
+  it("syncs a public table on the session, minting nothing", async () => {
+    const electric = fakeElectric({ schema: { player_game: schema }, rows: { player_game: [{ id: "p1", game_id: "g1", a: "1", b: "2", txid: "1" }] } })
+    let minted = 0
+    const sent: Array<[string | null, string | null]> = []
+    const c = createMechaClient({
+      types: TYPES,
+      tables: [{ id: "player_game", table: "player_game", fields: [], access: { scope: "public" } }],
+      electricUrl: "http://fake/electric",
+      authUrl: "http://fake/auth",
+      token: () => "session",
+      fetcher: async (input, init) => {
+        if (String(input).endsWith("/auth/shape")) minted += 1
+        const url = new URL(String(input))
+        if (url.pathname.endsWith("/v1/shape")) sent.push([url.searchParams.get("where"), new Headers(init?.headers).get("authorization")])
+        return electric.fetcher(input, init)
+      },
+    })
+    await c.collections.player_game.toArrayWhenReady()
+    expect(c.collections.player_game.toArray.map((r: any) => r.id)).toEqual(["p1"])
+    expect(minted).toBe(0)
+    expect(sent[0]).toEqual([PUBLIC_WHERE, "Bearer session"])
+    await c.collections.player_game.cleanup()
+  })
+
+  it("stops a public shape the gate refuses, having no token to mint afresh", async () => {
+    const electric = fakeElectric({ schema: { player_game: schema } })
+    // A gate that keeps refusing: a stream that retried would spend every refusal.
+    electric.fail("player_game", ...Array.from({ length: 10 }, () => [401, { message: "invalid shape token" }] as [number, unknown]))
+    let shapes = 0
+    const c = createMechaClient({
+      types: TYPES,
+      tables: [{ id: "player_game", table: "player_game", fields: [], access: { scope: "public" } }],
+      electricUrl: "http://fake/electric",
+      authUrl: "http://fake/auth",
+      token: () => "session",
+      fetcher: async (input, init) => {
+        if (new URL(String(input)).pathname.endsWith("/v1/shape")) shapes += 1
+        return electric.fetcher(input, init)
+      },
+    })
+    c.collections.player_game.startSyncImmediate()
+    await until(() => shapes > 0, "asked for the shape")
+    await new Promise((r) => setTimeout(r, 200))
+    const asked = shapes
+    await new Promise((r) => setTimeout(r, 300))
+    // Each stream over the table asks once and stops.
+    expect(shapes).toBe(asked)
+    expect(shapes).toBeLessThan(10)
+    await c.collections.player_game.cleanup()
   })
 
   it("is refused for a table with no single shape", () => {

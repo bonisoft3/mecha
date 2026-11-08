@@ -35,6 +35,11 @@ export type Effect = {
   credential?: { header: string; scheme?: string; secret: string };
   /** What the handler may use past the language (compute's language.ts). */
   endowments?: string[];
+  /** The media type of a sink that takes no JSON, whose handler sends its
+   * body already encoded, as a string. */
+  contentType?: string;
+  /** The origin the edge's airlock calls; the compose airlock's daprd holds its own. */
+  edgeOrigin?: string;
   /** The bridge the sink is: the release targets its container runs on, and
    * whether the local stack runs a simulator in its place. Anywhere else no
    * call is made and the effect fails. */
@@ -98,8 +103,9 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9-]*$/;
 // Daprd forwards a metadata key as a header only when its first letter is
 // uppercase; and a credential never takes a header the host or HTTP sets.
 const HEADER = /^[A-Z][A-Za-z0-9-]*$/;
-const RESERVED_HEADERS = new Set(["idempotency-key", "content-type", "content-length", "accept", "host", "transfer-encoding", "traceparent", "tracestate", "baggage"]);
+const RESERVED_HEADERS = new Set(["idempotency-key", "content-type", "content-length", "accept", "host", "transfer-encoding", "traceparent", "tracestate", "baggage", "dapr-app-id"]);
 const SECRET = /^[A-Z][A-Z0-9_]*$/;
+const MEDIA_TYPE = /^[a-z]+\/[a-z0-9][a-z0-9.+-]*$/;
 const HEADER_VALUE = /^[\x21-\x7e]([\x20-\x7e]*[\x21-\x7e])?$/;
 
 /** The headers a handler sets on one sink call, checked: names daprd forwards,
@@ -122,8 +128,26 @@ export function sinkHeaders(headers: unknown, host: string[] = []): Record<strin
   }
   return headers as Record<string, string>;
 }
-/** The effect's name is also its Dapr binding's. */
+/** The effect's name is also its Dapr HTTPEndpoint's. */
 const ENDPOINT = /^[a-z][a-z0-9-]*$/;
+
+/** The body of one sink call: JSON unless the effect declares otherwise, when
+ * only the handler knows the encoding. Bytes in a JSON body are sent as
+ * base64, the only way JSON carries them. Both airlocks ask here. */
+export function encodedBody(contentType: string | undefined, body: unknown): string {
+  if (contentType === undefined) {
+    return typeof body === "string" ? body : JSON.stringify(body, (_, v) => v instanceof Uint8Array ? base64Of(v) : v);
+  }
+  if (typeof body !== "string") throw new TypeError(`sink body: a ${contentType} effect sends an encoded string, got ${typeof body}`);
+  return body;
+}
+
+// In slices: spreading a picture's bytes into one call overflows the stack.
+export function base64Of(bytes: Uint8Array): string {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
 
 /** The ledger key a row's current fields make, as the guard's claim spells it
  * (pronto's emit.cue #ledgerKeySql): one field as it is, several as a JSON
@@ -171,6 +195,9 @@ export function parseManifest(text: string): Record<string, Effect> {
     }
     if (e.secrets !== undefined && (!Array.isArray(e.secrets) || !e.secrets.every((s) => typeof s === "string" && SECRET.test(s)))) {
       bad("secrets is not a list of environment variables' names");
+    }
+    if (e.contentType !== undefined && (typeof e.contentType !== "string" || !MEDIA_TYPE.test(e.contentType) || e.contentType === "application/json")) {
+      bad("contentType is not a media type other than JSON, which is the default");
     }
     if (e.credential !== undefined) {
       const c = e.credential;

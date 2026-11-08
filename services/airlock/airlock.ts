@@ -21,7 +21,7 @@ import { run, type Runner, type Task } from "graphile-worker";
 import { EventEmitter } from "node:events";
 import pg from "pg";
 import { type Answer, type Effect, ledgerKeySql, outcome, type Outcome, step, undeployed } from "./reentry.ts";
-import type { Handler, Transport } from "./handler.ts";
+import { BreakerOpen, type Handler, type Transport } from "./handler.ts";
 import { type BlobStore, stowed } from "./blobs.ts";
 
 export type Airlock = {
@@ -35,8 +35,12 @@ export type Airlock = {
   /** The header each effect's credential adds to its sink calls, read once;
    * the handler never holds it. */
   headers: Record<string, Record<string, string>>;
-  /** The cluster's blob plane, where an answer's bytes go; absent without one. */
-  blobs?: BlobStore;  /** The release target this airlock runs on, which a bridge naming its
+  /** The cluster's blob plane, where an answer's bytes go and a handler's
+   * content keys are read; absent without one. */
+  blobs?: BlobStore;
+  /** The door's origin, a handler's sink.origin. */
+  origin?: string;
+  /** The release target this airlock runs on, which a bridge naming its
    * targets is checked against. */
   target?: string;
 };
@@ -223,20 +227,30 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
 
 /** The handler run the ledger's count calls for, as an outcome. A throw is no
  * answer: retried while the ledger counts fewer runs than the effect's
- * attempts, `unknown` on the last, and a run past them calls nothing. */
+ * attempts, `unknown` on the last, and a run past them calls nothing. An open
+ * breaker spends no attempt. */
 async function perform(a: Airlock, name: string, effect: Effect, key: string, input: unknown, entered: number) {
   const handler = a.handlers[name] ?? die(`no handler is admitted for ${name}`);
   if (entered > effect.attempts) return outcome(effect, "unknown", false);
   const next = step(effect, entered);
   if (next === "unknown") return outcome(effect, "unknown", false);
+  // A reconcile that answered reached the sink, so a breaker its issue meets is a throw.
+  let reached = false;
   try {
     if (next === "reconcile") {
-      const known = await handler.call("reconcile", input, key, a.transport, a.secrets[name], a.headers[name]);
+      const known = await handler.call("reconcile", input, key, a.transport, a.secrets[name], a.headers[name], { blobs: a.blobs, origin: a.origin });
+      reached = true;
       if (!("absent" in known)) return outcome(effect, await stowed(known, key, a.blobs), true);
     }
-    const answer = await handler.call("issue", input, key, a.transport, a.secrets[name], a.headers[name]) as Answer;
+    const answer = await handler.call("issue", input, key, a.transport, a.secrets[name], a.headers[name], { blobs: a.blobs, origin: a.origin }) as Answer;
     return outcome(effect, await stowed(answer, key, a.blobs), false);
   } catch (e) {
+    if (e instanceof BreakerOpen && !reached) {
+      // Nothing was asked of the sink, so the run the ledger counted did not
+      // happen; the queue's backoff brings it back.
+      await a.db.query("UPDATE airlock.external_effect_ledger SET entered = entered - 1 WHERE key = $1", [key]);
+      throw e;
+    }
     if (entered < effect.attempts) throw e;
     console.error(`${key}: no answer after ${entered} runs, so unknown:`, e);
     return outcome(effect, "unknown", false);

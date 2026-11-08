@@ -1,16 +1,22 @@
-# The airlock daprd's configuration: the bindings API and nothing else, over
-# HTTP and over gRPC, which daprd always serves and which an HTTP-only list
-# leaves whole. With service invocation gone, an invoke whose target is a full
-# URL, which daprd would forward to any origin, cannot be asked; and with
-# state, pubsub, secrets, metadata and shutdown gone too, the only traffic this
-# daprd can originate is a call of a binding the program declared.
+# The airlock daprd's configuration: invocation and bindings over HTTP behind
+# the wall (the cluster's wall.yaml, one rule over the declared effects), and
+# bindings alone over gRPC, which daprd always serves and which an HTTP-only list
+# leaves whole. Together they keep a mistake from reaching an undeclared host or
+# another Dapr API; neither is a security boundary (README, "The wall").
 apiVersion: dapr.io/v1alpha1
 kind: Configuration
 metadata:
   name: airlock
 spec:
+  httpPipeline:
+    handlers:
+      - name: wall
+        type: middleware.http.routerchecker
   api:
     allowed:
+      - name: invoke
+        version: v1.0
+        protocol: http
       - name: bindings
         version: v1.0
         protocol: http

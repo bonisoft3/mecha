@@ -23,6 +23,8 @@ import { type EdgeFunctions, type EdgeMachines, installEngines, installHostStep 
 import { createEdgeAirlock, die, type EdgeAirlock, type EdgeEffectDeclarations } from './airlock.ts'
 import type { ClaimedRun, DispatchedRun, RunAnswer } from './dispatch.ts'
 import { hatchAt, type EdgeHatch } from './hatches.ts'
+import { verifyJwt } from '../../../services/auth/jwt.ts'
+import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
 import { applyScripts, ChangedScript, NoLedger, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
 import type { BatchMachine, Computation, Output } from '../../compute-snapshot/src/index.ts'
@@ -40,7 +42,7 @@ export interface EdgeEnv {
   COMPUTE_COORDINATOR?: DurableObjectNamespace<import('./compute-coordinator.ts').ComputeCoordinator>
   /** The edge's blob storage, and the URL a stored key is served at (the same
    * variable a container cluster's airlock reads). */
-  BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown> }
+  BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array | ReadableStream, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown>; get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null> }
   BLOB_URL?: string
   AIRLOCK_QUEUE?: { send(body: DispatchedRun): Promise<unknown> }
 }
@@ -502,6 +504,51 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         // written stays in pg_wal.
         await cluster.serialize(() => db.exec('CHECKPOINT'))
         return json({ ...report, hatchErrors }, failed || hatchErrors.length ? 500 : 200)
+      }
+      if (path.startsWith('/signal/')) {
+        if (!this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
+        const { db, cluster, clock, airlock, ticks } = await this.#boot()
+        const [, , name, id] = path.split('/')
+        const bytes = new Uint8Array(await req.arrayBuffer())
+        if (bytes.length > SIGNAL_MAX_BYTES) return json({ error: 'a signal is small' }, 413)
+        const body = new TextDecoder().decode(bytes)
+        let signal: string
+        try {
+          const { rows } = await cluster.serialize(() => db.query<{ signal: string }>('SELECT airlock.signal($1, $2, $3::json) AS signal', [name, id ?? null, body]))
+          signal = rows[0].signal
+        } catch (error) {
+          const code = (error as { code?: string }).code
+          if (code === 'PT503') return json({ error: 'a check is in flight' }, 503)
+          if (code === 'PT404' || code === '42883' || code === '3F000') return json({ error: `no signal ${name}` }, 404)
+          if (code === '22P02') return json({ error: 'a signal is JSON' }, 400)
+          throw error
+        }
+        if (signal === 'moved') {
+          if (ticks) await clock.arm()
+          if (hasAirlock) this.ctx.waitUntil(airlock.drain())
+        }
+        return json({ signal })
+      }
+      if (/^\/blob-(claim|write)\//.test(path)) {
+        if (!this.#dir.complete) return json({ error: 'the data directory is loading' }, 503)
+        const { db, cluster } = await this.#boot()
+        const auth = req.headers.get('authorization')
+        const claims = auth?.startsWith('Bearer ') ? await verifyJwt(this.env.JWT_SECRET, auth.slice('Bearer '.length)) : null
+        if (!claims || claims.role !== 'app_user' || typeof claims.sub !== 'string') return json({ error: 'a session is required' }, 401)
+        const key = blobKeyOf(path.split('/')[2])
+        if (key === null) return json({ error: 'a key is percent-encoded' }, 400)
+        try {
+          if (path.startsWith('/blob-claim/')) {
+            await cluster.serialize(() => db.query('SELECT blob_plane.claim_key($1, $2)', [claims.sub, key]))
+            return json({ claimed: key })
+          }
+          const { rows } = await cluster.serialize(() => db.query<{ may: boolean }>('SELECT blob_plane.may_write($1, $2) AS may', [claims.sub, key]))
+          return rows[0].may ? json({ may: true }) : json({ error: 'not this session\'s claim' }, 403)
+        } catch (error) {
+          const status = /^PT(\d{3})$/.exec((error as { code?: string }).code ?? '')?.[1]
+          if (status) return json({ error: (error as Error).message }, Number(status))
+          throw error
+        }
       }
       if (CLUSTER_ROUTES.test(path)) {
         const { cluster, clock, airlock, ticks } = await this.#boot()

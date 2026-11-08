@@ -93,7 +93,8 @@ Deno.test({ name: 'the edge cluster serves many subjects from one object', sanit
       assert.equal(bobs.filter((m) => m.value).length, 0)
       const widened = await fetch(at('/electric/v1/shape?table=note&offset=-1&where=true'), { headers: bearer(alice.token) })
       await widened.body?.cancel()
-      assert.equal(widened.status, 401)
+      // A session opens its public rows alone (PUBLIC_WHERE); any wider predicate is refused.
+      assert.equal(widened.status, 403)
     })
     await t.step('a held-open request answers with the write, confirmed by its x-txid', async () => {
       const notes = await shapeOf(alice.token, 'note')

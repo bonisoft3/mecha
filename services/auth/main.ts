@@ -14,7 +14,9 @@ import {
 } from "@simplewebauthn/server";
 import postgres from "postgres";
 import {
+  isSession,
   isSubsetWhere,
+  PUBLIC_WHERE,
   SHAPE_FIXED_PARAMS,
   shapeWhere,
   signJwt as sign,
@@ -348,7 +350,9 @@ const subsetError = (param: string, message: string) =>
 // that decides reach is compared.
 async function shapeVerify(req: Request): Promise<Response> {
   const claims = await bearerClaims(req);
-  if (!claims || claims.typ !== "shape") return jsonError(401, "invalid shape token");
+  // A session stands for its own public shapes (jwt.ts's PUBLIC_WHERE); any
+  // other `where` is a minted token's.
+  if (!claims || (claims.typ !== "shape" && !isSession(claims))) return jsonError(401, "invalid shape token");
 
   if (req.headers.get("x-forwarded-method") !== "GET") return jsonError(403, "method not allowed");
   const forwarded = req.headers.get("x-forwarded-uri");
@@ -389,8 +393,13 @@ async function shapeVerify(req: Request): Promise<Response> {
   const get = (key: string) => params.get(key)?.[0] ?? null;
   // A missing parameter is not a matching one. `??` would let an absent `where`
   // read as authorized against a claim that named a predicate.
-  if (get("table") !== claims.table) return jsonError(403, "table not authorized");
-  if (get("where") !== claims.where) return jsonError(403, "where not authorized");
+  if (claims.typ === "shape") {
+    if (get("table") !== claims.table) return jsonError(403, "table not authorized");
+    if (get("where") !== claims.where) return jsonError(403, "where not authorized");
+  } else {
+    if (!validTable(get("table"))) return jsonError(403, "table not authorized");
+    if (get("where") !== PUBLIC_WHERE) return jsonError(403, "where not authorized");
+  }
   if (subsetParams(get("subset__params")) === undefined) return subsetError("params", "subset__params is not an object of positions to strings");
   const subsetWhere = get("subset__where");
   if (subsetWhere !== null && !isSubsetWhere(subsetWhere)) return subsetError("where", "subset__where is not a predicate a subset may state");

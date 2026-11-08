@@ -51,6 +51,16 @@
       {
         "from": null,
         "srcs": [
+          "services/airlock/pdf.ts"
+        ],
+        "dst": "/airlock/",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
           "services/durex/work.ts",
           "services/durex/work.sql",
           "services/durex/migrate.ts"
@@ -149,6 +159,7 @@
       "services/compute/wasi.ts",
       "services/compute/install.ts",
       "services/compute/events.yaml",
+      "services/airlock/pdf.ts",
       "services/durex/work.ts",
       "services/durex/work.sql",
       "services/durex/migrate.ts",
@@ -272,6 +283,7 @@
           "services/compute/wasi.ts",
           "services/compute/install.ts",
           "services/compute/events.yaml",
+          "services/airlock/pdf.ts",
           "services/durex/work.ts",
           "services/durex/work.sql",
           "services/durex/migrate.ts",
@@ -342,6 +354,7 @@
           "services/compute/wasi.ts",
           "services/compute/install.ts",
           "services/compute/events.yaml",
+          "services/airlock/pdf.ts",
           "services/durex/work.ts",
           "services/durex/work.sql",
           "services/durex/migrate.ts",
@@ -403,6 +416,7 @@
           "services/compute/wasi.ts",
           "services/compute/install.ts",
           "services/compute/events.yaml",
+          "services/airlock/pdf.ts",
           "services/durex/work.ts",
           "services/durex/work.sql",
           "services/durex/migrate.ts",

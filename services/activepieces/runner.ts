@@ -262,7 +262,7 @@ export function handler(
 	let active = 0;
 	return async (req: Request): Promise<Response> => {
 		const url = new URL(req.url);
-		const match = /^\/actions\/([A-Za-z0-9_-]+)\/$/.exec(url.pathname);
+		const match = /^\/actions\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
 		if (!match || url.search || !config.actions.has(match[1])) {
 			return new Response(null, { status: 404 });
 		}

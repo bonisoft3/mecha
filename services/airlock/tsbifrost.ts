@@ -112,42 +112,11 @@ export function createTsBifrost(opts: TsBifrostOptions = {}): (req: Request) => 
       return json(200, { status: "ok", target });
     }
 
-    if (req.method === "POST" && url.pathname.startsWith("/v1.0/bindings/")) {
-      let envelope: {
-        operation?: string;
-        data?: unknown;
-        metadata?: Record<string, string>;
-      };
-      try {
-        envelope = (await req.json()) as typeof envelope;
-      } catch {
-        return json(400, { error: "invalid Dapr binding JSON" });
-      }
-      const meta = envelope.metadata ?? {};
-      const subPath = typeof meta.path === "string" && meta.path.startsWith("/") ? meta.path : "/v1/models";
-      const method = (envelope.operation || "post").toUpperCase();
-      const headers = new Headers({ "content-type": "application/json" });
-      for (const [k, v] of Object.entries(meta)) {
-        if (k !== "path" && typeof v === "string") headers.set(k, v);
-      }
-      const innerReq = new Request(`http://tsbifrost:${TSBIFROST_PORT}${subPath}`, {
-        method,
-        headers,
-        ...(method !== "GET" && method !== "HEAD" && envelope.data !== undefined
-          ? { body: typeof envelope.data === "string" ? envelope.data : JSON.stringify(envelope.data) }
-          : {}),
-      });
-      const innerRes = await handle(innerReq);
-      const bodyText = await innerRes.text();
-      const ct = innerRes.headers.get("content-type") ?? "application/json";
-      return new Response(bodyText, {
-        status: 200,
-        headers: {
-          "content-type": ct,
-          "metadata.statuscode": String(innerRes.status),
-          "metadata.content-type": ct,
-        },
-      });
+    // On Cloud Run the airlock has no daprd: its mesh address is this gateway,
+    // answering the invocation as daprd would hand it through.
+    const invoked = /^\/v1\.0\/invoke\/[^/]+\/method(\/.*)$/.exec(url.pathname);
+    if (invoked) {
+      return await handle(new Request(`http://tsbifrost:${TSBIFROST_PORT}${invoked[1]}${url.search}`, req));
     }
 
     if (req.method === "GET" && url.pathname === "/v1/models") {

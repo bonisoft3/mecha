@@ -1,17 +1,17 @@
 // The host side of an effect's handler: its admission, one fresh cage
 // (cage.ts) per call, and the only network the handler has: its sink's fetch,
-// which the host performs as a call of the effect's output binding on the
+// which the host performs as an invocation of the effect's HTTPEndpoint on the
 // airlock's daprd.
 //
 // The handler names a path, never a URL, and the host names only its own
-// effect's binding. The daprd allows the bindings API and nothing else (the
-// cluster's allowlist), and each binding's target is the program's
-// declaration, so nothing here can reach an origin the program did not
-// declare.
+// effect's endpoint. The daprd admits those endpoints and nothing else (the
+// cluster's wall), and each endpoint's target is the program's declaration, so
+// nothing here can reach an origin the program did not declare.
 
 import { compile } from "../compute/workers.ts";
 import { endowable } from "../compute/language.ts";
-import { type Answer, type Effect, parseManifest, sinkHeaders, CALL_TIMEOUT_MS } from "./reentry.ts";
+import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, parseManifest, sinkHeaders } from "./reentry.ts";
+import { type BlobStore, contentBlob } from "./blobs.ts";
 
 const NONE = { type: "module", deno: { permissions: "none" } } as const;
 
@@ -23,15 +23,15 @@ export type Response = { status: number; body: unknown };
 export type Transport = (
   endpoint: string,
   path: string,
-  init: { method: string; body?: unknown; headers?: Record<string, string> },
+  init: { method: string; body?: unknown; headers?: Record<string, string>; contentType?: string },
   key: string,
   headers: Record<string, string>,
 ) => Promise<Response>;
 
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 // A path's characters, then optionally a query; no `%` in the path, no empty
-// segment and no dot segment, so what the binding appends to its declared base
-// URL stays beneath it.
+// segment and no dot segment, so what daprd appends to the endpoint's declared
+// base URL stays beneath it.
 const PATH = /^\/[A-Za-z0-9\-._~!$&'()*+,;=:@/]*(\?[A-Za-z0-9\-._~!$&'()*+,;=:@/?%]*)?$/;
 const DOT_SEGMENT = /(^|\/)\.\.?(\/|\?|$)/;
 
@@ -45,43 +45,45 @@ export function sinkPath(path: unknown): string {
   return path;
 }
 
-/** Nothing one sink call is worth waiting on longer than this. */
+/** The cluster a handler runs in, as the host hands it over. */
+export type Place = { blobs?: BlobStore; origin?: string };
+
+/** The sink's breaker is open: daprd called nothing, so this is no run. */
+export class BreakerOpen extends Error {}
 
 /**
- * The real transport: the effect's HTTP output binding on the airlock's daprd.
- * Metadata named with a capital letter goes out as a header, so the host alone
- * sets them: the idempotency key, and the content type when there is a body.
- * The binding answers the sink's status in `Metadata.statuscode`, because the
- * cluster declares it with errorIfNot2XX off; a status from daprd itself other
- * than 200 means the sink was never answered, and is no answer.
+ * The real transport: the effect's HTTPEndpoint on the airlock's daprd, which
+ * hands the body, the headers and the sink's status through as they are. Only
+ * the host sets the idempotency key and the content type.
+ *
+ * daprd's own failure is also a 500, told from a sink's by its error code, and
+ * says whether the sink was called: an open breaker did not; anything else may
+ * have reached it.
  */
-export function bindingsTransport(mesh: string): Transport {
-  return async (binding, path, init, key, headers) => {
-    const res = await fetch(`${mesh}/v1.0/bindings/${binding}`, {
-      method: "POST",
+export function meshTransport(mesh: string): Transport {
+  return async (endpoint, path, init, key, headers) => {
+    const res = await fetch(`${mesh}/v1.0/invoke/${endpoint}/method${sinkPath(path)}`, {
+      method: init.method,
       signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        operation: init.method.toLowerCase(),
-        ...(init.body === undefined ? {} : { data: init.body }),
-        // Metadata past the binding's own reaches the sink as headers: the
-        // handler's own (sinkHeaders), the ledger key, and the credential the
-        // effect declares, which the host alone holds.
-        metadata: {
-          ...init.headers,
-          ...headers,
-          path: sinkPath(path),
-          "Idempotency-Key": key,
-          ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-      }),
+      headers: {
+        Accept: "application/json",
+        ...init.headers,
+        ...headers,
+        "Idempotency-Key": key,
+        ...(init.body === undefined ? {} : { "Content-Type": init.contentType ?? "application/json" }),
+      },
+      ...(init.body === undefined ? {} : { body: encodedBody(init.contentType, init.body) }),
     });
     const text = await res.text();
-    if (res.status !== 200) throw new Error(`binding ${binding}: daprd answered ${res.status} ${text}`);
-    const status = Number(res.headers.get("metadata.statuscode"));
-    if (!Number.isInteger(status) || status < 100) throw new Error(`binding ${binding}: no sink status in daprd's answer`);
-    const json = (res.headers.get("metadata.content-type") ?? "").includes("json");
-    return { status, body: json && text !== "" ? JSON.parse(text) : text };
+    const json = (res.headers.get("content-type") ?? "").includes("json");
+    const body = json && text !== "" ? JSON.parse(text) : text;
+    // The daprd's own error, whatever its status: a wall or an API rule that
+    // refused the call is the mesh's to fix, not a provider's refusal.
+    if (typeof body?.errorCode === "string" && body.errorCode.startsWith("ERR_")) {
+      if (/err: (circuit breaker is open|too many requests)$/.test(body.message ?? "")) throw new BreakerOpen(`effect ${endpoint}: ${body.message}`);
+      throw new Error(`effect ${endpoint}: daprd answered ${text}`);
+    }
+    return { status: res.status, body };
   };
 }
 
@@ -97,6 +99,7 @@ export class Handler {
     private compiled: object,
     private timeoutMs: number,
     private endowments: string[],
+    private contentType?: string,
   ) {}
 
   /** The handler at `file`, refused unless it exports `issue`, and `reconcile`
@@ -116,21 +119,42 @@ export class Handler {
     if (exports.join() !== wanted.join()) {
       throw new Error(`effect ${name}: ${file} must export exactly ${wanted.join(", ")}; it exports ${exports.join(", ") || "nothing"}`);
     }
-    return new Handler(name, file, compiled, timeoutMs, endowments);
+    return new Handler(name, file, compiled, timeoutMs, endowments, effect.contentType);
   }
 
   /** One run of issue or reconcile against the sink, its answer checked, the
-   * handler handed the values of the effect's secrets. */
-  async call(fn: "issue" | "reconcile", input: unknown, key: string, transport: Transport, secrets: Record<string, string> = {}, headers: Record<string, string> = {}): Promise<Answer> {
+   * handler handed the values of the effect's secrets; `place` is the cluster
+   * it runs in: the blob plane its content keys are read from, and the origin
+   * its door answers at. */
+  async call(fn: "issue" | "reconcile", input: unknown, key: string, transport: Transport, secrets: Record<string, string> = {}, headers: Record<string, string> = {}, place: Place = {}): Promise<Answer> {
     const worker = new Worker(new URL("./cage.ts", import.meta.url), NONE);
+    // Ends the call rather than reach the handler, which could catch it: only
+    // a call that asked nothing of the sink may be given back to the ledger.
+    // Counted when it starts, not when it settles: one in flight beside the
+    // breaker may already have reached the sink.
+    let started = 0;
+    let refuse: (e: BreakerOpen) => void;
+    const refused = new Promise<never>((_, reject) => (refuse = reject));
     const serve = async (data: Record<string, unknown>) => {
       const id = data.id;
+      if ("blob" in data) {
+        // A read of the plane, not of the sink: it calls nothing.
+        try {
+          worker.postMessage({ id, answer: await contentBlob(place.blobs, data.blob) });
+        } catch (e) {
+          worker.postMessage({ id, failure: e instanceof Error ? e.message : String(e) });
+        }
+        return;
+      }
       try {
         const { path, method, body, headers: asked } = data.fetch as { path: unknown; method: unknown; body: unknown; headers: unknown };
         if (typeof method !== "string" || !METHODS.has(method)) throw new TypeError(`sink method ${JSON.stringify(method)}`);
         const own = sinkHeaders(asked, Object.keys(headers));
-        worker.postMessage({ id, answer: await transport(this.name, sinkPath(path), { method, body, headers: own }, key, headers) });
+        started++;
+        const answer = await transport(this.name, sinkPath(path), { method, body, headers: own, ...(this.contentType ? { contentType: this.contentType } : {}) }, key, headers);
+        worker.postMessage({ id, answer });
       } catch (e) {
+        if (e instanceof BreakerOpen && started === 1) return refuse(e);
         worker.postMessage({ id, failure: e instanceof Error ? e.message : String(e) });
       }
     };
@@ -140,10 +164,10 @@ export class Handler {
     });
     const run = async () => {
       await exchange(worker, { source: this.compiled, file: this.file, endowments: this.endowments }, serve);
-      return (await exchange(worker, { call: fn, input, key, secrets }, serve)).result;
+      return (await exchange(worker, { call: fn, input, key, secrets, origin: place.origin }, serve)).result;
     };
     try {
-      return checked(this.name, fn, await Promise.race([run(), timeout]));
+      return checked(this.name, fn, await Promise.race([run(), timeout, refused]));
     } finally {
       clearTimeout(timer);
       worker.terminate();
@@ -173,7 +197,7 @@ function exchange(
   return new Promise((resolve, reject) => {
     worker.onmessage = (e) => {
       const data = e.data as Record<string, unknown>;
-      if ("fetch" in data) return onHostCall(data);
+      if ("fetch" in data || "blob" in data) return onHostCall(data);
       if ("error" in data) return reject(new Error(String(data.error)));
       resolve(data);
     };

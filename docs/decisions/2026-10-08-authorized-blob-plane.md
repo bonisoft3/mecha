@@ -2,13 +2,27 @@
 type: decision
 title: An authorized blob plane
 description: Closes the blob plane at the proxy, publishes images only through signed imgproxy URLs computed in SQL, and lets row policy own attachment, so an app needs no media service of its own.
-status: unbuilt
+status: partially-built
 ---
 
 # An authorized blob plane
 
-**Status: unbuilt, proposed 8 October 2026.** Nothing here is built. The spikes under
-[Before building](#before-building) decide whether it is.
+**Status: partly built, 5 November 2026.** Pronto's door and the edge's Worker take a write
+only from the session that claimed its key (rules 1 to 3), with no listing and no delete.
+What was built differs from the proposal in three places, each settled by running it:
+
+- **A guest may claim.** Its session is a real id with private rows, and a product that sells
+  to guests has to take their files. Guests' ids being free, a budget of recent claims on the
+  whole plane bounds them, beside a smaller one per account.
+- **Raw reads stay.** A print vendor must fetch the very bytes written, and `/img` re-encodes.
+  The door already answers them with `nosniff` and a `sandbox` policy, which answers rule 2's
+  worry about script on the origin.
+- **Bytes are not written once.** `rclone serve s3` ignores `If-None-Match` (question 1 below),
+  so rule 6 does not hold: a claimant can replace its own bytes, and nobody else can.
+
+Caddy's `forward_auth` holds the body through the check and passes the bearer (question 3). A
+check is a GET, which PostgREST runs only for a stable function, so the claim is its own call
+before the write. Rules 4 and 5 are not built. The rest of this record is the proposal as made.
 
 ## The problem
 

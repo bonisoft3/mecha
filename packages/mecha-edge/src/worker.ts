@@ -28,8 +28,9 @@
 // - Nothing live, no write, no 4xx or 5xx, and no session but a guest's.
 // - The browser keeps a shape response that is not live as Electric's server
 //   would let it, and nothing else.
-import { verifyJwt } from '../../../services/auth/jwt.ts'
+import { isSession, PUBLIC_WHERE, verifyJwt } from '../../../services/auth/jwt.ts'
 import type { EdgeEnv } from './object.ts'
+import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
 import { pokeCluster } from './clock.ts'
 
 const SHAPE_TTL_S = 300
@@ -42,6 +43,7 @@ const OWN_WRITE_KEEP_S = 300
 // One refresh per stale key per isolate, as edge-ssr.ts's renders.
 const refreshing = new Map<string, Promise<void>>()
 const CLUSTER_ROUTES = /^\/(auth|crud|electric)(\/|$)/
+const BLOB_MAX_BYTES = 16 * 1024 * 1024
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 // Cache API keys are URLs; none of these is ever fetched.
 const keyOf = (...parts: string[]) => new Request(`https://edge-cache.invalid/${parts.map(encodeURIComponent).join('/')}`)
@@ -147,6 +149,33 @@ export const edgeWorker = {
       if (req.headers.get('authorization') !== `Bearer ${env.IMPORT_TOKEN}`) return json({ error: 'unauthorized' }, 401)
       return object().fetch(req)
     }
+    // A provider's signal: public, and all it can do is ask for a row's re-check.
+    if (path.startsWith('/signal/')) {
+      if (req.method !== 'POST') return json({ error: 'a signal is a POST' }, 405)
+      // Public: an unbounded body would be buffered into the one object before its 413.
+      const length = Number(req.headers.get('content-length'))
+      if (!length) return json({ error: 'a signal states its length' }, 411)
+      if (length > SIGNAL_MAX_BYTES) return json({ error: 'a signal is small' }, 413)
+      return object().fetch(req)
+    }
+    if (path.startsWith('/blob-claim/')) {
+      if (req.method !== 'POST') return json({ error: 'a claim is a POST' }, 405)
+      return object().fetch(req)
+    }
+    if (req.method === 'PUT' && /^\/blobs\/mecha-objects\/[^/]+$/.test(path)) {
+      if (!env.BLOB_OBJECTS) return json({ error: 'this release binds no blob storage' }, 404)
+      const key = blobKeyOf(path.slice('/blobs/mecha-objects/'.length))
+      if (key === null) return json({ error: 'a key is percent-encoded' }, 400)
+      const length = Number(req.headers.get('content-length'))
+      if (!length) return json({ error: 'a blob states its length' }, 411)
+      if (length > BLOB_MAX_BYTES) return json({ error: 'a blob is too large' }, 413)
+      const allowed = await object().fetch(new Request(`${url.origin}/blob-write/${encodeURIComponent(key)}`, { method: 'POST', headers: { authorization: req.headers.get('authorization') ?? '' } }))
+      if (!allowed.ok) return allowed
+      await env.BLOB_OBJECTS.put(key, req.body!, {
+        httpMetadata: { contentType: req.headers.get('content-type') ?? 'application/octet-stream' },
+      })
+      return new Response(null, { status: 200 })
+    }
     if (!CLUSTER_ROUTES.test(path)) {
       if (!env.ASSETS) return json({ error: `no route for ${path}` }, 404)
       const res = await env.ASSETS.fetch(req)
@@ -184,7 +213,10 @@ export const edgeWorker = {
         return res
       }
       const live = p.get('live') === 'true'
-      const verified = claims?.typ === 'shape' && p.get('table') === claims.table && p.get('where') === claims.where
+      // A session's public shape is every subject's same response, so it shares the entry;
+      // the object still refuses a table it does not sync, and a refusal is never stored.
+      const verified = (claims?.typ === 'shape' && p.get('table') === claims.table && p.get('where') === claims.where)
+        || (isSession(claims) && p.get('where') === PUBLIC_WHERE)
       const browser = live ? 'no-store' : electricCache(p)
       if (live || !verified || !epoch) return marked(await learn(await object().fetch(req)), 'bypass', browser)
       // Every parameter but a live poll's cursor: a cache buster or an
@@ -193,7 +225,7 @@ export const edgeWorker = {
       return cached(keyOf(version, epoch, ...params.flat()), async () => learn(await object().fetch(req)), SHAPE_TTL_S, ctx, browser)
     }
 
-    const session = claims?.role === 'app_user' && typeof claims.sub === 'string'
+    const session = isSession(claims)
     const guest = session && claims.guest === true
     if (path.startsWith('/crud/') && session) {
       const reset = (await (await cache.match(keyOf(version, 'reset')))?.text()) ?? '0'

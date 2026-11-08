@@ -174,6 +174,51 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 		"""
 }
 
+// The airlock daprd's wall, against mistakes rather than an attacker: declared
+// destinations are the only ones reached by accident. Only the declared endpoints'
+// paths pass, the blob plane's binding where there is one, and daprd's health.
+#AirlockWall: W={
+	effects: [...string]
+	blobs:   bool
+	let blobPath = [if W.blobs {"bindings/blobs|"}, ""][0]
+	out: """
+		apiVersion: dapr.io/v1alpha1
+		kind: Component
+		metadata:
+		  name: wall
+		spec:
+		  type: middleware.http.routerchecker
+		  version: v1
+		  metadata:
+		    - {name: rule, value: "^/v1[.]0/(\(blobPath)healthz(/outbound)?|invoke/(\(strings.Join(W.effects, "|")))/method/.*)$"}
+		"""
+}
+
+// A breaker and no retry: declaring any policy for an endpoint turns off
+// daprd's built-in retries, which know nothing of what a repeat costs at the
+// sink; the ledger decides that. A sink's 4xx counts toward the trip, which no
+// policy can filter, so the threshold is one a run of refusals rarely reaches.
+#AirlockResiliency: R={
+	effects: [...string]
+	out: """
+		apiVersion: dapr.io/v1alpha1
+		kind: Resiliency
+		metadata:
+		  name: airlock
+		spec:
+		  policies:
+		    circuitBreakers:
+		      sink:
+		        maxRequests: 1
+		        interval: 60s
+		        timeout: 30s
+		        trip: consecutiveFailures >= 10
+		  targets:
+		    apps:
+		\(strings.Join([for e in R.effects {"      \(e): {circuitBreaker: sink}"}], "\n"))
+		"""
+}
+
 // What a sink may be: an https origin whose host is a DNS name of at least
 // two labels, the last opening with a letter. This is spelling only: a
 // single-label host (`database`) or an IP literal is refused here; a name that
@@ -190,7 +235,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // language, each only where its declaration names it, as pronto endows an
 // omnishell module with Intl. services/compute/language.ts holds the same
 // list (ENDOWABLE), and cluster_test.ts holds them to each other.
-#CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio"]
+#CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio", "Pdf"]
 #CageEndowment: or(#CageEndowments)
 
 // An environment variable's name: where a secret reaches the airlock.
@@ -297,13 +342,17 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // may reach, the bridge it reaches through, or the AI modality/tier it routes
 // through tsbifrost, and where the app keeps its handler and its binding.
 #Effect: E={
-	// `blobs` is the blob plane's own binding on the airlock's daprd.
-	name: =~#EffectName & !="blobs"
+	// The rest of the airlock's daprd's resources, in the directory an effect's
+	// endpoint is written to.
+	name: =~#EffectName & !="blobs" & !="wall" & !="resiliency"
 	{origin: #Origin} | {bridge: =~#EffectName} | {ai: #AiModality, tier: *"cheap" | #AiBackendTier}
 	handler:  *"effects/\(E.name).js" | string
 	endpoint: *"services/airlock/dapr/\(E.name).yaml" | string
 	// The environment variables whose values the handler is handed.
 	secrets?: [...=~#SecretName]
+	// Its bridge stands in for a sink elsewhere, so the keys it takes are fakes
+	// with a default rather than a refusal to start.
+	simulated?: true
 }
 
 // The networks around the airlock. `airlock`, internal, holds the airlock, the
@@ -637,6 +686,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// declaration, so a refused name fails the export instead of silently
 	// leaving the airlock without it.
 	_secrets: [for e in X.state.effects if e.secrets != _|_ for s in e.secrets {[if regexp.Match(#SecretName, s) {s}][0]}]
+	_simulatedSecrets: [for e in X.state.effects if e.secrets != _|_ if e.simulated != _|_ for s in e.secrets {s}]
 
 	// The steps the database image stages and this cluster places.
 	// A schedule or an effect is woken by the ticker: a declared schedule by
@@ -1654,10 +1704,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 
 			// Only an app that declares an effect gets an airlock, as only one
 			// that declares a schedule gets a ticker. The airlock reaches the
-			// database and its daprd (#AirlockNetworks); the daprd offers the
-			// bindings API alone (services/airlock/dapr.yaml), and its bindings
-			// are the program's declarations, so the only traffic leaving for the
-			// world is a call of a declared binding. Nothing pokes it: its
+			// database and its daprd (#AirlockNetworks); the daprd admits only
+			// the declared endpoints (#AirlockWall), which are the program's
+			// declarations, so the only traffic leaving for the world is a call of
+			// a declared endpoint. Nothing pokes it: its
 			// worker hears an interpreter's enqueue at the interpreter's commit
 			// (services/airlock/airlock.ts), and the instance is up whenever
 			// the cluster is.
@@ -1686,6 +1736,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// start, alters its own schema after an upgrade.
 							DATABASE_URL: databaseUrlEnv
 							MESH_URL:     {peer: "airlock-mesh", port: "http", prefix: "http://"}
+							// The door's own origin, which a handler names to a sink
+							// that calls or links back (handler.ts's sink.origin).
+							ORIGIN: origin
 							if len(X.state.bridges) > 0 {AIRLOCK_TARGET: "local"}
 							// An answer's bytes go to the blob plane, served by imgproxy
 							// (services/airlock/blobs.ts).
@@ -1694,7 +1747,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// A secret has no default: compose refuses to start without
 							// it rather than hand a handler a guessable one.
 							for k in X._secrets {
-								"\(k)": "${\(k):?\(k) is required: an effect declares it}"
+								"\(k)": [
+									if list.Contains(X._simulatedSecrets, k) {"${\(k):-simulator}"},
+									"${\(k):?\(k) is required: an effect declares it}",
+								][0]
 							}
 						}
 						after: {X._schemaReady, "airlock-mesh": "healthy"}
@@ -1725,11 +1781,20 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						])
 					}
 				}
-				// The airlock's daprd: one output binding per effect and nothing
-				// else, no Redis component and no resiliency policy, so a call is
-				// made once and the ledger's `entered` counts every attempt; and
-				// the bindings API alone, so no invoke reaches a full URL.
+				// The airlock's daprd: one HTTPEndpoint per effect behind the wall,
+				// no Redis component, and a breaker with no retry, so a call is
+				// made once and the ledger's `entered` counts every attempt.
 				"airlock-mesh": bayt.healthcheck.tcp & X._image & {
+					let names = [for e in X._effects {e.name}]
+					// Longest first, so a bridge's action URL is replaced before its
+					// container's bare one.
+					let _peerUrls = list.Sort(list.Concat([
+						[for b in X.state.bridges {
+							at:  "http://\(b.container):\(b.port)\([if b.action != _|_ {"/actions/\(b.action)"}, ""][0])"
+							env: "BRIDGE_\(strings.ToUpper(strings.Replace(b.name, "-", "_", -1)))_URL"
+						}],
+						[if X._aiOn {at: "http://tsbifrost:\(#TsBifrostPort)", env: "TSBIFROST_URL"}],
+					]), {x: _, y: _, less: len(x.at) > len(y.at)})
 					healthcheck: {
 						port:           3500
 						interval:       "5s"
@@ -1746,10 +1811,15 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						shell: "nu"
 						do: strings.Join(list.Concat([
 							["let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'airlock-mesh-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'airlock'); let app = (if (($env.AIRLOCK_APP_DIR? | default '') != '') { $env.AIRLOCK_APP_DIR } else if ('services/airlock/dapr.yaml' | path exists) { 'services/airlock' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/airlock') }); cp -f ($app | path join 'dapr.yaml') ($dir | path join 'config.yaml');"],
+							[
+								"'\(base64.Encode(null, (#AirlockWall & {effects: names, blobs: X.capabilities.blobs}).out))' | decode base64 | decode utf-8 | save -f ($dir | path join 'airlock/wall.yaml');",
+								"'\(base64.Encode(null, (#AirlockResiliency & {effects: names}).out))' | decode base64 | decode utf-8 | save -f ($dir | path join 'airlock/resiliency.yaml');",
+							],
 							[if X.capabilities.blobs {"'\(base64.Encode(null, _blobsBinding))' | decode base64 | decode utf-8 | save -f ($dir | path join 'airlock/blobs.yaml');"}],
-							[if !X.capabilities.blobs {"'\(base64.Encode(null, _envSecretStore))' | decode base64 | decode utf-8 | save -f ($dir | path join 'airlock/env.yaml');"}],
-							[for e in X._effects {"cp -f '\(e.endpoint)' ($dir | path join 'airlock/\(e.name).yaml');"}],
-							["exec daprd --app-id airlock --dapr-listen-addresses 127.0.0.1 --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path ($dir | path join 'airlock') --config ($dir | path join 'config.yaml') --dapr-http-port $env.DAPR_HTTP_PORT --dapr-grpc-port $env.DAPR_GRPC_PORT --dapr-internal-grpc-port $env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0 --log-level info"],
+							// An endpoint names a peer by its container address; on the
+							// host each peer is where its URL variable (env below) says.
+							[for e in X._effects {"open --raw '\(e.endpoint)'\(strings.Join([for u in _peerUrls {" | str replace --all '\(u.at)' $env.\(u.env)"}], "")) | save -f ($dir | path join 'airlock/\(e.name).yaml');"}],
+							["exec daprd --app-id airlock --dapr-listen-addresses 127.0.0.1 --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path ($dir | path join 'airlock') --config ($dir | path join 'config.yaml') --dapr-http-port $env.DAPR_HTTP_PORT --dapr-grpc-port $env.DAPR_GRPC_PORT --dapr-internal-grpc-port $env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0 --max-body-size 64Mi --log-level info"],
 						]), " ")
 						// What this daprd may reach, on the container where an operator
 						// looks (daprd reads neither): the declared origins and bridges.
@@ -1789,13 +1859,15 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						])
 						// The blob plane's binding (services/airlock/blobs.ts): rclone-s3
 						// takes any credentials, and the airlock sends bytes as base64.
-						if X.capabilities.blobs {
-							preamble: ["COPY <<'BLOBS' /dapr/airlock/blobs.yaml\n\(_blobsBinding)\nBLOBS"]
-						}
-						if !X.capabilities.blobs {
-							preamble: ["COPY <<'ENV' /dapr/airlock/env.yaml\n\(_envSecretStore)\nENV"]
-						}
-						entrypoint: ["/daprd", "--app-id", "airlock", "--dapr-listen-addresses", "0.0.0.0", "--resources-path", "/dapr/airlock", "--config", "/dapr/config.yaml", "--dapr-http-port", "3500", "--log-level", "info"]
+						preamble: list.Concat([
+							[
+								"COPY <<'WALL' /dapr/airlock/wall.yaml\n\((#AirlockWall & {effects: names, blobs: X.capabilities.blobs}).out)\nWALL",
+								"COPY <<'RESILIENCY' /dapr/airlock/resiliency.yaml\n\((#AirlockResiliency & {effects: names}).out)\nRESILIENCY",
+							],
+							[if X.capabilities.blobs {"COPY <<'BLOBS' /dapr/airlock/blobs.yaml\n\(_blobsBinding)\nBLOBS"}],
+						])
+						// An answer's pictures outgrow daprd's default 4Mi.
+						entrypoint: ["/daprd", "--app-id", "airlock", "--dapr-listen-addresses", "0.0.0.0", "--resources-path", "/dapr/airlock", "--config", "/dapr/config.yaml", "--dapr-http-port", "3500", "--max-body-size", "64Mi", "--log-level", "info"]
 					}
 					compose: {
 						networks: ["airlock", "airlock-out", "airlock-egress"]

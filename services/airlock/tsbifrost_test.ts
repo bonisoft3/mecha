@@ -213,25 +213,15 @@ Deno.test("tsbifrost normalizes chat completions and image generations across pr
   assert.equal(lastCall.url, "http://host.docker.internal:11434/api/chat");
   assert.deepEqual((lastCall.body as Record<string, unknown>).format, schemaObj);
 
-  // 5. Dapr HTTP output binding envelope (/v1.0/bindings/:binding) for shared-localhost Cloud Run
+  // 5. The invocation the airlock sends its mesh, for shared-localhost Cloud Run
   const daprBindingRes = await gcpGateway(
-    new Request("http://127.0.0.1:8090/v1.0/bindings/sdcpp-illustrate", {
+    new Request("http://127.0.0.1:8090/v1.0/invoke/sdcpp-illustrate/method/v1/images/generations", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        operation: "post",
-        data: { tier: "heavy", prompt: "Montessori boto card" },
-        metadata: {
-          path: "/v1/images/generations",
-          "Idempotency-Key": "dapr:1",
-          "Content-Type": "application/json",
-        },
-      }),
+      headers: { "content-type": "application/json", "Idempotency-Key": "dapr:1" },
+      body: JSON.stringify({ tier: "heavy", prompt: "Montessori boto card" }),
     }),
   );
   assert.equal(daprBindingRes.status, 200);
-  assert.equal(daprBindingRes.headers.get("metadata.statuscode"), "200");
-  assert.equal(daprBindingRes.headers.get("metadata.content-type"), "application/json");
   const daprBody = await daprBindingRes.json();
   assert.equal(daprBody.model, "imagen-4.0-ultra-generate-001");
   assert.equal(daprBody.data[0].b64_json, "R0lGODlhAQABAAAAACw=");
@@ -430,18 +420,15 @@ Deno.test("a field extra_params names wins; the fields beside it inside an objec
   assert.deepEqual(mergeExtra({ a: [1, 2], b: { c: 1 } }, { a: [3], b: 2 }), { a: [3], b: 2 });
 });
 
-Deno.test("the passthrough header rides a Dapr binding's metadata like any other header", async () => {
+Deno.test("the passthrough header rides an invocation like any other header", async () => {
   const leonardo = BRANCHES.find((b) => b.branch === "image cloudflare binding leonardo")!;
   const { handler, sent } = recordingGateway(leonardo);
-  const res = await handler(new Request("http://127.0.0.1:8090/v1.0/bindings/illustrate-card", {
+  const res = await handler(new Request("http://127.0.0.1:8090/v1.0/invoke/illustrate-card/method/v1/images/generations", {
     method: "POST",
-    body: JSON.stringify({
-      operation: "post",
-      data: { tier: "heavy", prompt: "A cat", extra_params: { guidance: 4 } },
-      metadata: { path: "/v1/images/generations", "X-Bf-Passthrough-Extra-Params": "true" },
-    }),
+    headers: { "X-Bf-Passthrough-Extra-Params": "true" },
+    body: JSON.stringify({ tier: "heavy", prompt: "A cat", extra_params: { guidance: 4 } }),
   }));
-  assert.equal(res.headers.get("metadata.statuscode"), "200");
+  assert.equal(res.status, 200);
   assert.equal(sent[0].guidance, 4);
 });
 

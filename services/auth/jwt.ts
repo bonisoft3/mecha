@@ -62,6 +62,18 @@ export function shapeWhere(scopes: string[]): string {
   return `scope_id IN (${scopes.map((s) => `'${s.replaceAll("'", "''")}'`).join(",")})`;
 }
 
+/** The public rows of a table, which every session reaches: `subject_scopes`
+ * opens every subject's scopes with `public:`. A gate admits a session's own
+ * token for this `where` with no shape token minted, which reaches no row a
+ * minted token would not, and spares a round trip per public table before a
+ * screen can mount. The client states the same string (packages/client/src/public-where.ts). */
+export const PUBLIC_WHERE = shapeWhere(["public:"]);
+
+/** Whether claims are a session's: a shape token is none. */
+export function isSession<C extends Record<string, unknown>>(claims: C | null): claims is C & { sub: string } {
+  return claims !== null && claims.role === "app_user" && typeof claims.sub === "string";
+}
+
 // A guard over SQL a machine wrote, not a language anyone writes: an author
 // writes PostgREST's filters in markup, and a subset's `where` is what its
 // client compiles a view's predicate to from them (electric-db-collection

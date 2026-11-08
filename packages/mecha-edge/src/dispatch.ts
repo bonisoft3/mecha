@@ -9,12 +9,16 @@ import {
   type CloudflareAiBinding,
   createTsBifrost,
 } from '../../../services/airlock/tsbifrost.ts'
-import { type Answer, CALL_TIMEOUT_MS, type Effect, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
-import { type BlobStore, stowed } from '../../../services/airlock/blobs.ts'
+import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
+import { type BlobStore, contentBlob, stowed } from '../../../services/airlock/blobs.ts'
 
 export interface EdgeSink {
   key: string
   fetch(path: unknown, init?: unknown): Promise<{ status: number; body: unknown }>
+  /** A content-addressed blob, checked against its key (blobs.ts contentBlob). */
+  blob(key: unknown): Promise<Uint8Array>
+  /** The deployment's origin, for a sink that calls or links back. */
+  readonly origin: string
 }
 
 /** A bridge's container on cloudflare: a Durable Object namespace of this
@@ -134,8 +138,11 @@ export interface PerformConfig {
   log?: (line: string) => void
   callTimeoutMs?: number
   handlerTimeoutMs?: number
-  /** The blob plane an answer's bytes go to; absent without one. */
+  /** The blob plane an answer's bytes go to and a handler's content keys are
+   * read from; absent without one. */
   blobs?: BlobStore
+  /** The release's origin: sink.origin. */
+  origin?: string
 }
 
 function containerStub(env: Record<string, unknown> | undefined, binding: string, bridge: string) {
@@ -153,10 +160,16 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
   if (spec.declaration.credential) {
     const { header, scheme, secret } = spec.declaration.credential
     const val = strings[secret]
-    if (val) credHeader[header] = scheme ? `${scheme} ${val}` : val
+    // Fails the run instead of calling the sink unauthenticated.
+    if (!val) throw new Error(`effect ${spec.declaration.handler}: secret ${secret} is not set on this deployment`)
+    credHeader[header] = scheme ? `${scheme} ${val}` : val
   }
   return {
     key,
+    blob: (blobKey: unknown) => contentBlob(cfg.blobs, blobKey),
+    get origin(): string {
+      return cfg.origin ?? die(`${key}: this release names no origin: give it a domain`)
+    },
     async fetch(path: unknown, init: unknown = {}): Promise<{ status: number; body: unknown }> {
       if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
         throw new Error(`sink.fetch path must begin with one '/', got ${JSON.stringify(path)}`)
@@ -168,11 +181,11 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
       let payload: string | undefined
       if (body !== undefined) {
         if (method === 'GET' || method === 'DELETE') throw new Error(`sink.fetch ${method} takes no body`)
-        payload = typeof body === 'string' ? body : JSON.stringify(body)
+        payload = encodedBody(spec.declaration.contentType, body)
       }
       const headers = new Headers({
         ...sinkHeaders(asked, spec.declaration.credential ? [spec.declaration.credential.header] : []),
-        'content-type': 'application/json',
+        'content-type': spec.declaration.contentType ?? 'application/json',
         'Idempotency-Key': encodeURIComponent(key),
         ...credHeader,
       })
@@ -216,7 +229,7 @@ export async function performEffect(spec: EdgeEffect, run: { key: string; entere
   const env = extractEnv(cfg.env)
   const sink = makeSink(spec, key, cfg, env)
   const { strings } = env
-  const secrets = Object.fromEntries((effect.secrets ?? []).map(name => [name, strings[name] ?? '']))
+  const secrets = Object.fromEntries((effect.secrets ?? []).map(name => [name, strings[name] || die(`effect ${effect.handler}: secret ${name} is not set on this deployment`)]))
   const stow = (answer: Answer) => within(handlerTimeoutMs, `${key}: storing the answer's bytes`, stowed(answer, key, cfg.blobs))
   if (step(effect, entered) === 'reconcile') {
     if (!spec.reconcile) throw new TypeError(`effect ${effect.handler} exports no reconcile function`)
@@ -293,8 +306,11 @@ export function die(message: string): never {
 export interface DispatcherEnv {
   CLUSTER: DurableObjectNamespace
   AI?: unknown
-  BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown> }
+  BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown>; get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null> }
   BLOB_URL?: string
+  /** The release's origin, from its domain: a handler's sink.origin, the same
+   * on every run of that release. */
+  ORIGIN?: string
   /** A bridge's container, BRIDGE_<NAME> (pronto's edge-bridges.ts). */
   [binding: `BRIDGE_${string}`]: ContainerBinding | undefined
 }
@@ -306,6 +322,11 @@ export function imagePlane(env: DispatcherEnv): BlobStore | undefined {
   if (bucket === undefined || env.BLOB_URL === undefined) return undefined
   return {
     put: async (key, bytes, type) => { await bucket.put(key, bytes, { httpMetadata: { contentType: type } }) },
+    get: async (key) => {
+      const object = await bucket.get(key)
+      if (object === null) throw new Error(`blob ${key} is not in the plane`)
+      return new Uint8Array(await object.arrayBuffer())
+    },
     url: (key) => `${env.BLOB_URL}${key}`,
   }
 }
@@ -320,7 +341,7 @@ export function edgeDispatcher({ effects, ai }: { effects: EdgeEffects; ai?: AiC
       await Promise.all(batch.messages.map(async (message) => {
         const run = message.body as DispatchedRun
         try {
-          await dispatchRun(cluster, effects, run, { ai, env: env as unknown as Record<string, unknown>, blobs: imagePlane(env) })
+          await dispatchRun(cluster, effects, run, { ai, env: env as unknown as Record<string, unknown>, blobs: imagePlane(env), origin: env.ORIGIN })
         } finally {
           message.ack()
         }

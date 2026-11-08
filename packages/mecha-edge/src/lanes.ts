@@ -19,8 +19,10 @@ export function lanes() {
       : api.length > 0 ? 'api'
       : undefined
     if (lane === undefined) return
-    apiStreak = lane === 'api' ? apiStreak + 1 : lane === 'render' ? 0 : apiStreak
-    lowStreak = lane === 'low' ? 0 : lowStreak + 1
+    // A streak counts only turns taken past a waiter: turns while a lane was empty owed it
+    // nothing, and counting them let a lone prefetch preempt the next render or token.
+    apiStreak = lane === 'api' ? (render.length > 0 ? apiStreak + 1 : 0) : lane === 'render' ? 0 : apiStreak
+    lowStreak = lane === 'low' ? 0 : low.length > 0 ? lowStreak + 1 : 0
     running = true
     waiting[lane].shift()!()
   }

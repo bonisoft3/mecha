@@ -393,8 +393,10 @@ export function coalescedLoad(load: (opts: LoadSubsetOptions) => true | Promise<
     for (let at = 0; at < waiting.length; at += SUBSET_BATCH) {
       const part = waiting.slice(at, at + SUBSET_BATCH)
       const where = part.length === 1 ? part[0].where : new IR.Func("or", part.map((w) => w.where)) as IR.BasicExpression<boolean>
+      // load may answer a synchronous true, which then() cannot take as a
+      // PromiseLike<void>; awaited, the type is the same in both branches.
       Promise.resolve()
-        .then(() => load({ where }))
+        .then(async () => { await load({ where }) })
         .then(() => { for (const w of part) w.resolve() }, (e) => { for (const w of part) w.reject(e) })
     }
   }
@@ -421,18 +423,24 @@ export function coalescedLoad(load: (opts: LoadSubsetOptions) => true | Promise<
 // render) it is local-only alone, as TanStack's in-memory storage was. A row stored before
 // a column was declared takes the column's default when read: a release that added
 // columns met readers' saved forms without them, and a binding to one threw.
+/** A row with every defaulted column it left out filled in: what a database
+ * does for a server table, and nothing does for a local one. */
+function withDefaults(fields: readonly TypeField[] | undefined, row: Record<string, unknown>): Record<string, unknown> {
+  const filled = { ...row }
+  for (const f of fields ?? []) if (f.default !== undefined && !(f.name in filled)) filled[f.name] = f.default
+  return filled
+}
+
 function deviceCollection(t: { id: string; key: string; fields?: readonly TypeField[] }): Collection<any, any, any> {
   const storageKey = `mecha:${t.id}`
   const storage = (globalThis as { localStorage?: Storage }).localStorage
-  const defaults = (t.fields ?? []).filter((f) => f.default !== undefined)
   const read = (): Map<unknown, Record<string, unknown>> => {
     const raw = storage?.getItem(storageKey) ?? null
     const parsed = raw === null ? {} : JSON.parse(raw)
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`${storageKey} does not hold a device table`)
     return new Map(Object.entries(parsed).map(([slot, stored]: [string, any]) => {
       if (typeof stored !== "object" || stored === null || typeof stored.data !== "object") throw new Error(`${storageKey}: ${slot} is not a stored row`)
-      const row = { ...stored.data }
-      for (const f of defaults) if (!(f.name in row)) row[f.name] = f.default
+      const row = withDefaults(t.fields, stored.data)
       return [row[t.key], row]
     }))
   }
@@ -1150,8 +1158,10 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       }
       if (normalizedRows.length === 0) return Promise.resolve()
       // One call, whatever the batch's size: the collection recomputes the live
-      // queries over this table once for it.
-      if (isLocal(t)) return Promise.resolve(void collections[tableId].insert(normalizedRows))
+      // queries over this table once for it. A local table has no database to
+      // fill the columns a row leaves out, so its defaults land here, as they
+      // do when a device row is read back (deviceCollection).
+      if (isLocal(t)) return Promise.resolve(void collections[tableId].insert(normalizedRows.map((row) => withDefaults(t.fields, row))))
       return run(
         `insert:${tableId}`,
         normalizedRows.map((row) => `${tableId}:${String(row[t.key])}`),

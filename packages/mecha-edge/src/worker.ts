@@ -26,8 +26,11 @@
 //   elsewhere (another colo, the object itself) is seen as before, once the
 //   entry is past its seconds, after one stale answer.
 // - Nothing live, no write, no 4xx or 5xx, and no session but a guest's.
-// - The browser keeps a shape response that is not live as Electric's server
-//   would let it, and nothing else.
+// - Every cluster response reaches the browser `no-store`, and each shape
+//   response the Worker serves gets a fresh `electric-cursor`: `shapes.ts`
+//   answers `offset=-1` with `up-to-date` in one round-trip, and Electric's
+//   client holds back `up-to-date` for 60 s from any response whose cursor
+//   matches the previous session's.
 import { isSession, PUBLIC_WHERE, verifyJwt } from '../../../services/auth/jwt.ts'
 import type { EdgeEnv } from './object.ts'
 import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
@@ -42,43 +45,33 @@ const STORED_AT = 'x-edge-stored-at'
 const OWN_WRITE_KEEP_S = 300
 // One refresh per stale key per isolate, as edge-ssr.ts's renders.
 const refreshing = new Map<string, Promise<void>>()
+let cursor = Date.now()
 const CLUSTER_ROUTES = /^\/(auth|crud|electric)(\/|$)/
 const BLOB_MAX_BYTES = 16 * 1024 * 1024
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 // Cache API keys are URLs; none of these is ever fetched.
 const keyOf = (...parts: string[]) => new Request(`https://edge-cache.invalid/${parts.map(encodeURIComponent).join('/')}`)
 
-async function cached(key: Request, miss: () => Promise<Response>, ttl: number, ctx: ExecutionContext, browser?: string): Promise<Response> {
+async function cached(key: Request, miss: () => Promise<Response>, ttl: number, ctx: ExecutionContext): Promise<Response> {
   const cache = (caches as unknown as { default: Cache }).default
   const hit = await cache.match(key)
-  if (hit) return marked(hit, 'hit', browser)
+  if (hit) return marked(hit, 'hit')
   const res = await miss()
   if (res.status !== 200) return marked(res, 'miss')
   const stored = new Response(res.body, res)
   stored.headers.set('cache-control', `max-age=${ttl}`)
   ctx.waitUntil(cache.put(key, stored.clone()))
-  return marked(stored, 'miss', browser)
+  return marked(stored, 'miss')
 }
 
-/** What the browser may keep: a shape response that is not live, a 200,
- * under Electric 1.8's own cache headers (its shapes/api/response.ex), which
- * its client is written against: it sends `expired_handle` and a cache buster
- * past a stale entry. Anything else, nothing. */
-function marked(res: Response, state: string, browser = 'no-store'): Response {
+function marked(res: Response, state: string): Response {
   const out = new Response(res.body, res)
-  out.headers.set('cache-control', res.status === 200 ? browser : 'no-store')
+  out.headers.set('cache-control', 'no-store')
   out.headers.set('x-edge-cache', state)
   out.headers.delete(STORED_AT)
+  if (out.headers.has('electric-cursor')) out.headers.set('electric-cursor', String((cursor = Math.max(cursor + 1, Date.now()))))
   return out
 }
-
-// A log read from its start is kept long by a browser and briefly by a shared
-// cache; any other read that is not live, a minute and five more stale.
-const electricCache = (p: URLSearchParams) => p.get('offset') === 'now' || p.get('log') === 'changes_only'
-  ? 'no-store'
-  : p.get('offset') === '-1'
-  ? 'public, max-age=604800, s-maxage=3600, stale-while-revalidate=2629746'
-  : 'public, max-age=60, stale-while-revalidate=300'
 
 /** A public read as the colo keeps it: a day, stamped with when it was read. */
 function storedPublic(res: Response): Response {
@@ -217,12 +210,11 @@ export const edgeWorker = {
       // the object still refuses a table it does not sync, and a refusal is never stored.
       const verified = (claims?.typ === 'shape' && p.get('table') === claims.table && p.get('where') === claims.where)
         || (isSession(claims) && p.get('where') === PUBLIC_WHERE)
-      const browser = live ? 'no-store' : electricCache(p)
-      if (live || !verified || !epoch) return marked(await learn(await object().fetch(req)), 'bypass', browser)
+      if (live || !verified || !epoch) return marked(await learn(await object().fetch(req)), 'bypass')
       // Every parameter but a live poll's cursor: a cache buster or an
       // expired_handle is how the client asks past a stale entry.
       const params = [...p].filter(([k]) => k !== 'cursor').sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      return cached(keyOf(version, epoch, ...params.flat()), async () => learn(await object().fetch(req)), SHAPE_TTL_S, ctx, browser)
+      return cached(keyOf(version, epoch, ...params.flat()), async () => learn(await object().fetch(req)), SHAPE_TTL_S, ctx)
     }
 
     const session = isSession(claims)

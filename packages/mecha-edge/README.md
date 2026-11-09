@@ -261,11 +261,11 @@ Reads the object answered are answered again from the colo's Cache API, with
   both write markers.
 - **Never** a live request, a write, a 4xx or 5xx, or a session other than a
   guest's.
-- **The browser** keeps a shape response that is not live under Electric
-  1.8's own `cache-control` — a week for a log read from its start, a minute
-  (and five more stale) for any other — since Electric's client steps past a
-  stale entry with `expired_handle` and a cache buster, which the Worker's
-  key includes too. Everything else reaches the browser `no-store`.
+- **The browser** receives every cluster response `no-store`, and each shape
+  response the Worker serves carries a fresh `electric-cursor`: `shapes.ts`
+  answers `offset=-1` with `up-to-date` in one round-trip, and Electric's
+  client holds back `up-to-date` for 60 s from any response whose cursor
+  matches the previous session's.
 
 ## What fixes its shape
 

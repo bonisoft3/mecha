@@ -127,12 +127,21 @@ Deno.test({ name: 'the edge cluster serves many subjects from one object', sanit
       const answered = await live
       await answered.body?.cancel()
       assert.equal(answered.headers.get('x-edge-cache'), 'bypass')
-      // The browser keeps what Electric's server would let it, and no live answer.
+      // Every shape response reaches the browser `no-store` with a moving
+      // cursor, including colo cache hits, so a reopened ShapeStream never
+      // suppresses `up-to-date` as a same-cursor replay.
+      const hitA = await alices('offset=-1')
+      await hitA.body?.cancel()
+      const hitB = await bobs('offset=-1')
+      await hitB.body?.cancel()
+      assert.equal(hitA.headers.get('x-edge-cache'), 'hit')
+      assert.equal(hitB.headers.get('x-edge-cache'), 'hit')
+      assert.notEqual(hitA.headers.get('electric-cursor'), hitB.headers.get('electric-cursor'))
       assert.equal(answered.headers.get('cache-control'), 'no-store')
-      assert.equal(first.headers.get('cache-control'), 'public, max-age=604800, s-maxage=3600, stale-while-revalidate=2629746')
+      assert.equal(first.headers.get('cache-control'), 'no-store')
       const later = await notes(`offset=${first.headers.get('electric-offset')}&handle=${first.headers.get('electric-handle')}`)
       await later.body?.cancel()
-      assert.equal(later.headers.get('cache-control'), 'public, max-age=60, stale-while-revalidate=300')
+      assert.equal(later.headers.get('cache-control'), 'no-store')
       await crud(alice.token, 'note?body=eq.para%20o%20vivo', { method: 'DELETE' })
     })
     await t.step("a guest's cached read gives way to its own write", async () => {

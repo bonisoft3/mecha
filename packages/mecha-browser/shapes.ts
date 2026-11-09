@@ -406,7 +406,6 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
       'electric-up-to-date': 'true',
     }
     if (!live) headers['electric-schema'] = JSON.stringify(l.schema)
-    if (entries.length === 0 && live) return new Response(null, { status: 204, headers })
     const msgs: unknown[] = entries.map((e) => e.message)
     msgs.push(upToDate())
     return new Response(JSON.stringify(msgs), { headers })

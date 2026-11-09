@@ -161,6 +161,25 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
     assert.equal(fetches, before + 1, 'two stale hits refresh once')
     assert.equal((await swr(bob)).headers.get('x-edge-cache'), 'hit')
     assert.equal(fetches, before + 1)
+
+    // Regression: cached /electric/v1/shape responses froze electric-cursor and
+    // carried browser max-age, so a reopened ShapeStream within 60 s matched
+    // replayCursor and suppressed up-to-date.
+    const shapeUrl = `https://app.example/electric/v1/shape?table=board&where=${encodeURIComponent("scope_id IN ('public:')")}&offset=-1`
+    const shapeReq = (g: { token: string }) => edgeWorker.fetch(new Request(shapeUrl, { headers: { authorization: `Bearer ${g.token}` } }), env, ctx)
+    const shapeBypass = await shapeReq(alice)
+    await flush()
+    assert.equal(shapeBypass.headers.get('x-edge-cache'), 'bypass')
+    assert.equal(shapeBypass.headers.get('cache-control'), 'no-store')
+    const shapeMiss = await shapeReq(alice)
+    await flush()
+    assert.equal(shapeMiss.headers.get('x-edge-cache'), 'miss')
+    assert.equal(shapeMiss.headers.get('cache-control'), 'no-store')
+    const shapeHit = await shapeReq(bob)
+    assert.equal(shapeHit.headers.get('x-edge-cache'), 'hit')
+    assert.equal(shapeHit.headers.get('cache-control'), 'no-store')
+    assert.notEqual(shapeHit.headers.get('electric-cursor'), shapeMiss.headers.get('electric-cursor'))
+    assert.notEqual(shapeMiss.headers.get('electric-cursor'), shapeBypass.headers.get('electric-cursor'))
   } finally {
     await db.close()
     if (savedCaches) Object.defineProperty(globalThis, 'caches', savedCaches)

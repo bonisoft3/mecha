@@ -25,7 +25,7 @@ import type { ClaimedRun, DispatchedRun, RunAnswer } from './dispatch.ts'
 import { hatchAt, type EdgeHatch } from './hatches.ts'
 import { verifyJwt } from '../../../services/auth/jwt.ts'
 import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
-import { applyScripts, ChangedScript, NoLedger, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
+import { applyScripts, ChangedScript, NoLedger, OutOfOrderScript, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
 import type { BatchMachine, Computation, Output } from '../../compute-snapshot/src/index.ts'
 import type { ComputeCapture } from './compute-coordinator.ts'
@@ -446,7 +446,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
             if (names.length) await db.exec('CHECKPOINT')
             return names
           } catch (error) {
-            if (error instanceof NoLedger || error instanceof ChangedScript || error instanceof UnrunnableScript) return json({ error: error.message }, 409)
+            if (error instanceof NoLedger || error instanceof ChangedScript || error instanceof OutOfOrderScript || error instanceof UnrunnableScript) return json({ error: error.message }, 409)
             if (error instanceof Error && 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code)) {
               await db.exec('ROLLBACK')
               return json({ error: error.message, sqlstate: error.code }, 422)

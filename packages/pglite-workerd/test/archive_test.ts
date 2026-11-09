@@ -1,13 +1,15 @@
-// migrate.ts against a real pgroll ledger: Postgres 18 migrated by pgroll (both
-// mecha's pinned images, as the migrate step runs them) to its first migration,
-// dumped with the ledger, restored, then given the app's set with one more. Only
-// the missing one applies, recorded as pgroll records it; a second run applies
-// nothing; one sorting before the ledger's latest is refused. Needs Docker.
+// The archive's ledger against a real pgroll ledger: Postgres 18 migrated by
+// pgroll (both mecha's pinned images, as the migrate step runs them) to its
+// first migration, dumped with the ledger, restored with its release's scripts,
+// then given the release's set with one more. The ledger holds the file as
+// given and the migration by the text pgroll recorded; only the missing one
+// applies; a second run applies nothing; another release's scripts never
+// restore. Needs Docker.
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
 import { icuDataDir } from '@electric-sql/pglite-icu-full'
 import { restore } from '../restore.ts'
-import { migrate } from '../migrate.ts'
+import { applyScripts, digest, pgrollScripts } from '../scripts.ts'
 
 // libraries/mecha/bayt.cue's _postgres and _pgroll.
 const POSTGRES = 'postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8'
@@ -26,12 +28,13 @@ async function docker(args: string[], stdin?: string): Promise<string> {
 }
 
 const sql = (up: string) => ({ operations: [{ sql: { up, onComplete: true } }] })
+const TEAM = { name: '005_create_tables.sql', sql: "CREATE TABLE team (id integer PRIMARY KEY, name text NOT NULL); INSERT INTO team VALUES (1, 'Flamengo');" }
 const MIGRATIONS = {
   '001_add_city': sql("ALTER TABLE team ADD COLUMN city text; UPDATE team SET city = 'Rio'"),
   '002_add_country': sql("ALTER TABLE team ADD COLUMN country text NOT NULL DEFAULT 'Brazil'\n-- tier: container\nALTER TABLE team REPLICA IDENTITY FULL;\n-- tier: any\n"),
 }
 
-Deno.test('the migrations a restored directory lacks apply from its own ledger', async () => {
+Deno.test('a restored directory records what its database applied and carries the rest of a release from there', async () => {
   const tmp = await Deno.makeTempDir({ prefix: 'pglite-migrate-' })
   const name = `pglite-migrate-${crypto.randomUUID().slice(0, 8)}`
   const url = 'postgres://postgres:x@127.0.0.1:5432/postgres?sslmode=disable'
@@ -42,7 +45,7 @@ Deno.test('the migrations a restored directory lacks apply from its own ledger',
       try { await docker(['exec', name, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres']); break } catch (e) { if (i > 120) throw e }
       await new Promise((r) => setTimeout(r, 500))
     }
-    await docker(['exec', '-i', name, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-v', 'ON_ERROR_STOP=1'], "CREATE TABLE team (id integer PRIMARY KEY, name text NOT NULL); INSERT INTO team VALUES (1, 'Flamengo');")
+    await docker(['exec', '-i', name, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-v', 'ON_ERROR_STOP=1'], TEAM.sql)
     await Deno.mkdir(`${tmp}/pgroll`)
     await Deno.writeTextFile(`${tmp}/pgroll/001_add_city.json`, JSON.stringify(MIGRATIONS['001_add_city']))
     // Copied in, not bind-mounted: a daemon in another container (dind) sees
@@ -60,22 +63,20 @@ Deno.test('the migrations a restored directory lacks apply from its own ledger',
     await pgroll('baseline', '000_baseline', '/tmp', '--yes')
     await pgroll('start', '/pgroll/001_add_city.json', '--complete')
     await Deno.writeTextFile(`${tmp}/dump.sql`, await docker(['exec', name, 'pg_dump', '-h', '127.0.0.1', '-U', 'postgres', '--schema=public', '--schema=pgroll', '--no-owner', '--no-publications', '--no-subscriptions']))
-    await restore(`${tmp}/dump.sql`, `${tmp}/pgdata`, [], () => {})
+    const [city, country] = pgrollScripts(MIGRATIONS)
+    await assert.rejects(() => restore(`${tmp}/dump.sql`, `${tmp}/other`, [], [TEAM, city, country], () => {}), /names 002_add_country, which the archive's pgroll ledger never completed/)
+    await Deno.remove(`${tmp}/other`, { recursive: true })
+    await restore(`${tmp}/dump.sql`, `${tmp}/pgdata`, [], [TEAM, city], () => {})
 
     const db = await PGlite.create({ dataDir: `${tmp}/pgdata`, icuDataDir: await icuDataDir() })
     try {
-      assert.deepEqual(await migrate(db, MIGRATIONS, () => {}), ['002_add_country'])
-      assert.deepEqual((await db.query('SELECT name, city, country FROM team')).rows, [{ name: 'Flamengo', city: 'Rio', country: 'Brazil' }])
       assert.deepEqual(
-        (await db.query("SELECT name, parent, done, migration_type FROM pgroll.migrations WHERE schema = 'public' ORDER BY created_at")).rows,
-        [
-          { name: '000_baseline', parent: null, done: true, migration_type: 'baseline' },
-          { name: '001_add_city', parent: '000_baseline', done: true, migration_type: 'pgroll' },
-          { name: '002_add_country', parent: '001_add_city', done: true, migration_type: 'pgroll' },
-        ],
+        (await db.query('SELECT name, sha256 FROM public._pronto_migrations ORDER BY name')).rows,
+        [{ name: '001_add_city', sha256: await digest(city.sql) }, { name: '005_create_tables.sql', sha256: await digest(TEAM.sql) }],
       )
-      assert.deepEqual(await migrate(db, MIGRATIONS, () => {}), [])
-      await assert.rejects(() => migrate(db, { ...MIGRATIONS, '0015_late': sql('SELECT 1') }, () => {}), /0015_late sorts before 002_add_country/)
+      assert.deepEqual(await applyScripts(db, [TEAM, city, country], () => {}), ['002_add_country'])
+      assert.deepEqual((await db.query('SELECT name, city, country FROM team')).rows, [{ name: 'Flamengo', city: 'Rio', country: 'Brazil' }])
+      assert.deepEqual(await applyScripts(db, [TEAM, city, country], () => {}), [])
     } finally {
       await db.close()
     }

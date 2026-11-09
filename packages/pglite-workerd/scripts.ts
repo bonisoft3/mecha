@@ -3,12 +3,14 @@
 // `_pronto_migrations`, written when a directory is built and read when a
 // later release reaches a directory the object kept — here with each
 // script's digest beside its name. A script the ledger lacks is applied in
-// name order, through the tier fence, and recorded; a seed is not, since it
-// belongs to a directory being built; a recorded script whose text the
-// release changed is refused by name, before anything is applied, because a
-// live schema moves only by a pgroll migration (pronto's
+// the release's order, through the tier fence, and recorded; a seed is not,
+// since it belongs to a directory being built; a recorded script whose text
+// the release changed is refused by name, before anything is applied, because
+// a live schema moves only by a pgroll migration (pronto's
 // docs/schema-change-admission.md), never by a file the directory already
-// ran. A directory without the ledger predates it: nothing says what it
+// ran; so is a pgroll migration sorting before one the directory applied. A directory restored from an archive (restore.ts) gets its ledger from
+// the release whose database the archive is and from the archive's own pgroll
+// ledger. A directory without the ledger predates both: nothing says what it
 // holds, so it is refused, and a reset loads one that carries it.
 import type { PGlite } from '@electric-sql/pglite'
 import { browserTier } from '../mecha-browser/fence.ts'
@@ -33,6 +35,12 @@ export class NoLedger extends Error {
 /** A script the directory applied, with other text now. */
 export class ChangedScript extends Error {
   constructor(name: string) { super(`${name} changed since the data directory applied it: a change to a live schema is a pgroll migration, folded into the entities once every directory has run it; or reset`) }
+}
+/** A pgroll migration owed that sorts before one the directory applied: a
+ * fresh directory runs it first, so the two would differ, as mecha's migrate
+ * step (services/migrate/migrate.sh) refuses it. */
+export class OutOfOrderScript extends Error {
+  constructor(name: string, latest: string) { super(`${name} sorts before ${latest}, which the data directory already applied: a fresh directory would run it first; name it after ${latest}`) }
 }
 /** A pgroll migration with an operation only pgroll runs, owed here. */
 export class UnrunnableScript extends Error {
@@ -59,17 +67,56 @@ export function pgrollSql(name: string, { operations }: PgRollMigration): string
   }).join(';\n')
 }
 
-/** The pgroll set as scripts in key order, as pgroll runs them; one pgroll
- * alone runs keeps its name and no SQL. */
+/** One pgroll migration as a script; one pgroll alone runs keeps its name and no SQL. */
+export function pgrollScript(name: string, migration: PgRollMigration): Script {
+  try {
+    return { name, sql: pgrollSql(name, migration) }
+  } catch (error) {
+    if (error instanceof UnrunnableScript) return { name, sql: null }
+    throw error
+  }
+}
+
+/** The pgroll set as scripts in key order, as pgroll runs them. */
 export function pgrollScripts(set: Record<string, PgRollMigration>): Script[] {
-  return Object.entries(set).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, migration]) => {
-    try {
-      return { name, sql: pgrollSql(name, migration) }
-    } catch (error) {
-      if (error instanceof UnrunnableScript) return { name, sql: null }
-      throw error
-    }
-  })
+  return Object.entries(set).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, migration]) => pgrollScript(name, migration))
+}
+
+/** A file step, by its extension: a pgroll migration's name has none
+ * (mecha's pgroll/ledger.cue #Name). */
+export const isFileScript = (name: string) => name.endsWith('.sql')
+
+/** The pgroll migrations a database completed, by the text it applied, from
+ * the ledger pgroll keeps in it; none where pgroll never ran. */
+export async function appliedPgroll(db: PGlite): Promise<Script[]> {
+  const present = await db.query<{ ok: boolean }>("SELECT to_regclass('pgroll.migrations') IS NOT NULL AS ok")
+  if (!present.rows[0].ok) return []
+  const rows = await db.query<{ name: string; migration: PgRollMigration }>(
+    `SELECT name, migration FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'pgroll' AND done ORDER BY name COLLATE "C"`,
+  )
+  return rows.rows.map((r) => pgrollScript(r.name, r.migration))
+}
+
+/** The ledger of a directory restored from an archive: the release's files as
+ * given, since a dump says nothing of the files its database ran, and the
+ * pgroll migrations the archive's own ledger holds, by the text it applied.
+ * The release must name those migrations and no other, or its scripts are
+ * another release's than the one that built and migrated the database. */
+export async function recordArchive(db: PGlite, release: Script[]): Promise<Script[]> {
+  const applied = await appliedPgroll(db)
+  const declared = release.filter((s) => !isFileScript(s.name)).map((s) => s.name)
+  const done = applied.map((s) => s.name)
+  const unapplied = declared.filter((n) => !done.includes(n))
+  const undeclared = done.filter((n) => !declared.includes(n))
+  if (unapplied.length || undeclared.length) {
+    throw new Error(`the release's scripts are not the archive's: ${[
+      ...(unapplied.length ? [`it names ${unapplied.join(', ')}, which the archive's pgroll ledger never completed`] : []),
+      ...(undeclared.length ? [`the archive completed ${undeclared.join(', ')}, which it does not name`] : []),
+    ].join('; ')}`)
+  }
+  const scripts = [...release.filter((s) => isFileScript(s.name)), ...applied]
+  await recordScripts(db, scripts)
+  return scripts
 }
 
 async function ledger(db: PGlite): Promise<void> {
@@ -87,19 +134,27 @@ export async function recordScripts(db: PGlite, scripts: Script[]): Promise<void
   for (const script of scripts) await record(db, script)
 }
 
-/** The scripts a kept directory lacks, applied and recorded; their names.
+/** The scripts a kept directory lacks, applied in the order given and
+ * recorded; their names. The order is the release's, the one a directory is
+ * built in (pronto's bundle/edge-scripts.ts): its files, then its pgroll set.
  * Every recorded script is checked first, so a refusal moves nothing. */
 export async function applyScripts(db: PGlite, scripts: Script[], log: (line: string) => void = console.log): Promise<string[]> {
   const present = await db.query<{ ok: boolean }>("SELECT to_regclass('public._pronto_migrations') IS NOT NULL AS ok")
   if (!present.rows[0].ok) throw new NoLedger()
   // An appliance's archive carries the ledger without digests: its scripts
-  // are refused as changed until a build records them.
+  // are refused as changed until a restore records them.
   await ledger(db)
   const recorded = new Map((await db.query<{ name: string; sha256: string | null }>('SELECT name, sha256 FROM public._pronto_migrations')).rows.map((r) => [r.name, r.sha256]))
-  // Byte order, as a directory being built applies them.
-  const owed = [...scripts].filter((s) => !isSeedScript(s.name)).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  const owed = scripts.filter((s) => !isSeedScript(s.name))
   for (const script of owed) {
     if (recorded.has(script.name) && recorded.get(script.name) !== await digest(script.sql)) throw new ChangedScript(script.name)
+  }
+  // Byte order, as migrate.sh's LC_ALL=C glob: the pgroll stream stays linear.
+  const latest = [...recorded.keys()].filter((n) => !isFileScript(n)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).at(-1)
+  if (latest !== undefined) {
+    for (const script of owed) {
+      if (!recorded.has(script.name) && !isFileScript(script.name) && script.name < latest) throw new OutOfOrderScript(script.name, latest)
+    }
   }
   const applied: string[] = []
   for (const script of owed) {

@@ -1,14 +1,19 @@
 // A PGlite data directory from a plain pg_dump of a Postgres database, for a
 // database too big to rebuild from its migrations (an archive): the roles its
-// grants and policies name first — a dump carries none — then the dump. psql's
+// grants and policies name first — a dump carries none — then the dump, then
+// the ledger of what the database applied (scripts.ts's recordArchive): the
+// scripts of the release that built and migrated it, as its edge build wrote
+// them (pronto's migrations.json), and the archive's own pgroll ledger, so a
+// later release carries the directory forward from what it holds. psql's
 // `COPY … FROM stdin` blocks become COPY from PGlite's /dev/blob, a batch of
 // rows at a time; pg_dump's \restrict and \unrestrict guards are psql's alone.
 // Runs npm's PGlite with the full ICU set: a directory on disk needs Node's
 // filesystem, which the workerd build leaves out, and it is the same Postgres.
 //
-//   deno run -A restore.ts <dump.sql> <pgdata-dir> [--roles <sql>]…
+//   deno run -A restore.ts <dump.sql> <pgdata-dir> --scripts <migrations.json> [--roles <sql>]…
 import { PGlite } from '@electric-sql/pglite'
 import { icuDataDir } from '@electric-sql/pglite-icu-full'
+import { recordArchive, type Script } from './scripts.ts'
 
 /** Closes a data directory for shipping: a checkpoint recycles the spent WAL
  * segments into pre-allocated future ones (a GiB after a restore), which no
@@ -26,7 +31,7 @@ export async function closeTrimmed(db: PGlite, pgdata: string) {
 // Rows per COPY: bounds what one batch holds in memory, here and in the wasm.
 const BATCH = 200_000
 
-export async function restore(dump: string, pgdata: string, roles: string[], log: (line: string) => void = console.log) {
+export async function restore(dump: string, pgdata: string, roles: string[], release: Script[], log: (line: string) => void = console.log) {
   // A fresh directory: PGlite runs initdb into it, and an existing one throws here.
   Deno.mkdirSync(pgdata)
   const t0 = performance.now()
@@ -90,6 +95,7 @@ export async function restore(dump: string, pgdata: string, roles: string[], log
   if (copy) throw new Error(`dump ends inside ${(copy as { head: string }).head}`)
   await flushSql()
   lap('dump restored')
+  lap(`${(await recordArchive(db, release)).length} scripts recorded as applied`)
   await db.exec('VACUUM ANALYZE')
   await closeTrimmed(db, pgdata)
   lap('VACUUM ANALYZE, CHECKPOINT, WAL trimmed')
@@ -99,7 +105,9 @@ if (import.meta.main) {
   const args = [...Deno.args]
   const roles: string[] = []
   for (let i = args.indexOf('--roles'); i >= 0; i = args.indexOf('--roles')) roles.push(...args.splice(i, 2).slice(1))
+  const at = args.indexOf('--scripts')
+  const scripts = at >= 0 ? args.splice(at, 2)[1] : undefined
   const [dump, pgdata] = args
-  if (!dump || !pgdata || args.length !== 2) throw new Error('usage: restore.ts <dump.sql> <pgdata-dir> [--roles <sql>]…')
-  await restore(dump, pgdata, roles)
+  if (!dump || !pgdata || !scripts || args.length !== 2) throw new Error('usage: restore.ts <dump.sql> <pgdata-dir> --scripts <migrations.json> [--roles <sql>]…')
+  await restore(dump, pgdata, roles, JSON.parse(await Deno.readTextFile(scripts)) as Script[])
 }

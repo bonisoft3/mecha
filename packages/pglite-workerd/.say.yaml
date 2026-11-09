@@ -11,6 +11,6 @@ say:
       for spec in ($env.CACHE_TO? | default '' | lines | where ($it | is-not-empty)) { $flags = ($flags | append [--set $'*.cache-to=($spec)']) }
       let bake_flags = $flags
       with-env {BUILDX_BAKE_ENTITLEMENTS_FS: "0"} { ^docker buildx bake ...$bake_flags package }
-  # Needs dist/ (build) and Docker (restore_test.ts, migrate_test.ts).
+  # Needs dist/ (build) and Docker (restore_test.ts, archive_test.ts).
   test:
     do: mise exec -- deno test -A --frozen test/

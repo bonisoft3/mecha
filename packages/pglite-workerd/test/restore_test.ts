@@ -48,7 +48,7 @@ Deno.test('a pg_dump restores into a PGlite data directory', async () => {
     await docker(['exec', '-i', name, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-v', 'ON_ERROR_STOP=1'], SCHEMA)
     await Deno.writeTextFile(`${tmp}/dump.sql`, await docker(['exec', name, 'pg_dump', '-h', '127.0.0.1', '-U', 'postgres', '--schema=public', '--no-owner', '--no-publications', '--no-subscriptions']))
     await Deno.writeTextFile(`${tmp}/roles.sql`, ROLES)
-    await restore(`${tmp}/dump.sql`, `${tmp}/pgdata`, [`${tmp}/roles.sql`], () => {})
+    await restore(`${tmp}/dump.sql`, `${tmp}/pgdata`, [`${tmp}/roles.sql`], [], () => {})
 
     const db = await PGlite.create({ dataDir: `${tmp}/pgdata`, icuDataDir: await icuDataDir() })
     try {

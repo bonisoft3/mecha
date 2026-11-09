@@ -170,22 +170,23 @@ directory is live data, and a load without `reset` leaves it alone.
 [`restore.ts`](restore.ts) builds such a directory from a plain `pg_dump`,
 for a database too big to rebuild from its migrations (an archive): the roles
 its grants and policies name first, since a dump carries none, then the dump,
-its `COPY` blocks fed to PGlite a batch of rows at a time. It closes the
-directory trimmed (`closeTrimmed`): the WAL segments a checkpoint pre-allocates
-past the insert position, a GiB after a restore, are dropped rather than
-shipped. A dump that
-carries the `pgroll` schema carries the database's ledger, and
-[`migrate.ts`](migrate.ts) applies the cluster's pgroll migrations it lacks,
-as the cluster's migrate step (`services/migrate/migrate.sh`) would: in name
-order, refusing one that sorts before the latest applied, each recorded as
-`pgroll start --complete` records it. pgroll does not run in PGlite, so only
-migrations of raw SQL apply, their `up` past the tier fence.
-[`scripts.ts`](scripts.ts) is the other ledger, the docker appliance's
-`_pronto_migrations` with a digest per script: what a directory being built
-applied, by name, and what a release later hands a directory the object
-kept — its files and its pgroll set as raw SQL — applied in name order past
-the tier fence, seeds never; a recorded script with other text, or a
-directory without the ledger, is refused by name.
+its `COPY` blocks fed to PGlite a batch of rows at a time, then the ledger of
+what the database applied. It closes the directory trimmed (`closeTrimmed`):
+the WAL segments a checkpoint pre-allocates past the insert position, a GiB
+after a restore, are dropped rather than shipped.
+[`scripts.ts`](scripts.ts) keeps that ledger, the docker appliance's
+`_pronto_migrations` with a digest per script. A directory being built records
+what it applied; an archive records the files of the release that built its
+database, as the restore is given them (`--scripts`, the release's
+`migrations.json`), since a dump says nothing of the files its database ran,
+and the pgroll migrations its own `pgroll` ledger holds as done, by the text
+each ran, refusing a release whose set names other migrations than those.
+A release later hands a directory the object kept, or `pgdata.ts --from` an
+archive, its files and its pgroll set as raw SQL in the order a directory
+applies them, files then pgroll; the ones the ledger lacks are applied in
+that order past the tier fence, seeds never, and a recorded script with other
+text, or a directory without the ledger, is refused by name. pgroll does not
+run in PGlite, so only migrations of raw SQL apply.
 
 ## Measured
 
@@ -229,9 +230,9 @@ writes, truncation, reopening and legacy formats; committed data and rolled-back
 updates are checked after a process restart without an explicit checkpoint.
 [`test/restore_test.ts`](test/restore_test.ts)
 restores a dump Postgres 18 (in Docker) took of a table with a policy, an ICU
-collation and a trigger; [`test/migrate_test.ts`](test/migrate_test.ts) gives
-a directory restored from a database pgroll migrated (mecha's pinned image)
-the set with one migration more.
+collation and a trigger; [`test/archive_test.ts`](test/archive_test.ts)
+restores one of a database pgroll migrated (mecha's pinned image) with its
+release's scripts and gives it the set with one migration more.
 
 [[wrangler-tools.ts]] resolves Node and Wrangler with `mise which --tool` from
 the package's pinned configuration. Sayt supplies its bootstrapped mise through

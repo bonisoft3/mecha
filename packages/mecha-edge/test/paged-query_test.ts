@@ -70,3 +70,57 @@ Deno.test('dynamic SQL cannot hide sequence writes in physical stages or scratch
   assert.equal(execution.state().revision, 0)
   db.reset()
 })
+
+Deno.test('source ingestion accepts 1024 rows atomically in 32-row inserts, preserves replay and rejects row and byte overflow', async () => {
+  const db = await fixture()
+  const sizes: number[] = []
+  const wrapped = { connect() {
+    const conn = host(db).connect()
+    return { query: (sql: string) => conn.query(sql), close: () => conn.close(), prepare(sql: string) {
+      const statement = conn.prepare(sql)
+      return { close: () => statement.close(), query(...values: string[]) {
+        if (sql.startsWith('INSERT INTO "source"')) sizes.push(JSON.parse(values[0]).length)
+        return statement.query(...values)
+      } }
+    } }
+  } }
+  const program: SnapshotProgram = { version: 'v', reads: ['source'], queries: { rows: 'SELECT value FROM source ORDER BY value' }, spec: { name: 'source', file: 'source.js', to: [] } }
+  const identity = { id: 'capture', name: 'source', version: 'v', revision: 1 }
+  let query = new PagedQuery(wrapped, [program])
+  query.initialize({ ...identity, tables: { source: { columns: [{ name: 'value', type: 'text' }], rows: 1152 } } })
+  const rows = Array.from({ length: 1024 }, (_, i) => ({ value: String(i) }))
+  const chunk = { ...identity, table: 'source', after: 0, next: 1024, done: false, rows }
+  try {
+    await assert.rejects(() => query.append({ ...chunk, next: 1025, rows: [...rows, { value: 'overflow' }] }), /exceeds limits/)
+    await assert.rejects(() => query.append({ ...chunk, next: 1, rows: [{ value: 'é'.repeat(131072) }] }), /exceeds limits/)
+    assert.equal(sizes.length, 0)
+    await query.append(chunk)
+    assert.equal(sizes.length, 32)
+    assert.ok(sizes.every(n => n === 32))
+    query = new PagedQuery(wrapped, [program])
+    await query.append(chunk)
+    assert.equal(sizes.length, 32)
+    await assert.rejects(() => query.append({ ...chunk, rows: rows.map((r,i) => i ? r : { value: 'different' }) }), /replay differs/)
+    await query.append({ ...identity, table: 'source', after: 1024, next: 1152, done: true, rows: Array.from({ length: 128 }, (_, i) => ({ value: String(1024+i) })) })
+    query.materialize('rows')
+    assert.equal(query.read('rows').rows.length, 128)
+    assert.deepEqual(query.progress().sources, [{ name: 'source', position: 1152 }])
+  } finally { db.reset() }
+})
+
+Deno.test('source ingestion admits exactly 256KiB of row JSON and rejects one additional byte', async () => {
+  const db = await fixture()
+  const program: SnapshotProgram = { version: 'v', reads: ['source'], queries: {}, spec: { name: 'bytes', file: 'bytes.js', to: [] } }
+  const identity = { id: 'bytes', name: 'bytes', version: 'v', revision: 1 }
+  const query = new PagedQuery(host(db), [program])
+  query.initialize({ ...identity, tables: { source: { columns: [{ name: 'value', type: 'text' }], rows: 1 } } })
+  const value = 'x'.repeat(256 * 1024 - JSON.stringify([{ value: '' }]).length)
+  const chunk = { ...identity, table: 'source', after: 0, next: 1, done: true, rows: [{ value }] }
+  try {
+    await assert.rejects(() => query.append({ ...chunk, rows: [{ value: value + 'x' }] }), /exceeds limits/)
+    assert.deepEqual(query.progress().sources, [{ name: 'source', position: 0 }])
+    await query.append(chunk)
+    await query.append(chunk)
+    assert.deepEqual(query.progress().sources, [{ name: 'source', position: 1 }])
+  } finally { db.reset() }
+})

@@ -3,6 +3,7 @@ import { computeFailureKey, type ComputeCapture } from './compute.ts'
 import type { ComputeService } from './compute.ts'
 import type { ExecutionOutput, ExecutionState } from './paged-execution.ts'
 import { pagedRequest } from './paged-transport.ts'
+import { strictJson } from './snapshot-program.ts'
 
 export interface PagedDatabase {
   computeManifest(capture: ComputeCapture): Promise<SnapshotManifest>
@@ -15,6 +16,7 @@ export interface PagedDatabase {
 interface Progress {
   owner?: string
   capture: ComputeCapture
+  manifest?: SnapshotManifest
   outputs: Record<string, { after: number; chunks: number; rows: number; done: boolean }>
 }
 interface Storage {
@@ -24,6 +26,7 @@ interface Storage {
   list<T>(options: { prefix: string }): Promise<Map<string, T>>
 }
 interface RemoteStatus {
+  manifest: SnapshotManifest
   sources: { name: string; position: number }[]
   queries: string[]
   declaredQueries: string[]
@@ -52,20 +55,52 @@ export async function reclaimPaged(db: PagedDatabase, service: ComputeService, s
 }
 
 /** Each acknowledgement follows a durable write; losing it only repeats that step. */
-export async function advancePaged(db: PagedDatabase, service: ComputeService, storage: Storage, capture: ComputeCapture, owner: string): Promise<'transfer' | 'query' | 'compute' | 'published'> {
+export async function advancePaged(db: PagedDatabase, service: ComputeService, storage: Storage, capture: ComputeCapture, owner: string, session?: { executing: boolean; transfer?: { key: string; status: RemoteStatus } }): Promise<'transfer' | 'query' | 'compute' | 'published'> {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(owner)) throw new Error('invalid paged compute owner')
+  const step = async () => {
+    if (session) session.executing = false
+    const execution = await pagedRequest<ExecutionState>(service, { capture, action: 'step' })
+    if (typeof execution?.done !== 'boolean') throw new Error('invalid paged execution state')
+    if (session) session.executing = !execution.done
+    return 'compute' as const
+  }
+  if (session?.executing) return await step()
   const key = keyFor(capture, owner)
   let progress = await storage.get<Progress>(key)
   if (!progress) {
     progress = { owner, capture, outputs: {} }
     await storage.put(key, progress)
   }
-  const manifest = await db.computeManifest(capture)
-  const status = await pagedRequest<RemoteStatus>(service, { capture, action: 'initialize', manifest })
+  let manifest = progress.manifest
+  const transfer = session?.transfer
+  if (session) delete session.transfer
+  let status: RemoteStatus
+  if (!manifest) {
+    manifest = await db.computeManifest(capture)
+    for (const field of ['id', 'name', 'version', 'revision'] as const) {
+      if (manifest[field] !== capture.identity[field]) throw new Error('paged manifest belongs to another capture')
+    }
+    status = await pagedRequest<RemoteStatus>(service, { capture, action: 'initialize', manifest })
+    if (strictJson(status.manifest) !== strictJson(manifest)) throw new Error('paged manifest differs from capture')
+    progress.manifest = manifest
+    await storage.put(key, progress)
+  } else {
+    status = transfer?.key === key ? transfer.status : await pagedRequest<RemoteStatus>(service, { capture, action: 'status' })
+    if (strictJson(status.manifest) !== strictJson(manifest)) throw new Error('paged manifest differs from capture')
+  }
+  for (const field of ['id', 'name', 'version', 'revision'] as const) {
+    if (manifest[field] !== capture.identity[field]) throw new Error('paged manifest belongs to another capture')
+  }
   const source = status.sources.find(source => source.position < manifest.tables[source.name].rows)
   if (source) {
     const chunk = await db.computeChunk(capture, source.name, source.position)
-    await pagedRequest(service, { capture, action: 'append', chunk })
+    const acknowledgement = await pagedRequest<{ next: number }>(service, { capture, action: 'append', chunk })
+    if (acknowledgement.next !== chunk.next) throw new Error('capture append acknowledgement differs')
+    source.position = acknowledgement.next
+    // An interrupted call discards this alarm-local cache; the next alarm reads durable progress.
+    if (session && status.sources.some(source => source.position < manifest.tables[source.name].rows)) {
+      session.transfer = { key, status }
+    }
     return 'transfer'
   }
   const query = status.declaredQueries.find(name => !status.queries.includes(name))
@@ -74,8 +109,7 @@ export async function advancePaged(db: PagedDatabase, service: ComputeService, s
     return 'query'
   }
   if (!status.execution.done) {
-    await pagedRequest(service, { capture, action: 'step' })
-    return 'compute'
+    return await step()
   }
   for (const sink of status.sinks) {
     const output = progress.outputs[sink] ?? { after: 0, chunks: 0, rows: 0, done: false }

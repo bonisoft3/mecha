@@ -60,9 +60,9 @@ async function tableExists(db: Queryable, table: string, cacheOwner: object, rol
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public' AND c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
         AND (pg_has_role(c.relowner, 'USAGE')
-          OR has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+          OR has_table_privilege(c.oid, $2)
           OR has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))`,
-    [table],
+    [table, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'],
   )
   const exists = result.rows.length > 0
   if (exists && key) cache.tables.add(key)

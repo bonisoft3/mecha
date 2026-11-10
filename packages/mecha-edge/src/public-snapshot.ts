@@ -2,6 +2,18 @@ import type { PGlite } from '@electric-sql/pglite'
 import { clearMetadataCache, metadataCache, readRest, readRestBatch, type ReadSchema } from '@mecha/postgrest-js'
 
 export class PublicSnapshotCapacity extends Error {}
+export const PUBLIC_SNAPSHOT_LIMIT = 16
+export const BACKGROUND_SNAPSHOT_LIMIT = 4
+
+export function snapshotAdmission() {
+  const pending = { high: 0, low: 0 }
+  return async <T>(priority: 'high' | 'low', work: () => Promise<T>): Promise<T> => {
+    const limit = priority === 'high' ? PUBLIC_SNAPSHOT_LIMIT : BACKGROUND_SNAPSHOT_LIMIT
+    if (pending[priority] >= limit) throw new PublicSnapshotCapacity('public snapshot queue full')
+    pending[priority]++
+    try { return await work() } finally { pending[priority]-- }
+  }
+}
 
 export interface PublicSnapshot {
   revision: string
@@ -18,6 +30,7 @@ export async function publicSnapshot<T>(
   generation: string,
   use: (snapshot: PublicSnapshot) => Promise<T>,
   schema?: ReadSchema,
+  priority: 'high' | 'low' = 'high',
 ): Promise<T> {
   if (!generation) throw new Error('snapshot requires a database generation')
   const cache = metadataCache(db)
@@ -32,6 +45,7 @@ export async function publicSnapshot<T>(
       SELECT pg_current_snapshot()::text AS revision,
              set_config('request.jwt.claims', '{"role":"app_user"}', true),
              set_config('app.scopes', 'public:', true);
+      ${priority === 'low' ? "SET LOCAL work_mem = '1MB';" : ''}
       SET LOCAL ROLE app_user;
     `) as [unknown, { rows: { revision: string }[] }]
     const revision = JSON.stringify([generation, rows[0].revision])

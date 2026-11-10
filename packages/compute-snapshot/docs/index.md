@@ -147,6 +147,11 @@ staging. The executor owns its intermediate data and numerical working storage.
 Writes received while execution runs queue the following coalesced batch. They
 do not prevent the current immutable batch from publishing. A replaced version,
 obsolete claim, or existing receipt prevents a late response from publishing.
+If publication fails a foreign-key constraint and newer source input is waiting,
+the failed transaction rolls back before the coordinator supersedes the still-active
+capture. No sink writes or receipt survive; the next batch reads the newer input.
+This handles parents deleted while an immutable batch was running. Foreign-key
+failures without newer input, and all other publication errors, remain failures.
 Failures retry the identical capture with bounded backoff; after `maxAttempts`
 (default 25), the failure and capture remain recorded and that batch is excluded
 from runnable work. Each failed execution rejects explicitly; inspecting a deadline

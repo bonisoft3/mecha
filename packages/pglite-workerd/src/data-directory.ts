@@ -19,11 +19,10 @@ export interface Assets {
   icu: ArrayBuffer
 }
 
-// Postgres's memory cut to what an isolate's 128 MB holds beside the wasm
-// heap; measured with GolAberto's 5.2 GB archive (README.md).
+// Reserve isolate headroom for the PostgreSQL wasm heap and other Worker allocations.
 export const SETTINGS: Record<string, string> = {
-  shared_buffers: '16MB',
-  work_mem: '8MB',
+  shared_buffers: '8MB',
+  work_mem: '1MB',
   maintenance_work_mem: '8MB',
   temp_buffers: '1MB',
   wal_buffers: '256kB',
@@ -41,7 +40,8 @@ export class DataDirectory {
   #physical: PhysicalSnapshots | null = null
   readonly #compression: StorageCompression
 
-  constructor(storage: DurableObjectStorage, private readonly format?: StorageFormat) {
+  constructor(storage: DurableObjectStorage, private readonly format: StorageFormat | undefined, private readonly abortOnFilesystemError: (error: unknown) => never) {
+    if (typeof abortOnFilesystemError !== 'function') throw new Error('filesystem failures require an object abort handler')
     this.#storage = storage
     storage.sql.exec('CREATE TABLE IF NOT EXISTS data_directory (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
     this.#compression = new StorageCompression(storage)
@@ -102,8 +102,11 @@ export class DataDirectory {
     if (this.#opened) throw new Error('the data directory is already open')
     if (!this.complete) throw new Error('no complete data directory: load one through /import first')
     this.#opened = true
+    this.#storage.sql.exec("DELETE FROM data_directory WHERE key='snapshot_restored'")
+    const fs = this.#dir
+    fs.abortOnUnexpectedError(this.abortOnFilesystemError)
     this.#db = PGlite.create({
-      fs: this.#dir,
+      fs,
       pgliteWasmModule: assets.pgliteWasm,
       initdbWasmModule: assets.initdbWasm,
       fsBundle: new Blob([assets.pgliteData]),
@@ -144,17 +147,32 @@ export class DataDirectory {
 
   snapshotManifest(id: string): PhysicalSnapshot | null { return this.#snapshots.manifest(id) }
   snapshots(): PhysicalSnapshot[] { return this.#snapshots.list() }
-  snapshotNodes(id: string, after = ''): SnapshotNodes { return this.#snapshots.nodes(id, after) }
-  snapshotBlocks(id: string, path: string, after = -1): SnapshotBlocks { return this.#snapshots.blocks(id, path, after) }
+  snapshotNodes(id: string, after = '', baseId?: string): SnapshotNodes { return this.#snapshots.nodes(id, after, baseId) }
+  snapshotBlocks(id: string, path: string, after = -1, baseId?: string): SnapshotBlocks { return this.#snapshots.blocks(id, path, after, baseId) }
   releaseSnapshot(id: string): void { this.#snapshots.release(id) }
   snapshotImportStatus(): PhysicalImportStatus | null { return this.#snapshots.importStatus() }
-  beginSnapshotImport(manifest: PhysicalSnapshot): PhysicalImportStatus {
-    if (this.#opened || this.complete) throw new Error('physical import requires an unopened incomplete directory')
-    return this.#snapshots.beginImport(manifest)
+  beginSnapshotRestore(id: string): void {
+    if (this.#opened) throw new Error('physical restore requires an unopened directory')
+    this.#snapshots.beginRestore(id)
+    this.#fs = null
+  }
+  advanceSnapshotRestore(id: string, maxBlocks = 128): boolean {
+    if (this.#opened) throw new Error('physical restore requires an unopened directory')
+    const done = this.#snapshots.advanceRestore(id, maxBlocks)
+    this.#fs = null
+    return done
+  }
+  beginSnapshotImport(manifest: PhysicalSnapshot, baseId?: string): PhysicalImportStatus {
+    if (this.#opened || this.complete && !baseId) throw new Error('physical import requires an unopened incomplete directory')
+    return this.#snapshots.beginImport(manifest, baseId)
   }
   importSnapshotNodes(page: SnapshotNodes): PhysicalImportStatus {
     if (this.#opened) throw new Error('physical import directory is open')
     return this.#snapshots.importNodes(page)
+  }
+  advanceSnapshotImport(id: string, maxBlocks = 128): boolean {
+    if (this.#opened) throw new Error('physical import directory is open')
+    return this.#snapshots.advanceImport(id, maxBlocks)
   }
   importSnapshotBlocks(page: SnapshotBlocks): PhysicalImportStatus {
     if (this.#opened) throw new Error('physical import directory is open')

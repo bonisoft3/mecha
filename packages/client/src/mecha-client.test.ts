@@ -683,6 +683,80 @@ describe("a table synced on demand", () => {
     for (const view of views) await view.cleanup()
   })
 
+  it("limits simultaneous ordered, limited subsets and retains their rows", async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => ({ id: `p${i}`, game_id: `g${i}`, a: "0", b: "0", txid: "5" }))
+    const electric = fakeElectric({ schema: { player_game: schema, other: schema }, rows: { player_game: rows }, xmin: 1 })
+    const pending: (() => void)[] = []
+    let active = 0, maximum = 0, started = 0, longPolls = 0
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = new URL(String(input instanceof Request ? input.url : input))
+      if ([...url.searchParams.keys()].some(key => key.startsWith('subset__'))) {
+        started++; active++; maximum = Math.max(maximum, active)
+        try { await new Promise<void>(resolve => pending.push(resolve)); return await electric.fetcher(input, init) }
+        finally { active-- }
+      }
+      if (url.searchParams.get('table') === 'other' && url.searchParams.get('live') === 'true') {
+        longPolls++
+        try { return await electric.fetcher(input, init) } finally { longPolls-- }
+      }
+      return await electric.fetcher(input, init)
+    }
+    const c = createMechaClient({ types: TYPES, tables: [{ id: 'player_game', table: 'player_game', sync: 'on-demand', fields: [] }, { id: 'other', table: 'other', fields: [] }],
+      electricUrl: 'http://fake/electric', authUrl: 'http://fake/auth', fetcher })
+    const subscription = c.collections.other.subscribeChanges(() => {})
+    await until(() => longPolls > 0, 'active long poll')
+    const views = rows.map(row => createLiveQueryCollection({ query: q => q.from({ row: c.collections.player_game })
+      .where(({ row: player }) => eq(player.game_id, row.game_id)).orderBy(({ row: player }) => player.a).limit(1) }))
+    try {
+      for (const view of views) view.startSyncImmediate()
+      await until(() => pending.length === 4, 'four active subsets')
+      expect(started).toBe(4)
+      expect(longPolls).toBeGreaterThan(0)
+      for (let i = 0; i < 400 && (views.some(view => !view.isReady() || view.isLoadingSubset) || pending.length || active); i++) {
+        if (pending.length) pending.shift()!()
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      expect(started).toBeGreaterThanOrEqual(rows.length)
+      for (const view of views) await until(() => view.isReady() && !view.isLoadingSubset, 'settled limited subset')
+      expect(maximum).toBe(4)
+      expect(views.map(view => view.toArray.map((row: any) => row.id))).toEqual(rows.map(row => [row.id]))
+    } finally {
+      pending.forEach(resolve => resolve())
+      for (const view of views) await view.cleanup()
+      await c.collections.player_game.cleanup()
+      subscription.unsubscribe()
+      await c.collections.other.cleanup()
+    }
+  })
+
+  it("cancels queued and in-flight subsets when their shape is cleaned up", async () => {
+    const electric = fakeElectric({ schema: { player_game: schema } })
+    let started = 0, canceled = 0
+    const fetcher: typeof fetch = (input, init) => {
+      const url = new URL(String(input instanceof Request ? input.url : input))
+      if (![...url.searchParams.keys()].some(key => key.startsWith('subset__'))) return electric.fetcher(input, init)
+      started++
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal
+        if (!signal) throw new Error('subset has no cancellation signal')
+        const cancel = () => { canceled++; reject(signal.reason) }
+        if (signal.aborted) cancel()
+        else signal.addEventListener('abort', cancel, { once: true })
+      })
+    }
+    const c = createMechaClient({ types: TYPES, tables: [{ id: 'player_game', table: 'player_game', sync: 'on-demand', fields: [] }],
+      electricUrl: 'http://fake/electric', authUrl: 'http://fake/auth', fetcher })
+    const views = Array.from({ length: 12 }, (_, i) => createLiveQueryCollection({ query: q => q.from({ row: c.collections.player_game })
+      .where(({ row }) => eq(row.game_id, `g${i}`)).orderBy(({ row }) => row.a).limit(1) }))
+    for (const view of views) view.startSyncImmediate()
+    await until(() => started === 4, 'four active subsets')
+    for (const view of views) await view.cleanup()
+    await c.collections.player_game.cleanup()
+    await until(() => canceled === 4, 'active subsets canceled')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(started).toBe(4)
+  })
+
   // A subset is a snapshot of the shape at one moment, and the live stream
   // carries every change to the shape from the moment the collection opened.
   // The two must merge without a row going back in time or arriving partial:

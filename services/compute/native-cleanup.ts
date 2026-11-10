@@ -1,4 +1,5 @@
 import type pg from "npm:pg@8.16.3";
+import { removeWorkDirectory } from "./native-process.ts";
 import { sqlIdentifier } from "./native-sources.ts";
 
 const delay = () => new Promise((resolve) => setTimeout(resolve, 100));
@@ -21,7 +22,7 @@ export async function dropOwnedSlots(client: pg.PoolClient, slots: string[]) {
   }
 }
 
-async function retirePipeline(url: string) {
+export async function retirePipeline(url: string) {
   const request = async (suffix: string, method = "GET") => {
     const response = await fetch(url + suffix, { method, signal: AbortSignal.timeout(30000) });
     if (response.status === 404) { await response.text(); return null; }
@@ -59,7 +60,8 @@ export async function reconcileNativeResources(db: pg.Pool, names: string[], leg
     if (!present.epochs && !present.sources) return;
     if (present.epochs) await client.query(`ALTER TABLE compute.native_epoch
       ADD COLUMN IF NOT EXISTS source_schema text,
-      ADD COLUMN IF NOT EXISTS pipeline_url text`);
+      ADD COLUMN IF NOT EXISTS pipeline_url text,
+      ADD COLUMN IF NOT EXISTS process_owned boolean NOT NULL DEFAULT false`);
     const epochs = present.epochs
       ? (await client.query("SELECT * FROM compute.native_epoch WHERE NOT (name=ANY($1::text[])) ORDER BY name", [names])).rows
       : [];
@@ -75,10 +77,12 @@ export async function reconcileNativeResources(db: pg.Pool, names: string[], leg
         if (!/^duckstream_[0-9a-f]{24}$/.test(schema)) throw new Error("invalid owned carrier schema");
       }
       if (epoch) {
-        const url = epoch.pipeline_url ?? (legacyEndpoint ? `${legacyEndpoint.replace(/\/$/, "")}/v0/pipelines/${name}` : undefined);
-        if (!url) throw new Error(`FELDERA_URL required to retire legacy native pipeline ${name}`);
-        await retirePipeline(url);
+        const url = epoch.process_owned ? undefined : epoch.pipeline_url ?? (legacyEndpoint ? `${legacyEndpoint.replace(/\/$/, "")}/v0/pipelines/${name}` : undefined);
+        if (!url && !epoch.process_owned) throw new Error(`FELDERA_URL required to retire legacy native pipeline ${name}`);
+        if (url) await retirePipeline(url);
         await dropOwnedSlots(client, epoch.slots);
+        const workDir = Deno.env.get("FELDERA_WORK_DIR");
+        if (epoch.process_owned && workDir) await removeWorkDirectory(workDir, name);
         for (const publication of epoch.publications) await client.query(`DROP PUBLICATION IF EXISTS ${sqlIdentifier(publication)}`);
       }
       await client.query("BEGIN");

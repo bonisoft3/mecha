@@ -1,0 +1,2 @@
+export const CAPTURE_CHUNK_ROWS = 1024;
+export const CAPTURE_CHUNK_BYTES = 256 * 1024;

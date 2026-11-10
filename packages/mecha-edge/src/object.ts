@@ -27,7 +27,7 @@ import { verifyJwt } from '../../../services/auth/jwt.ts'
 import { providersFrom } from '../../../services/auth/oidc.ts'
 import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
 import { applyScripts, ChangedScript, NoLedger, OutOfOrderScript, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
-import type { PublicSnapshot } from './public-snapshot.ts'
+import { snapshotAdmission, type PublicSnapshot } from './public-snapshot.ts'
 import type { BatchMachine, Computation, Output } from '../../compute-snapshot/src/index.ts'
 import type { ComputeCapture } from './compute-coordinator.ts'
 import { physicalSnapshotId, readerName, type computeReader } from './compute-reader.ts'
@@ -82,9 +82,10 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
   installHostStep(machines, functions)
   const hasAirlock = Object.keys(effects).length > 0
   return class Cluster extends DurableObject<EdgeEnv> {
-    readonly #dir = new DataDirectory(this.ctx.storage, storageFormat)
+    readonly #dir = new DataDirectory(this.ctx.storage, storageFormat, error => { this.ctx.abort(error instanceof Error ? error.message : String(error)); throw error })
     readonly #readers = new ComputeReaderOwners(this.ctx.storage.sql)
     #resetting = false
+    readonly #snapshotAdmission = snapshotAdmission()
     #cluster: Promise<{ db: PGlite; cluster: EdgeCluster; clock: Clock; airlock: EdgeAirlock; ticks: boolean }> | null = null
 
     // One instance per hatch for this object's life, so what it remembers between
@@ -199,7 +200,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         for (const { owner, capture } of this.#readers.list()) {
           if (owner !== compute.reader) continue
           if (capture.generation === generation && await coordinator.publication(capture.identity) === 'pending') continue
-          await this.#readers.release(owner, capture, () => this.#reader(capture).release())
+          await this.#releaseCapture(capture)
         }
       }
       if (this.#resetting) throw new DataDirectoryLoading()
@@ -213,21 +214,44 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     }
 
     async #releaseCapture(capture: ComputeCapture) {
-      if (compute?.physicalSnapshots) await this.#readers.release(compute.reader!, capture, () => this.#reader(capture).release())
-      this.#dir.releaseSnapshot(physicalSnapshotId(capture))
+      if (compute?.physicalSnapshots) await this.#readers.release(compute.reader!, capture, async () => {
+        const base = await this.#reader(capture).release(capture)
+        if (base === physicalSnapshotId(capture)) {
+          const old = this.#readers.base(compute.reader!, capture)
+          this.#readers.promote(compute.reader!, capture)
+          if (old && !this.#readers.pinned(old)) this.#dir.releaseSnapshot(physicalSnapshotId(old))
+        }
+      })
+      if (!this.#readers.pinned(capture)) this.#dir.releaseSnapshot(physicalSnapshotId(capture))
     }
 
     computeReaders() { return this.#readers.list() }
 
     async computePrepare(capture: ComputeCapture): Promise<boolean> {
-      await this.#captureCoordinator(capture)
-      if (!compute?.physicalSnapshots) return true
+      const coordinator = await this.#captureCoordinator(capture)
+      if (!compute?.physicalSnapshots) {
+        if (await coordinator.publication(capture.identity) !== 'pending') throw new Error('compute capture is no longer pending')
+        return true
+      }
       this.#readers.retain(compute.reader!, capture)
       const reader = this.#reader(capture)
-      const status = await reader.status(capture)
-      if (!status) return await reader.advance(capture, { kind: 'manifest', value: await this.computePhysicalManifest(capture) })
-      if (!status.nodesDone) return await reader.advance(capture, { kind: 'nodes', value: await this.computePhysicalNodes(capture, status.nodesAfter) })
-      if (status.nextFile) return await reader.advance(capture, { kind: 'blocks', value: await this.computePhysicalBlocks(capture, status.nextFile.path, status.nextFile.after) })
+      const state = await reader.status(capture)
+      const status = state.transfer
+      if (!status && !state.restoring && await coordinator.publication(capture.identity) !== 'pending') throw new Error('compute capture is no longer pending')
+      if (this.#resetting || !this.#dir.complete) throw new DataDirectoryLoading()
+      if (capture.generation !== this.#dir.generation) throw new Error('the data directory was replaced')
+      const manifest = this.#dir.snapshotManifest(physicalSnapshotId(capture))
+      if (!manifest) throw new Error('physical snapshot is no longer available')
+      if (state.restoring) return false
+      if (!status) return await reader.advance(capture, { kind: 'manifest', value: manifest })
+      if (!status.nodesDone) return await reader.advance(capture, { kind: 'nodes', value: await this.computePhysicalNodes(capture, status.nodesAfter, status.baseId ?? undefined) })
+      if (status.preparing) return await reader.advance(capture)
+      if (status.nextFile) return await reader.advance(capture, { kind: 'blocks', value: await this.computePhysicalBlocks(capture, status.nextFile.path, status.nextFile.after, status.baseId ?? undefined) })
+      if (status.complete) {
+        const old = this.#readers.base(compute.reader!, capture)
+        this.#readers.promote(compute.reader!, capture)
+        if (old && !this.#readers.pinned(old)) this.#dir.releaseSnapshot(physicalSnapshotId(old))
+      }
       return await reader.advance(capture)
     }
 
@@ -238,14 +262,14 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       return snapshot
     }
 
-    async computePhysicalNodes(capture: ComputeCapture, after: string) {
+    async computePhysicalNodes(capture: ComputeCapture, after: string, baseId?: string) {
       await this.computePhysicalManifest(capture)
-      return this.#dir.snapshotNodes(physicalSnapshotId(capture), after)
+      return this.#dir.snapshotNodes(physicalSnapshotId(capture), after, baseId)
     }
 
-    async computePhysicalBlocks(capture: ComputeCapture, path: string, after: number) {
+    async computePhysicalBlocks(capture: ComputeCapture, path: string, after: number, baseId?: string) {
       await this.computePhysicalManifest(capture)
-      return this.#dir.snapshotBlocks(physicalSnapshotId(capture), path, after)
+      return this.#dir.snapshotBlocks(physicalSnapshotId(capture), path, after, baseId)
     }
 
     async computeSnapshot(capture: ComputeCapture): Promise<Response> {
@@ -270,6 +294,11 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     async computeManifest(capture: ComputeCapture) {
       const coordinator = await this.#captureCoordinator(capture)
       return compute?.physicalSnapshots ? await this.#reader(capture).manifest(capture) : await coordinator.manifest(capture.identity)
+    }
+
+    async computeReaderName(capture: ComputeCapture) {
+      await this.#captureCoordinator(capture)
+      return compute?.physicalSnapshots ? readerName(capture) : null
     }
 
     async computeChunk(capture: ComputeCapture, source: string, after: number) {
@@ -413,8 +442,10 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
 
     protected async readPublic<T>(use: (snapshot: PublicSnapshot) => Promise<T>, priority: 'high' | 'low' = 'high'): Promise<T> {
       if (!this.#dir.complete) throw new DataDirectoryLoading()
-      const { cluster } = await this.#boot()
-      return cluster.publicSnapshot(this.#dir.generation, use, priority)
+      return await this.#snapshotAdmission(priority, async () => {
+        const { cluster } = await this.#boot()
+        return await cluster.publicSnapshot(this.#dir.generation, use, priority)
+      })
     }
 
     override async fetch(req: Request): Promise<Response> {
@@ -435,11 +466,16 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         this.#resetting = true
         const booted = this.#cluster ? await this.#cluster : null
         if (booted) await booted.cluster.read(async () => {})
+        for (const { owner, capture } of this.#readers.bases()) {
+          if (owner === compute?.reader) await this.#reader(capture).release(capture, true)
+          else this.#readers.retain(owner, capture)
+          this.#readers.clearBase(owner, capture)
+        }
         for (const snapshot of this.#dir.snapshots()) {
           await this.#releaseCapture({ generation: snapshot.sourceGeneration, identity: JSON.parse(snapshot.id) })
         }
         for (const { owner, capture } of this.#readers.list()) {
-          if (owner === compute?.reader) await this.#readers.release(owner, capture, () => this.#reader(capture).release())
+          if (owner === compute?.reader) await this.#readers.release(owner, capture, async () => { await this.#reader(capture).release(capture, true) })
         }
         await this.ctx.blockConcurrencyWhile(async () => {
           await this.ctx.storage.deleteAlarm()
@@ -447,6 +483,24 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
           else this.#dir.reset()
         })
         return json({ reset: true })
+      }
+      if (path === '/import/compute') {
+        if (req.method !== 'GET') return json({ error: 'compute status is a GET' }, 405)
+        if (!compute || !this.env.COMPUTE_COORDINATOR) return json({ error: 'computation is not configured' }, 404)
+        const detail = new URL(req.url).searchParams.get('detail') === '1'
+        const coordinator = await this.env.COMPUTE_COORDINATOR.get(this.env.COMPUTE_COORDINATOR.idFromName('compute')).status(detail)
+        const postgresMemoryBytes = detail && this.#cluster ? (await this.#cluster).db.Module.HEAPU8.byteLength : null
+        const readers = []
+        for (const row of this.#readers.list()) {
+          if (row.owner !== compute.reader) { readers.push({ ...row, status: null }); continue }
+          try {
+            readers.push({ ...row, status: { released: false, transfer: await this.#reader(row.capture).status(row.capture) } })
+          } catch (error) {
+            if (!(error instanceof Error) || error.message !== 'compute reader was released') throw error
+            readers.push({ ...row, status: { released: true, transfer: null } })
+          }
+        }
+        return json({ coordinator, readerOwner: compute.reader ?? null, readers, readerBases: this.#readers.bases(), ...(detail ? { postgresMemoryBytes } : {}) })
       }
       // A release's migrations over a directory kept: what the ledger lacks
       // is applied while nothing else runs, and the Worker ends the object

@@ -198,7 +198,7 @@ export async function createDrains(cfg: DrainsConfig): Promise<Drains> {
     if (quiet()) wake()
   }
 
-  const unlisten = await db.listen('drain', (table: string) => {
+  const unlisten = await serialize(() => db.listen('drain', (table: string) => {
     let woke = false
     for (const s of states) {
       if (!s.drain.on.includes(table)) continue
@@ -206,7 +206,7 @@ export async function createDrains(cfg: DrainsConfig): Promise<Drains> {
       woke = true
     }
     if (woke) settle()
-  })
+  }))
   settle()
 
   return {
@@ -219,7 +219,7 @@ export async function createDrains(cfg: DrainsConfig): Promise<Drains> {
       if (retrying !== null) clearTimeout(retrying)
       settling = retrying = null
       await current
-      await unlisten()
+      await serialize(() => unlisten())
       for (const p of passing) p()
       passing = []
       wake()

@@ -471,7 +471,7 @@ export async function createShapes(cfg: ShapesConfig): Promise<Shapes> {
       return m
     })
     return new Response(JSON.stringify({ metadata, data }), {
-      headers: { ...base, 'electric-offset': own ?? offsetOf(l.filled), 'electric-schema': JSON.stringify(l.schema), 'electric-up-to-date': 'true' },
+      headers: { ...base, 'electric-offset': own ?? offsetOf(l.filled), 'electric-schema': JSON.stringify(l.schema), 'electric-snapshot': 'true', 'electric-up-to-date': 'true' },
     })
   }
 

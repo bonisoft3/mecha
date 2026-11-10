@@ -13,6 +13,8 @@ export type BatchSpec = {
 	supersedeOnForeignKey?: boolean;
 	calculate(inputs: unknown): Promise<unknown>;
 	publish(client: pg.PoolClient, output: unknown): Promise<void>;
+	release?(inputs: unknown, output: unknown): Promise<void>;
+	discard?(output: unknown): Promise<void>;
 };
 export type Batches = {
 	invalidate(tables?: string[]): Promise<void>;
@@ -26,6 +28,14 @@ const TRANSACTION_ATTEMPTS = 25;
 const READ_COMMITTED_MACHINE_HASH = "dd7b02748a65c9c6fe5e56e4220b85e317e2fe56347eac3c725a2ea775079b53";
 const HYBRID_SERIALIZABLE_MACHINE_HASH = "57057ef2d61cf7f7615f134b81822ae725a9b688ccd3bb7c6978ce3b568844e3";
 const MECHA_MACHINE_HASH = "a71706b579d917082c9384ff022500ee5b36994bffd336895834f414df2f7154";
+
+function captureDigest(value: unknown): string | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return null;
+	}
+	const digest = (value as { digest?: unknown }).digest;
+	return typeof digest === "string" && digest.length > 0 ? digest : null;
+}
 
 export function computationGraph(
 	specs: readonly Pick<BatchSpec, "name" | "reads" | "to">[],
@@ -61,6 +71,7 @@ export async function openBatches(
 		maxAttempts?: number;
 		pollInterval?: number;
 		coalesceMs?: number;
+		invalidateOnStart?: boolean;
 	} = {},
 ): Promise<Batches> {
 	const attempts = options.maxAttempts ?? 25;
@@ -174,12 +185,19 @@ export async function openBatches(
 					"SELECT * FROM compute.batch",
 				);
 				for (const state of previous) {
-					if (
-						state.requested !== state.completed &&
-						byName.get(state.name)?.version !== state.version
-					) {
+					const next = byName.get(state.name);
+					if (!next || next.version === state.version) continue;
+					if (state.requested !== state.completed) {
 						throw new Error(
 							`unfinished computation ${state.name} has incompatible program version ${state.version}`,
+						);
+					}
+					if (BigInt(state.completed) > 0n) {
+						await client.query(
+							`UPDATE compute.capture c
+              SET completed_coverage=coalesce(c.completed_coverage,jsonb_build_object('version',$2::text))
+              FROM compute.definition d WHERE d.name=$1 AND c.instance_id=d.instance_id`,
+							[state.name, state.version],
 						);
 					}
 				}
@@ -221,11 +239,58 @@ export async function openBatches(
 						);
 					}
 					await client.query(
-						`INSERT INTO compute.definition(name,instance_id,version,reads,parents,ordinal) VALUES ($1,$2,$3,$4,$5,$6)
-            ON CONFLICT(name) DO UPDATE SET version=EXCLUDED.version,reads=EXCLUDED.reads,parents=EXCLUDED.parents,ordinal=EXCLUDED.ordinal,enabled=true`,
-						[name, id, spec.version, spec.reads, parents.get(name), ordinal++],
+						`INSERT INTO compute.definition(name,instance_id,version,reads,to_tables,parents,ordinal) VALUES ($1,$2,$3,$4,$5,$6,$7)
+            ON CONFLICT(name) DO UPDATE SET version=EXCLUDED.version,reads=EXCLUDED.reads,to_tables=EXCLUDED.to_tables,parents=EXCLUDED.parents,ordinal=EXCLUDED.ordinal,enabled=true`,
+						[name, id, spec.version, spec.reads, spec.to, parents.get(name), ordinal++],
 					);
 					await spec.initialize?.(client);
+				}
+				const readSet = new Set(specs.flatMap((s) => s.reads));
+				const trackedNames = [
+					...new Set(specs.flatMap((s) => [...s.reads, ...s.to])),
+				].filter((t) => /^[a-z_][a-z0-9_]{0,62}$/.test(t)).sort();
+				if (trackedNames.length) {
+					const { rows: physical } = await client.query<{ name: string }>(
+						`SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relname=ANY($1::text[]) ORDER BY c.relname`,
+						[trackedNames],
+					);
+					if (physical.length) {
+						await client.query(
+							`LOCK TABLE ${
+								physical.map(({ name }) => `public."${name}"`).join(",")
+							} IN SHARE ROW EXCLUSIVE MODE`,
+						);
+						for (const { name } of physical) {
+							await client.query(
+								"INSERT INTO compute.source(name) VALUES ($1) ON CONFLICT(name) DO NOTHING",
+								[name],
+							);
+							await client.query(
+								`DROP TRIGGER IF EXISTS compute_source_touch ON public."${name}";
+                CREATE OR REPLACE TRIGGER compute_source_touch_insert
+                AFTER INSERT ON public."${name}" REFERENCING NEW TABLE AS affected
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('${name}');
+                ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_insert;
+                CREATE OR REPLACE TRIGGER compute_source_touch_delete
+                AFTER DELETE ON public."${name}" REFERENCING OLD TABLE AS affected
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('${name}');
+                ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_delete;
+                CREATE OR REPLACE TRIGGER compute_source_touch_truncate
+                AFTER TRUNCATE ON public."${name}"
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source('${name}');
+                ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_truncate;
+                ${
+									readSet.has(name)
+										? `CREATE OR REPLACE TRIGGER compute_source_touch_update
+                AFTER UPDATE ON public."${name}" REFERENCING NEW TABLE AS affected
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('${name}');
+                ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_update;`
+										: `DROP TRIGGER IF EXISTS compute_source_touch_update ON public."${name}";`
+								}`,
+							);
+						}
+					}
 				}
 				if (old?.relkind === "r") {
 					const { rows: pools } = await client.query(
@@ -250,79 +315,292 @@ export async function openBatches(
 			} finally {
 				client.release();
 			}
-			await transaction(db, (client) => client.query("SELECT compute.schedule()"));
+			await transaction(db, (client) => client.query(
+				"SELECT compute.reconcile($1::boolean)",
+				[Boolean(options.invalidateOnStart)],
+			));
 		},
 		async task(payload, db) {
 			const { key } = payload as { key: string };
-			const claim = await transaction(db, async (client) => {
-				const work = await getWork(client, key);
-				if (work.outcome !== null) return;
-				const { name } = work.input as { name: string };
-				const spec = byName.get(name);
-				if (!spec) throw new Error(`unknown computation ${name}`);
-				const { rows: [state] } = await client.query(
-					"SELECT * FROM compute.batch WHERE name=$1",
-					[name],
+			const finishClaim = async (
+				client: pg.PoolClient,
+				spec: BatchSpec,
+				work: Awaited<ReturnType<typeof getWork>>,
+				beforeRequested: string,
+				beforeCompleted: string,
+				beforeCoverage: {
+					input: Record<string, unknown> | null;
+					sink: Record<string, unknown> | null;
+					completed: Record<string, unknown> | null;
+				} | undefined,
+				afterRequested: string,
+				afterCoverage: {
+					input: Record<string, unknown> | null;
+					sink: Record<string, unknown> | null;
+					completed: Record<string, unknown> | null;
+				} | undefined,
+				inputs: string,
+				digest: string | null,
+			) => {
+				await client.query(
+					'SELECT hybrid_compute_batch.deliver($1,\'{"kind":"claim","payload":{}}\'::jsonb)',
+					[work.instance],
 				);
-				if (state.version !== spec.version) {
-					throw new Error(`incompatible computation ${name}`);
-				}
-				if (state.claimed === null) {
-					const inputs = strictJson(await spec.capture(client));
+				if (
+					BigInt(afterRequested) > BigInt(beforeRequested) ||
+					strictJson(afterCoverage?.input ?? null, true) !==
+						strictJson(beforeCoverage?.input ?? null, true)
+				) {
 					await client.query(
-						'SELECT hybrid_compute_batch.deliver($1,\'{"kind":"claim","payload":{}}\'::jsonb)',
+						'SELECT hybrid_compute_batch.deliver($1,\'{"kind":"invalidate","payload":{}}\'::jsonb)',
 						[work.instance],
 					);
-					const { rows: [stored] } = await client.query(
-						"UPDATE compute.capture SET inputs=$2::jsonb WHERE instance_id=$1 RETURNING inputs",
-						[work.instance, inputs],
-					);
-					return { spec, work, inputs: stored.inputs };
 				}
-				return { spec, work, inputs: state.inputs };
-			});
+				const claimedCoverage = beforeCoverage?.input === null || beforeCoverage === undefined
+					? null
+					: digest === null
+					? beforeCoverage.input
+					: { ...beforeCoverage.input, digest };
+				const { rows: [stored] } = await client.query(
+					"UPDATE compute.capture SET inputs=$2::jsonb,claimed_coverage=$3::jsonb WHERE instance_id=$1 RETURNING inputs",
+					[
+						work.instance,
+						inputs,
+						claimedCoverage === null ? null : JSON.stringify(claimedCoverage),
+					],
+				);
+				const unchanged = BigInt(beforeCompleted) > 0n &&
+					digest !== null &&
+					beforeCoverage?.completed !== null &&
+					beforeCoverage?.input !== null &&
+					afterCoverage?.sink !== null &&
+					beforeCoverage !== undefined &&
+					afterCoverage !== undefined &&
+					beforeCoverage.completed.version === spec.version &&
+					beforeCoverage.completed.digest === digest &&
+					strictJson(beforeCoverage.completed.to ?? null, true) ===
+						strictJson(afterCoverage.sink, true);
+				return { spec, work, inputs: stored.inputs, unchanged };
+			};
+			const claim = await (async () => {
+				const client = await db.connect();
+				let deferred:
+					| {
+						spec: BatchSpec;
+						work: Awaited<ReturnType<typeof getWork>>;
+						requested: string;
+						completed: string;
+						coverage: {
+							input: Record<string, unknown> | null;
+							sink: Record<string, unknown> | null;
+							completed: Record<string, unknown> | null;
+						} | undefined;
+						inputs: string;
+						digest: string | null;
+					}
+					| undefined;
+				try {
+					for (let attempt = 0;; attempt++) {
+						await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+						try {
+							const work = await getWork(client, key);
+							if (work.outcome !== null) {
+								await client.query("COMMIT");
+								return;
+							}
+							const { name } = work.input as { name: string };
+							const spec = byName.get(name);
+							if (!spec) throw new Error(`unknown computation ${name}`);
+							const { rows: [state] } = await client.query(
+								"SELECT * FROM compute.batch WHERE name=$1",
+								[name],
+							);
+							if (state.version !== spec.version) {
+								throw new Error(`incompatible computation ${name}`);
+							}
+							if (state.claimed !== null) {
+								await client.query("COMMIT");
+								return { spec, work, inputs: state.inputs, unchanged: false };
+							}
+							const { rows: [coverage] } = await client.query<{
+								input: Record<string, unknown> | null;
+								sink: Record<string, unknown> | null;
+								completed: Record<string, unknown> | null;
+							}>(
+								`SELECT compute.input_coverage($2) AS input,
+                        compute.sink_coverage($2) AS sink,
+                        c.completed_coverage AS completed
+                 FROM compute.capture c WHERE c.instance_id=$1`,
+								[work.instance, name],
+							);
+							const captured = await spec.capture(client);
+							const inputs = strictJson(captured);
+							const digest = captureDigest(captured);
+							const { rows: [{ wrote }] } = await client.query<{ wrote: boolean }>(
+								"SELECT pg_current_xact_id_if_assigned() IS NOT NULL AS wrote",
+							);
+							if (wrote) {
+								await client.query("SELECT compute.lock_batches()");
+								const result = await finishClaim(
+									client,
+									spec,
+									work,
+									state.requested,
+									state.completed,
+									coverage,
+									state.requested,
+									coverage,
+									inputs,
+									digest,
+								);
+								await client.query("COMMIT");
+								return result;
+							}
+							await client.query("COMMIT");
+							deferred = {
+								spec,
+								work,
+								requested: state.requested,
+								completed: state.completed,
+								coverage,
+								inputs,
+								digest,
+							};
+							break;
+						} catch (error) {
+							await client.query("ROLLBACK");
+							if (
+								!(error instanceof pg.DatabaseError) ||
+								!["40001", "40P01"].includes(error.code ?? "") ||
+								attempt >= TRANSACTION_ATTEMPTS - 1
+							) throw error;
+						}
+					}
+				} finally {
+					client.release();
+				}
+				if (!deferred) return;
+				return await transaction(db, async (claimClient) => {
+					const work = await getWork(claimClient, key);
+					if (work.outcome !== null) return;
+					const { rows: [afterState] } = await claimClient.query(
+						"SELECT * FROM compute.batch WHERE name=$1",
+						[deferred.spec.name],
+					);
+					if (afterState.version !== deferred.spec.version) {
+						throw new Error(`incompatible computation ${deferred.spec.name}`);
+					}
+					if (afterState.claimed !== null) {
+						return {
+							spec: deferred.spec,
+							work,
+							inputs: afterState.inputs,
+							unchanged: false,
+						};
+					}
+					const { rows: [afterCoverage] } = await claimClient.query<{
+						input: Record<string, unknown> | null;
+						sink: Record<string, unknown> | null;
+						completed: Record<string, unknown> | null;
+					}>(
+						`SELECT compute.input_coverage($2) AS input,
+                    compute.sink_coverage($2) AS sink,
+                    c.completed_coverage AS completed
+             FROM compute.capture c WHERE c.instance_id=$1`,
+						[work.instance, deferred.spec.name],
+					);
+					return await finishClaim(
+						claimClient,
+						deferred.spec,
+						work,
+						deferred.requested,
+						deferred.completed,
+						deferred.coverage,
+						afterState.requested,
+						afterCoverage,
+						deferred.inputs,
+						deferred.digest,
+					);
+				});
+			})();
 			if (!claim) return;
 			await claim.spec.captured?.(claim.inputs);
-			const output = await claim.spec.calculate(claim.inputs);
-			try {
+			if (claim.unchanged) {
 				await transaction(db, async (client) => {
-					await claim.spec.publish(client, output);
 					await settleWork(client, key, "done", {});
 					await client.query(
-						"UPDATE compute.capture SET inputs=NULL WHERE instance_id=$1",
-						[claim.work.instance],
-					);
-					await client.query("SELECT compute.after_work($1,true)", [
-						claim.spec.name,
-					]);
-				});
-			} catch (error) {
-				if (
-					claim.spec.supersedeOnForeignKey === false ||
-					!(error instanceof pg.DatabaseError) || error.code !== "23503"
-				) {
-					throw error;
-				}
-				const superseded = await transaction(db, async (client) => {
-					const { rows: [state] } = await client.query(
-						"SELECT * FROM compute.batch WHERE name=$1",
-						[claim.spec.name],
-					);
-					if (BigInt(state.requested) <= BigInt(state.claimed)) return false;
-					await client.query(
 						`UPDATE compute.capture SET inputs=NULL,
-            last_superseded=jsonb_build_object('revision',$2::text,'reason','foreign_key_violation','constraint',$3::text,'at',clock_timestamp())
+            completed_coverage=CASE
+              WHEN claimed_coverage IS NULL OR compute.sink_coverage($2) IS NULL THEN NULL
+              ELSE claimed_coverage || jsonb_build_object('to',compute.sink_coverage($2))
+            END,
+            claimed_coverage=NULL
             WHERE instance_id=$1`,
-						[claim.work.instance, state.claimed, error.constraint],
+						[claim.work.instance, claim.spec.name],
 					);
-					await settleWork(client, key, "failed", {});
 					await client.query("SELECT compute.after_work($1,false)", [
 						claim.spec.name,
 					]);
-					return true;
 				});
-				if (!superseded) throw error;
+				await claim.spec.release?.(claim.inputs, {
+					...(claim.inputs as Record<string, unknown>),
+					capture: claim.inputs,
+				});
+				return;
 			}
+			const output = await claim.spec.calculate(claim.inputs);
+			let settled = false;
+			try {
+				try {
+					await transaction(db, async (client) => {
+						await claim.spec.publish(client, output);
+						await settleWork(client, key, "done", {});
+						await client.query(
+							`UPDATE compute.capture SET inputs=NULL,
+              completed_coverage=CASE
+                WHEN claimed_coverage IS NULL OR compute.sink_coverage($2) IS NULL THEN NULL
+                ELSE claimed_coverage || jsonb_build_object('to',compute.sink_coverage($2))
+              END,
+              claimed_coverage=NULL
+              WHERE instance_id=$1`,
+							[claim.work.instance, claim.spec.name],
+						);
+						await client.query("SELECT compute.after_work($1,true)", [
+							claim.spec.name,
+						]);
+					});
+				} catch (error) {
+					if (
+						claim.spec.supersedeOnForeignKey === false ||
+						!(error instanceof pg.DatabaseError) || error.code !== "23503"
+					) {
+						throw error;
+					}
+					const superseded = await transaction(db, async (client) => {
+						const { rows: [state] } = await client.query(
+							"SELECT * FROM compute.batch WHERE name=$1",
+							[claim.spec.name],
+						);
+						if (BigInt(state.requested) <= BigInt(state.claimed)) return false;
+						await client.query(
+							`UPDATE compute.capture SET inputs=NULL,claimed_coverage=NULL,
+            last_superseded=jsonb_build_object('revision',$2::text,'reason','foreign_key_violation','constraint',$3::text,'at',clock_timestamp())
+            WHERE instance_id=$1`,
+							[claim.work.instance, state.claimed, error.constraint],
+						);
+						await settleWork(client, key, "failed", {});
+						await client.query("SELECT compute.after_work($1,false)", [
+							claim.spec.name,
+						]);
+						return true;
+					});
+					if (!superseded) throw error;
+				}
+				settled = true;
+			} finally {
+				if (!settled) await claim.spec.discard?.(output);
+			}
+			await claim.spec.release?.(claim.inputs, output);
 		},
 	});
 	return {

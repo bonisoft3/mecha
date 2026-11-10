@@ -127,22 +127,24 @@ export async function installSources(
   await protectSources(client, schema);
 }
 
-export function nativeSql(program: IncrementalProgram, schema: string, publications: Record<string, string>): string {
-  sqlIdentifier(schema);
+export function nativeSql(program: IncrementalProgram, schema?: string, publications?: Record<string, string>): string {
+  if ((schema === undefined) !== (publications === undefined)) throw new Error("incomplete native connector configuration");
+  if (schema !== undefined) sqlIdentifier(schema);
   let sql = program.sql;
   for (const [name, input] of Object.entries(program.inputs)) {
     sqlIdentifier(name);
-    const publication = publications[name];
-    sqlIdentifier(publication);
+    const publication = publications?.[name];
+    if (publications !== undefined && publication === undefined) throw new Error(`missing native publication ${name}`);
+    if (publication !== undefined) sqlIdentifier(publication);
     const fields = input.fields.map((f) => `${sqlIdentifier(f.name)} ${f.type === "TIMESTAMP" ? "TIMESTAMP(6)" : f.type}`).join(",");
-    const connector = JSON.stringify([{
+    const connector = schema === undefined ? "" : " WITH ('connectors'='" + JSON.stringify([{
       name: "cdc", transport: { name: "postgres_cdc_input", config: {
         uri: "${env:FELDERA_DATABASE_URL}", publication, source_table: `${schema}.${name}`,
       } },
-    }]).replaceAll("'", "''");
+    }]).replaceAll("'", "''") + "')";
     const declaration = new RegExp(`CREATE TABLE ${name}\\s*\\([^;]*\\);`, "g");
     if ([...sql.matchAll(declaration)].length !== 1) throw new Error(`missing unique source declaration ${name}`);
-    sql = sql.replace(declaration, `CREATE TABLE cdc_${name} (__key VARCHAR NOT NULL PRIMARY KEY,${fields}) WITH ('connectors'='${connector}');\nCREATE LOCAL VIEW ${name} AS SELECT ${input.fields.map((f) => sqlIdentifier(f.name)).join(",")} FROM cdc_${name};`);
+    sql = sql.replace(declaration, `CREATE TABLE cdc_${name} (__key VARCHAR NOT NULL PRIMARY KEY,${fields})${connector};\nCREATE LOCAL VIEW ${name} AS SELECT ${input.fields.map((f) => sqlIdentifier(f.name)).join(",")} FROM cdc_${name};`);
   }
   for (const [name, output] of Object.entries(program.outputs)) {
     sqlIdentifier(name);

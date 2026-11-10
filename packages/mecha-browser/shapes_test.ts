@@ -279,4 +279,3 @@ Deno.test('a row inserted and deleted before read-back does not expire a client 
     ])
   } finally { await f.close() }
 })
-

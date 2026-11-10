@@ -800,6 +800,8 @@ Deno.test("Feldera deployment selects its pinned internal service and ships the 
     assert.ok(compute.dockerfile.copy.some((copy: { srcs: string[]; dst: string }) => copy.srcs[0] === "duckstream/feldera.json" && copy.dst === "/app/computations/analytics.feldera.json"));
     if (duckstreamEngine === "feldera") {
       assert.equal(feldera.dockerfile.from.name, "images.feldera.com/feldera/pipeline-manager:0.367.0@sha256:42819714d16f7d5d37c17c87812ce98fb23efd2b1bfbf95b4889877f14693272");
+      // Host CPU count can launch enough compiler processes to starve the manager's status API.
+      assert.match(feldera.dockerfile.preamble.join("\n"), /\[build\].*jobs = 2/);
       assert.match(feldera.dockerfile.preamble.join("\n"), /\[profile\.unoptimized\].*strip = "symbols"/);
       assert.deepEqual(feldera.compose.healthcheck.test, ["CMD", "httpcheck", "http://127.0.0.1:8080/healthz"]);
       assert.equal(feldera.compose.ports, undefined);

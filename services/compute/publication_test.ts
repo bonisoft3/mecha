@@ -2,7 +2,7 @@ import { assertEquals, assertRejects } from "@std/assert";
 import pg from "npm:pg@8.16.3";
 import { pgTest, postgres } from "./pg-test.ts";
 import { table as types } from "./portable-fixture.ts";
-import { type Publication, publish, publishDelta } from "./publication.ts";
+import { type Publication, publish, publishDelta, publishPages } from "./publication.ts";
 
 const CRUD = `CREATE ROLE anon NOLOGIN; CREATE ROLE service NOLOGIN;
   CREATE FUNCTION public.app_pre_request() RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$;`;
@@ -635,3 +635,45 @@ pgTest(
     );
   },
 );
+
+pgTest("paged publication stages bounded pages atomically", async () => {
+  await using db = await fixture(`
+    CREATE TABLE a (id uuid PRIMARY KEY, value integer);
+    CREATE TABLE b (id text PRIMARY KEY, value integer);
+    CREATE TABLE history (n integer);
+    INSERT INTO a VALUES ('00000000-0000-0000-0000-000000000001', 1);
+    INSERT INTO b VALUES ('old', 5);
+    CREATE FUNCTION complete() RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ INSERT INTO history VALUES (1) $$;
+    CREATE FUNCTION fail_complete() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'hook failed'; END $$;
+    GRANT ALL ON a, b TO service;`);
+  const one = '00000000-0000-0000-0000-000000000001';
+  const two = '00000000-0000-0000-0000-000000000002';
+  const spec: Publication = { name: 'paged', to: ['a', 'b'], onComplete: 'complete', sinkWrites: { b: 'upsert' } };
+  const run = async (data: Record<string, Record<string, unknown>[][]>, options = spec) => {
+    await db.client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+    try {
+      const result = await publishPages(db.client, options, async function* (sink) {
+        for (const page of data[sink] ?? []) yield page;
+      }, { role: 'service' });
+      assertEquals((await db.client.query("SELECT current_user = session_user AS restored")).rows[0].restored, true);
+      await db.client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await db.client.query('ROLLBACK');
+      throw error;
+    }
+  };
+  assertEquals(await run({ a: [[{ id: one, value: 1 }], [{ id: two, value: 2 }]], b: [] }), {
+    a: { rows: 2, upserted: 1, deleted: 0 }, b: { rows: 0, upserted: 0, deleted: 0 },
+  });
+  await assertRejects(() => run({ a: [[{ id: one, value: 3 }], [{ id: `{${one}}`, value: 4 }]], b: [] }), Error);
+  await assertRejects(() => run({ a: [[{ id: one, value: 1 }], [{ id: two }]], b: [] }), Error, 'rows differ in columns');
+  await assertRejects(() => run({ a: [Array.from({ length: 129 }, (_, i) => ({ id: String(i), value: i }))], b: [] }), Error, 'exceeds its bound');
+  await assertRejects(() => run({ a: [[{ id: one, value: 9 }]], b: [[{ id: 'new', value: 3 }]] }, { ...spec, onComplete: 'fail_complete' }), Error, 'hook failed');
+  assertEquals((await db.client.query('SELECT id::text,value FROM a ORDER BY id')).rows, [{ id: one, value: 1 }, { id: two, value: 2 }]);
+  assertEquals((await db.client.query('SELECT * FROM b')).rows, [{ id: 'old', value: 5 }]);
+  assertEquals((await db.client.query('SELECT count(*)::int AS n FROM history')).rows[0].n, 1);
+  assertEquals(await run({ a: [], b: [] }), {
+    a: { rows: 0, upserted: 0, deleted: 2 }, b: { rows: 0, upserted: 0, deleted: 0 },
+  });
+});

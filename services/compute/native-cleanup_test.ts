@@ -78,3 +78,36 @@ pgTest("legacy native retirement fails closed without endpoint and ignores unreg
     assertEquals((await db.query("SELECT to_regnamespace('duckstream_cccccccccccccccccccccccc') IS NOT NULL AS exists")).rows[0].exists, true);
   } finally { await db.end(); }
 });
+
+Deno.test("retiring a process-owned epoch does not contact a manager", async () => {
+  const statements: string[] = [];
+  const client = {
+    async query(sql: string) {
+      statements.push(sql);
+      if (sql.includes("AS epochs")) return { rows: [{ epochs: true, sources: false }] };
+      if (sql.startsWith("SELECT * FROM compute.native_epoch")) {
+        return { rows: [{ name: "retired", process_owned: true, pipeline_url: null, slots: [], publications: [] }] };
+      }
+      if (sql.includes("AS present")) return { rows: [{ present: false }] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const db = { connect: () => Promise.resolve(client) } as unknown as pg.Pool;
+  const root = await Deno.makeTempDir();
+  const previous = Deno.env.get("FELDERA_WORK_DIR");
+  try {
+    Deno.env.set("FELDERA_WORK_DIR", root);
+    await Deno.mkdir(`${root}/retired`);
+    await Deno.mkdir(`${root}/active`);
+    await Deno.writeTextFile(`${root}/active/keep`, "present");
+    await reconcileNativeResources(db, []);
+    assertEquals(statements.some((sql) => sql.startsWith("DELETE FROM compute.native_epoch")), true);
+    await assertRejects(() => Deno.stat(`${root}/retired`), Deno.errors.NotFound);
+    assertEquals(await Deno.readTextFile(`${root}/active/keep`), "present");
+  } finally {
+    if (previous === undefined) Deno.env.delete("FELDERA_WORK_DIR");
+    else Deno.env.set("FELDERA_WORK_DIR", previous);
+    await Deno.remove(root, { recursive: true });
+  }
+});

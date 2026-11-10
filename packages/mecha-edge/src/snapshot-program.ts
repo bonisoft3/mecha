@@ -1,3 +1,5 @@
+import { strictJson } from '../../compute-snapshot/src/json.ts'
+export { strictJson } from '../../compute-snapshot/src/json.ts'
 import { postgresRows, type TypeField, type TypeTable } from '../../../services/compute/portable-contract.ts'
 import { validateSnapshot, type Snapshot } from '../../../services/compute/snapshot-data.ts'
 import type { Output } from '../../compute-snapshot/src/index.ts'
@@ -18,15 +20,6 @@ export interface SnapshotProgram {
   }
 }
 
-export function strictJson(value: unknown): string {
-  const result = JSON.stringify(value, (_key, v) => {
-    if (v === undefined || typeof v === 'bigint' || typeof v === 'function' || typeof v === 'symbol' ||
-      (typeof v === 'number' && !Number.isFinite(v))) throw new TypeError('computation returned a non-JSON value')
-    return v
-  })
-  if (result === undefined) throw new TypeError('computation returned no value')
-  return result
-}
 
 export function programFor(programs: readonly SnapshotProgram[], snapshot: Snapshot) {
   validateSnapshot(snapshot)

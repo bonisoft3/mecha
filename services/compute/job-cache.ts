@@ -14,7 +14,7 @@ export class PostgresJobCache implements JobCache {
     options: { maxEntries?: number; maxBytes?: number } = {},
   ): Promise<PostgresJobCache> {
     const maxEntries = options.maxEntries ?? 100_000;
-    const maxBytes = options.maxBytes ?? 256 * 1024 * 1024;
+    const maxBytes = options.maxBytes ?? 512 * 1024 * 1024;
     for (const [name, limit] of Object.entries({ maxEntries, maxBytes })) {
       if (!Number.isSafeInteger(limit) || limit < 1) {
         throw new Error(`${name} must be a positive safe integer`);

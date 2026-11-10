@@ -1,0 +1,7 @@
+FROM scratch
+COPY rootfs/ /
+USER 1000:1000
+WORKDIR /app
+ENV TOKIO_WORKER_THREADS=1
+ENV LD_LIBRARY_PATH=/usr/local/lib
+ENTRYPOINT ["/app/pipeline"]

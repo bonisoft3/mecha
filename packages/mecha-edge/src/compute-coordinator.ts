@@ -3,11 +3,14 @@ import type { Snapshot } from '../../compute-snapshot/src/index.ts'
 import { serviceExecutor, computeFailureKey as failureKey } from './compute.ts'
 import { strictJson, validateIdentity } from './snapshot-program.ts'
 import { advancePaged, reclaimPaged, retainedPaged, type PagedDatabase } from './paged-coordinator.ts'
+import { pagedRequest } from './paged-transport.ts'
 
 import type { ComputeCapture } from './compute.ts'
+import type { computeReader } from './compute-reader.ts'
 export type { ComputeCapture } from './compute.ts'
 
 interface ComputeDatabase extends PagedDatabase {
+  computeReaderName(capture: ComputeCapture): Promise<string | null>
   computeClaim(): Promise<ComputeCapture | null>
   computePrepare(capture: ComputeCapture): Promise<boolean>
   computeSnapshot(capture: ComputeCapture): Promise<Response>
@@ -18,9 +21,16 @@ interface ComputeDatabase extends PagedDatabase {
 interface ComputeEnv {
   CLUSTER: DurableObjectNamespace
   COMPUTE: Fetcher
+  COMPUTE_READER?: DurableObjectNamespace<InstanceType<ReturnType<typeof computeReader>>>
 }
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 16_384)
+const checkpointSummary = (checkpoint: unknown) => {
+  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) return {}
+  return Object.fromEntries(Object.entries(checkpoint).filter(([key, value]) =>
+    key.length <= 128 && (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))
+  ).slice(0, 32))
+}
 
 export function computeCoordinator(execute = (snapshot: Snapshot, env: ComputeEnv) => serviceExecutor(env.COMPUTE)(snapshot), paged: readonly string[] = [], owner?: string) {
   if (paged.length && !owner) throw new Error('paged computations require a compute owner')
@@ -51,12 +61,33 @@ export function computeCoordinator(execute = (snapshot: Snapshot, env: ComputeEn
       })
     }
 
-    async status() {
+    async status(detail = false) {
+      const paged = [...(await this.ctx.storage.list<{ owner?: string; capture: ComputeCapture }>({ prefix: 'paged:' })).values()]
+      const details = []
+      if (detail && owner) {
+        for (const progress of paged) {
+          if (progress.owner !== owner) continue
+          const status = await pagedRequest<{
+            manifest: { tables: Record<string, { rows: number }> }
+            sources: { name: string; position: number }[]
+            queries: string[]; declaredQueries: string[]
+            execution: { revision: number; done: boolean; checkpoint: unknown }
+          }>(this.env.COMPUTE, { capture: progress.capture, action: 'status' })
+          details.push({
+            capture: progress.capture,
+            sources: status.sources.map(source => ({ ...source, total: status.manifest.tables[source.name].rows })),
+            queries: { completed: status.queries.length, total: status.declaredQueries.length },
+            execution: { revision: status.execution.revision, done: status.execution.done, checkpoint: checkpointSummary(status.execution.checkpoint) },
+          })
+        }
+      }
       return {
         alarm: await this.ctx.storage.getAlarm(),
         failure: await this.ctx.storage.get('failure') ?? null,
         failures: [...(await this.ctx.storage.list({ prefix: 'failure:' })).values()],
         retainedPaged: await retainedPaged(this.ctx.storage, owner),
+        paged,
+        ...(detail ? { details } : {}),
       }
     }
 
@@ -70,17 +101,44 @@ export function computeCoordinator(execute = (snapshot: Snapshot, env: ComputeEn
         if (owner) await reclaimPaged(cluster, this.env.COMPUTE, this.ctx.storage, owner)
         const capture = await cluster.computeClaim()
         if (capture) {
+          const deadline = Date.now() + 20_000
           await this.#activate(capture.generation)
           try {
+            let steps = 0
             let ready = false
-            for (let step = 0; step < 16 && !ready; step++) ready = await cluster.computePrepare(capture)
+            while (steps < 128 && Date.now() < deadline && !ready) {
+              steps++
+              ready = await cluster.computePrepare(capture)
+            }
             if (!ready) {
               await this.#schedule(Date.now(), revision)
               return
             }
             if (paged.includes(capture.identity.name)) {
-              for (let step = 0; step < 16; step++) {
-                if (await advancePaged(cluster, this.env.COMPUTE, this.ctx.storage, capture, owner!) !== 'transfer') break
+              let published = false
+              const session = { executing: false }
+              const readers = this.env.COMPUTE_READER
+              const db: PagedDatabase = {
+                computeManifest: capture => cluster.computeManifest(capture),
+                computeChunk: async (capture, source, after) => {
+                  const name = await cluster.computeReaderName(capture)
+                  if (name === null) return await cluster.computeChunk(capture, source, after)
+                  if (!readers) throw new Error('physical snapshots require COMPUTE_READER')
+                  return await readers.get(readers.idFromName(name)).chunk(capture, source, after)
+                },
+                computeOutputChunk: (capture, attempt, sink, ordinal, rows) => cluster.computeOutputChunk(capture, attempt, sink, ordinal, rows),
+                computeSealOutput: (capture, attempt, manifest) => cluster.computeSealOutput(capture, attempt, manifest),
+                computePublishStaged: (capture, attempt) => cluster.computePublishStaged(capture, attempt),
+                computePublication: capture => cluster.computePublication(capture),
+              }
+              while (steps < 128 && Date.now() < deadline && !published) {
+                steps++
+                published = await advancePaged(db, this.env.COMPUTE, this.ctx.storage, capture, owner!, session) === 'published'
+              }
+              if (!published) {
+                await this.ctx.storage.delete(failureKey(capture))
+                await this.#schedule(Date.now(), revision)
+                return
               }
             } else {
               const response = await cluster.computeSnapshot(capture)
@@ -92,7 +150,12 @@ export function computeCoordinator(execute = (snapshot: Snapshot, env: ComputeEn
             }
             await this.ctx.storage.delete(failureKey(capture))
           } catch (error) {
-            if (await cluster.computePublication(capture) === 'pending') {
+            let publication: 'pending' | 'published' | 'obsolete'
+            try { publication = await cluster.computePublication(capture) }
+            catch (recoveryError) {
+              throw new Error(`compute failed: ${errorMessage(error).slice(0, 8_000)}; publication check failed: ${errorMessage(recoveryError).slice(0, 8_000)}`, { cause: error })
+            }
+            if (publication === 'pending') {
               await this.ctx.storage.put(failureKey(capture), { ...capture, at: Date.now(), error: errorMessage(error) })
               await cluster.computeReject(capture, errorMessage(error))
               await this.#schedule(await cluster.computeWakeAt(), revision)

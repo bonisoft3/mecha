@@ -1,8 +1,31 @@
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
-import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from '../src/public-snapshot.ts'
-import { readRest } from '../../postgrest-js/src/index.ts'
+import { publicSnapshot, PublicSnapshotCapacity, snapshotAdmission, type PublicSnapshot } from '../src/public-snapshot.ts'
+import { readRest, metadataCache } from '../../postgrest-js/src/index.ts'
 import { createEdgeCluster } from '../src/cluster.ts'
+
+Deno.test('snapshot admission bounds cold boot and reserves independent interactive capacity', async () => {
+  const admit = snapshotAdmission()
+  let release!: () => void
+  const boot = new Promise<void>(resolve => { release = resolve })
+  let entered = 0
+  const render = (priority: 'high' | 'low', fail = false) => admit(priority, async () => {
+    entered++
+    await boot
+    if (fail) throw new Error('boot failed')
+    return priority
+  })
+  const background = Array.from({ length: 4 }, () => render('low'))
+  const interactive = Array.from({ length: 16 }, () => render('high'))
+  await assert.rejects(render('low'), PublicSnapshotCapacity)
+  await assert.rejects(render('high'), PublicSnapshotCapacity)
+  assert.equal(entered, 20)
+  release()
+  assert.deepEqual(await Promise.all(background), Array(4).fill('low'))
+  assert.deepEqual(await Promise.all(interactive), Array(16).fill('high'))
+  await assert.rejects(render('low', true), /boot failed/)
+  assert.equal(await render('low'), 'low')
+})
 
 Deno.test('public SSR defers shape DDL until API access, before writes are admitted', async () => {
   const db = await PGlite.create()
@@ -18,6 +41,27 @@ Deno.test('public SSR defers shape DDL until API access, before writes are admit
     assert.equal(await installed(), true)
     assert.equal((await db.query<{ count: number }>("SELECT count(DISTINCT tgrelid)::int AS count FROM pg_trigger WHERE tgfoid = 'shape_notify()'::regprocedure")).rows[0].count, 2)
     assert.equal((await db.query<{ count: number }>('SELECT count(*)::int AS count FROM app_user')).rows[0].count, 2)
+  } finally { await db.close() }
+})
+
+Deno.test('background snapshots use transaction-local query memory and retain public read-only scope', async () => {
+  const db = await PGlite.create()
+  try {
+    await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+    await db.exec(await Deno.readTextFile(new URL('fixture.sql', import.meta.url)))
+    await db.exec(`SET work_mem='8MB';
+      CREATE VIEW snapshot_settings WITH (security_invoker=true) AS
+        SELECT current_setting('work_mem') AS memory, current_user AS role, current_setting('transaction_read_only') AS readonly;
+      GRANT SELECT ON snapshot_settings TO app_user;`)
+    const cluster = await createEdgeCluster({ db, tables: ['board'], secret: 'test', log: line => { throw new Error(line) }, fail: error => { throw error } })
+    const read = (priority: 'high' | 'low') => cluster.publicSnapshot('generation', s => s.read('/snapshot_settings'), priority)
+    const setting = async () => (await db.query<{ memory: string }>("SELECT current_setting('work_mem') AS memory")).rows[0].memory
+    assert.deepEqual(await read('high'), [{ memory: '8MB', role: 'app_user', readonly: 'on' }])
+    assert.deepEqual(await read('low'), [{ memory: '1MB', role: 'app_user', readonly: 'on' }])
+    assert.equal(await setting(), '8MB')
+    await assert.rejects(cluster.publicSnapshot('generation', async () => { throw new Error('snapshot failed') }, 'low'), /snapshot failed/)
+    assert.equal(await setting(), '8MB')
+    assert.deepEqual(await read('high'), [{ memory: '8MB', role: 'app_user', readonly: 'on' }])
   } finally { await db.close() }
 })
 
@@ -263,7 +307,9 @@ Deno.test('interactive public snapshots jump ahead of background shape snapshots
 
     resume.resolve()
     await Promise.all([held, shapeSnap, ...lowSnapshots, ...highSnapshots])
-    assert.deepEqual(order.slice(0, 5), ['live-1:1', 'live-2:1', 'live-3:1', 'live-4:1', 'prefetch:1'])
+    // A shape uses the short background lane, which can take the first yielded turn.
+    assert.deepEqual(order.slice(0, 4), ['live-1:1', 'live-2:1', 'live-3:1', 'live-4:1'])
+    assert.equal(order.includes('prefetch:1'), true)
     assert.equal(order.includes('shape:200'), true)
     assert.equal(order.includes('live-5:1'), true)
   } finally {
@@ -347,5 +393,21 @@ Deno.test('batched snapshot reads preserve each parent order, limit, offset, and
     })
     db.transaction = originalTransaction
     await assert.rejects(publicSnapshot(db, 'batch', snapshot => snapshot.readMany(['/batch_goal?limit=1', '/batch_goal'])), /bounded reads/)
+  } finally { await db.close() }
+})
+
+Deno.test('warming another public table retains already checked privileges', async () => {
+  const db = await PGlite.create()
+  try {
+    await db.exec(`CREATE ROLE app_user; CREATE TABLE first_read(id int); CREATE TABLE second_read(id int);
+      GRANT SELECT ON first_read,second_read TO app_user;`)
+    await publicSnapshot(db, 'directory', async snapshot => {
+      await snapshot.read('/first_read')
+      await snapshot.read('/second_read')
+    })
+    // Privilege names are values, not schema changes that invalidate earlier reads.
+    assert.deepEqual([...metadataCache(db).tables].sort(), ['app_user\0first_read', 'app_user\0second_read'])
+    await db.exec('REVOKE SELECT ON first_read FROM app_user')
+    await assert.rejects(publicSnapshot(db, 'directory', snapshot => snapshot.read('/first_read')), /snapshot read 404/)
   } finally { await db.close() }
 })

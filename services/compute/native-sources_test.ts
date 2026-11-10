@@ -462,6 +462,10 @@ Deno.test("native SQL wires CDC and bag-difference feedback without widening tim
     schema,
     { source_item: "source_publication" },
   );
+  const artifactSql = nativeSql(program);
+  assertEquals(artifactSql, nativeSql(program));
+  assertEquals(artifactSql.includes("postgres_cdc_input"), false);
+  assertEquals(artifactSql.includes("source_publication"), false);
   assertEquals(sql.includes("CREATE TABLE source_item("), false);
   assertEquals(
     sql.includes(

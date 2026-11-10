@@ -61,7 +61,8 @@ import { compilationProfile } from "./native-feldera.ts";
 import { reconcileNativeResources } from "./native-cleanup.ts";
 import type { BatchSpec } from "./batches.ts";
 import { Feldera, type FelderaProgram } from "./feldera.ts";
-import { publish } from "./publication.ts";
+import { publish, publishPages } from "./publication.ts";
+import { BoundedRuntime, collectBoundedFiles, type BoundedCapture, type BoundedOutput } from "./bounded-runtime.ts";
 import { type SinkWrites, validateSinkWrites } from "../../packages/compute-snapshot/src/sink-writes.ts";
 import { PostgresJobCache } from "./job-cache.ts";
 import type { TypeTable } from "./portable-contract.ts";
@@ -522,12 +523,12 @@ export async function computationVersion(
     )
       .map((byte) => byte.toString(16).padStart(2, "0")).join("");
   const files = await Promise.all(
-    [spec.file, ...spec.wasm, ...(spec.feldera ? [spec.feldera] : [])]
+    [spec.file, ...spec.wasm, ...(spec.feldera ? [spec.feldera] : []), ...(engine === "duckdb-snapshot" && spec.steps ? [`${spec.steps}.bundle.js`] : [])]
       .map(async (file) => await hash(await Deno.readFile(file))),
   );
   const contract = spec.feldera === undefined && engine === "duckdb-snapshot"
     ? { protocol: 1, spec, schema, files }
-    : { protocol: engine === "feldera" ? 3 : 2, engine, spec, schema, files };
+    : { protocol: engine === "feldera" ? 3 : spec.steps ? 4 : 2, engine, spec, schema, files };
   return await hash(new TextEncoder().encode(strictJson(contract, true)));
 }
 
@@ -535,6 +536,8 @@ async function main() {
   const { openBatches } = await import("./batches.ts");
   const specs: Spec[] = JSON.parse(need("COMPUTATIONS"));
   const engine = queryEngine(Deno.env.get("DUCKSTREAM_ENGINE"));
+  const artifacts = Deno.env.get("FELDERA_ARTIFACTS_DIR");
+  if (engine === "feldera" && artifacts !== undefined && (!artifacts || !artifacts.startsWith("/"))) throw new Error("FELDERA_ARTIFACTS_DIR must be an absolute path");
   const profile = compilationProfile(Deno.env.get("FELDERA_COMPILATION_PROFILE"));
   if (engine === "feldera" && specs.some((spec) => !spec.feldera)) {
     throw new Error(
@@ -563,6 +566,8 @@ async function main() {
   const native: NativeRuntime[] = [];
   const nativeDb = new pg.Pool({ connectionString: databaseUrl });
   const engineFailure = Promise.withResolvers<unknown>();
+  const boundedNames = specs.filter(spec => spec.steps && engine === "duckdb-snapshot").map(spec => spec.name);
+  let collected = false;
   for (let i = 0; i < computations.length; i++) {
     const c = computations[i];
     const spec = specs[i];
@@ -573,11 +578,41 @@ async function main() {
     );
     if (engine === "feldera") {
       const program = JSON.parse(await Deno.readTextFile(spec.feldera!));
-      c.feldera(need("FELDERA_URL"), program);
-      const runtime = new NativeRuntime(nativeDb, need("FELDERA_URL"), c,
-        program, version, databaseUrl, claims, profile);
+      c.feldera((artifacts ? Deno.env.get("FELDERA_URL") ?? "http://127.0.0.1" : need("FELDERA_URL")), program);
+      const runtime = new NativeRuntime(nativeDb, (artifacts ? Deno.env.get("FELDERA_URL") ?? "" : need("FELDERA_URL")), c,
+        program, version, databaseUrl, claims, profile, artifacts);
       native.push(runtime);
       batches.push(runtime.spec);
+      continue;
+    }
+    if (spec.steps) {
+      const directory = need("COMPUTE_STATE_DIR");
+      const admitted = await admit(spec.file, spec.endowments ?? []);
+      const runtime = await BoundedRuntime.create({
+        spec, version, databaseUrl, directory, runner,
+        source: await Deno.readTextFile(`${spec.steps}.bundle.js`),
+        reads: admitted.reads, queries: admitted.queries, queryStages: admitted.queryStages,
+      });
+      batches.push({
+        name: c.name, reads: c.reads, to: c.to, version,
+        async initialize(client) {
+          if (collected) return;
+          const { rows } = await client.query(
+            "SELECT c.inputs FROM compute.capture c JOIN compute.definition d USING(instance_id) WHERE d.name=ANY($1::text[]) AND c.inputs IS NOT NULL",
+            [boundedNames],
+          );
+          await collectBoundedFiles(directory, rows.map(row => row.inputs));
+          collected = true;
+        },
+        capture: () => runtime.capture(),
+        calculate: input => runtime.calculate(input as BoundedCapture),
+        async publish(client, output) {
+          const sinks = await publishPages(client, spec, sink => runtime.pages(output as BoundedOutput, sink), claims);
+          console.log(JSON.stringify({ computation: c.name, sinks }));
+        },
+        release: (input, output) => runtime.release(input as BoundedCapture, output as BoundedOutput),
+        discard: output => runtime.discard(output as BoundedOutput),
+      });
       continue;
     }
     batches.push({
@@ -609,7 +644,7 @@ async function main() {
     });
   }
   NativeRuntime.validateGraph(native);
-  const coordinator = await openBatches(databaseUrl, batches);
+  const coordinator = await openBatches(databaseUrl, batches, { invalidateOnStart: !native.length });
   const service = {
     async refresh(tables?: string[]) {
       if (native.length) throw new Error("native CDC owns computation invalidation");
@@ -618,8 +653,12 @@ async function main() {
     },
   };
   await reconcileNativeResources(nativeDb, native.map((runtime) => runtime.spec.name), Deno.env.get("FELDERA_URL"));
-  for (const runtime of native) await runtime.initialize();
-  if (!native.length) await service.refresh();
+  try {
+    for (const runtime of native) await runtime.initialize();
+  } catch (error) {
+    for (const runtime of native) await runtime.close();
+    throw error;
+  }
   let stopping = false;
   const polling = (async () => {
     while (!stopping && native.length) {
@@ -637,6 +676,7 @@ async function main() {
     stopping = true;
     await server.shutdown();
     await coordinator.close();
+    for (const runtime of native) await runtime.close();
     await nativeDb.end();
   }
 }

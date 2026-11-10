@@ -1,0 +1,6 @@
+{
+  "sql": "CREATE TABLE source_rows (group_id VARCHAR, amount INTEGER); CREATE VIEW totals AS SELECT group_id,SUM(amount) AS amount FROM source_rows GROUP BY group_id;",
+  "inputs": { "source_rows": { "query": "SELECT group_id,amount FROM source_rows", "fields": [{ "name": "group_id", "type": "VARCHAR" }, { "name": "amount", "type": "INTEGER" }] } },
+  "outputs": { "totals": { "view": "totals", "fields": [{ "name": "group_id", "type": "VARCHAR" }, { "name": "amount", "type": "BIGINT" }] } },
+  "incremental": { "inputs": { "source_rows": { "table": "items", "projection": "group_id,amount" } }, "outputs": { "totals": { "partitionQuery": "SELECT group_id AS __partition,group_id,amount FROM totals" } } }
+}

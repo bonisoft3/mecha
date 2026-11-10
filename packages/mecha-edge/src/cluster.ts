@@ -19,7 +19,7 @@ import { oidc, type Links, type Profile, type Provider } from '../../../services
 import { prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
-import { publicSnapshot, PublicSnapshotCapacity, type PublicSnapshot } from './public-snapshot.ts'
+import { publicSnapshot, PublicSnapshotCapacity, PUBLIC_SNAPSHOT_LIMIT, type PublicSnapshot } from './public-snapshot.ts'
 import { createSnapshotCoordinator, NOTIFY_CHANNEL, type BatchMachine, type Computation, type Output, type Snapshot, type SnapshotCoordinator, type SnapshotIdentity } from '../../compute-snapshot/src/index.ts'
 import { lanes } from './lanes.ts'
 
@@ -183,7 +183,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     if (!cfg.compute?.computations.length) return null
     await ensureShapes()
     const coordinator = await createSnapshotCoordinator({ db, serialize: serializeLow, ...cfg.compute })
-    await db.listen(NOTIFY_CHANNEL, () => cfg.compute!.changed())
+    await serializeLow(() => db.listen(NOTIFY_CHANNEL, () => cfg.compute!.changed()))
     return coordinator
   })().catch(error => { computeReady = undefined; throw error })
   const publicOnly = async (table: string) => {
@@ -292,7 +292,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         ),
       )
       if (added.affectedRows === 0) return json(409, { error: 'already an account' })
-      const token = await signJwt(secret, { role: 'app_user', sub: userId, handle: st.handle, exp: now() + USER_TOKEN_TTL_S })
+      const token = await signJwt(secret, { role: 'app_user', sub: userId, handle: st.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
       return json(200, { token, user: { id: userId, handle: st.handle } })
     }
     let handle = st.handle as string
@@ -323,7 +323,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       }
     }
     if (!inserted) return json(500, { error: 'could not allocate identity' })
-    const token = await signJwt(secret, { role: 'app_user', sub: userId, handle, exp: now() + USER_TOKEN_TTL_S })
+    const token = await signJwt(secret, { role: 'app_user', sub: userId, handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id: userId, handle } })
   }
 
@@ -388,7 +388,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         cred.id,
       ]),
     )
-    const token = await signJwt(secret, { role: 'app_user', sub: cred.user_id, handle: cred.handle, exp: now() + USER_TOKEN_TTL_S })
+    const token = await signJwt(secret, { role: 'app_user', sub: cred.user_id, handle: cred.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id: cred.user_id, handle: cred.handle } })
   }
 
@@ -591,11 +591,11 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     async publicSnapshot(generation, use, priority = 'high') {
       // Admit per lane before joining the database queue so queued low-priority
       // prefetches cannot starve interactive renders, and each lane stays bounded.
-      if (pendingSnapshots[priority] >= 16) throw new PublicSnapshotCapacity('public snapshot queue full')
+      if (pendingSnapshots[priority] >= PUBLIC_SNAPSHOT_LIMIT) throw new PublicSnapshotCapacity('public snapshot queue full')
       pendingSnapshots[priority]++
       try {
         await drains()
-        return await lane(() => publicSnapshot(db, generation, use, cfg.schema), priority === 'high' ? 'render' : 'low')
+        return await lane(() => publicSnapshot(db, generation, use, cfg.schema, priority), priority === 'high' ? 'render' : 'background-render')
       }
       finally { pendingSnapshots[priority]-- }
     },

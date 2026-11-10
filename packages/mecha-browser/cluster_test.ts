@@ -121,8 +121,10 @@ async function gatedStream(cluster: Cluster) {
   }) as typeof setTimeout
   let open: () => void = () => {}
   const gate = new Promise<void>((r) => (open = r))
+  const subsetRequests: string[] = []
   const fetchClient = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input)
+    if (new URL(url).searchParams.has('subset__where')) subsetRequests.push(url)
     if (new URL(url).searchParams.get('live') === 'true') {
       await Promise.race([gate, new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))])
     }
@@ -141,7 +143,7 @@ async function gatedStream(cluster: Cluster) {
   const seen: Msg[] = []
   stream.subscribe((ms) => { for (const m of ms as Msg[]) if (m.key) seen.push(m) })
   while (!stream.isUpToDate) await new Promise((r) => setTimeout(r, 10))
-  return { stream, seen, open }
+  return { stream, seen, open, subsetRequests }
 }
 
 // Regression: the cluster answered a refused subset `{message}` or `{error}`,
@@ -254,6 +256,17 @@ Deno.test('a subset is the rows both the scope and its predicate admit, with the
   assert.equal((await get(subset('"game" = $1', '{"1":"7"}'))).status, 500)
   db.query = query
   await db.close()
+})
+
+Deno.test('a real ShapeStream does not prefetch a completed subset snapshot', async () => {
+  const { db, cluster } = await scopedCluster()
+  const { stream, subsetRequests } = await gatedStream(cluster)
+  try {
+    const snapshot = await stream.requestSnapshot({ where: '"game" = $1', params: { '1': '7' } })
+    assert.deepEqual(snapshot.data.map((message) => message.value.id), [1])
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(subsetRequests.length, 1)
+  } finally { stream.unsubscribeAll(); await db.close() }
 })
 
 Deno.test("a real ShapeStream merges a late subset with the changes around it, each change once", async () => {

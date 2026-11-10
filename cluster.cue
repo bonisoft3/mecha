@@ -1160,7 +1160,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				let hostScripts = [if X.meta.served != _|_ {#"let sfile = ($env.CADDY_SCRIPTS_FILE? | default (if (($env.BAYT_LOCAL_SERVED_DIR? | default "") != "") { ($env.BAYT_LOCAL_SERVED_DIR | path join "caddy/release-scripts") } else { "/etc/caddy/release-scripts" })); let rel = (if ($sfile | path exists) { open --raw $sfile | str trim } else { "" }); $env_lines = ($env_lines | append $"PRONTO_RELEASE_SCRIPTS=($rel)"); $extra_env = ($extra_env | merge { PRONTO_RELEASE_SCRIPTS: $rel }); "#}, ""][0]
 				entrypoint: {
 					shell: "nu"
-					do:    #"let origin = ($env.ORIGIN? | default ""); let h = ($origin | str replace -r '^https?://' ''); if ($h == $origin) or ($h | is-empty) or ($h !~ '^[A-Za-z0-9.:-]+$') { print -e $"ORIGIN '($origin)' is no origin: set it to the scheme and host readers reach the door at, as https://app.example"; exit 1 }; let p = (if ($h | str contains ":") { $h | split row ":" | last } else { "8443" }); let tls_port = (if (($env.CADDY_TLS_HOST_PORT? | default "") != "") { $env.CADDY_TLS_HOST_PORT } else { $p }); let work = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let cdir = ($work | path join $"caddy-($nu.pid)-(random int 1000..9999)"); mkdir ($cdir | path join "data") ($cdir | path join "config"); let env_file = ($cdir | path join "env"); let certs = (($env.CADDY_CERT_DIR? | default ".certs") | path expand | str replace -a (char -u 5c) '/'); let served_dir = ($env.BAYT_LOCAL_SERVED_DIR? | default ""); let is_local = (($served_dir != "") and (($served_dir | path join "srv") | path exists)); let cfg_src = (if $is_local { '\#(X.meta.caddyfile)' } else { ($env.CADDY_CONFIG_FILE? | default (if ('\#(X.meta.caddyfile)' | path exists) { '\#(X.meta.caddyfile)' } else { "/etc/caddy/Caddyfile" })) }); mut env_lines = [$"CADDY_TLS_HOST_PORT=($tls_port)"]; mut extra_env = { XDG_DATA_HOME: ($cdir | path join "data"), XDG_CONFIG_HOME: ($cdir | path join "config"), CADDY_TLS_HOST_PORT: $tls_port }; if $is_local { let served_fwd = ($served_dir | path expand | str replace -a (char -u 5c) '/'); let srv_root = $"($served_fwd)/srv"; let omni_root = $"($served_fwd)/omnishell"; $env_lines = ($env_lines | append [$"CADDY_DOOR_PORT=($tls_port)" $"PRONTO_SRV_ROOT=($srv_root)" $"PRONTO_OMNISHELL_ROOT=($omni_root)"]); $extra_env = ($extra_env | merge { CADDY_DOOR_PORT: $tls_port, PRONTO_SRV_ROOT: $srv_root, PRONTO_OMNISHELL_ROOT: $omni_root }) }; if (($certs | path join "localhost.pem") | path exists) { let tv = $"($certs)/localhost.pem ($certs)/localhost-key.pem"; $env_lines = ($env_lines | append $"CADDY_TLS=($tv)"); $extra_env = ($extra_env | merge { CADDY_TLS: $tv }) }; \#(hostScripts)($env_lines | str join (char nl)) + (char nl) | save -f $env_file; with-env $extra_env { let adapted = (^caddy adapt --envfile $env_file --config $cfg_src --adapter caddyfile); let roots = ($adapted | split row "," | parse -r '"root":"(?<r>[^"]+)"' | get -o r | default [] | uniq); for r in $roots { if ($r | path exists) { glob ($r | path join "**/*" | str replace -a (char -u 5c) '/') | where ($it | path type) == "file" and (not ($it | str ends-with ".etag")) | each {|f| let etag = $"($f).etag"; if (not ($etag | path exists)) { let d = (open --raw $f | hash sha256); ((char dquote) + $d + (char dquote)) | save --raw -f $etag } } | ignore } }; exec caddy run --envfile $env_file --config $cfg_src --adapter caddyfile }"#
+					do:    #"let origin = ($env.ORIGIN? | default ""); let h = ($origin | str replace -r '^https?://' ''); if ($h == $origin) or ($h | is-empty) or ($h !~ '^[A-Za-z0-9.:-]+$') { print -e $"ORIGIN '($origin)' is no origin: set it to the scheme and host readers reach the door at, as https://app.example"; exit 1 }; let p = (if ($h | str contains ":") { $h | split row ":" | last } else { "8443" }); let tls_port = (if (($env.CADDY_TLS_HOST_PORT? | default "") != "") { $env.CADDY_TLS_HOST_PORT } else { $p }); let work = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let cdir = ($work | path join $"caddy-($nu.pid)-(random int 1000..9999)"); mkdir ($cdir | path join "data") ($cdir | path join "config"); let env_file = ($cdir | path join "env"); let certs = (($env.CADDY_CERT_DIR? | default ".certs") | path expand | str replace -a (char -u 5c) '/'); let served_dir = ($env.BAYT_LOCAL_SERVED_DIR? | default ""); let is_local = (($served_dir != "") and (($served_dir | path join "srv") | path exists)); let cfg_src = (if $is_local { '\#(X.meta.caddyfile)' } else { ($env.CADDY_CONFIG_FILE? | default (if ('\#(X.meta.caddyfile)' | path exists) { '\#(X.meta.caddyfile)' } else { "/etc/caddy/Caddyfile" })) }); mut env_lines = [$"CADDY_TLS_HOST_PORT=($tls_port)"]; mut extra_env = { XDG_DATA_HOME: ($env.CADDY_DATA_HOME? | default ($cdir | path join "data")), XDG_CONFIG_HOME: ($cdir | path join "config"), CADDY_TLS_HOST_PORT: $tls_port }; if $is_local { let served_fwd = ($served_dir | path expand | str replace -a (char -u 5c) '/'); let srv_root = $"($served_fwd)/srv"; let omni_root = $"($served_fwd)/omnishell"; $env_lines = ($env_lines | append [$"CADDY_DOOR_PORT=($tls_port)" $"PRONTO_SRV_ROOT=($srv_root)" $"PRONTO_OMNISHELL_ROOT=($omni_root)"]); $extra_env = ($extra_env | merge { CADDY_DOOR_PORT: $tls_port, PRONTO_SRV_ROOT: $srv_root, PRONTO_OMNISHELL_ROOT: $omni_root }) }; if (($certs | path join "localhost.pem") | path exists) { let tv = $"($certs)/localhost.pem ($certs)/localhost-key.pem"; $env_lines = ($env_lines | append $"CADDY_TLS=($tv)"); $extra_env = ($extra_env | merge { CADDY_TLS: $tv }) }; \#(hostScripts)($env_lines | str join (char nl)) + (char nl) | save -f $env_file; with-env $extra_env { let adapted = (^caddy adapt --envfile $env_file --config $cfg_src --adapter caddyfile); let roots = ($adapted | split row "," | parse -r '"root":"(?<r>[^"]+)"' | get -o r | default [] | uniq); for r in $roots { if ($r | path exists) { glob ($r | path join "**/*" | str replace -a (char -u 5c) '/') | where ($it | path type) == "file" and (not ($it | str ends-with ".etag")) | each {|f| let etag = $"($f).etag"; if (not ($etag | path exists)) { let d = (open --raw $f | hash sha256); ((char dquote) + $d + (char dquote)) | save --raw -f $etag } } | ignore } }; exec caddy run --envfile $env_file --config $cfg_src --adapter caddyfile }"#
 					dockerfile: {
 						shell: "sh"
 						do:    "\(admitted)\(tlsEnv)\(scripts)\(validators)exec caddy run --envfile /etc/caddy/env --config /etc/caddy/Caddyfile --adapter caddyfile"
@@ -1518,14 +1518,15 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				let _wasm = [for w, _ in {for c in X.state.computations for w in c.wasm {(w): true}} {file: w, target: "/app/computations/\(path.Base(w, path.Unix))"}]
 				let _target = {for w in _wasm {(w.file): w.target}}
 				let _feldera = [for c in X.state.computations if c.feldera != _|_ {file: c.feldera, target: "/app/computations/\(c.name).feldera.json"}]
+				let _steps = [for c in X.state.computations if c.steps != _|_ {file: "\(c.steps).bundle.js", target: "/app/computations/\(c.name).steps.bundle.js"}]
 				if X.state.duckstreamEngine == "feldera" {
 					feldera: bayt.healthcheck.http & X._image & {
 						healthcheck: {url: "http://127.0.0.1:8080/healthz", start_period: "120s"}
 						dockerfile: {
 							from: name: "images.feldera.com/feldera/pipeline-manager:0.367.0@sha256:42819714d16f7d5d37c17c87812ce98fb23efd2b1bfbf95b4889877f14693272"
 							workdir: "/home/ubuntu"
-							// Feldera clears Cargo environment overrides; config keeps stripping specific to test builds.
-							preamble: [#"RUN test ! -e /home/ubuntu/.cargo/config.toml && printf '%s\n' '[profile.unoptimized]' 'strip = "symbols"' > /home/ubuntu/.cargo/config.toml"#]
+							// Feldera clears Cargo environment overrides before starting the compiler.
+							preamble: [#"RUN test ! -e /home/ubuntu/.cargo/config.toml && printf '%s\n' '[build]' 'jobs = 2' '[profile.unoptimized]' 'strip = "symbols"' > /home/ubuntu/.cargo/config.toml"#]
 						}
 						compose: {
 							restart: "on-failure"
@@ -1555,17 +1556,19 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					expose: tcp: {port: 9997, env: "PORT"}
 					entrypoint: {
 						shell:      "nu"
-						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let lake = ($base | path join $'lake-($nu.pid)-(random int 1000..9999)'); mkdir $lake; let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '\(#DuckdbExtensionsMarker)'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts'); with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir, LAKE_DIR: $lake } { exec deno run --unstable-worker-options --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"
+						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let lake = ($base | path join $'lake-($nu.pid)-(random int 1000..9999)'); mkdir $lake; let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '\(#DuckdbExtensionsMarker)'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts'); with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir, LAKE_DIR: $lake } { exec deno run --unstable-worker-options --allow-run=/opt/feldera/runtime/supervisor --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"
 						dockerfile: null
 						env: {
 							CRUD_URL:          {peer: "crud", port: "http", prefix: "http://"}
 							DATABASE_URL:      ["postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}"]
 							CDC_SLOT:          (#ConduitSlot & {app: X.meta.app}).name
+							COMPUTE_STATE_DIR: "${COMPUTE_STATE_DIR:-.pronto/live/duckstream}"
 							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-duckdb-snapshot}"
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
 								name:       c.name
 								file:       c.file
 								if c.feldera != _|_ {feldera: c.feldera}
+								if c.steps != _|_ {steps: c.steps}
 								to:         c.to
 								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
 								wasm:       c.wasm
@@ -1586,18 +1589,21 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							conduit: "healthy"
 						}
 					}
-					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}], [for f in _feldera {f.file}]])
+					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}], [for f in _feldera {f.file}], [for f in _steps {f.file}]])
 					dockerfile: {
 						from: (_from & {in: X.meta.images.compute}).out
 						copy: list.Concat([
 							[for c in X.state.computations {srcs: [c.file], dst: "/app/computations/\(c.name).js"}],
 							[for w in _wasm {srcs: [w.file], dst: w.target}],
 							[for f in _feldera {srcs: [f.file], dst: f.target}],
+							[for f in _steps {srcs: [f.file], dst: f.target}],
 						])
 					}
 					compose: {
+						volumes: ["../.pronto/live/duckstream:/state"]
 						if X.state.duckstreamEngine == "feldera" {depends_on: feldera: _healthy}
 						environment: {
+							COMPUTE_STATE_DIR: "/state"
 							LAKE_DIR:          "/lake"
 							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-\(X.state.duckstreamEngine)}"
 							if X.state.duckstreamEngine == "feldera" {
@@ -1608,6 +1614,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								name: c.name
 								file: "/app/computations/\(c.name).js"
 								if c.feldera != _|_ {feldera: "/app/computations/\(c.name).feldera.json"}
+								if c.steps != _|_ {steps: "/app/computations/\(c.name).steps"}
 								to: c.to
 								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
 								wasm: [for w in c.wasm {_target[w]}]
@@ -2013,6 +2020,14 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// a sibling plugin.
 		verbs: [Name=string]: {verb: "setup" | "generate" | "build" | "launch" | "release", cmds: [...string], note: string}
 		checks: [Name=string]: {verb: "lint" | "test" | "integrate", cmds: [...string], note: string}
+		if len([for c in X.state.computations if c.steps != _|_ {c.steps}]) > 0 {
+			let _sources = base64.Encode(null, json.Marshal([for c in X.state.computations if c.steps != _|_ {c.steps}]))
+			verbs: computeSteps: {
+				verb: "generate"
+				cmds: ["let mecha = (^mise where github:bonisoft3/mecha | str trim); let sources = ('\(_sources)' | decode base64 | decode utf-8 | from json); ^mise exec -- deno run -A --frozen --config ($mecha | path join 'services/compute/deno.json') ($mecha | path join 'services/compute/step-build.ts') ...$sources"]
+				note: "bundles bounded computation steps before deployment"
+			}
+		}
 		checks: caddy: {
 			verb: "lint"
 			// `adapt`, not `validate`: validate also PROVISIONS, which loads the

@@ -1,5 +1,7 @@
+import { loadArtifact } from "./native-artifacts.ts";
+import { NativeProcess, removeWorkDirectory, validateWorkDirectory } from "./native-process.ts";
 import type pg from "npm:pg@8.16.3";
-import { dropOwnedSlots } from "./native-cleanup.ts";
+import { dropOwnedSlots, retirePipeline } from "./native-cleanup.ts";
 import { rows as normalizeRows } from "./feldera.ts";
 import { xxhash3 } from "npm:hash-wasm@4.12.0";
 import type { Row } from "./main.ts";
@@ -39,7 +41,8 @@ export async function replicationIdentity(
 
 /** A fresh OSS circuit owns fresh CDC identities; captured inputs survive in PostgreSQL. */
 export class NativeFeldera {
-  private readonly path: string;
+  private path: string;
+  private process?: NativeProcess;
   private deployment = "";
   private incarnation = "";
   private sql = "";
@@ -55,6 +58,7 @@ export class NativeFeldera {
     readonly version: string,
     private uri: string,
     private readonly profile: CompilationProfile = "optimized",
+    private readonly artifacts?: string,
   ) {
     if (!/^[a-z][a-z0-9_-]{0,99}$/.test(name)) {
       throw new Error("invalid native pipeline name");
@@ -71,11 +75,16 @@ export class NativeFeldera {
     if (this.poisoned) {
       throw new Error("native pipeline requires reconstruction");
     }
+    const deadline = AbortSignal.timeout(30000);
+    const controller = new AbortController();
+    deadline.addEventListener("abort", () => controller.abort(new Error(
+      `native ${this.name}: ${method} ${path.split("?")[0] || "pipeline status"} timed out after 30000ms`,
+    )), { once: true });
     const response = await fetch(this.path + path, {
       method,
       headers: { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(30000),
+      signal: controller.signal,
     });
     if (missing && response.status === 404) return response;
     if (!response.ok) {
@@ -125,11 +134,17 @@ export class NativeFeldera {
     baseline: Record<string, Row[]>,
     captureIds: string[],
   ) {
-    const existing = await this.request("", "GET", undefined, true);
-    await existing.text();
-    if (existing.status !== 404) {
-      await this.json("/stop?force=true", "POST");
-      await this.status("Stopped");
+    const workDir = this.artifacts ? Deno.env.get("FELDERA_WORK_DIR") : undefined;
+    if (this.artifacts && !workDir) throw new Error("FELDERA_WORK_DIR must be an absolute path");
+    if (workDir) validateWorkDirectory(workDir);
+    const artifact = this.artifacts ? await loadArtifact(this.artifacts, this.name, nativeSql(this.program)) : undefined;
+    if (!this.artifacts) {
+      const existing = await this.request("", "GET", undefined, true);
+      await existing.text();
+      if (existing.status !== 404) {
+        await this.json("/stop?force=true", "POST");
+        await this.status("Stopped");
+      }
     }
     const schema = sourceSchema(this.version);
     const prefix = "duckstream_" + crypto.randomUUID().replaceAll("-", "");
@@ -141,6 +156,7 @@ export class NativeFeldera {
     );
     const identities = await Promise.all(
       Object.keys(this.program.inputs).map(async (name) => ({
+        name,
         table: `${schema}.${name}`,
         publication: publications[name],
         ...await replicationIdentity(
@@ -153,14 +169,21 @@ export class NativeFeldera {
     const client = await db.connect();
     try {
       await client.query(
-        "ALTER TABLE compute.native_epoch ADD COLUMN IF NOT EXISTS source_schema text, ADD COLUMN IF NOT EXISTS pipeline_url text",
+        "ALTER TABLE compute.native_epoch ADD COLUMN IF NOT EXISTS source_schema text, ADD COLUMN IF NOT EXISTS pipeline_url text, ADD COLUMN IF NOT EXISTS process_owned boolean NOT NULL DEFAULT false",
       );
       const { rows: old } = await client.query(
-        "SELECT publications, slots, source_schema FROM compute.native_epoch WHERE name=$1",
+        "SELECT publications, slots, source_schema, pipeline_url, process_owned FROM compute.native_epoch WHERE name=$1",
         [this.name],
       );
       for (const epoch of old) {
+        if (!epoch.process_owned && (this.artifacts || (epoch.pipeline_url && epoch.pipeline_url !== this.path))) {
+          const url = epoch.pipeline_url ?? (this.path.startsWith("/v0/") ? undefined : this.path);
+          if (!url) throw new Error("FELDERA_URL required to retire legacy native pipeline");
+          await retirePipeline(url);
+        }
         await dropOwnedSlots(client, epoch.slots);
+        const retiredWorkDir = Deno.env.get("FELDERA_WORK_DIR");
+        if (epoch.process_owned && !this.artifacts && retiredWorkDir) await removeWorkDirectory(retiredWorkDir, this.name);
         for (const publication of epoch.publications) {
           await client.query(
             `DROP PUBLICATION IF EXISTS ${sqlIdentifier(publication)}`,
@@ -223,9 +246,9 @@ export class NativeFeldera {
         );
       }
       await client.query(
-        `INSERT INTO compute.native_epoch(name,publications,slots,source_schema,pipeline_url) VALUES($1,$2,$3,$4,$5)
-        ON CONFLICT(name) DO UPDATE SET publications=EXCLUDED.publications,slots=EXCLUDED.slots,source_schema=EXCLUDED.source_schema,pipeline_url=EXCLUDED.pipeline_url`,
-        [this.name, Object.values(publications), slots, schema, this.path],
+        `INSERT INTO compute.native_epoch(name,publications,slots,source_schema,pipeline_url,process_owned) VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT(name) DO UPDATE SET publications=EXCLUDED.publications,slots=EXCLUDED.slots,source_schema=EXCLUDED.source_schema,pipeline_url=EXCLUDED.pipeline_url,process_owned=EXCLUDED.process_owned`,
+        [this.name, Object.values(publications), slots, schema, this.artifacts ? null : this.path, !!this.artifacts],
       );
       await client.query("COMMIT");
     } catch (error) {
@@ -234,60 +257,72 @@ export class NativeFeldera {
     } finally {
       client.release();
     }
-    this.sql = nativeSql(this.program, schema, publications);
-    await this.json("", "PUT", {
-      name: this.name,
-      program_code: this.sql,
-      udf_rust: "",
-      udf_toml: "",
-      runtime_config: {
-        workers: 1,
-        storage: null,
-        max_parallel_connector_init: 1,
-      },
-      program_config: { profile: this.profile },
-    });
-    await this.status("Compiled");
-    await this.json("/start", "POST");
-    const state = await this.status("Running");
-    if (!/^0\.367\.0(?:\+|$)/.test(state.platform_version)) {
-      throw new Error("native manager must be 0.367.0");
+    if (this.artifacts) {
+      this.sql = nativeSql(this.program);
+      const inputs = Object.fromEntries(Object.keys(this.program.inputs).map((name) => [
+        `cdc_${name}`, { stream: `cdc_${name}`, max_queued_records: 10000, max_queued_size: "16MiB", transport: { name: "postgres_cdc_input", config: {
+          uri: this.uri, publication: publications[name], source_table: `${schema}.${name}`,
+          batch: { max_size: "1MiB", max_fill_ms: 1000 },
+        } } },
+      ]));
+      this.process = await NativeProcess.start(artifact!, inputs, workDir!, this.name);
+      this.path = this.process.url;
+      this.deployment = this.process.deployment;
+    } else {
+      this.sql = nativeSql(this.program, schema, publications);
+      await this.json("", "PUT", {
+        name: this.name, program_code: this.sql, udf_rust: "", udf_toml: "",
+        runtime_config: { workers: 1, storage: null, max_parallel_connector_init: 1 },
+        program_config: { profile: this.profile },
+      });
+      await this.status("Compiled");
+      await this.json("/start", "POST");
+      const state = await this.status("Running");
+      if (!/^0\.367\.0(?:\+|$)/.test(state.platform_version)) throw new Error("native manager must be 0.367.0");
+      this.deployment = state.deployment_id;
     }
-    this.deployment = state.deployment_id;
-    this.incarnation =
-      (await this.json("/stats")).global_metrics.incarnation_uuid;
-    const deadline = Date.now() + 600000;
-    let ready = false;
-    do {
+    this.incarnation = (await this.json("/stats")).global_metrics.incarnation_uuid;
+    const watches = new Map(identities.map((identity) => [identity.id, {
+      progress: 0, phase: "", deadline: Date.now() + 600000,
+    }]));
+    for (;;) {
       await this.check();
       const { rows: [installed] } = await db.query(
         "SELECT to_regclass('etl.replication_state') IS NOT NULL AS present",
       );
-      if (installed.present) {
-        const { rows } = await db.query(
+      const rows: { pipeline_id: string; state: string }[] = installed.present
+        ? (await db.query(
           `SELECT pipeline_id::text,state::text FROM etl.replication_state
           WHERE is_current AND (pipeline_id,table_id) IN
           (SELECT id::bigint,table_name::regclass::oid FROM jsonb_to_recordset($1::jsonb) AS expected(id text,table_name text))`,
-          [JSON.stringify(
-            identities.map((i) => ({ id: i.id, table_name: i.table })),
-          )],
-        );
-        const inputs = (await this.json("/stats")).inputs.filter((
-          i: { endpoint_name: string },
-        ) => i.endpoint_name.startsWith("cdc_"));
-        ready = rows.length === identities.length && rows.every((r) =>
-          ["sync_done", "ready"].includes(r.state)
-        ) &&
-          inputs.length === identities.length &&
-          inputs.every((i: { barrier: boolean }) => i.barrier === false);
-        if (rows.some((r) => r.state === "errored")) {
-          throw new Error("native CDC bootstrap failed");
+          [JSON.stringify(identities.map((i) => ({ id: i.id, table_name: i.table })))],
+        )).rows : [];
+      const inputs = (await this.json("/stats")).inputs.filter((
+        i: { endpoint_name: string },
+      ) => i.endpoint_name.startsWith("cdc_"));
+      if (inputs.length > identities.length) throw new Error("unexpected native CDC bootstrap inputs");
+      let ready = true;
+      for (const identity of identities) {
+        const state = rows.find((row) => row.pipeline_id === identity.id)?.state;
+        const input = inputs.find((i: { config: { stream: string } }) => i.config.stream === `cdc_${identity.name}`);
+        if (state === "errored") throw new Error("native CDC bootstrap failed");
+        if (["sync_done", "ready"].includes(state ?? "") && input?.barrier === false) continue;
+        ready = false;
+        const watch = watches.get(identity.id)!;
+        const progress = input ? 2 * input.metrics.total_records - input.metrics.buffered_records : 0;
+        const phase = `${state ?? "missing"}:${input?.barrier ?? "missing"}`;
+        if (progress > watch.progress || phase !== watch.phase) {
+          watch.progress = progress;
+          watch.phase = phase;
+          watch.deadline = Date.now() + 600000;
+        }
+        if (Date.now() > watch.deadline) {
+          throw new Error(`native CDC bootstrap made no progress for ten minutes: ${identity.name}`);
         }
       }
       if (ready) break;
       await delay();
-    } while (Date.now() < deadline);
-    if (!ready) throw new Error("native CDC bootstrap timed out");
+    }
     for (const [name, rows] of Object.entries(baseline)) {
       this.metrics.baselineRows += rows.length;
       await this.ingress(name, rows.map((insert) => ({ insert })));
@@ -296,12 +331,12 @@ export class NativeFeldera {
   }
 
   async check() {
-    const state = await this.json("");
-    if (
-      state.deployment_id !== this.deployment ||
-      state.program_code !== this.sql ||
-      !["Running", "Paused"].includes(state.deployment_status)
-    ) throw new Error("native pipeline incarnation changed");
+    await this.process?.check();
+    const state = await this.json(this.process ? "/status" : "");
+    if (this.process
+      ? !["Running", "Paused"].includes(state.runtime_status)
+      : state.deployment_id !== this.deployment || state.program_code !== this.sql ||
+        !["Running", "Paused"].includes(state.deployment_status)) throw new Error("native pipeline incarnation changed");
     const stats = await this.json("/stats");
     if (stats.global_metrics.incarnation_uuid !== this.incarnation) {
       throw new Error("native runtime restarted");
@@ -313,6 +348,14 @@ export class NativeFeldera {
       ) throw new Error(`native input ${input.endpoint_name} failed`);
     }
   }
+  private async processStatus(wanted: string) {
+    const deadline = Date.now() + 600000;
+    while ((await this.json("/status")).runtime_status !== wanted) {
+      if (Date.now() > deadline) throw new Error(`native process ${wanted} timed out`);
+      await delay();
+    }
+  }
+  async close() { await this.process?.close(); }
   async pending(): Promise<boolean> {
     await this.check();
     for (const name of Object.keys(this.program.outputs)) {
@@ -329,8 +372,9 @@ export class NativeFeldera {
   async capture(): Promise<DeltaStep> {
     await this.check();
     if (!this.paused) {
-      await this.json("/pause", "POST");
-      await this.status("Paused");
+      await this.json("/pause", this.process ? "GET" : "POST");
+      if (this.process) await this.processStatus("Paused");
+      else await this.status("Paused");
       this.paused = true;
     }
     const names = Object.keys(this.program.outputs);
@@ -411,8 +455,9 @@ export class NativeFeldera {
     if (this.acknowledged.has(id)) return;
     try {
       if (this.paused) {
-        await this.json("/resume", "POST");
-        await this.status("Running");
+        await this.json(this.process ? "/start" : "/resume", this.process ? "GET" : "POST");
+        if (this.process) await this.processStatus("Running");
+        else await this.status("Running");
         this.paused = false;
       }
       for (const [name, rows] of Object.entries(delta)) {

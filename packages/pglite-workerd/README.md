@@ -18,7 +18,9 @@ callbacks (workerd: "Wasm code generation disallowed by embedder"), and re-arms
 an idle timer every 10 s that keeps an object awake. This build has none of
 those: plpgsql and dict_snowball linked in, host callbacks as imports,
 `-sENVIRONMENT=web`, assets resolved against `import.meta.url` only when not
-passed, a 16 MiB memory minimum, and no timer left pending between queries.
+passed, a 16 MiB memory minimum, 1 MiB linear heap growth, and no timer left
+pending between queries. Linear growth limits unused WASM allocation at the
+cost of more frequent growth operations; it does not cap the heap.
 [`bayt.cue`](bayt.cue) pins every input; [`patches/`](patches) carries the
 source changes, [`wasm.nu`](wasm.nu) the relink.
 
@@ -68,12 +70,18 @@ OpfsAhpFS reads from an OPFS access handle; the isolate holds only the node
 table, and the database is bounded by the object's storage, not its memory.
 The default format uses raw 8 KiB blocks, matching Postgres pages.
 
-`new DataDirectory(storage, { version: 1, blockSize: 131072, codec: 'deflate' })`
+`new DataDirectory(storage, { version: 1, blockSize: 131072, codec: 'deflate' }, error => { ctx.abort(String(error)); throw error })`
 selects lossless zlib level-1 compression for a new directory. Blocks that would
 grow are stored raw, with an encoding byte. Block sizes are powers of two from
 8 to 128 KiB. `fs_format` persists the choice; reopening without options uses
 that format, and conflicting options fail. Existing directories without format
 metadata retain raw 8 KiB storage. Changing block size requires a fresh import.
+
+The abort handler is required. An unexpected host filesystem exception can
+unwind PostgreSQL frames without their cleanup, and PGlite can swallow that
+exception. The owner must terminate the object before the connection is reused;
+reopening performs PostgreSQL recovery from durable files. Ordinary filesystem
+errno errors continue through PostgreSQL's normal error handling.
 
 `DataDirectory.beginCompression(generation, target)` admits only an unopened,
 complete, unpinned raw 8 KiB directory and a deflate 8 KiB target.
@@ -207,11 +215,14 @@ the original measurements. That build's warm players query used 3,212 ms CPU and
 3,941 ms object wall time; warm Flamengo rating history used 5 ms each.
 
 The matched query-memory follow-up found that 1 MiB
-`work_mem` spilled 900 temporary pages. The current 8 MiB setting removed those
+`work_mem` spilled 900 temporary pages. The previous 8 MiB setting removed those
 spills for this query. Two warm round trips took 481–570 ms with raw storage and
 650 ms with compressed storage and the decoded-block cache. Results matched the
 source archive. These are small latency samples, not capacity guarantees, and
 `work_mem` applies per query operation, not as a total PostgreSQL memory cap.
+Workerd now defaults to 1 MiB `work_mem` and 8 MiB `shared_buffers` to reserve
+isolate headroom; this may increase temporary I/O and latency and has not been
+shown to prevent memory resets.
 The probes run on Paid; fitting Free's account storage budget does not prove
 Free runtime quotas or its per-object size limit.
 

@@ -114,6 +114,85 @@ pgTest("a burst coalesces; edits during a claim become one successor", async () 
   }
 });
 
+pgTest("startup invalidation joins queued work before capture starts", async () => {
+  await using server = await postgres();
+  const db = new pg.Pool({ connectionString: server.url });
+  const began = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const captured: string[] = [];
+  const published: unknown[] = [];
+  const definition = spec({
+    capture: async (client) => {
+      const { rows: [state] } = await client.query("SELECT requested FROM compute.batch");
+      captured.push(state.requested);
+      return state.requested;
+    },
+    calculate: async (input) => {
+      began.resolve();
+      await release.promise;
+      return input;
+    },
+    publish: (_client, output) => {
+      published.push(output);
+      return Promise.resolve();
+    },
+  });
+  let batches = await openBatches(server.url, [definition], { ...options, coalesceMs: 3600000 });
+  try {
+    await batches.invalidate();
+    await batches.close();
+    await db.query("UPDATE graphile_worker._private_jobs SET run_at=now()");
+    batches = await openBatches(server.url, [definition], { ...options, invalidateOnStart: true });
+    await began.promise;
+    assertEquals(captured, ["2"]);
+    release.resolve();
+    await until(async () => (await db.query("SELECT completed FROM compute.batch")).rows[0].completed === "2");
+    assertEquals(published, ["2"]);
+    assertEquals((await db.query("SELECT requested,completed FROM compute.batch")).rows, [{ requested: "2", completed: "2" }]);
+  } finally {
+    release.resolve();
+    await batches.close();
+    await db.end();
+  }
+});
+
+pgTest("startup invalidation preserves a retained claim before its successor", async () => {
+  await using server = await postgres();
+  const db = new pg.Pool({ connectionString: server.url });
+  let input = 1;
+  let fail = true;
+  const captured: number[] = [];
+  const published: unknown[] = [];
+  const definition = spec({
+    capture: () => {
+      captured.push(input);
+      return Promise.resolve(input);
+    },
+    publish: (_client, output) => {
+      if (fail) return Promise.reject(new Error("publication interrupted"));
+      published.push(output);
+      return Promise.resolve();
+    },
+  });
+  let batches = await openBatches(server.url, [definition], options);
+  try {
+    await batches.invalidate();
+    await until(async () => (await db.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE attempts=1 AND locked_at IS NULL AND last_error IS NOT NULL")).rows[0].n === 1);
+    await batches.close();
+    assertEquals((await db.query("SELECT inputs FROM compute.batch")).rows, [{ inputs: 1 }]);
+    input = 2;
+    fail = false;
+    await db.query("UPDATE graphile_worker._private_jobs SET run_at=now()");
+    batches = await openBatches(server.url, [definition], { ...options, invalidateOnStart: true });
+    await until(async () => (await db.query("SELECT completed FROM compute.batch")).rows[0].completed === "2");
+    assertEquals(captured, [1, 2]);
+    assertEquals(published, [1, 2]);
+  } finally {
+    await batches.close();
+    await db.end();
+  }
+});
+
 pgTest("redelivery after publication cannot republish a removed computation", async () => {
   await using server = await postgres();
   const db = new pg.Pool({ connectionString: server.url });
@@ -148,6 +227,7 @@ pgTest("publication rollback retains the frozen claim through retry and restart"
   let captures = 0;
   let fail = true;
   const calculated: unknown[] = [];
+  const released: unknown[] = [];
   const definition = spec({
     capture: () => {
       captures++;
@@ -156,6 +236,10 @@ pgTest("publication rollback retains the frozen claim through retry and restart"
     calculate: (value) => {
       calculated.push(value);
       return Promise.resolve(value);
+    },
+    release: async (inputs, output) => {
+      assertEquals((await db.query("SELECT inputs FROM compute.batch")).rows[0].inputs, null);
+      released.push([inputs, output]);
     },
     publish: async (client, value) => {
       await client.query("INSERT INTO output VALUES ($1)", [value]);
@@ -168,6 +252,7 @@ pgTest("publication rollback retains the frozen claim through retry and restart"
     await batches.invalidate();
     await until(async () => (await db.query("SELECT count(*)::int AS n FROM graphile_worker.jobs WHERE attempts = 1 AND locked_at IS NULL")).rows[0].n === 1);
     assertEquals((await db.query("SELECT * FROM output")).rows, []);
+    assertEquals(released, []);
     assertEquals((await db.query("SELECT completed, claimed, inputs FROM compute.batch")).rows[0], { completed: "0", claimed: "1", inputs: 1 });
     assertEquals((await db.query("SELECT outcome FROM durex.work")).rows, [{ outcome: null }]);
     assertEquals((await db.query("SELECT count(*)::int AS n FROM hybrid_compute_batch.receipt WHERE request->'event'->>'kind'='complete'")).rows[0].n, 0);
@@ -183,6 +268,8 @@ pgTest("publication rollback retains the frozen claim through retry and restart"
     batches = await openBatches(server.url, [definition], options);
     await batches.invalidate();
     await until(async () => (await db.query("SELECT requested = completed AS done FROM compute.batch")).rows[0].done);
+    await until(() => Promise.resolve(released.length === 2));
+    assertEquals(released, [[1, 1], [99, 99]]);
     assertEquals((await db.query("SELECT value FROM output ORDER BY value")).rows, [{ value: 1 }, { value: 99 }]);
     assertEquals(calculated, [1, 1, 99]);
     assertEquals(captures, 2);
@@ -591,6 +678,7 @@ pgTest("permissive default grants cannot expose captured inputs or authorize mac
     for (
       const table of [
         "compute.capture",
+        "compute.source",
         "compute.batch",
         "compute.machine_version",
         "hybrid_compute_batch.instance",
@@ -967,3 +1055,327 @@ for (const legacy of [
     await db.end();
   }
 });
+
+pgTest("failed publication discards bounded output and retries the retained capture", async () => {
+  const { BoundedRuntime } = await import("./bounded-runtime.ts");
+  type Capture = import("./bounded-runtime.ts").BoundedCapture;
+  type Output = import("./bounded-runtime.ts").BoundedOutput;
+  await using server = await postgres();
+  const db = new pg.Pool({ connectionString: server.url });
+  const directory = await Deno.makeTempDir();
+  const runtime = await BoundedRuntime.create({
+    directory, databaseUrl: server.url, version: "v1", reads: [], queries: {},
+    spec: { name: "ratings", file: "fixture.js", to: ["ratings"], wasm: [] },
+    source: `export const reads=[];export const queries={};export const finish=()=>({});
+      export function plan(){return {checkpoint:null,writes:{ratings:[{id:'one',value:7}]},done:true}}`,
+    runner: { run: () => { throw new Error("unexpected WASM"); } },
+  });
+  await db.query("CREATE TABLE output (value integer NOT NULL)");
+  let captures = 0;
+  let fail = true;
+  let released = false;
+  const inputs: Capture[] = [];
+  const definition = spec({
+    capture: () => { captures++; return runtime.capture(); },
+    calculate: input => {
+      inputs.push(input as Capture);
+      return runtime.calculate(input as Capture);
+    },
+    publish: async (client, output) => {
+      for await (const page of runtime.pages(output as Output, "ratings")) {
+        await client.query("INSERT INTO output VALUES ($1)", [page[0].value]);
+      }
+      if (fail) throw new Error("publication failed after staging bounded output");
+    },
+    discard: async output => {
+      assertEquals((await db.query("SELECT inputs FROM compute.batch")).rows[0].inputs, inputs[0]);
+      await runtime.discard(output as Output);
+    },
+    release: async (input, output) => {
+      assertEquals((await db.query("SELECT inputs FROM compute.batch")).rows[0].inputs, null);
+      await runtime.release(input as Capture, output as Output);
+      released = true;
+    },
+  });
+  const batches = await openBatches(server.url, [definition], options);
+  const files = async () => {
+    const names = [];
+    for await (const file of Deno.readDir(directory)) names.push(file.name);
+    return names.sort();
+  };
+  try {
+    await batches.invalidate();
+    await until(async () => (await db.query("SELECT count(*)::int AS n FROM graphile_worker.jobs WHERE attempts=1 AND locked_at IS NULL")).rows[0].n === 1);
+    assertEquals(await files(), [`capture-${inputs[0].id}.duckdb`]);
+    assertEquals((await db.query("SELECT * FROM output")).rows, []);
+    fail = false;
+    await db.query("UPDATE graphile_worker._private_jobs SET run_at=now()");
+    await until(() => Promise.resolve(released));
+    assertEquals(captures, 1);
+    assertEquals(inputs, [inputs[0], inputs[0]]);
+    assertEquals(await files(), []);
+    assertEquals((await db.query("SELECT * FROM output")).rows, [{ value: 7 }]);
+  } finally {
+    await batches.close();
+    await db.end();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+pgTest(
+  "reconciled startup preserves verified prepared state and invalidates on version, source, sink, or unverified changes",
+  async () => {
+    await using server = await postgres();
+    const db = new pg.Pool({ connectionString: server.url });
+    await db.query(`
+      CREATE TABLE games (id int PRIMARY KEY, goals int NOT NULL);
+      CREATE TABLE teams (id int PRIMARY KEY, name text NOT NULL);
+      CREATE TABLE ratings (id int PRIMARY KEY, score int NOT NULL);
+      CREATE TABLE chances (id int PRIMARY KEY, pct int NOT NULL);
+      CREATE TABLE standings (id int PRIMARY KEY, pts int NOT NULL);
+      INSERT INTO games VALUES (1, 2);
+      INSERT INTO teams VALUES (1, 'A');
+    `);
+    const counts = { ratings: 0, chances: 0, standings: 0 };
+    const makeSpecs = (versions: { ratings?: string; chances?: string; standings?: string } = {}): BatchSpec[] => [
+      spec({
+        name: "ratings",
+        reads: ["games"],
+        to: ["ratings"],
+        version: versions.ratings ?? "v1",
+        capture: async (client) => {
+          counts.ratings++;
+          return (await client.query("SELECT coalesce(sum(goals), 0)::int AS total FROM games")).rows[0].total;
+        },
+        publish: async (client, total) => {
+          await client.query("DELETE FROM ratings");
+          await client.query("INSERT INTO ratings VALUES (1, $1)", [total]);
+        },
+      }),
+      spec({
+        name: "chances",
+        reads: ["ratings"],
+        to: ["chances"],
+        version: versions.chances ?? "v1",
+        capture: async (client) => {
+          counts.chances++;
+          return (await client.query("SELECT coalesce(sum(score), 0)::int AS total FROM ratings")).rows[0].total;
+        },
+        publish: async (client, total) => {
+          await client.query("DELETE FROM chances");
+          await client.query("INSERT INTO chances VALUES (1, $1)", [Number(total) * 10]);
+        },
+      }),
+      spec({
+        name: "standings",
+        reads: ["teams"],
+        to: ["standings"],
+        version: versions.standings ?? "v1",
+        capture: async (client) => {
+          counts.standings++;
+          return (await client.query("SELECT count(*)::int AS total FROM teams")).rows[0].total;
+        },
+        publish: async (client, total) => {
+          await client.query("DELETE FROM standings");
+          await client.query("INSERT INTO standings VALUES (1, $1)", [total]);
+        },
+      }),
+    ];
+    let batches: Awaited<ReturnType<typeof openBatches>> | undefined;
+    try {
+      batches = await openBatches(server.url, makeSpecs(), { ...options, invalidateOnStart: true });
+      await until(async () =>
+        (await db.query("SELECT count(*)::int = 3 AND bool_and(requested = completed AND completed > 0) AS done FROM compute.batch")).rows[0].done
+      );
+      assertEquals(counts, { ratings: 1, chances: 1, standings: 1 });
+      await batches.close();
+      batches = undefined;
+
+      batches = await openBatches(server.url, makeSpecs(), { ...options, invalidateOnStart: true });
+      assertEquals(
+        (await db.query("SELECT name, requested, completed, claimed, wake FROM compute.batch ORDER BY name")).rows,
+        [
+          { name: "chances", requested: "2", completed: "2", claimed: null, wake: null },
+          { name: "ratings", requested: "1", completed: "1", claimed: null, wake: null },
+          { name: "standings", requested: "1", completed: "1", claimed: null, wake: null },
+        ],
+      );
+      assertEquals(counts, { ratings: 1, chances: 1, standings: 1 });
+      await batches.close();
+      batches = undefined;
+
+      // Replica-role table writes without a matching compute.source restore must still advance source revisions.
+      await db.query("BEGIN; SET LOCAL session_replication_role = 'replica'; INSERT INTO games VALUES (2, 3); COMMIT");
+      batches = await openBatches(server.url, makeSpecs(), { ...options, invalidateOnStart: true });
+      await until(async () =>
+        (await db.query("SELECT bool_and(requested = completed) AS done FROM compute.batch")).rows[0].done
+      );
+      assertEquals(counts, { ratings: 2, chances: 2, standings: 1 });
+      assertEquals((await db.query("SELECT pct FROM chances")).rows, [{ pct: 50 }]);
+      await batches.close();
+      batches = undefined;
+
+      await db.query("DELETE FROM standings");
+      batches = await openBatches(server.url, makeSpecs(), { ...options, invalidateOnStart: true });
+      await until(async () =>
+        (await db.query("SELECT bool_and(requested = completed) AS done FROM compute.batch")).rows[0].done
+      );
+      assertEquals(counts, { ratings: 2, chances: 2, standings: 2 });
+      assertEquals((await db.query("SELECT pts FROM standings")).rows, [{ pts: 1 }]);
+      await batches.close();
+      batches = undefined;
+
+      batches = await openBatches(server.url, makeSpecs({ ratings: "v2" }), { ...options, invalidateOnStart: true });
+      await until(async () =>
+        (await db.query("SELECT bool_and(requested = completed) AS done FROM compute.batch")).rows[0].done
+      );
+      assertEquals(counts, { ratings: 3, chances: 3, standings: 2 });
+      await batches.close();
+      batches = undefined;
+
+      await db.query(
+        "UPDATE compute.capture SET completed_coverage = NULL WHERE instance_id = (SELECT instance_id FROM compute.definition WHERE name = 'standings')",
+      );
+      batches = await openBatches(server.url, makeSpecs({ ratings: "v2" }), { ...options, invalidateOnStart: true });
+      await until(async () =>
+        (await db.query("SELECT bool_and(requested = completed) AS done FROM compute.batch")).rows[0].done
+      );
+      assertEquals(counts, { ratings: 3, chances: 3, standings: 3 });
+      await batches.close();
+      batches = undefined;
+
+      const savedSources = (await db.query("SELECT name, revision::text, txid::text FROM compute.source ORDER BY name")).rows;
+      await db.query("BEGIN");
+      await db.query("SET LOCAL session_replication_role = 'replica'");
+      await db.query("TRUNCATE compute.source, games, teams, ratings, chances, standings");
+      await db.query("INSERT INTO games VALUES (1, 2), (2, 3)");
+      await db.query("INSERT INTO teams VALUES (1, 'A')");
+      await db.query("INSERT INTO ratings VALUES (1, 5)");
+      await db.query("INSERT INTO chances VALUES (1, 50)");
+      await db.query("INSERT INTO standings VALUES (1, 1)");
+      for (const row of savedSources) {
+        await db.query("INSERT INTO compute.source(name, revision, txid) VALUES ($1, $2::bigint, $3::xid8)", [
+          row.name,
+          row.revision,
+          row.txid,
+        ]);
+      }
+      await db.query("COMMIT");
+
+      batches = await openBatches(server.url, makeSpecs({ ratings: "v2" }), { ...options, invalidateOnStart: true });
+      assertEquals(
+        (await db.query("SELECT name, requested, completed, claimed, wake FROM compute.batch ORDER BY name")).rows,
+        [
+          { name: "chances", requested: "6", completed: "6", claimed: null, wake: null },
+          { name: "ratings", requested: "3", completed: "3", claimed: null, wake: null },
+          { name: "standings", requested: "3", completed: "3", claimed: null, wake: null },
+        ],
+      );
+      assertEquals(counts, { ratings: 3, chances: 3, standings: 3 });
+      await batches.close();
+      batches = undefined;
+
+      let digestCalculations = 0;
+      let digestPublications = 0;
+      let digestReleased = 0;
+      const digestSpec = spec({
+        name: "standings",
+        reads: ["teams"],
+        to: ["standings"],
+        version: "v2",
+        capture: async (client) => {
+          counts.standings++;
+          const total = (await client.query("SELECT count(*)::int AS total FROM teams WHERE name <> 'ignored'")).rows[0].total;
+          return { id: "00000000-0000-4000-8000-000000000001", version: "v2", name: "standings", total, digest: `d:${total}` };
+        },
+        calculate: async (input) => {
+          digestCalculations++;
+          return input;
+        },
+        publish: async (client, value) => {
+          digestPublications++;
+          await client.query("DELETE FROM standings");
+          await client.query("INSERT INTO standings VALUES (1, $1)", [(value as { total: number }).total]);
+        },
+        release: async () => {
+          digestReleased++;
+        },
+      });
+      batches = await openBatches(server.url, [digestSpec], { ...options, invalidateOnStart: true });
+      await until(async () =>
+        (await db.query("SELECT requested = completed AND completed > 3 AS done FROM compute.batch WHERE name = 'standings'")).rows[0].done
+      );
+      assertEquals([counts.standings, digestCalculations, digestPublications, digestReleased], [4, 1, 1, 1]);
+
+      // An ignored source row and a 0-row sink statement do not force republication when the query digest is unchanged.
+      await db.query("INSERT INTO teams VALUES (2, 'ignored')");
+      await db.query("DELETE FROM standings WHERE false");
+      await batches.invalidate(["teams"]);
+      await until(async () =>
+        (await db.query("SELECT requested = completed AND completed = 5 AS done FROM compute.batch WHERE name = 'standings'")).rows[0].done
+      );
+      assertEquals([counts.standings, digestCalculations, digestPublications, digestReleased], [5, 1, 1, 2]);
+      await batches.close();
+      batches = undefined;
+
+      // Restart after a digest-unchanged completion remains clean.
+      batches = await openBatches(server.url, [digestSpec], { ...options, invalidateOnStart: true });
+      assertEquals([counts.standings, digestCalculations, digestPublications, digestReleased], [5, 1, 1, 2]);
+
+      // A sink modification forces recalculation and republication even when the input digest is unchanged.
+      await db.query("DELETE FROM standings");
+      await batches.invalidate(["teams"]);
+      await until(async () =>
+        (await db.query("SELECT requested = completed AND completed = 6 AS done FROM compute.batch WHERE name = 'standings'")).rows[0].done
+      );
+      assertEquals([counts.standings, digestCalculations, digestPublications, digestReleased], [6, 2, 2, 3]);
+      await batches.close();
+      batches = undefined;
+
+      // Invalidation during a read-only capture completes without blocking and schedules a successor run.
+      const captureStarted = Promise.withResolvers<void>();
+      const releaseCapture = Promise.withResolvers<void>();
+      let captureCalls = 0;
+      batches = await openBatches(server.url, [
+        spec({
+          name: "ratings",
+          reads: ["games"],
+          to: ["ratings"],
+          version: "v2",
+          capture: async (client) => {
+            captureCalls++;
+            const total = (await client.query("SELECT coalesce(sum(goals), 0)::int AS total FROM games")).rows[0].total;
+            if (captureCalls === 1) {
+              captureStarted.resolve();
+              await releaseCapture.promise;
+            }
+            return total;
+          },
+          publish: async (client, total) => {
+            await client.query("DELETE FROM ratings");
+            await client.query("INSERT INTO ratings VALUES (1, $1)", [total]);
+          },
+        }),
+        digestSpec,
+      ], options);
+      await db.query("INSERT INTO games VALUES (3, 4)");
+      await batches.invalidate(["games"]);
+      await captureStarted.promise;
+      await db.query("INSERT INTO games VALUES (4, 6)");
+      await batches.invalidate(["games", "teams"]);
+      assertEquals(
+        (await db.query("SELECT requested, completed, claimed FROM compute.batch WHERE name = 'standings'")).rows,
+        [{ requested: "7", completed: "6", claimed: null }],
+      );
+      releaseCapture.resolve();
+      await until(async () =>
+        (await db.query("SELECT bool_and(requested = completed) AS done FROM compute.batch")).rows[0].done
+      );
+      assertEquals(captureCalls, 2);
+      assertEquals((await db.query("SELECT score FROM ratings")).rows, [{ score: 15 }]);
+    } finally {
+      await batches?.close();
+      await db.end();
+    }
+  },
+);

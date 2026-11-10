@@ -110,6 +110,58 @@ schema refusal, replay and compatibility with untyped numerical queries.
 exercises source values, native DuckDB conversion and typed sink publication in
 a disposable database.
 
+## Bounded native snapshots
+
+In `duckdb-snapshot` mode, a computation with `steps` uses the same bounded
+numerical steps as Cloudflare. Generation bundles the authored module into
+`<steps>.bundle.js`; the runtime admits this artifact inside a permissionless
+worker and never invokes a compiler. Its bytes participate in computation
+identity, so incompatible retained work is refused.
+
+Capture copies declared tables from one repeatable-read PostgreSQL transaction
+and materializes query results in an immutable DuckDB file. The batch ledger
+retains its identity, not the full relation as JSON. Generated SQL stages execute
+in DuckDB. Numerical steps read bounded pages, run WASM, and accumulate outputs
+in a separate DuckDB file. Outputs are sorted once for publication; pages read
+bounded ordinal ranges instead of repeatedly sorting the remaining output.
+PostgreSQL stages those output pages and applies all
+sinks, the completion hook, and the batch receipt in one transaction. A failed
+publication retains the original input file for replay; a process restart can
+repeat numerical work but cannot silently recapture newer source rows.
+
+Bounded means bounded transfers, not a smaller application window or incremental
+maintenance. Query pages are limited to 4,096 rows and 1 MiB; publication pages
+to 128 rows and 256 KiB. Each DuckDB instance uses one execution thread with a 512 MiB engine budget
+and can spill to disk. This is not a cap on total service memory: concurrent captures,
+workers and a numerical WASM job have their own allocations. Native execution
+replays steps from the retained capture after interruption; it does not persist
+each step's checkpoint as the Cloudflare executor does. Worker SQL cannot access
+host files or the network through DuckDB.
+
+`COMPUTE_STATE_DIR` must survive process and container replacement alongside the
+PostgreSQL batch ledger. The Docker appliance uses `/var/lib/duckstream`: mount
+and reuse a named volume there. Local execution uses `.pronto/live/duckstream`;
+Compose binds that directory to `/state`. Do not delete retained captures to
+recover space. Successful or superseded work releases its files after commit;
+startup collects abandoned files under the coordinator singleton, preserving
+all manifests referenced by the ledger. A missing retained file is an error.
+
+Startup reconciliation runs before workers begin capturing. Statement triggers on
+physical `public` source and sink tables advance `compute.source` revisions,
+and claims and publications record their covered computation version, source
+revisions, parent revisions, and sink revisions on `compute.capture`. Startup
+invalidates computations whose completed or claimed coverage is missing or no
+longer matches current definitions, sources, parents, or sinks, and cascades to
+declared dependents; verified idle state remains clean. Pending unclaimed work
+absorbs startup invalidation, and a retained claim replays its original input
+before a successor captures newer data. Restoring `compute.source` in the same
+transaction as `public` source and sink tables preserves the recorded revisions
+across archive import.
+
+Computations without `steps` retain the small-input array-based snapshot path.
+Neither path provides incremental SQL maintenance: source copying and query
+execution recur for each coalesced batch.
+
 ## Cloudflare snapshot execution
 
 The Cloudflare release uses the same admitted computation and numerical WASM
@@ -132,7 +184,8 @@ Its `step(host, checkpoint)` receives read-only `query`, declared `wasm`, and
 deterministic `seed` capabilities. It returns scratch SQL statements, sink
 upserts, a JSON checkpoint and `done`. The static cage packages this module
 with the computation; its compiled bytes participate in the execution version.
-Pages and native execution retain the ordinary `plan`/`finish` module.
+Pages retain the ordinary `plan`/`finish` module; native snapshot execution uses
+`steps` when declared, as described above.
 
 This path uses disk-backed DuckDB with a 32 MB engine budget instead of the
 in-memory query path above. Each capture gets a separate Query Durable Object.
@@ -205,10 +258,15 @@ Durable Object in its own immutable Worker imports bounded encoded block pages,
 opens the immutable database
 image, and materializes ordinary logged heap tables in durable ranges of at most 256
 PostgreSQL pages per call. Completed tables become readable only after every range
-commits. This work runs independently of request serving. Transfer
-cursors and materialized relations survive eviction. Publication or supersession
-reclaims both the image and reader. Reset fences and reclaims retained readers
-before replacing the source directory. Private PostgreSQL relations on the source
+commits. Before each source-row page, the coordinator validates the source
+generation and directory, then reads directly from the reader. Row payloads bypass
+the serving database object. This work runs independently of request serving. Transfer
+cursors and materialized relations survive eviction. Each computation version keeps
+one reader per source generation within its immutable Reader Worker. The first
+capture copies the full image; subsequent captures transfer node metadata and
+changed blocks from the last acknowledged image. Publication retires the capture
+but preserves that baseline. Reset fences old generations before replacing the
+source directory. Private PostgreSQL relations on the source
 stage bounded output chunks. Sealing checks exact chunk and row
 counts; publication applies all sinks with the completion receipt atomically.
 Receipt reconciliation handles a lost publication response and reclaims the
@@ -220,11 +278,28 @@ its output cursor.
 The database object's alarm belongs only to schedules and drains;
 requests do not await computation or its scheduling queries. The metadata snapshot
 cut and publication serialize against database work; physical transfer, source-row
-capture, query execution and pure computation run independently. This first physical
-reader implementation transfers the whole database image for each capture, including
-tables the computation does not read. It removes the long serving-database capture
-transaction, but adds transfer time and duplicated storage. Publication still requires
-one source transaction; snapshotting does not make that transaction incremental.
+capture, query execution and pure computation run independently. Source snapshots
+retain changed-block preimages until the reader acknowledges its next complete
+image. Bounded metadata pages identify which files need block transfer; unchanged
+files need no block-page requests. The importer binds those decisions to the
+baseline and verifies them on replay. Delta pages include explicit block deletions
+and appended blocks; all bytes come from the frozen target, never from a later
+source state. Publication eligibility is checked at transfer admission and again
+at publication; copying pages does not enter the serving PostgreSQL transaction
+queue. Each page still checks generation, reset and retained snapshot identity.
+
+The reader freezes its pristine imported image before opening PostgreSQL. Before
+another capture, it closes PostgreSQL and restores that image in bounded steps,
+discarding local materialization writes. It applies the next delta with the old
+baseline still retained, so interruption or supersession can restore that baseline.
+The completed image and its new pristine snapshot commit together. Stale releases
+cannot retire a newer capture, and source baseline promotion cannot move backward.
+
+The physical transfer is incremental; source-table materialization, loading those
+rows into DuckDB, and the computation remain batch operations. Baselines require
+retained storage on both objects; long intervals between captures accumulate source
+preimages. Publication still requires one source transaction; this transport does
+not make that transaction incremental.
 
 Execution and transport failures are recorded durably and thrown from the computation
 alarm. Exhausted captures remain inspectable but have no runnable deadline. They
@@ -262,9 +337,11 @@ Reader imports have their own durable ownership ledger on the source. Its privat
 name. The ledger survives source-directory reset. Cleanup touches only the bound
 Reader owner; a redeployment cannot silently discard another release's imported
 database. Rebinding the owning release reclaims its completed or obsolete imports.
-Unbound reader records remain visible for manual retirement. Staged publication
-releases the bound reader and physical snapshot after the receipt commits, without
-waiting for another claim. A lost publication or cleanup acknowledgement retains
+Unbound reader records remain visible for manual retirement. A separate baseline
+ledger pins source images across publication, including references from other
+immutable Reader owners. Staged publication retires the bound capture after the
+receipt commits while retaining its baseline. Reset clears source baseline pins
+but keeps inaccessible owners' retirement records. A lost publication or cleanup acknowledgement retains
 a coordinator wake; already committed work is not marked as failed.
 
 Manual retirement must remove the obsolete companion's Durable Object storage
@@ -305,19 +382,68 @@ schema migration.
 ## Query engines
 
 `DUCKSTREAM_ENGINE` selects `duckdb-snapshot` (the default) or `feldera`.
-Feldera mode requires `FELDERA_URL` and a generated `feldera` descriptor file
-for every computation. The descriptor contains the authored SQL, projected
+Feldera mode requires a generated `feldera` descriptor file for every
+computation and either `FELDERA_ARTIFACTS_DIR` or `FELDERA_URL`. The descriptor contains the authored SQL, projected
 input queries and typed materialized output views. Its bytes and engine choice
 participate in the computation version, so a deployment cannot reinterpret
 retained inputs after changing engines. Computations without a descriptor keep
 the existing snapshot contract.
+
+`FELDERA_ARTIFACTS_DIR` selects locally supervised, precompiled Linux pipelines.
+The Docker appliance builds these when its declared engine is Feldera. Its
+release build compiles connector-free SQL and packages the executable, program
+information, a Linux parent-death supervisor and isolated shared libraries. The
+runtime checks their digests, SQL identity, architecture and pinned Feldera
+version before starting CDC. It never compiles on demand or falls back to
+snapshot execution. Changing SQL requires rebuilding the release artifact.
+
+Publication and carrier-table identities remain runtime configuration, so a
+fresh circuit can use fresh CDC identities with the same executable. Coordinator
+death terminates its pipelines through Linux parent-death signaling. Restart
+still reconstructs OSS relational state from a fresh baseline; precompilation
+does not introduce checkpoint support. `FELDERA_MAX_RSS` sets each pipeline's
+memory-pressure budget (default `384MiB`), not an operating-system hard limit.
+Standalone CDC connectors apply backpressure at 10,000 queued records or 16 MiB
+per input, with PostgreSQL CDC batches capped at 1 MiB and a one-second fill
+time. These thresholds may overshoot; they limit ingestion queues separately
+from circuit storage. Size the complete application under a container limit, including PostgreSQL,
+Electric, queries and the computation workers.
+
+The [pinned CDC memory guard](https://github.com/feldera/etl/blob/cdfb3c7e6581b63d8876c3c1b335b3a99e676c55/crates/etl/src/runtime/memory_monitor.rs)
+counts the entire cgroup, including
+file cache and sibling services. It pauses at 85% and resumes below 75%; drained
+input queues alone need not release that pause. A dedicated VM appliance can
+use host-memory accounting by omitting a smaller container memory limit. This
+keeps the connector's emergency guard enabled; it does not prove the complete
+application fits. Measure bootstrap and steady-state memory on the deployment.
+Bootstrap fails after ten minutes without ingestion or circuit progress, rather
+than imposing a total duration limit on a growing snapshot.
+
+Artifact execution requires a private, disk-backed `FELDERA_WORK_DIR`; the
+appliance uses `/var/lib/feldera`. Each computation has a separate directory and
+each incarnation a unique child directory. After retiring previous CDC slots,
+startup removes stale scratch for that computation and starts fresh spill
+storage with a 64 MiB cache. Retirement also removes obsolete computations'
+scratch under the configured root, preserving active computations. A previous
+host or a changed root needs separate deployment cleanup. Spill storage is
+recomputable scratch, not an OSS checkpoint.
+
+Without an artifact directory, `FELDERA_URL` selects the existing remote manager
+path. When migrating a retained database from manager-owned pipelines, leave the
+old manager reachable until its registered pipelines have been retired. The
+coordinator refuses to drop active CDC resources merely because a manager is
+unreachable. A fresh database has no such retirement dependency.
 
 `FELDERA_COMPILATION_PROFILE` accepts `optimized` (the default) or `unoptimized`.
 Disposable test runners use `unoptimized` to reduce cold Rust compilation time;
 the pinned container strips symbols for that profile before Feldera copies and
 checksums its executables. These test binaries lack symbolic native backtraces.
 Direct launches and production retain `optimized`. The profile changes compiler
-optimization, not the computation version or retained-input contract.
+optimization, not the computation version or retained-input contract. The container
+limits Cargo to two concurrent build jobs to reduce compiler memory pressure.
+This does not limit pipeline execution workers.
+The limit lives in Cargo configuration because Feldera clears compiler environment
+overrides.
 
 Snapshot mode reads one repeatable-read PostgreSQL snapshot. Native mode uses
 Feldera's PostgreSQL CDC connector. Row-local PostgreSQL projections maintain

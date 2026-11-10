@@ -1,3 +1,4 @@
+import { subsetScheduler } from './subset-scheduler.js'
 import { createCollection, IR } from "@tanstack/db"
 import { ShapeStream } from "@electric-sql/client"
 import type { Collection, LoadSubsetOptions } from "@tanstack/db"
@@ -553,6 +554,17 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     phaseListeners.forEach((fn) => fn())
   }
 
+  // Electric pauses its stream before fetching; limit pause holders as well as HTTP requests.
+  const scheduleSubset = subsetScheduler()
+  const scheduleSubsetRequest = subsetScheduler()
+  const neverAbort = new AbortController().signal
+  const subsetFetch = (input: RequestInfo | URL, init: RequestInit | undefined, lifetime: AbortSignal) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), 'https://mecha.invalid')
+    if (![...url.searchParams.keys()].some(key => key.startsWith('subset__'))) return doFetch(input, init)
+    const requestSignal = init?.signal ?? (input instanceof Request ? input.signal : neverAbort)
+    const signal = AbortSignal.any([requestSignal, lifetime])
+    return scheduleSubsetRequest(() => doFetch(input, { ...init, signal }), signal, () => { throw signal.reason ?? new DOMException('Aborted', 'AbortError') })
+  }
   const gcTime = config.shapeIdleMs ?? SHAPE_IDLE_MS
   const identity = () => config.subject ? config.subject() : config.token?.()
   // Unions and their nested shapes outlive readers; their account cannot be
@@ -570,11 +582,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   function shape(t: Table, key?: RowKey) {
     const getKey = (item: any) => item[t.key]
     const onDemand = t.sync === "on-demand"
-    const options = electricCollectionOptions({
-      id: key ? `mecha:${t.id}@${key.column}=${key.value}` : `mecha:${t.id}`,
-      getKey,
-      syncMode: t.sync,
-      shapeOptions: {
+    const shapeOptions = {
         url: `${electricUrl}/v1/shape`,
         // Typed as a string upstream, resolved as a supplier at runtime like
         // any other param. An on-demand shape asks for whole rows: a change
@@ -582,7 +590,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         // changed, and land in the collection as a row missing the rest.
         params: { table: t.table, where: shapes.where(t.table, key) as any, ...(onDemand ? { replica: "full" as const } : {}) },
         headers: { Authorization: shapes.authorization(t.table, key) },
-        fetchClient: config.fetcher,
+        fetchClient: (input: RequestInfo | URL, init?: RequestInit) => subsetFetch(input, init, neverAbort),
         // A refused token is re-minted, not retried: the refresh runs ahead
         // of expiry by a margin, but a machine asleep through it resumes
         // into a 401, and the retry resolves the header afresh. Anything
@@ -597,7 +605,12 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         // profiles apart, nor a string from a timezone that are both `text`.
         // An int8 is not necessarily txid, so it stays text too.
         parser: parserOf(t),
-      },
+    }
+    const options = electricCollectionOptions({
+      id: key ? `mecha:${t.id}@${key.column}=${key.value}` : `mecha:${t.id}`,
+      getKey,
+      syncMode: t.sync,
+      shapeOptions,
       // No persistence handlers: writes ride the offline executor below —
       // handlers would tie delivery to the optimistic transaction's
       // lifetime instead of the durable outbox's.
@@ -617,6 +630,8 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       return () => void failureListeners.delete(fn)
     }
     options.sync.sync = (params) => {
+      const controller = new AbortController()
+      shapeOptions.fetchClient = (input, init) => subsetFetch(input, init, controller.signal)
       const sink = idempotentSink(params, getKey)
       // Electric's parsers run per SQL type, while a carrier belongs to a
       // column. Normalize here, where both the message and its field list are
@@ -635,10 +650,9 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       if (!onDemand || load === undefined) return result
       return {
         ...(result as object),
+        cleanup: () => { controller.abort(); (result as any)?.cleanup?.() },
         loadSubset: coalescedLoad((opts: LoadSubsetOptions) => {
-          const loaded = load(parenthesizedLoad(opts))
-          if (loaded === true) return true
-          return loaded.catch((error) => {
+          return scheduleSubset(() => { const result = load(parenthesizedLoad(opts)); return result === true ? undefined : result }, controller.signal, () => undefined).catch((error) => {
             // A subset's request carries the stream's header but not its
             // onError, so a refused token is forgotten here as it is there.
             if ((error as { status?: number })?.status === 401) shapes.forget(t.table, key)

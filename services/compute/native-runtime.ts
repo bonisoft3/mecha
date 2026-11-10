@@ -59,6 +59,7 @@ export class NativeRuntime {
     uri: string,
     claims: Parameters<typeof publish>[3],
     profile: CompilationProfile = "optimized",
+    artifacts?: string,
   ) {
     this.names = Object.keys(program.outputs);
     this.engine = new NativeFeldera(
@@ -68,6 +69,7 @@ export class NativeRuntime {
       version,
       uri,
       profile,
+      artifacts,
     );
     this.spec = {
       name: computation.name,
@@ -354,6 +356,7 @@ export class NativeRuntime {
     );
     this.ready.resolve();
   }
+  async close() { await this.engine.close(); }
   async pending() {
     if (this.failure) throw this.failure.error;
     if (this.busy || this.first) await this.engine.check();

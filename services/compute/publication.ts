@@ -189,18 +189,83 @@ export async function publishDelta(
   );
 }
 
-async function apply(
+/** Caller owns the transaction and must roll it back if publication fails. */
+export async function publishPages(
   client: pg.PoolClient,
   spec: Publication,
-  rows: Record<string, Row[]>,
+  pages: (sink: string) => AsyncIterable<Row[]>,
   claims: Row,
-  deletions?: Record<string, string[]>,
 ): Promise<Summary> {
-  const sinks = { ...rows };
+  validate(spec, Object.fromEntries(spec.to.map((table) => [table, []])));
   validateSchemas(spec.types, spec.sinkTypes, spec.to, true);
-  for (const [table, fields] of Object.entries(spec.sinkTypes ?? {})) {
-    sinks[table] = postgresRows({ fields, types: spec.types! }, sinks[table]);
+  const previous = await enterAuthority(client, claims);
+  const summary: Summary = Object.fromEntries(spec.to.map((table) =>
+    [table, { rows: 0, upserted: 0, deleted: 0 }]
+  ));
+  const stages = new Map<string, { name: string; columns?: string[] }>();
+  for (const table of spec.to) {
+    const name = `publication_${crypto.randomUUID().replaceAll("-", "")}`;
+    const stage = identifier(name);
+    await client.query(`CREATE TEMP TABLE ${stage} ON COMMIT DROP AS SELECT * FROM public.${identifier(table)} WITH NO DATA`);
+    await client.query(`CREATE UNIQUE INDEX ON ${stage} (id)`);
+    let columns: string[] | undefined;
+    for await (const page of pages(table)) {
+      validate(spec, Object.fromEntries(spec.to.map((sink) => [sink, sink === table ? page : []])));
+      const encoded = json(page);
+      if (page.length > 128 || new TextEncoder().encode(encoded).length > 256 * 1024) {
+        throw new Error(`${table} publication page exceeds its bound`);
+      }
+      if (!page.length) continue;
+      const names = Object.keys(page[0]).sort();
+      if (columns && JSON.stringify(columns) !== JSON.stringify(names)) {
+        throw new Error(`${table} rows differ in columns`);
+      }
+      columns = names;
+      const fields = spec.sinkTypes?.[table];
+      const normalized = fields ? postgresRows({ fields, types: spec.types! }, page) : page;
+      const list = columns.map(identifier).join(", ");
+      await client.query(
+        `INSERT INTO ${stage} (${list}) SELECT ${list} FROM json_populate_recordset(NULL::public.${identifier(table)}, $1::json)`,
+        [json(normalized)],
+      );
+      summary[table].rows += page.length;
+    }
+    stages.set(table, { name, columns });
   }
+  for (const table of spec.to) {
+    const { name, columns } = stages.get(table)!;
+    const stage = identifier(name);
+    if (columns) {
+      const list = columns.map(identifier).join(", ");
+      const rest = columns.filter((column) => column !== "id");
+      const changes = rest.map((column) => `${identifier(column)} = EXCLUDED.${identifier(column)}`).join(", ");
+      const existing = rest.map((column) => `sink.${identifier(column)}`).join(", ");
+      const incoming = rest.map((column) => `EXCLUDED.${identifier(column)}`).join(", ");
+      const conflict = rest.length
+        ? `DO UPDATE SET ${changes} WHERE to_jsonb(ROW(${existing})) IS DISTINCT FROM to_jsonb(ROW(${incoming}))`
+        : "DO NOTHING";
+      const result = await client.query(
+        `INSERT INTO public.${identifier(table)} AS sink (${list}) SELECT ${list} FROM ${stage} WHERE true ON CONFLICT (id) ${conflict}`,
+      );
+      summary[table].upserted = result.rowCount!;
+    }
+  }
+  for (const table of spec.to) {
+    if (spec.sinkWrites?.[table] !== "upsert") {
+      const stage = identifier(stages.get(table)!.name);
+      const result = await client.query(
+        `DELETE FROM public.${identifier(table)} AS sink WHERE NOT EXISTS (SELECT FROM ${stage} AS retained WHERE sink.id = retained.id)`,
+      );
+      summary[table].deleted = result.rowCount!;
+    }
+  }
+  if (spec.onComplete) await client.query(`SELECT public.${identifier(spec.onComplete)}()`);
+  for (const { name } of stages.values()) await client.query(`DROP TABLE ${identifier(name)}`);
+  await leaveAuthority(client, previous);
+  return summary;
+}
+
+async function enterAuthority(client: pg.PoolClient, claims: Row) {
   const claimsJson = json(claims);
   const { role, settings, isolation } = await roleSettings(client, claims);
   const { rows: transaction } = await client.query<{ isolation: string }>(
@@ -240,6 +305,30 @@ async function apply(
     claimsJson,
   ]);
   await client.query("SELECT public.app_pre_request()");
+  return previous;
+}
+
+async function leaveAuthority(
+  client: pg.PoolClient, previous: { name: string; value: string | null }[],
+) {
+  for (const { name, value } of previous) {
+    await client.query("SELECT set_config($1, $2, true)", [name, value ?? ""]);
+  }
+}
+
+async function apply(
+  client: pg.PoolClient,
+  spec: Publication,
+  rows: Record<string, Row[]>,
+  claims: Row,
+  deletions?: Record<string, string[]>,
+): Promise<Summary> {
+  const sinks = { ...rows };
+  validateSchemas(spec.types, spec.sinkTypes, spec.to, true);
+  for (const [table, fields] of Object.entries(spec.sinkTypes ?? {})) {
+    sinks[table] = postgresRows({ fields, types: spec.types! }, sinks[table]);
+  }
+  const previous = await enterAuthority(client, claims);
   for (const table of spec.to) {
     const ids = [
       ...sinks[table].map((row) => row.id),
@@ -330,9 +419,6 @@ async function apply(
   if (spec.onComplete) {
     await client.query(`SELECT public.${identifier(spec.onComplete)}()`);
   }
-  // Restore authority before the caller advances the private batch ledger.
-  for (const { name, value } of previous) {
-    await client.query("SELECT set_config($1, $2, true)", [name, value ?? ""]);
-  }
+  await leaveAuthority(client, previous);
   return summary;
 }

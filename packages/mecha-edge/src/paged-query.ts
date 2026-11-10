@@ -1,3 +1,4 @@
+import { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from '../../compute-snapshot/src/chunk-limits.ts'
 import type { SnapshotChunk, SnapshotManifest } from '../../compute-snapshot/src/index.ts'
 import { snapshotStatements } from '../../../services/compute/snapshot-data.ts'
 import { bindBoundary, typedSql } from '../../../services/compute/portable-contract.ts'
@@ -94,7 +95,7 @@ export class PagedQuery {
 
   async append(chunk: SnapshotChunk) {
     const payload = strictJson(chunk)
-    if (new TextEncoder().encode(payload).length > maxBytes + 16384 || chunk.rows.length > maxRows) throw new Error('capture chunk exceeds limits')
+    if (new TextEncoder().encode(payload).length > CAPTURE_CHUNK_BYTES + 16384 || chunk.rows.length > CAPTURE_CHUNK_ROWS || new TextEncoder().encode(JSON.stringify(chunk.rows)).length > CAPTURE_CHUNK_BYTES) throw new Error('capture chunk exceeds limits')
     const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload)))].map(n => n.toString(16).padStart(2, '0')).join('')
     return this.atomic(conn => {
       const manifest = this.saved(conn)

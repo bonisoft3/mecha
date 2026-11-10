@@ -112,7 +112,7 @@ export def link [modules: table, cflags: list<string>, prefix: string] {
   let backend = ^make -s -C src/backend -f Makefile -f ($STATIC | path join print.mk) print-link PORTNAME=emscripten LDFLAGS_EX= LDFLAGS_EX_BE= | words
   let ldflags = [
     -sWASM_BIGINT -sSUPPORT_LONGJMP=emscripten -sFORCE_FILESYSTEM=1 -sUSE_PTHREADS=0
-    -sEXIT_RUNTIME=1 -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=Module -sALLOW_MEMORY_GROWTH
+    -sEXIT_RUNTIME=1 -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=Module -sALLOW_MEMORY_GROWTH -sMEMORY_GROWTH_LINEAR_STEP=1048576
     -sERROR_ON_UNDEFINED_SYMBOLS=1 -sINVOKE_RUN=0
     $'($TREE)/pglite/src/pglitec/pglitec.o' ($STATIC | path join pgl_static_modules.o)
     ...($modules | sort-by name | get objs | flatten)

@@ -40,6 +40,49 @@ Deno.test('a turn that fails frees the connection for the next', async () => {
   assert.equal(await next, 'ran')
 })
 
+Deno.test('short background database work overtakes queued background renders', async () => {
+  const serialize = lanes()
+  let release!: () => void
+  const current = serialize(() => new Promise<void>(resolve => { release = resolve }), 'background-render')
+  await Promise.resolve()
+  await Promise.resolve()
+  const ran: string[] = []
+  const renders = Array.from({ length: 3 }, (_, i) => serialize(async () => { ran.push(`render${i}`) }, 'background-render'))
+  const database = serialize(async () => { ran.push('database') }, 'low')
+  release()
+  await Promise.all([current, database, ...renders])
+  assert.deepEqual(ran, ['database', 'render0', 'render1', 'render2'])
+})
+
+Deno.test('background renders progress after bounded bursts of database work', async () => {
+  const ran = await order([...Array(40).fill('low'), ...Array(3).fill('background-render')])
+  assert.equal(ran.indexOf('background-render40'), 16)
+  assert.equal(ran.indexOf('background-render41'), 33)
+  assert.equal(ran.indexOf('background-render42'), 42)
+})
+
+Deno.test('database turns before a render queues count toward its bound', async () => {
+  const serialize = lanes()
+  for (let i = 0; i < 16; i++) await serialize(async () => {}, 'low')
+  let release!: () => void
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const held = serialize(() => new Promise<void>(resolve => { release = resolve; entered() }), 'api')
+  await started
+  const ran: string[] = []
+  const low = serialize(async () => { ran.push('low') }, 'low')
+  const render = serialize(async () => { ran.push('render') }, 'background-render')
+  release()
+  await Promise.all([held, low, render])
+  assert.deepEqual(ran, ['render', 'low'])
+})
+
+Deno.test('foreground traffic yields to both kinds of background work', async () => {
+  const ran = await order(['low', 'background-render', ...Array(12).fill('api')])
+  assert.ok(ran.indexOf('low0') <= 4)
+  assert.ok(ran.indexOf('background-render1') <= 9)
+})
+
 Deno.test('turns taken while a lane was empty owe it nothing', async () => {
   // A prefetch arriving after a run of API turns preempted the render queued with it.
   const serialize = lanes()

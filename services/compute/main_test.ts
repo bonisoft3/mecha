@@ -33,6 +33,11 @@ Deno.test("engine and Feldera program bytes fence retained computation inputs", 
     const snapshot = await computationVersion(spec, [], "duckdb-snapshot");
     const native = await computationVersion(spec, [], "feldera");
     assert(snapshot !== native);
+    const bounded = { ...spec, steps: `${dir}/steps` };
+    await Deno.writeTextFile(`${bounded.steps}.bundle.js`, "first bounded algorithm");
+    const first = await computationVersion(bounded, [], "duckdb-snapshot");
+    await Deno.writeTextFile(`${bounded.steps}.bundle.js`, "changed bounded algorithm");
+    assert(first !== await computationVersion(bounded, [], "duckdb-snapshot"));
     await Deno.writeTextFile(spec.feldera, '{"sql":"SELECT 2"}');
     assert(native !== await computationVersion(spec, [], "feldera"));
   } finally {

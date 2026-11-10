@@ -33,6 +33,17 @@ export class SqliteFS extends BaseFilesystem {
   #nextFd = 1
   #nextId = 1
 
+  // A host throw can unwind live PostgreSQL frames without closing its portal.
+  abortOnUnexpectedError(abort: (error: unknown) => never): void {
+    for (const name of ['chmod', 'close', 'fstat', 'lstat', 'mkdir', 'open', 'readdir', 'read', 'rename', 'rmdir', 'truncate', 'unlink', 'utimes', 'writeFile', 'write'] as const) {
+      const operation = this[name] as (...args: never[]) => unknown
+      Object.defineProperty(this, name, { value: (...args: never[]) => {
+        try { return operation.apply(this, args) }
+        catch (error) { if (!(error instanceof FsError)) abort(error); throw error }
+      } })
+    }
+  }
+
   constructor(sql: SqlStorage, requested?: StorageFormat) {
     super('sqlite://')
     this.#sql = sql

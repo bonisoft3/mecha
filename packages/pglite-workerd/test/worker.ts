@@ -11,6 +11,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { PGlite } from '@electric-sql/pglite'
 import { DataDirectory, type PhysicalSnapshot, type SnapshotNodes, type SnapshotBlocks } from '../src/data-directory.ts'
+import { SqliteFS } from '../src/sqlite-fs.ts'
 import type { StorageFormat } from '../src/storage-block.ts'
 import { filesystemCases } from './filesystem-cases.ts'
 import { recompressionCases, recompressionCrash } from './recompression-cases.ts'
@@ -38,11 +39,17 @@ globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...a: unkn
 globalThis.clearTimeout = ((id: Parameters<typeof clearTimeout>[0]) => { timers.delete(id); realClearTimeout(id) }) as typeof clearTimeout
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+let failRead = 0
+const read = SqliteFS.prototype.read
+SqliteFS.prototype.read = function (...args) {
+  if (failRead > 0 && --failRead === 0) throw new Error('injected filesystem failure')
+  return read.apply(this, args)
+}
 
 export class Fixture extends DurableObject {
   readonly #bornAt = new Date().toISOString()
   protected get storageFormat(): StorageFormat | undefined { return undefined }
-  readonly #dir = new DataDirectory(this.ctx.storage, this.storageFormat)
+  readonly #dir = new DataDirectory(this.ctx.storage, this.storageFormat, error => { this.ctx.abort(error instanceof Error ? error.message : String(error)); throw error })
   #db: Promise<PGlite> | null = null
 
   physicalManifest(id: string) { return this.#dir.snapshotManifest(id) }
@@ -62,7 +69,7 @@ export class Fixture extends DurableObject {
     if (path === '/compression-status') return json(this.#dir.storageStatus())
     if (path === '/compression-begin') return json(this.#dir.beginCompression(this.#dir.generation, compressionTarget))
     if (path === '/compression-advance') return json(this.#dir.advanceCompression(this.#dir.generation))
-    if (path === '/physical-snapshot-cases') { await physicalSnapshotCases(this.ctx.storage); return json({ ok: true }) }
+    if (path === '/physical-snapshot-cases') { await physicalSnapshotCases(this.ctx.storage, this.storageFormat?.codec ?? 'raw'); return json({ ok: true }) }
     if (path === '/recompression-cases') { await recompressionCases(this.ctx.storage); return json({ ok: true }) }
     if (path === '/recompression-stage' || path === '/recompression-recover') { await recompressionCrash(this.ctx.storage, path === '/recompression-recover'); return json({ ok: true }) }
     if (path === '/filesystem-cases') { filesystemCases(this.ctx.storage.sql); return json({ ok: true }) }
@@ -71,6 +78,18 @@ export class Fixture extends DurableObject {
     if (path === '/abort') this.ctx.abort('aborted by /abort')
     this.#db ??= this.#dir.open({ pgliteWasm, initdbWasm, pgliteData, icu })
     const db = await this.#db
+    if (path === '/missing-fs') {
+      try { db.Module.FS.stat('/pgdata/__missing_expected_file__'); return json({ missing: false }) }
+      catch { return json({ missing: true }) }
+    }
+    if (path === '/fail-read') {
+      await db.transaction(async tx => {
+        await tx.exec('INSERT INTO filesystem_fault_marker VALUES (1)')
+        failRead = 50
+        await tx.query('SELECT sum(length(payload)) FROM filesystem_fault_rows')
+      })
+      return json({ unexpected: true, remaining: failRead })
+    }
     if (path === '/freeze-physical') return json(await this.#dir.freeze(await req.text()))
     if (path === '/release-physical') { this.#dir.releaseSnapshot(await req.text()); return json({ ok: true }) }
     if (path === '/freeze-transaction') {

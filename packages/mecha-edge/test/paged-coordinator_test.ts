@@ -67,6 +67,7 @@ function fixture(sourceRows = 35, computeOwner = owner, values = new Map<string,
   } }
   const lost = (name: string) => { if (faults.delete(name)) throw new Error(`lost ${name} acknowledgement`) }
   const status = (remote: Remote) => ({
+    manifest: structuredClone(manifest),
     sources: [...remote.sources].map(([name, position]) => ({ name, position })),
     queries: [...remote.queries], declaredQueries: ['projection', 'summary'], sinks: ['sink', 'empty_sink'],
     execution: structuredClone(remote.execution),
@@ -76,6 +77,7 @@ function fixture(sourceRows = 35, computeOwner = owner, values = new Map<string,
     if (value.generation !== generation || publication !== 'pending') throw new Error('capture is no longer available')
   }
   const db: PagedDatabase & {
+    computeReaderName(value: ComputeCapture): Promise<string | null>
     computePrepare(): Promise<boolean>
     computeClaim(): Promise<ComputeCapture | null>
     computeReject(value: ComputeCapture, error: string): Promise<void>
@@ -87,6 +89,7 @@ function fixture(sourceRows = 35, computeOwner = owner, values = new Map<string,
       if (publication !== 'pending' && sourceRetained) { lost('source-release'); sourceRetained = false }
       return publication === 'pending' && generation === capture.generation ? structuredClone(capture) : null
     }) },
+    computeReaderName(value) { return defer(() => { current(value); return null }) },
     computeManifest(value) { return defer(() => { events.push('manifest'); current(value); return structuredClone(manifest) }) },
     computeChunk(value, source, after): Promise<SnapshotChunk> { return defer(() => {
       current(value)
@@ -148,17 +151,24 @@ function fixture(sourceRows = 35, computeOwner = owner, values = new Map<string,
           execution: { revision: 0, checkpoint: null, done: false } }
         remotes.set(key, remote)
       }
+      lost('initialize')
       return Response.json(status(remote))
     }
     assert.ok(remote)
     assert.deepEqual(request.capture, remote.capture)
     switch (request.action) {
+      case 'status': {
+        lost('status')
+        const answer = status(remote)
+        if (faults.delete('wrong-manifest')) answer.manifest.version = 'wrong'
+        return Response.json(answer)
+      }
       case 'append': {
         const chunk = request.chunk!
         assert.equal(chunk.after, remote.sources.get(chunk.table))
         remote.sources.set(chunk.table, chunk.next)
         lost('append')
-        return Response.json({ next: chunk.next })
+        return Response.json({ next: faults.delete('wrong-append-cursor') ? chunk.next + 1 : chunk.next })
       }
       case 'materialize':
         assert.equal(remote.sources.get('source'), sourceRows)
@@ -214,13 +224,13 @@ async function finish(f: ReturnType<typeof fixture>) {
   assert.fail('paged computation did not terminate')
 }
 
-Deno.test('paged alarms batch at most sixteen transfers and resume every phase from durable remote state', async () => {
-  const f = fixture()
+Deno.test('paged alarms batch within the shared budget and resume every phase from durable remote state', async () => {
+  const f = fixture(260)
   await actor(f).alarm()
-  assert.equal(f.events.filter(event => event === 'append').length, 16)
-  assert.equal(f.remotes.get(keyOf(capture))!.sources.get('source'), 16)
+  assert.equal(f.events.filter(event => event === 'append').length, 127)
+  assert.equal(f.remotes.get(keyOf(capture))!.sources.get('source'), 127)
   await actor(f, new MemoryStorage(f.storage.values)).alarm()
-  assert.equal(f.events.filter(event => event === 'append').length, 32)
+  assert.equal(f.events.filter(event => event === 'append').length, 254)
   await finish(f)
   assert.equal(f.publishes, 1)
   assert.equal(f.uploadEffects, 3)
@@ -231,6 +241,36 @@ Deno.test('paged alarms batch at most sixteen transfers and resume every phase f
   assert.equal(await f.storage.get('failure'), undefined)
   assert.equal((await f.storage.list({ prefix: 'failure:' })).size, 0)
   assert.equal([...f.storage.values.keys()].some(key => /checkpoint|execution/.test(key)), false)
+})
+
+Deno.test('one alarm skips redundant status calls during execution and restart validates again', async () => {
+  const f = fixture(0)
+  const session = { executing: false }
+  for (let i = 0; i < 5; i++) await advancePaged(f.db, f.service, f.storage, capture, owner, session)
+  assert.equal(f.events.filter(event => event === 'step').length, 3)
+  assert.equal(f.events.filter(event => event === 'status').length, 2)
+  assert.equal(session.executing, false)
+  const restarted = { executing: false }
+  await advancePaged(f.db, f.service, f.storage, capture, owner, restarted)
+  assert.equal(f.events.filter(event => event === 'status').length, 3)
+  await finish(f)
+  assert.equal(f.publishes, 1)
+})
+
+Deno.test('lost fast-step acknowledgement clears the shortcut and resumes from durable state', async () => {
+  const f = fixture(0)
+  const session = { executing: false }
+  for (let i = 0; i < 3; i++) await advancePaged(f.db, f.service, f.storage, capture, owner, session)
+  assert.equal(session.executing, true)
+  f.faults.add('step')
+  await assert.rejects(advancePaged(f.db, f.service, f.storage, capture, owner, session), /lost step acknowledgement/)
+  assert.equal(session.executing, false)
+  const count = f.events.filter(event => event === 'status').length
+  await advancePaged(f.db, f.service, f.storage, capture, owner, session)
+  assert.equal(f.events.filter(event => event === 'status').length, count + 1)
+  assert.equal(f.events.filter(event => event === 'step').length, 3)
+  await finish(f)
+  assert.equal(f.publishes, 1)
 })
 
 for (const action of ['append', 'materialize', 'step', 'upload', 'seal']) {
@@ -323,7 +363,7 @@ Deno.test('a capture superseded during execution clears its old failure and reta
 })
 
 Deno.test('obsolete generations reclaim only their own remote capture and never publish stale output', async () => {
-  const f = fixture(40)
+  const f = fixture(260)
   await actor(f).alarm()
   const other = { ...capture, generation: 'generation-2' }
   f.remotes.set(keyOf(other), { ...structuredClone(f.remotes.get(keyOf(capture))!), capture: other })
@@ -439,13 +479,75 @@ Deno.test('rollback resumes only its own partially uploaded output and retains t
 Deno.test('physical preparation yields between bounded transfer turns without starting queries or rejecting a healthy capture', async () => {
   const f = fixture()
   let prepared = 0
-  Object.assign(f.db, { computePrepare: () => Promise.resolve(++prepared > 20) })
+  Object.assign(f.db, { computePrepare: () => Promise.resolve(++prepared > 140) })
   await actor(f).alarm()
-  assert.equal(prepared, 16)
+  assert.equal(prepared, 128)
   assert.equal(f.events.includes('manifest'), false)
   assert.equal(f.events.includes('reject'), false)
   assert.notEqual(await f.storage.getAlarm(), null)
   await actor(f, new MemoryStorage(f.storage.values)).alarm()
-  assert.equal(prepared, 21)
+  assert.equal(prepared, 141)
   assert.equal(f.events.includes('manifest'), true)
+})
+
+Deno.test('cached manifest survives coordinator restart and avoids repeated Reader and initialization calls', async () => {
+  const f = fixture(20)
+  for (let i = 0; i < 10; i++) await advancePaged(f.db, f.service, new MemoryStorage(f.storage.values), capture, owner)
+  assert.equal(f.events.filter(event => event === 'manifest').length, 1)
+  assert.equal(f.events.filter(event => event === 'initialize').length, 1)
+  assert.equal(f.events.filter(event => event === 'status').length, 9)
+  assert.equal(f.events.filter(event => event === 'append').length, 10)
+})
+
+Deno.test('lost initialization acknowledgement retries without saving an unacknowledged manifest', async () => {
+  const f = fixture(2)
+  f.faults.add('initialize')
+  await assert.rejects(advancePaged(f.db, f.service, f.storage, capture, owner), /lost initialize/)
+  const first = await f.storage.get<{ manifest?: SnapshotManifest }>(progressKey(capture))
+  assert.equal(first?.manifest, undefined)
+  await advancePaged(f.db, f.service, new MemoryStorage(f.storage.values), capture, owner)
+  await advancePaged(f.db, f.service, new MemoryStorage(f.storage.values), capture, owner)
+  assert.equal(f.events.filter(event => event === 'initialize').length, 2)
+  assert.equal(f.events.filter(event => event === 'manifest').length, 2)
+  assert.equal(f.events.filter(event => event === 'status').length, 1)
+})
+
+Deno.test('legacy progress initializes once and subsequent status errors or mismatched artifacts fail loudly', async () => {
+  const f = fixture(4)
+  await f.storage.put(progressKey(capture), { owner, capture, outputs: {} })
+  await advancePaged(f.db, f.service, f.storage, capture, owner)
+  f.faults.add('status')
+  await assert.rejects(advancePaged(f.db, f.service, f.storage, capture, owner), /lost status/)
+  f.faults.add('wrong-manifest')
+  await assert.rejects(advancePaged(f.db, f.service, f.storage, capture, owner), /manifest differs/)
+  assert.equal(f.events.filter(event => event === 'append').length, 1)
+  await advancePaged(f.db, f.service, f.storage, capture, owner)
+  assert.equal(f.events.filter(event => event === 'manifest').length, 1)
+  assert.equal(f.events.filter(event => event === 'append').length, 2)
+})
+
+Deno.test('source transfers reuse acknowledged progress only within an uninterrupted alarm', async () => {
+  const f = fixture(10)
+  const session = { executing: false }
+  for (let i = 0; i < 4; i++) await advancePaged(f.db, f.service, f.storage, capture, owner, session)
+  assert.equal(f.events.filter(event => event === 'status').length, 0)
+  f.faults.add('append')
+  await assert.rejects(advancePaged(f.db, f.service, f.storage, capture, owner, session), /lost append acknowledgement/)
+  await advancePaged(f.db, f.service, f.storage, capture, owner, session)
+  assert.equal(f.events.filter(event => event === 'status').length, 1)
+  assert.equal(f.remotes.get(keyOf(capture))!.sources.get('source'), 6)
+  await advancePaged(f.db, f.service, f.storage, capture, owner, { executing: false })
+  assert.equal(f.events.filter(event => event === 'status').length, 2)
+  assert.equal(f.remotes.get(keyOf(capture))!.sources.get('source'), 7)
+})
+
+Deno.test('an invalid append acknowledgement cannot advance the alarm-local cursor', async () => {
+  const f = fixture(10)
+  const session = { executing: false }
+  await advancePaged(f.db, f.service, f.storage, capture, owner, session)
+  f.faults.add('wrong-append-cursor')
+  await assert.rejects(advancePaged(f.db, f.service, f.storage, capture, owner, session), /append acknowledgement differs/)
+  await advancePaged(f.db, f.service, f.storage, capture, owner, session)
+  assert.equal(f.events.filter(event => event === 'status').length, 1)
+  assert.equal(f.remotes.get(keyOf(capture))!.sources.get('source'), 3)
 })

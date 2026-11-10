@@ -1,3 +1,5 @@
+import { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from './chunk-limits.ts';
+export { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from './chunk-limits.ts';
 import { initializeOutputs, collectOutputs, stageOutput, sealOutput as sealStagedOutput, publishOutput, type OutputSeal } from './staged-publication.ts';
 import { type SinkWrites, validateSinkWrites } from './sink-writes.ts';
 export type { OutputSeal } from './staged-publication.ts';
@@ -51,8 +53,6 @@ export interface SnapshotChunk extends SnapshotIdentity {
   rows: SnapshotTable['rows'];
 }
 export interface ChunkLimits { maxRows?: number; maxBytes?: number }
-export const CAPTURE_CHUNK_ROWS = 128;
-export const CAPTURE_CHUNK_BYTES = 256 * 1024;
 export const MATERIALIZE_BLOCKS = 256;
 export type Output = Record<string, Record<string, unknown>[]>;
 export interface CoordinatorConfig {
@@ -452,23 +452,40 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
   }
   async function commit(snapshot: SnapshotIdentity, apply: (tx: Queryable, spec: Computation) => Promise<void>) {
     checkIdentity(snapshot);
-    return await atomic(async tx => {
-      const states = await reconcile(tx);
-      const item = states.get(snapshot.name);
-      const receipt = await tx.query(`SELECT id FROM ${PRIVATE}.receipts WHERE id=$1`, [snapshot.id]);
-      if (receipt.rows.length) return;
-      if (!item || item.version !== snapshot.version || item.state.claimed !== snapshot.revision || item.state.completed >= snapshot.revision) return;
-      const spec = specs.find(s => s.name === snapshot.name && s.version === snapshot.version);
-      if (!spec) throw new Error('compute capture configuration differs');
-      await captureTables(tx, snapshot);
-      await apply(tx, spec);
-      await tx.query(`INSERT INTO ${PRIVATE}.receipts(id,name,version,revision,committed_at) VALUES($1,$2,$3,$4,$5)`,
-        [snapshot.id, snapshot.name, snapshot.version, snapshot.revision, now()]);
-      item.state = await reduce(item.state, 'complete');
-      item.failures = 0; item.retry_at = null; item.error = null;
-      await save(tx, item);
-      await releaseCaptures(tx, 'id=$1', [snapshot.id]);
-    });
+    let failedApply: unknown;
+    try {
+      return await atomic(async tx => {
+        const states = await reconcile(tx);
+        const item = states.get(snapshot.name);
+        const receipt = await tx.query(`SELECT id FROM ${PRIVATE}.receipts WHERE id=$1`, [snapshot.id]);
+        if (receipt.rows.length) return;
+        if (!item || item.version !== snapshot.version || item.state.claimed !== snapshot.revision || item.state.completed >= snapshot.revision) return;
+        const spec = specs.find(s => s.name === snapshot.name && s.version === snapshot.version);
+        if (!spec) throw new Error('compute capture configuration differs');
+        await captureTables(tx, snapshot);
+        try { await apply(tx, spec); } catch (error) { failedApply = error; throw error; }
+        await tx.query(`INSERT INTO ${PRIVATE}.receipts(id,name,version,revision,committed_at) VALUES($1,$2,$3,$4,$5)`,
+          [snapshot.id, snapshot.name, snapshot.version, snapshot.revision, now()]);
+        item.state = await reduce(item.state, 'complete');
+        item.failures = 0; item.retry_at = null; item.error = null;
+        await save(tx, item);
+        await releaseCaptures(tx, 'id=$1', [snapshot.id]);
+      });
+    } catch (error) {
+      if (error !== failedApply || !error || typeof error !== 'object' || !('code' in error) || error.code !== '23503') throw error;
+      const superseded = await atomic(async tx => {
+        const item = (await reconcile(tx)).get(snapshot.name);
+        if (!item || item.version !== snapshot.version || item.state.claimed !== snapshot.revision ||
+          item.state.completed >= snapshot.revision || item.state.requested <= snapshot.revision) return false;
+        await captureTables(tx, snapshot);
+        item.state = await reduce(item.state, 'supersede');
+        item.failures = 0; item.retry_at = null; item.error = null;
+        await save(tx, item);
+        await releaseCaptures(tx, 'id=$1', [snapshot.id]);
+        return true;
+      });
+      if (!superseded) throw error;
+    }
   }
   async function activeSpec(tx: Queryable, identity: SnapshotIdentity) {
     await captureTables(tx, identity);

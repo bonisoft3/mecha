@@ -1,3 +1,5 @@
+import { EXECUTION_QUERY_BYTES, EXECUTION_QUERY_ROWS, EXECUTION_BYTES, EXECUTION_OUTPUT_BYTES, EXECUTION_OUTPUT_ROWS, scratchStatement, type ExecutionQueryPage } from '../../compute-snapshot/src/bounded.ts'
+export { EXECUTION_QUERY_BYTES, EXECUTION_QUERY_ROWS, EXECUTION_BYTES, EXECUTION_OUTPUT_BYTES, EXECUTION_OUTPUT_ROWS, scratchStatement, type ExecutionQueryPage } from '../../compute-snapshot/src/bounded.ts'
 import { validateQuerySql } from './query-sql.ts'
 export interface ExecutionConnection {
   query(sql: string): { toArray(): Record<string, unknown>[] }
@@ -13,34 +15,8 @@ export interface ExecutionStep {
   done: boolean
 }
 export interface ExecutionOutput { after: number; next: number; done: boolean; rows: Record<string, unknown>[] }
-export interface ExecutionQueryPage { after: number; next: number; done: boolean; rows: Record<string, unknown>[] }
-export const EXECUTION_QUERY_BYTES = 1024 * 1024
-export const EXECUTION_QUERY_ROWS = 4096
-export const EXECUTION_BYTES = 8 * 1024 * 1024
-export const EXECUTION_OUTPUT_BYTES = 256 * 1024
-export const EXECUTION_OUTPUT_ROWS = 128
 const schema = 'duckdb_private'
 const utf8 = new TextEncoder()
-const scratchName = '[a-z_][a-z0-9_]{0,62}'
-const scratchLiteral = "(?:NULL|TRUE|FALSE|[-+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][-+]?[0-9]+)?|'(?:[^']|'')*')"
-const scratchColumn = `${scratchName}\\s+[a-z_][a-z0-9_]*(?:\\s*\\(\\s*[0-9]+(?:\\s*,\\s*[0-9]+)?\\s*\\))?(?:\\[\\])*`
-const scratchValues = `${scratchLiteral}(?:\\s*,\\s*${scratchLiteral})*`
-const scratchPredicate = `${scratchName}\\s*(?:=\\s*${scratchLiteral}|IN\\s*\\(\\s*${scratchValues}\\s*\\))`
-
-function scratchStatement(sql: string) {
-  const match = /^\s*(CREATE\s+TABLE|INSERT\s+INTO|DELETE\s+FROM|DROP\s+TABLE)\s+([a-z_][a-z0-9_]{0,62})(?=\s|\(|;|$)/i.exec(sql)
-  if (!match) throw new Error('execution statements must target an unqualified scratch table')
-  const operation = match[1].toUpperCase().replace(/\s+/g, ' ')
-  const name = match[2].toLowerCase()
-  const tail = sql.slice(match[0].length)
-  if (/^(?:duckdb_|duckstream_|execution_)/.test(name) || /\bnextval\b|\bU\s*&/i.test(sql)) throw new Error('execution statement uses reserved storage')
-  const supported = operation === 'CREATE TABLE' ? /^\s+AS\s+(?:SELECT|WITH)\b/i.test(tail) || new RegExp(`^\\s*\\(\\s*${scratchColumn}(?:\\s*,\\s*${scratchColumn})*\\s*\\)\\s*;?\\s*$`, 'i').test(tail)
-    : operation === 'INSERT INTO' ? new RegExp(`^\\s+VALUES\\s*\\(\\s*${scratchValues}\\s*\\)(?:\\s*,\\s*\\(\\s*${scratchValues}\\s*\\))*\\s*;?\\s*$`, 'i').test(tail)
-    : operation === 'DELETE FROM' ? new RegExp(`^\\s+WHERE\\s+${scratchPredicate}(?:\\s+AND\\s+${scratchPredicate})*\\s*;?\\s*$`, 'i').test(tail)
-    : /^\s*;?\s*$/.test(tail)
-  if (!supported) throw new Error('unsupported execution scratch statement')
-  return { operation, name, sql: `${operation} main."${name}"${tail}`, select: operation === 'CREATE TABLE' ? /^\s+AS\s+([\s\S]+)$/i.exec(tail)?.[1] : undefined }
-}
 
 function json(value: unknown): string {
   const visit = (item: unknown): void => {

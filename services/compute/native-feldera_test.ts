@@ -19,6 +19,8 @@ function startup(
   deploy = () => "Running",
   profile?: CompilationProfile,
   errors: Record<string, unknown> = {},
+  bootstrap?: (poll: number) => { input: number; processed: number; ready: boolean },
+  secondSource = false,
 ) {
   const originalFetch = globalThis.fetch;
   const originalNow = Date.now;
@@ -29,6 +31,7 @@ function startup(
   let programConfig: unknown;
   let compilePolls = 0;
   let deployPolls = 0;
+  let bootstrapPolls = 0;
   let registeredPipeline: unknown;
   const state = {
     deployment_id: "deployment",
@@ -40,15 +43,17 @@ function startup(
   const client = {
     query: (sql: string, args?: unknown[]) => {
       if (sql.includes("INSERT INTO compute.native_epoch")) registeredPipeline = args?.[4];
-      return Promise.resolve({ rows: sql.includes("AS present") ? [{ present: false }] : [] });
+      return Promise.resolve({ rows: sql.includes("AS present") ? [{ present: false }] : sql.includes("AS oid") ? [{ oid: "42" }] : [] });
     },
     release() {},
   };
+  const sourceNames = bootstrap ? ["probe", ...(secondSource ? ["stuck"] : [])] : [];
   const db = {
     connect: () => Promise.resolve(client),
-    query: (sql: string) =>
+    query: (sql: string, args?: unknown[]) =>
       Promise.resolve({
-        rows: sql.includes("AS present") ? [{ present: true }] : [],
+        rows: sql.includes("AS present") ? [{ present: true }]
+          : bootstrap ? JSON.parse(args![0] as string).map((i: { id: string }) => ({ pipeline_id: i.id, state: "sync_done" })) : [],
       }),
   } as unknown as pg.Pool;
   Date.now = () => now;
@@ -67,9 +72,16 @@ function startup(
       return Promise.resolve(Response.json({}));
     }
     if (url.pathname.endsWith("/stats")) {
+      const snapshot = bootstrap?.(++bootstrapPolls);
       return Promise.resolve(Response.json({
-        global_metrics: { incarnation_uuid: "incarnation" },
-        inputs: [],
+        global_metrics: { incarnation_uuid: "incarnation", total_input_records: snapshot?.input ?? 0, total_processed_records: snapshot?.processed ?? 0 },
+        inputs: snapshot ? sourceNames.map((name) => ({
+          endpoint_name: `cdc_${name}`, config: { stream: `cdc_${name}` },
+          barrier: name === "stuck" || !snapshot.ready,
+          metrics: { num_parse_errors: 0, num_transport_errors: 0,
+            total_records: name === "stuck" ? 0 : snapshot.input,
+            buffered_records: name === "stuck" ? 0 : snapshot.input - snapshot.processed },
+        })) : [],
       }));
     }
     if (!created) return Promise.resolve(new Response(null, { status: 404 }));
@@ -79,8 +91,8 @@ function startup(
     return Promise.resolve(Response.json({ ...state, ...errors, program_code: sql }));
   };
   const program: IncrementalProgram = {
-    sql: "CREATE VIEW empty AS SELECT 1;",
-    inputs: {},
+    sql: sourceNames.map((name) => `CREATE TABLE ${name}(id VARCHAR);\n`).join("") + "CREATE VIEW empty AS SELECT 1;",
+    inputs: Object.fromEntries(sourceNames.map((name) => [name, { query: "SELECT id FROM items", fields: [{ name: "id", type: "VARCHAR" }] } ])),
     outputs: {},
     incremental: { inputs: {}, outputs: {} },
   };
@@ -148,6 +160,30 @@ Deno.test("native startup permits optimized compilation beyond ten minutes", asy
   assertEquals(fake.started, true);
 });
 
+Deno.test("native bootstrap permits a progressing snapshot beyond ten minutes", async () => {
+  using fake = startup(() => "Success", undefined, undefined, {}, (poll) => {
+    fake.advance(4);
+    return { input: 100, processed: poll * 10, ready: poll === 5 };
+  });
+  await fake.initialize();
+});
+
+Deno.test("native bootstrap fails when neither ingestion nor the circuit advances", async () => {
+  using fake = startup(() => "Success", undefined, undefined, {}, () => {
+    fake.advance(11);
+    return { input: 0, processed: 0, ready: false };
+  });
+  await assertRejects(fake.initialize, Error, "native CDC bootstrap made no progress for ten minutes");
+});
+
+Deno.test("progress on another source cannot hide a stalled bootstrap", async () => {
+  using fake = startup(() => "Success", undefined, undefined, {}, (poll) => {
+    fake.advance(3);
+    return { input: poll * 100, processed: poll * 100, ready: false };
+  }, true);
+  await assertRejects(fake.initialize, Error, "native CDC bootstrap made no progress for ten minutes: stuck");
+});
+
 Deno.test("native startup bounds compilation and keeps deployment waits shorter", async () => {
   {
     using fake = startup(() => {
@@ -177,6 +213,37 @@ Deno.test("native startup fails immediately on a terminal compiler error", async
   assert(!error.message.includes("CREATE VIEW"));
   assertEquals(fake.compilePolls, 1);
   assertEquals(fake.started, false);
+});
+
+Deno.test("native management timeouts identify the pipeline without exposing endpoint credentials", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  const deadline = new AbortController();
+  AbortSignal.timeout = () => deadline.signal;
+  globalThis.fetch = (_input, init) => new Promise((_resolve, reject) => {
+    const signal = init!.signal!;
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    deadline.abort();
+  });
+  try {
+    const runtime = new NativeFeldera(
+      "http://private:credential@manager",
+      "startup",
+      { sql: "", inputs: {}, outputs: {}, incremental: { inputs: {}, outputs: {} } },
+      "a".repeat(64),
+      "postgres://postgres@database/app",
+    );
+    const error = await assertRejects(
+      () => runtime.initialize({} as pg.Pool, {}, []),
+      Error,
+      "native startup: GET pipeline status timed out after 30000ms",
+    );
+    assert(!error.message.includes("credential"));
+    assert(!error.message.includes("manager"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    AbortSignal.timeout = originalTimeout;
+  }
 });
 
 Deno.test("native CDC identity matches pinned ETL IDs", async () => {
@@ -213,6 +280,7 @@ Deno.test({
   sanitizeOps: false,
   async fn() {
     const profile = compilationProfile(Deno.env.get("FELDERA_COMPILATION_PROFILE"));
+    const artifacts = Deno.env.get("NATIVE_FELDERA_ARTIFACTS");
     const directory = await Deno.makeTempDir({
       prefix: "native-feldera-test-",
     });
@@ -263,48 +331,27 @@ Deno.test({
     }
     let db: pg.Pool | undefined;
     let batches: Batches | undefined;
+    const testContainer = Deno.env.get("NATIVE_TEST_CONTAINER");
+    let connected = false;
+    async function docker(...args: string[]) {
+      const result = await new Deno.Command("docker", { args, stdout: "piped", stderr: "piped" }).output();
+      assert(result.success, new TextDecoder().decode(result.stderr));
+      return new TextDecoder().decode(result.stdout).trim();
+    }
     try {
-      await compose("up", "-d", "--wait");
-      db = new pg.Pool({
-        connectionString: "postgres://postgres:spike@" +
-          await compose("port", "postgres", "5432") + "/spike",
-      });
-      const endpoint = "http://" + await compose("port", "feldera", "8080");
-      const uri = "postgres://postgres:spike@postgres:5432/spike";
+      await compose("up", "-d", "--wait", ...artifacts ? ["postgres"] : []);
+      let address = await compose("port", "postgres", "5432");
+      if (testContainer) {
+        await docker("network", "connect", project + "_default", testContainer);
+        connected = true;
+        const postgres = await compose("ps", "-q", "postgres");
+        address = await docker("inspect", "--format", `{{(index .NetworkSettings.Networks "${project}_default").IPAddress}}`, postgres) + ":5432";
+      }
+      db = new pg.Pool({ connectionString: "postgres://postgres:spike@" + address + "/spike" });
+      const endpoint = artifacts ? "http://127.0.0.1" : "http://" + await compose("port", "feldera", "8080");
+      const uri = artifacts ? db.options.connectionString! : "postgres://postgres:spike@postgres:5432/spike";
       const version = "a".repeat(64);
-      const program: IncrementalProgram = {
-        sql:
-          "CREATE TABLE source_rows (group_id VARCHAR, amount INTEGER); CREATE VIEW totals AS SELECT group_id,SUM(amount) AS amount FROM source_rows GROUP BY group_id;",
-        inputs: {
-          source_rows: {
-            query: "SELECT group_id,amount FROM source_rows",
-            fields: [{ name: "group_id", type: "VARCHAR" }, {
-              name: "amount",
-              type: "INTEGER",
-            }],
-          },
-        },
-        outputs: {
-          totals: {
-            view: "totals",
-            fields: [{ name: "group_id", type: "VARCHAR" }, {
-              name: "amount",
-              type: "BIGINT",
-            }],
-          },
-        },
-        incremental: {
-          inputs: {
-            source_rows: { table: "items", projection: "group_id,amount" },
-          },
-          outputs: {
-            totals: {
-              partitionQuery:
-                "SELECT group_id AS __partition,group_id,amount FROM totals",
-            },
-          },
-        },
-      };
+      const program: IncrementalProgram = JSON.parse(await Deno.readTextFile(new URL("./fixtures/native-integration.json", import.meta.url)));
       await db.query(`CREATE SCHEMA compute;
         CREATE TABLE compute.native_epoch(name text PRIMARY KEY,publications text[] NOT NULL,slots text[] NOT NULL);
         CREATE TABLE items(id text PRIMARY KEY,group_id text NOT NULL,amount integer NOT NULL,ignored text);
@@ -329,10 +376,12 @@ Deno.test({
         version,
         uri,
         profile,
+        artifacts,
       );
       try {
         await runtime.initialize(db, { totals: [] }, []);
       } catch (error) {
+        if (artifacts) throw error;
         const diagnostics =
           await (await fetch(endpoint + "/v0/pipelines/" + runtime.name))
             .json();
@@ -344,12 +393,14 @@ Deno.test({
           { cause: error },
         );
       }
+      if (!artifacts) {
       const configured =
         await (await fetch(endpoint + "/v0/pipelines/" + runtime.name)).json();
       assert(configured.program_code.includes("${env:FELDERA_DATABASE_URL}"));
       assertEquals(configured.program_code.includes(uri), false);
       assertEquals(configured.program_config.profile, profile);
       assertEquals(configured.program_code.includes("postgres:spike"), false);
+      }
       assert(await runtime.pending());
       const initial = await runtime.capture();
       assertEquals(
@@ -405,6 +456,7 @@ Deno.test({
         group_id: "b",
         amount: 7,
       }];
+      if (artifacts) await runtime.close();
       const restarted = new NativeFeldera(
         endpoint,
         runtime.name,
@@ -412,6 +464,7 @@ Deno.test({
         version,
         uri,
         profile,
+        artifacts,
       );
       await restarted.initialize(db, { totals: baseline }, [
         "initial",
@@ -448,6 +501,8 @@ Deno.test({
       assertEquals(deleted.totals, [{ row: baseline[1], weight: -1 }]);
       await restarted.acknowledge("delete", deleted);
       assertEquals(await restarted.pending(), false);
+      if (artifacts) await restarted.close();
+      else {
       const stopped = await fetch(
         endpoint + "/v0/pipelines/" + runtime.name + "/stop?force=true",
         { method: "POST" },
@@ -460,6 +515,7 @@ Deno.test({
             .json()).deployment_status === "Stopped",
         "stop class fixture",
       );
+      }
       await db.query(`CREATE ROLE service NOLOGIN;
         CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$;
         CREATE TABLE runtime_items(id text PRIMARY KEY,group_id text NOT NULL,amount integer NOT NULL);
@@ -539,6 +595,7 @@ Deno.test({
         uri,
         { role: "service" },
         profile,
+        artifacts,
       );
       const connectionString = db.options.connectionString!;
       batches = await openBatches(connectionString, [full.spec], options);
@@ -610,6 +667,7 @@ Deno.test({
           .rows;
       await batches.close();
       batches = undefined;
+      await full.close();
       full = new NativeRuntime(
         db,
         endpoint,
@@ -619,6 +677,7 @@ Deno.test({
         uri,
         { role: "service" },
         profile,
+        artifacts,
       );
       batches = await openBatches(connectionString, [full.spec], options);
       await full.initialize();
@@ -661,9 +720,11 @@ Deno.test({
       );
       await batches.close();
       batches = undefined;
+      await full.close();
     } finally {
       if (batches) await batches.close();
       if (db) await db.end();
+      if (connected) await docker("network", "disconnect", project + "_default", testContainer!);
       await compose("down", "-v");
       await Deno.remove(directory, { recursive: true });
     }

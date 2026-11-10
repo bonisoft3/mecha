@@ -11,6 +11,11 @@ import { load } from '../load.ts'
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+Deno.test('workerd backend uses one MiB linear heap growth', async () => {
+  const backend = await Deno.readTextFile(new URL('../dist/pglite.js', import.meta.url))
+  assert.match(backend, /overGrownHeapSize=oldSize\+1048576\/cutDown/)
+})
+
 // wrangler's output streams outlive each restart's step.
 for (const codec of ['raw', 'deflate']) Deno.test({ name: `PGlite serves a ${codec} data directory in a Durable Object`, sanitizeResources: false, sanitizeOps: false }, async (t) => {
   Deno.statSync(new URL('../dist/pglite.wasm', import.meta.url))
@@ -95,6 +100,26 @@ for (const codec of ['raw', 'deflate']) Deno.test({ name: `PGlite serves a ${cod
       assert.match(probe.runtimeCompile, /disallowed by embedder/)
       assert.equal(probe.webAssemblyFunction, 'undefined')
       assert.deepEqual(await rows('SELECT 1 AS one'), [{ one: 1 }])
+      assert.deepEqual(await rows("SELECT current_setting('shared_buffers') AS shared, current_setting('work_mem') AS work, current_setting('maintenance_work_mem') AS maintenance"),
+        [{ shared: '8MB', work: '1MB', maintenance: '8MB' }])
+    })
+    await t.step('an unexpected filesystem exception resets PostgreSQL and rolls back the active transaction', async () => {
+      await load(`${tmp}/seeded`, send('filesystem-fault'), { log: () => {} })
+      await call('/exec', 'filesystem-fault', { method: 'POST', body: `
+        CREATE TABLE filesystem_fault_marker(id integer);
+        CREATE TABLE filesystem_fault_rows AS SELECT n AS id,repeat(md5(n::text),20) AS payload FROM generate_series(1,30000) n;
+        CHECKPOINT;
+      ` })
+      await worker.restart()
+      await rows('SELECT 1', 'filesystem-fault')
+      const before = await call('/state', 'filesystem-fault')
+      assert.deepEqual(await call('/missing-fs', 'filesystem-fault'), { missing: true })
+      assert.equal((await call('/state', 'filesystem-fault')).bornAt, before.bornAt)
+      const failure = await fetch(`${worker.origin}/fail-read?do=filesystem-fault&codec=${codec}`, { method: 'POST' }).then(r => r.status, () => 0)
+      assert.notEqual(failure, 200)
+      assert.deepEqual(await rows('SELECT count(*)::int AS n FROM filesystem_fault_marker', 'filesystem-fault'), [{ n: 0 }])
+      assert.deepEqual(await rows('SELECT 1 AS ok', 'filesystem-fault'), [{ ok: 1 }])
+      assert.notEqual((await call('/state', 'filesystem-fault')).bornAt, before.bornAt)
     })
     await t.step('an open directory refuses an import', async () => {
       const res = await send('seeded')('dir?path=/x', { method: 'POST' })

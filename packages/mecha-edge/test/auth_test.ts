@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from '@simplewebauthn/server/helpers'
-import { encodeBase64Url, signJwt } from '../../../services/auth/jwt.ts'
+import { encodeBase64Url, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
 import { providersFrom, SESSION_COOKIE, sha256url, STATE_COOKIE } from '../../../services/auth/oidc.ts'
 import { createEdgeCluster } from '../src/cluster.ts'
 
@@ -112,6 +112,7 @@ Deno.test({
       assert.equal(regVerifyRes.status, 200)
       const regVerified = (await regVerifyRes.json()) as any
       assert.ok(regVerified.token)
+      assert.equal((await verifyJwt(secret, regVerified.token))?.guest, false)
       assert.ok(regVerified.user?.id)
       assert.ok(regVerified.user?.handle)
 
@@ -135,6 +136,7 @@ Deno.test({
       assert.equal(loginVerifyRes.status, 200)
       const loggedIn = (await loginVerifyRes.json()) as any
       assert.equal(loggedIn.user.id, regVerified.user.id)
+      assert.equal((await verifyJwt(secret, loggedIn.token))?.guest, false)
       assert.equal(loggedIn.user.handle, regVerified.user.handle)
 
       // 3. Guest minting and promotion to passkey
@@ -166,6 +168,7 @@ Deno.test({
       )
       assert.equal(promoVerifyRes.status, 200)
       const promoted = (await promoVerifyRes.json()) as any
+      assert.equal((await verifyJwt(secret, promoted.token))?.guest, false)
       // Retains guest ID and handle
       assert.equal(promoted.user.id, guest.user.id)
       assert.equal(promoted.user.handle, guest.user.handle)

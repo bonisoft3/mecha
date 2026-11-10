@@ -12,7 +12,7 @@ const incompressible = () => {
 }
 
 function prepare(storage: DurableObjectStorage) {
-  const directory = new DataDirectory(storage, compressionTarget)
+  const directory = new DataDirectory(storage, compressionTarget, error => { throw error })
   SqliteFS.schema(storage.sql)
   SqliteFS.drop(storage.sql)
   const fs = new SqliteFS(storage.sql)
@@ -63,7 +63,7 @@ export function compressionCases(storage: DurableObjectStorage) {
   assert.equal(directory.storageStatus().maintenance?.converted, 0)
   sql.exec('DROP TRIGGER fail_compression')
   assert.equal(directory.advanceCompression(generation, 2).maintenance?.converted, 2)
-  const resumed = new DataDirectory(storage, compressionTarget)
+  const resumed = new DataDirectory(storage, compressionTarget, error => { throw error })
   while (resumed.storageStatus().maintenance) resumed.advanceCompression(generation, 2)
   assert.equal(resumed.storageReady, true)
   assert.equal(resumed.beginCompression(generation, compressionTarget).maintenance, null)
@@ -86,7 +86,7 @@ export function compressionCrash(storage: DurableObjectStorage, recover: boolean
     directory.advanceCompression(generation, 1)
     return
   }
-  const directory = new DataDirectory(storage, compressionTarget)
+  const directory = new DataDirectory(storage, compressionTarget, error => { throw error })
   assert.equal(directory.storageStatus().maintenance?.converted, 1)
   assert.equal(directory.storageReady, false)
   while (directory.storageStatus().maintenance) directory.advanceCompression(generation, 1)

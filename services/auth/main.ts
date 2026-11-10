@@ -539,7 +539,8 @@ async function registerVerify(req: Request): Promise<Response> {
 }
 
 async function loginStart(_req: Request): Promise<Response> {
-  // Discoverable credentials: the authenticator offers the resident passkey.
+  // Usernameless by doctrine: allowCredentials is empty so the authenticator
+  // surfaces its discoverable (resident) credentials for this RP.
   const options = await generateAuthenticationOptions({
     rpID: RP_ID,
     allowCredentials: [],
@@ -567,7 +568,7 @@ async function loginVerify(req: Request): Promise<Response> {
     from mecha_auth.webauthn_credential c join app_user u on u.id = c.user_id
     where c.id = ${response.id}`;
   if (creds.length === 0) {
-    return jsonError(401, "authentication verification failed");
+    return json(401, { error: "authentication verification failed", unknownCredential: true });
   }
   const cred = creds[0];
   let verification;

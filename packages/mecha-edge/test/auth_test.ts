@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from '@simplewebauthn/server/helpers'
-import { signJwt } from '../../../services/auth/jwt.ts'
+import { encodeBase64Url, signJwt } from '../../../services/auth/jwt.ts'
+import { providersFrom, SESSION_COOKIE, sha256url, STATE_COOKIE } from '../../../services/auth/oidc.ts'
 import { createEdgeCluster } from '../src/cluster.ts'
 
 type Cbor = Parameters<typeof isoCBOR.encode>[0]
@@ -372,6 +373,159 @@ Deno.test({
         [user.id],
       )
       assert.deepEqual(after.rows[0], { table: 'mecha_auth.webauthn_credential', view: 'v', granted: false, rows: 1 })
+    } finally {
+      await db.close()
+    }
+  },
+})
+
+Deno.test({
+  name: 'mecha-edge OIDC provider sign-in, session exchange, sign-out and sealed identity_link',
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const origin = 'https://test.local'
+    const issuer = 'https://accounts.google.com'
+    const secret = 'edge-auth-secret'
+    const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+    const jwk = { ...(await crypto.subtle.exportKey('jwk', keys.publicKey)), kid: 'k1' }
+    const codes = new Map<string, { client: string; redirect: string; challenge: string; nonce: string }>()
+    let profileName = 'Alice'
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input)
+      if (url === `${issuer}/.well-known/openid-configuration`) {
+        return Response.json({
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          jwks_uri: `${issuer}/jwks`,
+        })
+      }
+      if (url === `${issuer}/jwks`) return Response.json({ keys: [jwk] })
+      if (url === `${issuer}/token`) {
+        const form = new URLSearchParams(String(init?.body))
+        const grant = codes.get(form.get('code') ?? '')
+        codes.delete(form.get('code') ?? '')
+        if (!grant || (await sha256url(form.get('code_verifier') ?? '')) !== grant.challenge) {
+          return Response.json({ error: 'invalid_grant' }, { status: 400 })
+        }
+        const b64 = (s: string) => encodeBase64Url(new TextEncoder().encode(s))
+        const head = b64(JSON.stringify({ alg: 'ES256', kid: 'k1', typ: 'JWT' }))
+        const body = b64(JSON.stringify({
+          iss: issuer,
+          aud: grant.client,
+          sub: 'google-sub-1',
+          name: profileName,
+          picture: 'https://pics.test/alice.png',
+          nonce: grant.nonce,
+          exp: Math.floor(Date.now() / 1000) + 300,
+        }))
+        const sig = new Uint8Array(
+          await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, new TextEncoder().encode(`${head}.${body}`)),
+        )
+        return Response.json({ id_token: `${head}.${body}.${encodeBase64Url(sig)}` })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }
+
+    const db = await PGlite.create()
+    try {
+      await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+      await db.exec(await Deno.readTextFile(new URL('fixture.sql', import.meta.url)))
+      await db.exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;')
+
+      const providers = providersFrom((k) => ({
+        OIDC_PROVIDERS: 'google',
+        OIDC_GOOGLE_CLIENT_ID: 'origin',
+      }[k]))
+      const cluster = await createEdgeCluster({
+        db,
+        tables: ['note', 'board'],
+        secret,
+        origin,
+        providers,
+        fetcher,
+        log: (line) => { console.error('CLUSTER LOG:', line) },
+        fail: (e) => { throw e },
+      })
+
+      const startRes = await cluster.handle(new Request(`${origin}/auth/oidc/google/start?return=%2Fexplore`))
+      assert.equal(startRes.status, 303)
+      const authorizeUrl = new URL(startRes.headers.get('location')!)
+      assert.equal(authorizeUrl.origin + authorizeUrl.pathname, `${issuer}/authorize`)
+      assert.equal(authorizeUrl.searchParams.get('client_id'), origin)
+      const stateCookie = startRes.headers.get('set-cookie')!.split(';')[0]
+      assert.ok(stateCookie.startsWith(`${STATE_COOKIE}=`))
+      const code = crypto.randomUUID()
+      codes.set(code, {
+        client: authorizeUrl.searchParams.get('client_id')!,
+        redirect: authorizeUrl.searchParams.get('redirect_uri')!,
+        challenge: authorizeUrl.searchParams.get('code_challenge')!,
+        nonce: authorizeUrl.searchParams.get('nonce')!,
+      })
+
+      const cbRes = await cluster.handle(
+        new Request(`${origin}/auth/oidc/google/callback?code=${code}&state=${encodeURIComponent(authorizeUrl.searchParams.get('state')!)}`, {
+          headers: { cookie: stateCookie },
+        }),
+      )
+      assert.equal(cbRes.status, 303)
+      assert.equal(cbRes.headers.get('location'), '/explore')
+      const sessionCookie = cbRes.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
+
+      const sessionRes = await cluster.handle(
+        new Request(`${origin}/auth/oidc/session`, {
+          method: 'POST',
+          headers: { cookie: sessionCookie },
+        }),
+      )
+      assert.equal(sessionRes.status, 200)
+      const session = (await sessionRes.json()) as { token: string; user: { id: string; handle: string } }
+      assert.ok(session.token)
+      assert.ok(session.user.id)
+
+      // Repeat sign-in updates profile and preserves user_id
+      profileName = 'Alice Updated'
+      const start2 = await cluster.handle(new Request(`${origin}/auth/oidc/google/start`))
+      const authUrl2 = new URL(start2.headers.get('location')!)
+      const stateCookie2 = start2.headers.get('set-cookie')!.split(';')[0]
+      const code2 = crypto.randomUUID()
+      codes.set(code2, {
+        client: authUrl2.searchParams.get('client_id')!,
+        redirect: authUrl2.searchParams.get('redirect_uri')!,
+        challenge: authUrl2.searchParams.get('code_challenge')!,
+        nonce: authUrl2.searchParams.get('nonce')!,
+      })
+      const cb2 = await cluster.handle(
+        new Request(`${origin}/auth/oidc/google/callback?code=${code2}&state=${encodeURIComponent(authUrl2.searchParams.get('state')!)}`, {
+          headers: { cookie: stateCookie2 },
+        }),
+      )
+      const sessionCookie2 = cb2.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
+      const session2 = (await (await cluster.handle(new Request(`${origin}/auth/oidc/session`, { method: 'POST', headers: { cookie: sessionCookie2 } }))).json()) as { user: { id: string } }
+      assert.equal(session2.user.id, session.user.id)
+      const stored = await db.query<{ name: string }>('SELECT name FROM mecha_auth.identity_link WHERE user_id = $1', [session.user.id])
+      assert.equal(stored.rows[0].name, 'Alice Updated')
+
+      // mecha_auth.identity_link is sealed from app_user in DB privileges and exempt from RLS audit
+      const privs = await db.query<{ schema_ok: boolean; table_ok: boolean; exempt: boolean }>(
+        `SELECT has_schema_privilege('app_user', 'mecha_auth', 'USAGE') AS schema_ok,
+                has_table_privilege('app_user', 'mecha_auth.identity_link', 'SELECT') AS table_ok,
+                EXISTS (SELECT 1 FROM mecha.rls_exempt WHERE table_name = 'mecha_auth.identity_link') AS exempt`,
+      )
+      assert.equal(privs.rows[0].schema_ok, false)
+      assert.equal(privs.rows[0].table_ok, false)
+      assert.equal(privs.rows[0].exempt, true)
+
+      const signoutRes = await cluster.handle(new Request(`${origin}/auth/oidc/signout`, { method: 'POST' }))
+      assert.equal(signoutRes.status, 204)
+      const cleared = signoutRes.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=;`))
+      assert.ok(cleared?.includes('Max-Age=0'))
+      const clearedCookie = cleared!.split(';')[0]
+      const afterSignout = await cluster.handle(
+        new Request(`${origin}/auth/oidc/session`, { method: 'POST', headers: { cookie: clearedCookie } }),
+      )
+      assert.equal(afterSignout.status, 401)
     } finally {
       await db.close()
     }

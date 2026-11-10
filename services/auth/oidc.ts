@@ -111,7 +111,7 @@ export function discovery(fetcher: typeof fetch = fetch): (p: Provider) => Promi
       hit = (async () => {
         const res = await fetcher(`${p.internal.replace(/\/$/, "")}/.well-known/openid-configuration`);
         if (!res.ok) throw new Error(`${p.issuer}'s discovery: ${res.status}`);
-        const d = await res.json();
+        const d = (await res.json()) as { issuer: string; authorization_endpoint: string; token_endpoint: string; jwks_uri: string };
         // OpenID Connect Discovery 1.0 §4.3: the document names the issuer it was asked of.
         if (d.issuer !== p.issuer) throw new Error(`${p.issuer}'s discovery names the issuer ${d.issuer}`);
         return { authorize: d.authorization_endpoint, token: inside(p, d.token_endpoint), jwks: inside(p, d.jwks_uri) };
@@ -133,7 +133,7 @@ export function keySource(fetcher: typeof fetch = fetch): (jwks: string, kid: st
     if (find()) return find();
     const res = await fetcher(jwks);
     if (!res.ok) throw new Error(`${jwks}: ${res.status}`);
-    held.set(jwks, (await res.json()).keys);
+    held.set(jwks, ((await res.json()) as { keys: JsonWebKey[] }).keys);
     return find();
   };
 }
@@ -308,7 +308,7 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
       }),
     });
     if (!exchanged.ok) return refuse(401, "the provider refused the code");
-    const idToken = (await exchanged.json()).id_token;
+    const idToken = ((await exchanged.json()) as { id_token?: unknown }).id_token;
     if (typeof idToken !== "string") return refuse(401, "no id token");
     const profile = await verifyIdToken(name, idToken, (kid) => keys(ends.jwks, kid), { issuer: p.issuer, issuers: p.issuers, client, nonce: state.nonce });
     if (profile === null) return refuse(401, "id token refused");

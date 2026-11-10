@@ -24,6 +24,7 @@ import { createEdgeAirlock, die, type EdgeAirlock, type EdgeEffectDeclarations }
 import type { ClaimedRun, DispatchedRun, RunAnswer } from './dispatch.ts'
 import { hatchAt, type EdgeHatch } from './hatches.ts'
 import { verifyJwt } from '../../../services/auth/jwt.ts'
+import { providersFrom } from '../../../services/auth/oidc.ts'
 import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
 import { applyScripts, ChangedScript, NoLedger, OutOfOrderScript, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import type { PublicSnapshot } from './public-snapshot.ts'
@@ -101,8 +102,26 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         await db.exec(`SET default_transaction_isolation TO 'read committed'`)
         await installEngines(db, Object.keys(machines), Object.keys(functions))
         const ticks = clockMode === 'ticker' && await hasSchedules(db)
+        const env = (name: string) => {
+          const v = (this.env as unknown as Record<string, unknown>)[name]
+          return typeof v === 'string' ? v : undefined
+        }
+        const configuredProviders = (env('OIDC_PROVIDERS') ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter((name) => name !== '' && Boolean(env(`OIDC_${name.toUpperCase()}_CLIENT_ID`) || env(`OIDC_${name.toUpperCase()}_ISSUER`)))
+          .join(',')
+        const providers = providersFrom((name) => {
+          if (name === 'OIDC_PROVIDERS') return configuredProviders
+          if (/^OIDC_[A-Z0-9]+_CLIENT_ID$/.test(name)) return env(name) ?? (env(name.replace(/_CLIENT_ID$/, '_ISSUER')) ? 'origin' : undefined)
+          if (/^OIDC_[A-Z0-9]+_AUTHORIZE_PARAMS$/.test(name)) {
+            const p = name.slice('OIDC_'.length, -'_AUTHORIZE_PARAMS'.length).toLowerCase()
+            return env(name) ?? (env(name.replace(/_AUTHORIZE_PARAMS$/, '_ISSUER')) && !env(name.replace(/_AUTHORIZE_PARAMS$/, '_CLIENT_ID')) ? `provider=${p}` : undefined)
+          }
+          return env(name)
+        })
         const cluster = await createEdgeCluster({
-          db, tables, schema, secret: this.env.JWT_SECRET, log: console.error, drains,
+          db, tables, schema, secret: this.env.JWT_SECRET, log: console.error, drains, providers,
           ...(compute ? { compute: {
             ...compute,
             ...(compute.physicalSnapshots ? { retainSnapshot: async identity => {

@@ -4,8 +4,8 @@
 // subject a shape token names (mecha-browser's shapes.ts), and the app's
 // drains called as their tables change (mecha-browser's drains.ts).
 // Routes: /auth/guest, /auth/whoami, /auth/shape, /auth/register/start,
-// /auth/register/verify, /auth/login/start, /auth/login/verify, /crud/*,
-// /electric/v1/shape.
+// /auth/register/verify, /auth/login/start, /auth/login/verify, /auth/oidc/*,
+// /crud/*, /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
 import {
   generateAuthenticationOptions,
@@ -15,6 +15,7 @@ import {
 } from '@simplewebauthn/server'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
 import { isSession, PUBLIC_WHERE, shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
+import { oidc, type Links, type Profile, type Provider } from '../../../services/auth/oidc.ts'
 import { prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
@@ -39,6 +40,8 @@ export interface EdgeClusterConfig {
   compute?: { computations: Computation[]; machine: BatchMachine; retainSnapshot?(identity: SnapshotIdentity): Promise<void>; execute?(snapshot: Snapshot): Promise<Output>; changed(): void }
   rpId?: string
   origin?: string
+  providers?: Record<string, Provider>
+  fetcher?: typeof fetch
 }
 
 export interface EdgeCluster {
@@ -136,12 +139,14 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     for (const row of rows) publicCache.set(row.name, row.p)
   }
   let authTablesReady: Promise<void> | undefined
-  // The passkeys live in mecha_auth, as the host auth service keeps them
-  // (services/auth/schema.ts); the REST handler serves public alone.
+  // The passkeys and identity links live in mecha_auth, as the host auth
+  // service keeps them (services/auth/schema.ts); the REST handler serves
+  // public alone.
   const createAuthTables = async () => {
     await db.transaction(async (tx) => {
-      await tx.exec(prepareAuthTables(['webauthn_credential']))
-      await tx.exec(sealAuthTables(['webauthn_credential']))
+      await tx.exec(prepareAuthTables(['webauthn_credential', 'identity_link']))
+      await tx.exec(`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text`)
+      await tx.exec(sealAuthTables(['webauthn_credential', 'identity_link']))
     })
   }
   const ensureAuthTables = () => authTablesReady ??= serialize(createAuthTables).catch((e) => {
@@ -149,13 +154,13 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     throw e
   })
   // Before the cluster answers anything: an earlier release's table in public
-  // moves, and the grants are taken back, where the cluster keeps passkeys.
+  // moves, and the grants are taken back, where the cluster keeps auth tables.
   // One that has none makes its tables at the first ceremony.
   {
-    const { rows: [held] } = await db.query<{ passkeys: boolean }>(
-      `SELECT to_regclass('public.webauthn_credential') IS NOT NULL OR to_regnamespace('mecha_auth') IS NOT NULL AS passkeys`,
+    const { rows: [held] } = await db.query<{ auth: boolean }>(
+      `SELECT to_regclass('public.webauthn_credential') IS NOT NULL OR to_regclass('public.identity_link') IS NOT NULL OR to_regnamespace('mecha_auth') IS NOT NULL AS auth`,
     )
-    if (held.passkeys) await ensureAuthTables()
+    if (held.auth) await ensureAuthTables()
   }
 
   // Anonymous rendering needs no change stream. Install its triggers before
@@ -354,7 +359,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         [response.id],
       ),
     )
-    if (creds.length === 0) return json(401, { error: 'authentication verification failed' })
+    if (creds.length === 0) return json(401, { error: 'authentication verification failed', unknownCredential: true })
     const cred = creds[0]
     const rpId = cfg.rpId ?? new URL(req.url).hostname
     const origin = cfg.origin ?? new URL(req.url).origin
@@ -386,6 +391,73 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const token = await signJwt(secret, { role: 'app_user', sub: cred.user_id, handle: cred.handle, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id: cred.user_id, handle: cred.handle } })
   }
+
+  const links: Links = {
+    async userFor(p: Profile) {
+      await ensureAuthTables()
+      return await serialize(async () => {
+        await db.query('BEGIN')
+        try {
+          const { rows: [link] } = await db.query<{ user_id: string }>(
+            `UPDATE mecha_auth.identity_link SET name = $1, picture = $2
+             WHERE provider = $3 AND issuer = $4 AND sub = $5 RETURNING user_id`,
+            [p.name, p.picture, p.provider, p.issuer, p.sub],
+          )
+          if (link) {
+            const { rows: [u] } = await db.query<{ handle: string }>('SELECT handle FROM app_user WHERE id = $1', [link.user_id])
+            await db.query('COMMIT')
+            return { id: link.user_id, handle: u.handle }
+          }
+          const id = crypto.randomUUID()
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const handle = generateHandle()
+            await db.query('SAVEPOINT alloc')
+            try {
+              await db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, handle])
+              await db.query('RELEASE SAVEPOINT alloc')
+            } catch (e) {
+              await db.query('ROLLBACK TO SAVEPOINT alloc')
+              if (typeof e === 'object' && e !== null && 'code' in e && (e as { code: string }).code === '23505') continue
+              throw e
+            }
+            await db.query(
+              `INSERT INTO mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [p.provider, p.issuer, p.sub, id, p.name, p.picture],
+            )
+            await db.query('COMMIT')
+            return { id, handle }
+          }
+          throw new Error('could not allocate identity')
+        } catch (e) {
+          await db.query('ROLLBACK')
+          throw e
+        }
+      })
+    },
+    async handleOf(provider: string, issuer: string, id: string) {
+      await ensureAuthTables()
+      const { rows: [u] } = await serialize(() =>
+        db.query<{ handle: string }>(
+          `SELECT u.handle FROM app_user u
+           WHERE u.id = $1 AND EXISTS (
+             SELECT 1 FROM mecha_auth.identity_link l WHERE l.user_id = u.id AND l.provider = $2 AND l.issuer = $3
+           )`,
+          [id, provider, issuer],
+        ),
+      )
+      return u ? u.handle : null
+    },
+  }
+
+  const providerSignIn = oidc({
+    secret,
+    origin: (req) => cfg.origin ?? new URL(req.url).origin,
+    providers: cfg.providers ?? {},
+    links,
+    issue: (user) => signJwt(secret, { role: 'app_user', sub: user.id, handle: user.handle, exp: now() + USER_TOKEN_TTL_S }),
+    fetcher: cfg.fetcher,
+  })
 
   async function shapeToken(req: Request): Promise<Response> {
     const claims = await session(req)
@@ -486,6 +558,8 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       await ensureShapes()
       await compute()
       await drains()
+      const signedIn = providerSignIn(req)
+      if (signedIn !== null) return await signedIn
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)

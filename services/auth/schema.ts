@@ -28,6 +28,8 @@ const columns: Record<AuthTable, string> = {
     issuer text not null,
     sub text not null,
     user_id uuid not null unique references public.app_user(id) on delete cascade,
+    name text,
+    picture text,
     created_at timestamptz not null default now(),
     primary key (provider, issuer, sub)`,
 };

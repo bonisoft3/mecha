@@ -299,9 +299,15 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
   `)
   try {
     const objects = new Map<string, Uint8Array>()
+    const pdfBytes = new TextEncoder().encode('%PDF-1.4')
     const effects: EdgeEffects = {
       draw: {
-        ...draft(3, () => ({ done: { image: { $blob: { base64: btoa('jpeg bytes'), type: 'image/jpeg' } } } }), { table: 'card', state: 'drawing', onDone: 'drawn' }),
+        ...draft(3, () => ({
+          done: {
+            image: { $blob: { base64: btoa('jpeg bytes'), type: 'image/jpeg' } },
+            file: { $blob: { bytes: pdfBytes, type: 'application/pdf' } },
+          },
+        }), { table: 'card', state: 'drawing', onDone: 'drawn' }),
       },
     }
     const { airlock, deliver } = harness(db, effects, {
@@ -309,10 +315,13 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
     })
     await airlock.drain()
     await deliver()
-    const { rows: [l] } = await db.query<{ outcome: { data: { image: string } } }>(`SELECT outcome FROM airlock.external_effect_ledger WHERE key = 'draw:c1'`)
+    const { rows: [l] } = await db.query<{ outcome: { data: { image: string; file: string } } }>(`SELECT outcome FROM airlock.external_effect_ledger WHERE key = 'draw:c1'`)
     const url = l.outcome.data.image
+    const fileUrl = l.outcome.data.file
     assert.match(url, /^\/img\/insecure\/plain\/s3:\/\/bucket\/effects\/[0-9a-f]{64}\.jpg$/)
+    assert.match(fileUrl, /^\/blobs\/mecha-objects\/effects\/[0-9a-f]{64}\.pdf$/)
     assert.equal(new TextDecoder().decode(objects.get(url.slice('/img/insecure/plain/s3://bucket/'.length))!), 'jpeg bytes')
+    assert.equal(new TextDecoder().decode(objects.get(fileUrl.slice('/blobs/mecha-objects/'.length))!), '%PDF-1.4')
     assert.equal(await status(db, 'card', 'c1'), 'drawn')
   } finally {
     await db.close()

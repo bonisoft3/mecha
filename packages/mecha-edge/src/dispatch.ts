@@ -121,6 +121,16 @@ function checkAnswer(call: 'issue' | 'reconcile', result: unknown): Answer {
     return { absent: true }
   }
   if (k !== 'done' && k !== 'failed') throw new TypeError(`${call} returned unknown key ${k}`)
+  return { [k]: v } as Answer
+}
+
+// Stowing replaces any {$blob: {bytes: Uint8Array, type}} with its served URL
+// first; a JSON round-trip before stowing would turn Uint8Array into a plain
+// object that stowed() then refuses.
+function jsonAnswer(call: 'issue' | 'reconcile', answer: Answer): Answer {
+  if ('absent' in answer) return answer
+  const k = 'done' in answer ? 'done' : 'failed'
+  const v = 'done' in answer ? answer.done : answer.failed
   let text: string | undefined
   try {
     text = JSON.stringify(v)
@@ -230,15 +240,16 @@ export async function performEffect(spec: EdgeEffect, run: { key: string; entere
   const sink = makeSink(spec, key, cfg, env)
   const { strings } = env
   const secrets = Object.fromEntries((effect.secrets ?? []).map(name => [name, strings[name] || die(`effect ${effect.handler}: secret ${name} is not set on this deployment`)]))
-  const stow = (answer: Answer) => within(handlerTimeoutMs, `${key}: storing the answer's bytes`, stowed(answer, key, cfg.blobs))
+  const stow = async (call: 'issue' | 'reconcile', answer: Answer) =>
+    jsonAnswer(call, await within(handlerTimeoutMs, `${key}: storing the answer's bytes`, stowed(answer, key, cfg.blobs)))
   if (step(effect, entered) === 'reconcile') {
     if (!spec.reconcile) throw new TypeError(`effect ${effect.handler} exports no reconcile function`)
     const known = checkAnswer('reconcile', await within(handlerTimeoutMs, `effect ${effect.handler}: reconcile`, Promise.resolve(spec.reconcile(input, sink, secrets))))
-    if (!('absent' in known)) return outcome(effect, await stow(known), true)
+    if (!('absent' in known)) return outcome(effect, await stow('reconcile', known), true)
   }
-  const ans = checkAnswer('issue', await within(handlerTimeoutMs, `effect ${effect.handler}: issue`, Promise.resolve(spec.issue(input, sink, secrets))))
+  const ans = await stow('issue', checkAnswer('issue', await within(handlerTimeoutMs, `effect ${effect.handler}: issue`, Promise.resolve(spec.issue(input, sink, secrets)))))
   if ('failed' in ans) log(`airlock effect ${key} returned failed on attempt ${entered}: ${JSON.stringify(ans.failed)}`)
-  return outcome(effect, await stow(ans), false)
+  return outcome(effect, ans, false)
 }
 
 /** The cluster object's side of the protocol, as the dispatcher reaches it. */

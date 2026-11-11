@@ -442,12 +442,27 @@ async function readState(
   return st;
 }
 
-const ADJECTIVES = ["amber", "brisk", "calm", "dusk", "ember", "fern", "gold", "hazel", "ivory", "jade", "kind", "lunar", "mellow", "noble", "ochre", "pale", "quiet", "rustic", "sage", "tidal"];
-const NOUNS = ["fox", "wren", "otter", "pine", "reed", "moth", "lark", "moss", "dune", "cove", "elk", "finch", "heron", "ibis", "kite", "lynx", "newt", "orca", "quail", "seal"];
-function generateHandle(): string {
-  const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const n = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-  return `${a}-${n}-${10 + Math.floor(Math.random() * 90)}`;
+const FRUITS = [
+  "acerola", "amora", "avocado", "banana", "caju", "carambola", "cherry", "citrus",
+  "coconut", "cupuacu", "fig", "guava", "jabuticaba", "jackfruit", "kiwi", "lemon",
+  "lime", "lychee", "mango", "maracuja", "melon", "nectarine", "olive", "orange",
+  "papaya", "peach", "pear", "persimmon", "pineapple", "pitanga", "plum", "tangerine",
+];
+const ANIMALS = [
+  "albatross", "armadillo", "badger", "capybara", "chameleon", "condor", "dolphin", "falcon",
+  "flamingo", "fox", "gecko", "heron", "hummingbird", "ibis", "iguana", "jaguar",
+  "kingfisher", "koala", "lemur", "lynx", "macaw", "manatee", "meerkat", "ocelot",
+  "otter", "owl", "panda", "pelican", "penguin", "quokka", "tapir", "toucan",
+];
+export function guestHandle(id: string): string {
+  const hex = id.replaceAll("-", "").toLowerCase();
+  const fruit = FRUITS[(parseInt(hex.slice(0, 2), 16) || 0) % FRUITS.length];
+  const animal = ANIMALS[(parseInt(hex.slice(2, 4), 16) || 0) % ANIMALS.length];
+  const slug = hex.slice(-4) || "0000";
+  return `${fruit}-${animal}-${slug}`;
+}
+function generateHandle(id = crypto.randomUUID()): string {
+  return guestHandle(id);
 }
 
 async function registerStart(req: Request): Promise<Response> {
@@ -605,11 +620,12 @@ async function guest(_req: Request): Promise<Response> {
   // Origin-independent by terminal doctrine: no WebAuthn, no origin check —
   // this door must open from any origin the cluster is reachable on.
   const userId = crypto.randomUUID();
-  let handle = generateHandle();
+  let handle = generateHandle(userId);
   let inserted = false;
   for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
     try {
-      await sql`insert into app_user (id, handle) values (${userId}, ${handle})`;
+      const [row] = await sql`insert into app_user (id, handle) values (${userId}, ${handle}) returning handle`;
+      if (row?.handle) handle = String(row.handle);
       inserted = true;
     } catch (e) {
       if ((e as { code?: string }).code === "23505") handle = generateHandle();

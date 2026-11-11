@@ -572,7 +572,7 @@ Deno.test('advancePaged applies WAL deltas and falls back to reset-source when W
     const req = JSON.parse(String(init!.body)) as PagedRequest
     if (req.action === 'initialize' || req.action === 'status') {
       const res = await baseFetch(input, init)
-      const body = await res.json()
+      const body = await res.json() as Record<string, unknown>
       const remote = f.remotes.get(keyOf(req.capture))!
       if ((remote.sources.get('source') ?? 0) === 0 && !f.events.includes('reset-source') && !f.events.includes('apply-wal')) {
         body.walSources = [{ name: 'source', fromLsn: 1, targetLsn: 5 }]
@@ -609,7 +609,7 @@ Deno.test('advancePaged applies WAL deltas and falls back to reset-source when W
     const req = JSON.parse(String(init!.body)) as PagedRequest
     if (req.action === 'initialize') {
       const res = await baseFetch2(input, init)
-      const body = await res.json()
+      const body = await res.json() as Record<string, unknown>
       body.walSources = [{ name: 'source', fromLsn: 1, targetLsn: 5 }]
       return Response.json(body)
     }

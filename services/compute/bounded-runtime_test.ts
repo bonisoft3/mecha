@@ -75,10 +75,9 @@ Deno.test("bounded runtime executes single-pass calculate computations without s
 		delete config.spec.steps;
 		delete config.source;
 		config.computation = {
-			reads: [],
-			queries: config.queries,
-			calculate(inputs) {
-				const rows = (inputs.items as { id: string; value: number }[]) ?? [];
+			async calculate(inputs) {
+				const rows =
+					((inputs as { items?: { id: string; value: number }[] }).items) ?? [];
 				return { sink: rows.filter((r) => r.value < 5) };
 			},
 		};
@@ -196,8 +195,12 @@ Deno.test("bounded query checks the same relation it returns", async () => {
 	const directory = await Deno.makeTempDir();
 	try {
 		const config = options(directory);
-		const sql = "SELECT i FROM range(CASE WHEN contains(current_query(), 'AS'||chr(32)||'size') THEN 1 ELSE 4097 END) t(i)";
-		config.source = `export const reads=[];export const queries={};export const finish=()=>({});export async function plan(host){await host.query(${JSON.stringify(sql)});return {checkpoint:null,writes:{},done:true}}`;
+		const sql =
+			"SELECT i FROM range(CASE WHEN contains(current_query(), 'AS'||chr(32)||'size') THEN 1 ELSE 4097 END) t(i)";
+		config.source =
+			`export const reads=[];export const queries={};export const finish=()=>({});export async function plan(host){await host.query(${
+				JSON.stringify(sql)
+			});return {checkpoint:null,writes:{},done:true}}`;
 		const runtime = await BoundedRuntime.create(config);
 		const capture = await runtime.capture();
 		await assertRejects(
@@ -245,24 +248,31 @@ Deno.test("query-backed WASM pages preserve order and columns across row and byt
 			const config = options(directory);
 			config.spec.wasm = ["test.wasm"];
 			config.queries = {};
-			const sql = `SELECT i::INTEGER AS ordinal,repeat('x',${width}) AS item,i::INTEGER AS total,(i+1)::INTEGER AS __bounded_position FROM range(${count}) t(i)`;
+			const sql =
+				`SELECT i::INTEGER AS ordinal,repeat('x',${width}) AS item,i::INTEGER AS total,(i+1)::INTEGER AS __bounded_position FROM range(${count}) t(i)`;
 			let oldInput: string | undefined;
 			if (count === 5000) {
 				const db = await DuckDBInstance.create(":memory:");
 				const con = await db.connect();
 				try {
-					const encoded = await encodeWasmQueryInput({ request: { games: [] } }, { path: ["request", "games"], orderBy: "ordinal", sql }, async (after) => {
-						const result = await con.runAndReadAll(`SELECT * FROM (${sql}) r WHERE ordinal > ${after} ORDER BY ordinal LIMIT 128`);
-						const rows = result.getRowObjects();
-						let next = after;
-						const values = rows.map((row) => {
-							next = Number(row.ordinal);
-							const value = { ...row };
-							delete value.ordinal;
-							return value;
-						});
-						return { after, next, done: rows.length < 128, rows: values };
-					});
+					const encoded = await encodeWasmQueryInput(
+						{ request: { games: [] } },
+						{ path: ["request", "games"], orderBy: "ordinal", sql },
+						async (after) => {
+							const result = await con.runAndReadAll(
+								`SELECT * FROM (${sql}) r WHERE ordinal > ${after} ORDER BY ordinal LIMIT 128`,
+							);
+							const rows = result.getRowObjects();
+							let next = after;
+							const values = rows.map((row) => {
+								next = Number(row.ordinal);
+								const value = { ...row };
+								delete value.ordinal;
+								return value;
+							});
+							return { after, next, done: rows.length < 128, rows: values };
+						},
+					);
 					oldInput = new TextDecoder().decode(encoded);
 				} finally {
 					con.closeSync();
@@ -270,19 +280,28 @@ Deno.test("query-backed WASM pages preserve order and columns across row and byt
 				}
 			}
 			let seen = false;
-			config.runner = { run: (jobs) => {
-				if (oldInput !== undefined) assertEquals(jobs[0].input, oldInput);
-				const input = JSON.parse(jobs[0].input);
-				assertEquals(input.request.games.length, count);
-				for (let i = 0; i < count; i++) {
-					assertEquals(input.request.games[i], { item: "x".repeat(width), total: i, __bounded_position: i + 1 });
-				}
-				seen = true;
-				return Promise.resolve([true]);
-			} };
-			config.source = `export const reads=[];export const queries={};export const finish=()=>({});
+			config.runner = {
+				run: (jobs) => {
+					if (oldInput !== undefined) assertEquals(jobs[0].input, oldInput);
+					const input = JSON.parse(jobs[0].input);
+					assertEquals(input.request.games.length, count);
+					for (let i = 0; i < count; i++) {
+						assertEquals(input.request.games[i], {
+							item: "x".repeat(width),
+							total: i,
+							__bounded_position: i + 1,
+						});
+					}
+					seen = true;
+					return Promise.resolve([true]);
+				},
+			};
+			config.source =
+				`export const reads=[];export const queries={};export const finish=()=>({});
 export async function plan(host){
- await host.wasmFromQuery('test',{request:{games:[]}},{path:['request','games'],orderBy:'ordinal',sql:${JSON.stringify(sql)} });
+ await host.wasmFromQuery('test',{request:{games:[]}},{path:['request','games'],orderBy:'ordinal',sql:${
+					JSON.stringify(sql)
+				} });
  return {checkpoint:null,writes:{},done:true};
 }`;
 			const runtime = await BoundedRuntime.create(config);
@@ -293,12 +312,15 @@ export async function plan(host){
 		alias.spec.wasm = ["test.wasm"];
 		alias.queries = {};
 		let aliasSeen = false;
-		alias.runner = { run: (jobs) => {
-			assertEquals(JSON.parse(jobs[0].input), { games: [{ r: 2 }] });
-			aliasSeen = true;
-			return Promise.resolve([true]);
-		} };
-		alias.source = `export const reads=[];export const queries={};export const finish=()=>({});
+		alias.runner = {
+			run: (jobs) => {
+				assertEquals(JSON.parse(jobs[0].input), { games: [{ r: 2 }] });
+				aliasSeen = true;
+				return Promise.resolve([true]);
+			},
+		};
+		alias.source =
+			`export const reads=[];export const queries={};export const finish=()=>({});
 export async function plan(host){
  await host.wasmFromQuery('test',{games:[]},{path:['games'],orderBy:'ordinal',sql:'SELECT 1 AS ordinal,2 AS r'});
  return {checkpoint:null,writes:{},done:true};
@@ -309,14 +331,19 @@ export async function plan(host){
 		const config = options(directory);
 		config.spec.wasm = ["test.wasm"];
 		config.queries = {};
-		config.source = `export const reads=[];export const queries={};export const finish=()=>({});
+		config.source =
+			`export const reads=[];export const queries={};export const finish=()=>({});
 export async function plan(host){
  await host.wasmFromQuery('test',{games:[]},{path:['games'],orderBy:'ordinal',sql:"SELECT 1 AS ordinal,repeat('x',1048576) AS value"});
  return {checkpoint:null,writes:{},done:true};
 }`;
 		const runtime = await BoundedRuntime.create(config);
 		const capture = await runtime.capture();
-		await assertRejects(() => runtime.calculate(capture), Error, "execution query row exceeds page limit");
+		await assertRejects(
+			() => runtime.calculate(capture),
+			Error,
+			"execution query row exceeds page limit",
+		);
 	} finally {
 		await Deno.remove(directory, { recursive: true });
 	}
@@ -327,7 +354,8 @@ Deno.test("bounded publication keeps sink order across row and byte limits", asy
 	try {
 		const config = options(directory);
 		config.spec.to = ["sink", "other", "empty"];
-		config.source = `export const reads=[];export const queries={};export const finish=()=>({});
+		config.source =
+			`export const reads=[];export const queries={};export const finish=()=>({});
 export function plan(){
  const small=Array.from({length:130},(_,i)=>({id:String(129-i).padStart(3,'0'),value:i}));
  const prefix=JSON.stringify({id:'a',value:''}).length;
@@ -338,13 +366,18 @@ export function plan(){
 		const small = [];
 		for await (const page of runtime.pages(output, "sink")) small.push(page);
 		assertEquals(small.map((page) => page.length), [128, 2]);
-		assertEquals(small.flat().map((row) => row.id),
-			Array.from({ length: 130 }, (_, i) => String(i).padStart(3, "0")));
+		assertEquals(
+			small.flat().map((row) => row.id),
+			Array.from({ length: 130 }, (_, i) => String(i).padStart(3, "0")),
+		);
 		const large = [];
 		for await (const page of runtime.pages(output, "other")) large.push(page);
 		assertEquals(large.map((page) => page.length), [1, 1]);
 		assertEquals(large.flat().map((row) => row.id), ["a", "b"]);
-		assertEquals(new TextEncoder().encode(JSON.stringify(large[0])).length, 262144);
+		assertEquals(
+			new TextEncoder().encode(JSON.stringify(large[0])).length,
+			262144,
+		);
 		const empty = [];
 		for await (const page of runtime.pages(output, "empty")) empty.push(page);
 		assertEquals(empty, []);
@@ -628,62 +661,84 @@ Deno.test("bounded capture preserves query order across native conversion pages"
 });
 
 Deno.test("bounded sink batches preserve JSON strings and replace keys only across steps", async () => {
-  const directory = await Deno.makeTempDir();
-  try {
-    const config = options(directory);
-    config.queries = {};
-    const rows = [
-      { id: "", value: { text: "line\nquoted \"value\" \\ café", numbers: [1e30, 0.125, null] } },
-      { id: "key'\"\\雪", value: { text: "before", numbers: [1, 2, null] } },
-    ];
-    const updated = { ...rows[1], value: { text: "after\n\\雪", numbers: [3, 4, null] } };
-    config.source = `export const reads=[];export const queries={};export const finish=()=>({});
+	const directory = await Deno.makeTempDir();
+	try {
+		const config = options(directory);
+		config.queries = {};
+		const rows = [
+			{
+				id: "",
+				value: {
+					text: 'line\nquoted "value" \\ café',
+					numbers: [1e30, 0.125, null],
+				},
+			},
+			{ id: "key'\"\\雪", value: { text: "before", numbers: [1, 2, null] } },
+		];
+		const updated = {
+			...rows[1],
+			value: { text: "after\n\\雪", numbers: [3, 4, null] },
+		};
+		config.source =
+			`export const reads=[];export const queries={};export const finish=()=>({});
       export function plan(host,seed,checkpoint){
         return checkpoint===null
           ? {checkpoint:1,writes:{sink:${JSON.stringify(rows)}},done:false}
           : {checkpoint:2,writes:{sink:${JSON.stringify([updated])}},done:true};
       }`;
-    const runtime = await BoundedRuntime.create(config);
-    const capture = await runtime.capture();
-    const output = await runtime.calculate(capture);
-    const actual = [];
-    for await (const page of runtime.pages(output, "sink")) actual.push(...page);
-    assertEquals(actual, [rows[0], updated]);
-    await runtime.discard(output);
-    for (const [writes, message] of [
-      [[updated, updated], "invalid execution output row"],
-      [[{ id: rows[1].id, changed: true }], "execution output columns differ"],
-    ] as const) {
-      const invalid = await BoundedRuntime.create({
-        ...config,
-        source: config.source.replace(JSON.stringify([updated]), JSON.stringify(writes)),
-      });
-      await assertRejects(() => invalid.calculate(capture), Error, message);
-    }
-    const replay = await runtime.calculate(capture);
-    await runtime.release(capture, replay);
-  } finally {
-    await Deno.remove(directory, { recursive: true });
-  }
+		const runtime = await BoundedRuntime.create(config);
+		const capture = await runtime.capture();
+		const output = await runtime.calculate(capture);
+		const actual = [];
+		for await (const page of runtime.pages(output, "sink")) {
+			actual.push(...page);
+		}
+		assertEquals(actual, [rows[0], updated]);
+		await runtime.discard(output);
+		for (
+			const [writes, message] of [
+				[[updated, updated], "invalid execution output row"],
+				[
+					[{ id: rows[1].id, changed: true }],
+					"execution output columns differ",
+				],
+			] as const
+		) {
+			const invalid = await BoundedRuntime.create({
+				...config,
+				source: config.source.replace(
+					JSON.stringify([updated]),
+					JSON.stringify(writes),
+				),
+			});
+			await assertRejects(() => invalid.calculate(capture), Error, message);
+		}
+		const replay = await runtime.calculate(capture);
+		await runtime.release(capture, replay);
+	} finally {
+		await Deno.remove(directory, { recursive: true });
+	}
 });
 
 pgTest(
-  "bounded persistent replica seeds once and applies LSN-fenced WAL deltas and duckpipe tables",
-  async () => {
-    await using server = await postgres();
-    const admin = new pg.Client({ connectionString: server.url });
-    const directory = await Deno.makeTempDir();
-    await admin.connect();
-    try {
-      const batchesSql = await Deno.readTextFile(new URL("./batches.sql", import.meta.url));
-      await admin.query(`
+	"bounded persistent replica seeds once and applies LSN-fenced WAL deltas and duckpipe tables",
+	async () => {
+		await using server = await postgres();
+		const admin = new pg.Client({ connectionString: server.url });
+		const directory = await Deno.makeTempDir();
+		await admin.connect();
+		try {
+			const batchesSql = await Deno.readTextFile(
+				new URL("./batches.sql", import.meta.url),
+			);
+			await admin.query(`
         CREATE SCHEMA hybrid_compute_batch;
         CREATE TABLE hybrid_compute_batch.instance (id uuid PRIMARY KEY, state jsonb NOT NULL DEFAULT '{}'::jsonb);
         CREATE SCHEMA compute;
         CREATE TABLE compute.machine_version (fingerprint text NOT NULL);
       `);
-      await admin.query(batchesSql);
-      await admin.query(`
+			await admin.query(batchesSql);
+			await admin.query(`
         CREATE TABLE games (id text PRIMARY KEY, goals int NOT NULL);
         CREATE TABLE teams (id text PRIMARY KEY, name text NOT NULL);
         INSERT INTO games VALUES ('g1', 2), ('g2', 3);
@@ -702,73 +757,76 @@ pgTest(
           FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('games', 'true');
       `);
 
-      const config = options(directory);
-      config.databaseUrl = server.url;
-      config.reads = ["games", "teams"];
-      config.queries = {
-        items: "SELECT t.id AS id, (SELECT coalesce(sum(goals), 0)::INTEGER FROM games) AS value FROM teams t ORDER BY t.id",
-      };
-      const runtime = await BoundedRuntime.create(config);
+			const config = options(directory);
+			config.databaseUrl = server.url;
+			config.reads = ["games", "teams"];
+			config.queries = {
+				items:
+					"SELECT t.id AS id, (SELECT coalesce(sum(goals), 0)::INTEGER FROM games) AS value FROM teams t ORDER BY t.id",
+			};
+			const runtime = await BoundedRuntime.create(config);
 
-      const readWatermarks = async () => {
-        const db = await DuckDBInstance.create(`${directory}/replica.duckdb`, { access_mode: "READ_ONLY" });
-        const conn = await db.connect();
-        try {
-          const rows = await conn.runAndReadAll(
-            "SELECT table_name, seeded_count::INTEGER AS seeded, incremental_count::INTEGER AS incremental FROM duckstream_replica.watermarks ORDER BY table_name",
-          );
-          return rows.getRowObjects();
-        } finally {
-          conn.closeSync();
-          db.closeSync();
-        }
-      };
+			const readWatermarks = async () => {
+				const db = await DuckDBInstance.create(`${directory}/replica.duckdb`, {
+					access_mode: "READ_ONLY",
+				});
+				const conn = await db.connect();
+				try {
+					const rows = await conn.runAndReadAll(
+						"SELECT table_name, seeded_count::INTEGER AS seeded, incremental_count::INTEGER AS incremental FROM duckstream_replica.watermarks ORDER BY table_name",
+					);
+					return rows.getRowObjects();
+				} finally {
+					conn.closeSync();
+					db.closeSync();
+				}
+			};
 
-      const runCapture = async () => {
-        const cap = await runtime.capture();
-        const out = await runtime.calculate(cap);
-        const rows = [];
-        for await (const page of runtime.pages(out, "sink")) rows.push(...page);
-        await runtime.release(cap, out);
-        return rows;
-      };
+			const runCapture = async () => {
+				const cap = await runtime.capture();
+				const out = await runtime.calculate(cap);
+				const rows = [];
+				for await (const page of runtime.pages(out, "sink")) rows.push(...page);
+				await runtime.release(cap, out);
+				return rows;
+			};
 
-      assertEquals(await runCapture(), [{ id: "t1", value: 5 }]);
-      assertEquals(await readWatermarks(), [
-        { table_name: "games", seeded: 1, incremental: 0 },
-        { table_name: "teams", seeded: 1, incremental: 0 },
-      ]);
+			assertEquals(await runCapture(), [{ id: "t1", value: 5 }]);
+			assertEquals(await readWatermarks(), [
+				{ table_name: "games", seeded: 1, incremental: 0 },
+				{ table_name: "teams", seeded: 1, incremental: 0 },
+			]);
 
-      await admin.query(`
+			await admin.query(`
         INSERT INTO games VALUES ('g3', 4);
         UPDATE games SET id = 'g2_renamed', goals = 10 WHERE id = 'g2';
         DELETE FROM games WHERE id = 'g1';
       `);
-      assertEquals(await runCapture(), [{ id: "t1", value: 14 }]);
-      assertEquals(await readWatermarks(), [
-        { table_name: "games", seeded: 1, incremental: 1 },
-        { table_name: "teams", seeded: 1, incremental: 0 },
-      ]);
+			assertEquals(await runCapture(), [{ id: "t1", value: 14 }]);
+			assertEquals(await readWatermarks(), [
+				{ table_name: "games", seeded: 1, incremental: 1 },
+				{ table_name: "teams", seeded: 1, incremental: 0 },
+			]);
 
-      await admin.query("TRUNCATE games; INSERT INTO games VALUES ('g4', 7)");
-      assertEquals(await runCapture(), [{ id: "t1", value: 7 }]);
-      assertEquals(await readWatermarks(), [
-        { table_name: "games", seeded: 1, incremental: 2 },
-        { table_name: "teams", seeded: 1, incremental: 0 },
-      ]);
+			await admin.query("TRUNCATE games; INSERT INTO games VALUES ('g4', 7)");
+			assertEquals(await runCapture(), [{ id: "t1", value: 7 }]);
+			assertEquals(await readWatermarks(), [
+				{ table_name: "games", seeded: 1, incremental: 2 },
+				{ table_name: "teams", seeded: 1, incremental: 0 },
+			]);
 
-      // Clearing compute.wal forces a clean reseed on the next capture instead of reading a broken WAL chain.
-      await admin.query(`
+			// Clearing compute.wal forces a clean reseed on the next capture instead of reading a broken WAL chain.
+			await admin.query(`
         DELETE FROM compute.wal WHERE table_name = 'games';
         UPDATE games SET goals = 11 WHERE id = 'g4';
       `);
-      assertEquals(await runCapture(), [{ id: "t1", value: 11 }]);
-      assertEquals(await readWatermarks(), [
-        { table_name: "games", seeded: 2, incremental: 2 },
-        { table_name: "teams", seeded: 1, incremental: 0 },
-      ]);
+			assertEquals(await runCapture(), [{ id: "t1", value: 11 }]);
+			assertEquals(await readWatermarks(), [
+				{ table_name: "games", seeded: 2, incremental: 2 },
+				{ table_name: "teams", seeded: 1, incremental: 0 },
+			]);
 
-      await admin.query(`
+			await admin.query(`
         CREATE SCHEMA duckpipe;
         CREATE TABLE duckpipe.table_mappings (
           source_schema text NOT NULL,
@@ -784,21 +842,27 @@ pgTest(
         INSERT INTO duckpipe.table_mappings
         SELECT 'public', name, name || '_ducklake', 'SNAPSHOT', '0/0'::pg_lsn FROM compute.source;
       `);
-      await assertRejects(
-        () => BoundedRuntime.syncReplica(directory, server.url, ["games", "teams"], 2),
-        Error,
-        "duckpipe replica did not reach target LSN fence",
-      );
-      const fenced = runCapture();
-      await new Promise((r) => setTimeout(r, 80));
-      await admin.query(`
+			await assertRejects(
+				() =>
+					BoundedRuntime.syncReplica(
+						directory,
+						server.url,
+						["games", "teams"],
+						2,
+					),
+				Error,
+				"duckpipe replica did not reach target LSN fence",
+			);
+			const fenced = runCapture();
+			await new Promise((r) => setTimeout(r, 80));
+			await admin.query(`
         UPDATE duckpipe.table_mappings
         SET state = 'STREAMING', applied_lsn = pg_current_wal_insert_lsn()
       `);
-      assertEquals(await fenced, [{ id: "t1", value: 19 }]);
-    } finally {
-      await admin.end();
-      await Deno.remove(directory, { recursive: true });
-    }
-  },
+			assertEquals(await fenced, [{ id: "t1", value: 19 }]);
+		} finally {
+			await admin.end();
+			await Deno.remove(directory, { recursive: true });
+		}
+	},
 );

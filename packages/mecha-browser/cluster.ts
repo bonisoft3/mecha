@@ -76,9 +76,23 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     chain = p.catch(() => {})
     return p
   }
+  const FRUITS = [
+    'acerola', 'amora', 'avocado', 'banana', 'caju', 'carambola', 'cherry', 'citrus',
+    'coconut', 'cupuacu', 'fig', 'guava', 'jabuticaba', 'jackfruit', 'kiwi', 'lemon',
+    'lime', 'lychee', 'mango', 'maracuja', 'melon', 'nectarine', 'olive', 'orange',
+    'papaya', 'peach', 'pear', 'persimmon', 'pineapple', 'pitanga', 'plum', 'tangerine',
+  ]
+  const ANIMALS = [
+    'albatross', 'armadillo', 'badger', 'capybara', 'chameleon', 'condor', 'dolphin', 'falcon',
+    'flamingo', 'fox', 'gecko', 'heron', 'hummingbird', 'ibis', 'iguana', 'jaguar',
+    'kingfisher', 'koala', 'lemur', 'lynx', 'macaw', 'manatee', 'meerkat', 'ocelot',
+    'otter', 'owl', 'panda', 'pelican', 'penguin', 'quokka', 'tapir', 'toucan',
+  ]
   const id = crypto.randomUUID()
-  const user = { id, handle: `guest-${id.slice(0, 8)}`, guest: true }
-  await db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [user.id, user.handle])
+  const hex = id.replaceAll('-', '').toLowerCase()
+  const initHandle = `${FRUITS[(parseInt(hex.slice(0, 2), 16) || 0) % FRUITS.length]}-${ANIMALS[(parseInt(hex.slice(2, 4), 16) || 0) % ANIMALS.length]}-${hex.slice(-4) || '0000'}`
+  const { rows: insertedRows } = await db.query<{ handle: string }>('INSERT INTO app_user (id, handle) VALUES ($1, $2) RETURNING handle', [id, initHandle])
+  const user = { id, handle: insertedRows[0]?.handle ?? initHandle, guest: true }
   await db.query(`SELECT set_config('request.jwt.claims', $1, false)`, [JSON.stringify({ sub: user.id, role: 'app_user', guest: user.guest })])
   const scopes = async () => (await db.query<{ s: string[] }>('SELECT subject_scopes($1) AS s', [user.id])).rows[0].s
 

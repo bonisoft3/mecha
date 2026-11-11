@@ -68,12 +68,27 @@ const SHAPE_TOKEN_TTL_S = 900
 const STATE_TTL_S = 300
 
 const enc = new TextEncoder()
-const ADJECTIVES = ['amber', 'brisk', 'calm', 'dusk', 'ember', 'fern', 'gold', 'hazel', 'ivory', 'jade', 'kind', 'lunar', 'mellow', 'noble', 'ochre', 'pale', 'quiet', 'rustic', 'sage', 'tidal']
-const NOUNS = ['fox', 'wren', 'otter', 'pine', 'reed', 'moth', 'lark', 'moss', 'dune', 'cove', 'elk', 'finch', 'heron', 'ibis', 'kite', 'lynx', 'newt', 'orca', 'quail', 'seal']
-function generateHandle(): string {
-  const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]
-  const n = NOUNS[Math.floor(Math.random() * NOUNS.length)]
-  return `${a}-${n}-${10 + Math.floor(Math.random() * 90)}`
+const FRUITS = [
+  'acerola', 'amora', 'avocado', 'banana', 'caju', 'carambola', 'cherry', 'citrus',
+  'coconut', 'cupuacu', 'fig', 'guava', 'jabuticaba', 'jackfruit', 'kiwi', 'lemon',
+  'lime', 'lychee', 'mango', 'maracuja', 'melon', 'nectarine', 'olive', 'orange',
+  'papaya', 'peach', 'pear', 'persimmon', 'pineapple', 'pitanga', 'plum', 'tangerine',
+]
+const ANIMALS = [
+  'albatross', 'armadillo', 'badger', 'capybara', 'chameleon', 'condor', 'dolphin', 'falcon',
+  'flamingo', 'fox', 'gecko', 'heron', 'hummingbird', 'ibis', 'iguana', 'jaguar',
+  'kingfisher', 'koala', 'lemur', 'lynx', 'macaw', 'manatee', 'meerkat', 'ocelot',
+  'otter', 'owl', 'panda', 'pelican', 'penguin', 'quokka', 'tapir', 'toucan',
+]
+export function guestHandle(id: string): string {
+  const hex = id.replaceAll('-', '').toLowerCase()
+  const fruit = FRUITS[(parseInt(hex.slice(0, 2), 16) || 0) % FRUITS.length]
+  const animal = ANIMALS[(parseInt(hex.slice(2, 4), 16) || 0) % ANIMALS.length]
+  const slug = hex.slice(-4) || '0000'
+  return `${fruit}-${animal}-${slug}`
+}
+function generateHandle(id = crypto.randomUUID()): string {
+  return guestHandle(id)
 }
 
 type Claims = Record<string, unknown>
@@ -208,8 +223,11 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
 
   async function guest(): Promise<Response> {
     const id = crypto.randomUUID()
-    const handle = `guest-${id.slice(0, 8)}`
-    await serialize(() => db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, handle]))
+    const initHandle = guestHandle(id)
+    const { rows } = await serialize(() =>
+      db.query<{ handle: string }>('INSERT INTO app_user (id, handle) VALUES ($1, $2) RETURNING handle', [id, initHandle]),
+    )
+    const handle = rows[0]?.handle ?? initHandle
     const token = await signJwt(secret, { role: 'app_user', sub: id, handle, guest: true, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id, handle, guest: true } })
   }

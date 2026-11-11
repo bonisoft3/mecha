@@ -606,7 +606,8 @@ async function main() {
   const native: NativeRuntime[] = [];
   const nativeDb = new pg.Pool({ connectionString: databaseUrl });
   const engineFailure = Promise.withResolvers<unknown>();
-  const boundedNames = specs.filter(spec => spec.steps && engine === "duckdb-snapshot").map(spec => spec.name);
+  const stateDir = Deno.env.get("COMPUTE_STATE_DIR");
+  const boundedNames = specs.filter(spec => engine === "duckdb-snapshot" && Boolean(spec.steps || stateDir)).map(spec => spec.name);
   let collected = false;
   for (let i = 0; i < computations.length; i++) {
     const c = computations[i];
@@ -625,12 +626,12 @@ async function main() {
       batches.push(runtime.spec);
       continue;
     }
-    if (spec.steps) {
-      const directory = need("COMPUTE_STATE_DIR");
+    if (spec.steps || stateDir) {
+      const directory = stateDir ?? need("COMPUTE_STATE_DIR");
       const admitted = await admit(spec.file, spec.endowments ?? []);
       const runtime = await BoundedRuntime.create({
         spec, version, databaseUrl, directory, runner,
-        source: await Deno.readTextFile(`${spec.steps}.bundle.js`),
+        ...(spec.steps ? { source: await Deno.readTextFile(`${spec.steps}.bundle.js`) } : { computation: c }),
         reads: admitted.reads, queries: admitted.queries, queryStages: admitted.queryStages,
       });
       batches.push({

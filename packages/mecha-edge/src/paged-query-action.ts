@@ -7,6 +7,9 @@ import { pagedProgram, type PagedRequest } from './paged-transport.ts'
 export async function pagedQueryAction(db: ExecutionDatabase, programs: readonly SnapshotProgram[], request: PagedRequest) {
   const program = pagedProgram(programs, request.capture)
   const queries = new PagedQuery(db, programs)
+  if (request.action === 'cleanup') {
+    return queries.cleanup(request.capture.identity)
+  }
   if (request.action === 'initialize') {
     if (!request.manifest) throw new Error('missing paged manifest')
     for (const field of ['id', 'name', 'version', 'revision'] as const) {
@@ -27,10 +30,23 @@ export async function pagedQueryAction(db: ExecutionDatabase, programs: readonly
       await queries.append(request.chunk)
       return { next: request.chunk.next }
     }
+    case 'apply-wal': {
+      if (!request.wal) throw new Error('missing capture WAL')
+      return queries.applyWal(request.wal)
+    }
+    case 'reset-source': {
+      if (typeof request.table !== 'string') throw new Error('missing source table')
+      return queries.resetSource(request.table)
+    }
     case 'materialize': {
       if (typeof request.query !== 'string') throw new Error('missing query name')
       const result = queries.materialize(request.query)
       return { materialized: result.done ? request.query : null, done: result.done }
+    }
+    case 'read': {
+      if (progress.queries.length !== Object.keys(program.queries).length) throw new Error('queries are not materialized')
+      if (typeof request.query !== 'string') throw new Error('missing query name')
+      return queries.read(request.query, request.after)
     }
     case 'query': {
       if (progress.queries.length !== Object.keys(program.queries).length) throw new Error('queries are not materialized')

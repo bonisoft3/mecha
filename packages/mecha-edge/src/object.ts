@@ -306,6 +306,12 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       return compute?.physicalSnapshots ? await this.#reader(capture).chunk(capture, source, after) : await coordinator.chunk(capture.identity, source, after)
     }
 
+    async computeWal(capture: ComputeCapture, source: string, afterLsn: number) {
+      const coordinator = await this.#captureCoordinator(capture)
+      if (compute?.physicalSnapshots) return await this.#reader(capture).tableWal(capture, source, afterLsn)
+      return coordinator.tableWal ? await coordinator.tableWal(capture.identity, source, afterLsn) : null
+    }
+
     async computeOutputChunk(capture: ComputeCapture, attempt: string, sink: string, ordinal: number, rows: Record<string, unknown>[]) {
       await (await this.#captureCoordinator(capture)).outputChunk(capture.identity, attempt, sink, ordinal, rows)
     }
@@ -387,13 +393,14 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
      * writes. The drains settle on a timer after the call returns, so the
      * object stays until they have. */
     async #effects<T>(use: (airlock: EdgeAirlock) => Promise<T>): Promise<T> {
-      const { cluster, airlock } = await this.#boot()
+      const { cluster, clock, airlock, ticks } = await this.#boot()
       await cluster.compute()
       const drains = await cluster.drains()
       try {
         return await use(airlock)
       } finally {
-        this.ctx.waitUntil(drains.idle())
+        if (ticks) await clock.arm()
+        this.ctx.waitUntil(drains.idle().then(() => ticks ? clock.arm() : undefined))
       }
     }
 

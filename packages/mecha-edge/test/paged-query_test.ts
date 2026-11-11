@@ -256,3 +256,167 @@ Deno.test('PGlite transition-table WAL and LSN fence drive incremental DuckDB WA
     await pg.close()
   }
 })
+
+Deno.test('unified PagedQuery seeds in chunks on cold start, skips untouched tables, applies WAL deltas and falls back on pruned WAL', async () => {
+  const { PGlite } = await import('@electric-sql/pglite')
+  const { icuDataDir } = await import('@electric-sql/pglite-icu-full')
+  const { createSnapshotCoordinator } = await import('../../compute-snapshot/src/index.ts')
+  const { pagedQueryAction } = await import('../src/paged-query-action.ts')
+  const pg = await PGlite.create({ icuDataDir: await icuDataDir() })
+  const queryDb = await fixture()
+  const program: SnapshotProgram = {
+    version: 'v1',
+    reads: ['games', 'teams'],
+    queries: {
+      summary: 'SELECT t.id AS id, (SELECT coalesce(sum(goals), 0)::INTEGER FROM games) AS total FROM teams t ORDER BY t.id',
+    },
+    spec: { name: 'standings', file: 'standings.js', to: ['standings'] },
+  }
+  let state: import('../../compute-snapshot/src/index.ts').BatchState = {
+    phase: 'idle', name: 'standings', requested: 0, completed: 0, wake: 0, claimed: 0, required: [], due: 0, coalesce: 0, attempts: 25,
+  }
+  const machine = {
+    execute(raw: unknown) {
+      const input = raw as {
+        initialize?: boolean
+        payload?: { name: string; coalesce: number; attempts: number; revision: number }
+        state?: typeof state
+        event?: { kind: string }
+      }
+      if (input.initialize && input.payload) {
+        state = {
+          phase: 'idle', name: input.payload.name, requested: input.payload.revision,
+          completed: input.payload.revision, wake: 0, claimed: 0, required: [],
+          due: 0, coalesce: input.payload.coalesce, attempts: input.payload.attempts,
+        }
+        return { kind: 'accepted' as const, state }
+      }
+      const s = { ...input.state! }
+      const { kind } = input.event!
+      if (kind === 'invalidate') s.requested++
+      else if (kind === 'schedule') { s.wake = s.requested; s.phase = 'active' }
+      else if (kind === 'claim') { s.claimed = s.requested; s.wake = 0 }
+      else if (kind === 'complete') { s.completed = s.claimed; s.claimed = 0; s.phase = 'idle' }
+      state = s
+      return { kind: 'accepted' as const, state: s }
+    },
+  }
+  let queue = Promise.resolve()
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    const p = queue.then(fn)
+    queue = p.then(() => undefined, () => undefined)
+    return p
+  }
+  try {
+    await pg.exec(`
+      CREATE ROLE service NOLOGIN;
+      CREATE TABLE games (id text PRIMARY KEY, goals integer NOT NULL);
+      CREATE TABLE teams (id text PRIMARY KEY, name text NOT NULL);
+      CREATE TABLE standings (id text PRIMARY KEY, total integer NOT NULL);
+      GRANT ALL ON standings TO service;
+      INSERT INTO games VALUES ('g1', 2), ('g2', 3);
+      INSERT INTO teams VALUES ('t1', 'Alpha');
+    `)
+    const coordinator = await createSnapshotCoordinator({
+      db: pg,
+      serialize,
+      computations: [{ name: 'standings', version: 'v1', reads: ['games', 'teams'], to: ['standings'], coalesceMs: 0 }],
+      machine,
+      execute: async () => ({}),
+    })
+    let chunkCalls: string[] = []
+    let walCalls: string[] = []
+    const runCapture = async () => {
+      const work = await coordinator.claim()
+      assert.ok(work)
+      const qHost = host(queryDb)
+      const act = (req: import('../src/paged-transport.ts').PagedRequest) => pagedQueryAction(qHost, [program], req)
+      const capture = { generation: 'gen-1', identity: work }
+      const manifest = await coordinator.manifest(work)
+      let status = (await act({ action: 'initialize', capture, manifest })) as {
+        sources?: { name: string; position: number }[]
+        walSources?: { name: string; fromLsn: number; targetLsn: number }[]
+        queries?: string[]
+        declaredQueries?: string[]
+        execution: { revision: number; done: boolean }
+      }
+      while (status.walSources?.length) {
+        const ws = status.walSources[0]
+        walCalls.push(`${ws.name}@${ws.fromLsn}`)
+        const wal = await coordinator.tableWal!(work, ws.name, ws.fromLsn)
+        if (wal) await act({ action: 'apply-wal', capture, wal })
+        else await act({ action: 'reset-source', capture, table: ws.name })
+        status = (await act({ action: 'status', capture })) as typeof status
+      }
+      for (const src of status.sources ?? []) {
+        let pos = src.position
+        const total = manifest.tables[src.name].rows
+        while (pos < total) {
+          chunkCalls.push(src.name)
+          const chunk = await coordinator.chunk(work, src.name, pos)
+          await act({ action: 'append', capture, chunk })
+          pos = chunk.next
+        }
+      }
+      for (const qName of status.declaredQueries ?? []) {
+        let done = false
+        while (!done) {
+          const res = (await act({ action: 'materialize', capture, query: qName })) as { done: boolean }
+          done = res.done
+        }
+      }
+      const readPage = (await act({ action: 'read', capture, query: 'summary', after: 0 })) as {
+        rows: Record<string, unknown>[]
+        done: boolean
+      }
+      assert.equal(readPage.done, true)
+      await act({
+        action: 'commit',
+        capture,
+        revision: status.execution.revision,
+        step: { checkpoint: null, writes: { standings: readPage.rows }, done: true },
+      })
+      const execOut = (await act({ action: 'output', capture, sink: 'standings', after: 0 })) as { rows: Record<string, unknown>[] }
+      await coordinator.outputChunk(work, 'attempt-1', 'standings', 0, execOut.rows)
+      await coordinator.sealOutput(work, 'attempt-1', { standings: { chunks: 1, rows: execOut.rows.length } })
+      await coordinator.publishStaged(work, 'attempt-1')
+      await act({ action: 'cleanup', capture })
+    }
+
+    await pg.exec("UPDATE games SET goals = 2 WHERE id = 'g1'")
+    chunkCalls = []
+    walCalls = []
+    await runCapture()
+    assert.deepEqual(chunkCalls, ['games', 'teams'])
+    assert.deepEqual(walCalls, [])
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 5 }])
+
+    // Second capture: games updated, teams untouched -> 0 chunks, 1 WAL delta for games
+    await pg.exec("UPDATE games SET goals = 7 WHERE id = 'g2'; INSERT INTO games VALUES ('g3', 4);")
+    chunkCalls = []
+    walCalls = []
+    await runCapture()
+    assert.deepEqual(chunkCalls, [])
+    assert.equal(walCalls.length, 1)
+    assert.match(walCalls[0], /^games@[1-9]\d*$/)
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 13 }])
+
+    // Third capture: real WAL pruning in compute_snapshot_private -> coordinator.tableWal returns null -> reset-source fallback re-chunks only games, teams stays warm
+    await pg.exec(`
+      DELETE FROM compute_snapshot_private.wal WHERE table_name = 'games';
+      UPDATE compute_snapshot_private.table_watermarks SET pruned_lsn = target_lsn WHERE table_name = 'games';
+      DELETE FROM games WHERE id = 'g1';
+    `)
+    chunkCalls = []
+    walCalls = []
+    await runCapture()
+    assert.deepEqual(chunkCalls, ['games'])
+    assert.equal(walCalls.length, 1)
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 11 }])
+
+    await coordinator.stop()
+  } finally {
+    queryDb.reset()
+    await pg.close()
+  }
+})

@@ -551,3 +551,79 @@ Deno.test('an invalid append acknowledgement cannot advance the alarm-local curs
   assert.equal(f.events.filter(event => event === 'status').length, 1)
   assert.equal(f.remotes.get(keyOf(capture))!.sources.get('source'), 3)
 })
+
+Deno.test('advancePaged applies WAL deltas and falls back to reset-source when WAL is unavailable or mismatched', async () => {
+  const f = fixture(2)
+  let walMode: 'ok' | 'mismatch' | 'null' = 'ok'
+  Object.assign(f.db, {
+    computeWal: (_value: ComputeCapture, table: string, fromLsn: number) => Promise.resolve(
+      walMode === 'null' ? null : {
+        ...capture.identity,
+        table,
+        fromLsn,
+        targetLsn: 5,
+        pkColumns: ['id'],
+        entries: [{ lsn: 5, op: 'I' as const, row: { id: '1', total: '2' } }],
+      },
+    ),
+  })
+  const baseFetch = f.service.fetch
+  f.service.fetch = async (input, init) => {
+    const req = JSON.parse(String(init!.body)) as PagedRequest
+    if (req.action === 'initialize' || req.action === 'status') {
+      const res = await baseFetch(input, init)
+      const body = await res.json()
+      const remote = f.remotes.get(keyOf(req.capture))!
+      if ((remote.sources.get('source') ?? 0) === 0 && !f.events.includes('reset-source') && !f.events.includes('apply-wal')) {
+        body.walSources = [{ name: 'source', fromLsn: 1, targetLsn: 5 }]
+      }
+      return Response.json(body)
+    }
+    if (req.action === 'apply-wal') {
+      f.events.push('apply-wal')
+      if (walMode === 'mismatch') {
+        return new Response(JSON.stringify({ error: 'replica row count mismatch after WAL apply for source' }), { status: 500 })
+      }
+      const remote = f.remotes.get(keyOf(req.capture))!
+      remote.sources.set('source', 2)
+      return Response.json({ next: 2 })
+    }
+    if (req.action === 'reset-source') {
+      f.events.push('reset-source')
+      const remote = f.remotes.get(keyOf(req.capture))!
+      remote.sources.set('source', 0)
+      return Response.json({ next: 0 })
+    }
+    return await baseFetch(input, init)
+  }
+  assert.equal(await advancePaged(f.db, f.service, f.storage, capture, owner), 'transfer')
+  assert.equal(f.events.includes('apply-wal'), true)
+  assert.equal(f.events.includes('reset-source'), false)
+  assert.equal(f.remotes.get(keyOf(capture))!.sources.get('source'), 2)
+
+  const f2 = fixture(2)
+  walMode = 'mismatch'
+  Object.assign(f2.db, { computeWal: f.db.computeWal })
+  const baseFetch2 = f2.service.fetch
+  f2.service.fetch = async (input, init) => {
+    const req = JSON.parse(String(init!.body)) as PagedRequest
+    if (req.action === 'initialize') {
+      const res = await baseFetch2(input, init)
+      const body = await res.json()
+      body.walSources = [{ name: 'source', fromLsn: 1, targetLsn: 5 }]
+      return Response.json(body)
+    }
+    if (req.action === 'apply-wal') {
+      f2.events.push('apply-wal')
+      return new Response(JSON.stringify({ error: 'replica row count mismatch after WAL apply for source' }), { status: 500 })
+    }
+    if (req.action === 'reset-source') {
+      f2.events.push('reset-source')
+      return Response.json({ next: 0 })
+    }
+    return await baseFetch2(input, init)
+  }
+  assert.equal(await advancePaged(f2.db, f2.service, f2.storage, capture, owner), 'transfer')
+  assert.equal(f2.events.includes('apply-wal'), true)
+  assert.equal(f2.events.includes('reset-source'), true)
+})

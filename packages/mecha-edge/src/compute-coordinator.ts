@@ -126,6 +126,12 @@ export function computeCoordinator(execute = (snapshot: Snapshot, env: ComputeEn
                   if (!readers) throw new Error('physical snapshots require COMPUTE_READER')
                   return await readers.get(readers.idFromName(name)).chunk(capture, source, after)
                 },
+                computeWal: async (capture, source, afterLsn) => {
+                  const name = await cluster.computeReaderName(capture)
+                  if (name === null) return cluster.computeWal ? await cluster.computeWal(capture, source, afterLsn) : null
+                  if (!readers) throw new Error('physical snapshots require COMPUTE_READER')
+                  return await readers.get(readers.idFromName(name)).tableWal(capture, source, afterLsn)
+                },
                 computeOutputChunk: (capture, attempt, sink, ordinal, rows) => cluster.computeOutputChunk(capture, attempt, sink, ordinal, rows),
                 computeSealOutput: (capture, attempt, manifest) => cluster.computeSealOutput(capture, attempt, manifest),
                 computePublishStaged: (capture, attempt) => cluster.computePublishStaged(capture, attempt),

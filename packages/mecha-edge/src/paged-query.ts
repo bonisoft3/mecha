@@ -1,6 +1,6 @@
 import { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from '../../compute-snapshot/src/chunk-limits.ts'
-import type { SnapshotChunk, SnapshotManifest } from '../../compute-snapshot/src/index.ts'
-import { snapshotStatements } from '../../../services/compute/snapshot-data.ts'
+import type { SnapshotChunk, SnapshotIdentity, SnapshotManifest, SnapshotTableWal } from '../../compute-snapshot/src/index.ts'
+import { snapshotStatements, snapshotWalStatements } from '../../../services/compute/snapshot-data.ts'
 import { bindBoundary, typedSql } from '../../../services/compute/portable-contract.ts'
 import { validateQuerySql } from './query-sql.ts'
 import { validateQueryStages } from '../../../services/compute/query-stages.ts'
@@ -14,6 +14,7 @@ interface Connection {
 interface Database { connect(): Connection }
 const q = (name: string) => `"${name.replaceAll('"', '""')}"`
 const privateSchema = 'duckstream_private'
+const replicaSchema = 'duckpipe_replica'
 const maxBytes = 256 * 1024
 const maxRows = 128
 
@@ -67,30 +68,75 @@ export class PagedQuery {
     const statements = snapshotStatements(empty, program.reads, program.spec.types)
     return this.atomic(conn => {
       conn.query(`CREATE SCHEMA IF NOT EXISTS ${privateSchema}`)
+      conn.query(`CREATE SCHEMA IF NOT EXISTS ${replicaSchema}`)
+      conn.query(`CREATE TABLE IF NOT EXISTS ${replicaSchema}.watermarks(table_name VARCHAR PRIMARY KEY,col_sig VARCHAR NOT NULL,lsn BIGINT NOT NULL,row_count BIGINT NOT NULL)`)
       conn.query(`CREATE TABLE IF NOT EXISTS ${privateSchema}.metadata(key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL)`)
       const saved = conn.query(`SELECT value FROM ${privateSchema}.metadata WHERE key='manifest'`).toArray()
       if (saved.length) {
-        if (strictJson(JSON.parse(String(saved[0].value))) !== strictJson(manifest)) throw new Error('compute object belongs to another capture')
-        return
+        const prior = JSON.parse(String(saved[0].value)) as SnapshotManifest
+        if (strictJson(prior) === strictJson(manifest)) return
+        if (prior.id === manifest.id) throw new Error('compute object belongs to another capture')
+        const watermarked = new Set(conn.query(`SELECT table_name FROM ${replicaSchema}.watermarks`).toArray().map(row => String(row.table_name)))
+        for (const row of conn.query(`SELECT table_name FROM duckdb_tables() WHERE schema_name='main'`).toArray()) {
+          const name = String(row.table_name)
+          if (!watermarked.has(name)) conn.query(`DROP TABLE IF EXISTS main.${q(name)}`)
+        }
+        conn.query(`DROP SCHEMA IF EXISTS ${privateSchema} CASCADE`)
+        conn.query(`DROP SCHEMA IF EXISTS duckdb_private CASCADE`)
+        conn.query(`CREATE SCHEMA ${privateSchema}`)
+        conn.query(`CREATE TABLE ${privateSchema}.metadata(key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL)`)
       }
       conn.query(`CREATE TABLE ${privateSchema}.progress(name VARCHAR PRIMARY KEY,position BIGINT NOT NULL)`)
+      conn.query(`CREATE TABLE ${privateSchema}.wal_sync(name VARCHAR PRIMARY KEY,from_lsn BIGINT NOT NULL,target_lsn BIGINT NOT NULL)`)
       conn.query(`CREATE TABLE ${privateSchema}.chunks(name VARCHAR,position BIGINT,payload VARCHAR NOT NULL,PRIMARY KEY(name,position))`)
       for (const [index, statement] of statements.entries()) {
+        const name = program.reads[index]
+        const table = manifest.tables[name]
+        const wm = manifest.watermarks?.[name]
+        const colSig = JSON.stringify(table.columns)
+        if (wm !== undefined) {
+          const prior = this.parameter(conn, `SELECT col_sig,lsn::VARCHAR AS lsn,row_count::VARCHAR AS row_count FROM ${replicaSchema}.watermarks WHERE table_name=?`, name)
+          const hasTable = this.parameter(conn, `SELECT 1 FROM duckdb_tables() WHERE schema_name='main' AND table_name=?`, name)
+          if (prior.length === 1 && hasTable.length === 1 && String(prior[0].col_sig) === colSig) {
+            const priorLsn = Number(prior[0].lsn)
+            const priorRows = Number(prior[0].row_count)
+            if (priorLsn === wm.targetLsn && priorRows === table.rows) {
+              this.parameter(conn, `INSERT INTO ${privateSchema}.progress VALUES(?,CAST(? AS BIGINT))`, name, String(table.rows))
+              continue
+            }
+            if (priorLsn < wm.targetLsn) {
+              this.parameter(conn, `INSERT INTO ${privateSchema}.progress VALUES(?,0)`, name)
+              this.parameter(conn, `INSERT INTO ${privateSchema}.wal_sync VALUES(?,CAST(? AS BIGINT),CAST(? AS BIGINT))`, name, String(priorLsn), String(wm.targetLsn))
+              continue
+            }
+          }
+        }
+        conn.query(`DROP TABLE IF EXISTS ${q(name)}`)
+        this.parameter(conn, `DELETE FROM ${replicaSchema}.watermarks WHERE table_name=?`, name)
         conn.query(statement.create)
-        this.parameter(conn, `INSERT INTO ${privateSchema}.progress VALUES(?,0)`, program.reads[index])
+        this.parameter(conn, `INSERT INTO ${privateSchema}.progress VALUES(?,0)`, name)
+        if (table.rows === 0 && wm !== undefined) {
+          this.parameter(conn, `INSERT INTO ${replicaSchema}.watermarks VALUES(?,?,CAST(? AS BIGINT),0)`, name, colSig, String(wm.targetLsn))
+        }
       }
       this.parameter(conn, `INSERT INTO ${privateSchema}.metadata VALUES('manifest',?)`, strictJson(manifest))
     })
   }
 
   progress() {
-    return this.atomic(conn => ({
-      manifest: this.saved(conn),
-      sources: conn.query(`SELECT name,position::VARCHAR AS position FROM ${privateSchema}.progress`).toArray()
-        .map(row => ({ name: String(row.name), position: Number(row.position) })),
-      queries: conn.query(`SELECT substring(key,7) AS name FROM ${privateSchema}.metadata WHERE starts_with(key,'query:')`).toArray()
-        .map(row => String(row.name)),
-    }))
+    return this.atomic(conn => {
+      const manifest = this.saved(conn)
+      const walSources = conn.query(`SELECT name,from_lsn::VARCHAR AS from_lsn,target_lsn::VARCHAR AS target_lsn FROM ${privateSchema}.wal_sync`).toArray()
+        .map(row => ({ name: String(row.name), fromLsn: Number(row.from_lsn), targetLsn: Number(row.target_lsn) }))
+      return {
+        manifest,
+        sources: conn.query(`SELECT name,position::VARCHAR AS position FROM ${privateSchema}.progress`).toArray()
+          .map(row => ({ name: String(row.name), position: Number(row.position) })),
+        ...(walSources.length ? { walSources } : {}),
+        queries: conn.query(`SELECT substring(key,7) AS name FROM ${privateSchema}.metadata WHERE starts_with(key,'query:')`).toArray()
+          .map(row => String(row.name)),
+      }
+    })
   }
 
   async append(chunk: SnapshotChunk) {
@@ -113,6 +159,7 @@ export class PagedQuery {
         return
       }
       if (conn.query(`SELECT key FROM ${privateSchema}.metadata WHERE key='sealed'`).toArray().length) throw new Error('capture is sealed')
+      if (this.parameter(conn, `SELECT 1 FROM ${privateSchema}.wal_sync WHERE name=?`, chunk.table).length) throw new Error('capture table awaits WAL sync or reset')
       const progress = this.parameter(conn, `SELECT position::VARCHAR AS position FROM ${privateSchema}.progress WHERE name=?`, chunk.table)
       if (Number(progress[0]?.position) !== chunk.after) throw new Error('capture chunks must be consecutive')
       if (!chunk.rows.length && !chunk.done) throw new Error('capture chunk made no progress')
@@ -123,7 +170,108 @@ export class PagedQuery {
       }
       this.parameter(conn, `UPDATE ${privateSchema}.progress SET position=CAST(? AS BIGINT) WHERE name=?`, String(chunk.next), chunk.table)
       this.parameter(conn, `INSERT INTO ${privateSchema}.chunks VALUES(?,CAST(? AS BIGINT),?)`, chunk.table, String(chunk.after), digest)
+      const wm = manifest.watermarks?.[chunk.table]
+      if (chunk.done && wm !== undefined) {
+        this.parameter(conn, `INSERT OR REPLACE INTO ${replicaSchema}.watermarks VALUES(?,?,CAST(? AS BIGINT),CAST(? AS BIGINT))`,
+          chunk.table, JSON.stringify(source.columns), String(wm.targetLsn), String(source.rows))
+      }
     })
+  }
+
+  applyWal(wal: SnapshotTableWal & SnapshotIdentity & { table: string }) {
+    const payload = strictJson(wal)
+    if (new TextEncoder().encode(payload).length > CAPTURE_CHUNK_BYTES + 16384 || wal.entries.length > CAPTURE_CHUNK_ROWS ||
+      new TextEncoder().encode(JSON.stringify(wal.entries)).length > CAPTURE_CHUNK_BYTES) throw new Error('capture WAL exceeds limits')
+    return this.atomic(conn => {
+      const manifest = this.saved(conn)
+      for (const field of ['id', 'name', 'version', 'revision'] as const) {
+        if (manifest[field] !== wal[field]) throw new Error('capture WAL identity differs')
+      }
+      const source = manifest.tables[wal.table]
+      const wm = manifest.watermarks?.[wal.table]
+      if (!source || !wm || wal.targetLsn !== wm.targetLsn) throw new Error('invalid capture WAL target')
+      if (conn.query(`SELECT key FROM ${privateSchema}.metadata WHERE key='sealed'`).toArray().length) throw new Error('capture is sealed')
+      const sync = this.parameter(conn, `SELECT from_lsn::VARCHAR AS from_lsn,target_lsn::VARCHAR AS target_lsn FROM ${privateSchema}.wal_sync WHERE name=?`, wal.table)
+      if (!sync.length) {
+        const progress = this.parameter(conn, `SELECT position::VARCHAR AS position FROM ${privateSchema}.progress WHERE name=?`, wal.table)
+        const savedWm = this.parameter(conn, `SELECT lsn::VARCHAR AS lsn,row_count::VARCHAR AS row_count FROM ${replicaSchema}.watermarks WHERE table_name=?`, wal.table)
+        if (Number(progress[0]?.position) === source.rows && Number(savedWm[0]?.lsn) === wal.targetLsn && Number(savedWm[0]?.row_count) === source.rows) {
+          return { next: source.rows }
+        }
+        throw new Error('capture table is not awaiting WAL sync')
+      }
+      if (Number(sync[0].from_lsn) !== wal.fromLsn || Number(sync[0].target_lsn) !== wal.targetLsn) throw new Error('capture WAL range differs')
+      const program = this.program(manifest)
+      const ops = snapshotWalStatements(wal.table, wal, program.spec.types)
+      for (const op of ops) {
+        if (op.values.length) this.parameter(conn, op.sql, ...op.values)
+        else conn.query(op.sql)
+      }
+      const [{ count }] = conn.query(`SELECT count(*)::VARCHAR AS count FROM ${q(wal.table)}`).toArray()
+      if (Number(count) !== source.rows) throw new Error('replica row count mismatch after WAL apply')
+      this.parameter(conn, `INSERT OR REPLACE INTO ${replicaSchema}.watermarks VALUES(?,?,CAST(? AS BIGINT),CAST(? AS BIGINT))`,
+        wal.table, JSON.stringify(source.columns), String(wal.targetLsn), String(source.rows))
+      this.parameter(conn, `UPDATE ${privateSchema}.progress SET position=CAST(? AS BIGINT) WHERE name=?`, String(source.rows), wal.table)
+      this.parameter(conn, `DELETE FROM ${privateSchema}.wal_sync WHERE name=?`, wal.table)
+      return { next: source.rows }
+    })
+  }
+
+  resetSource(table: string) {
+    return this.atomic(conn => {
+      const manifest = this.saved(conn)
+      const source = manifest.tables[table]
+      if (!source) throw new Error('undeclared source table')
+      if (conn.query(`SELECT key FROM ${privateSchema}.metadata WHERE key='sealed'`).toArray().length) throw new Error('capture is sealed')
+      const program = this.program(manifest)
+      const [statement] = snapshotStatements({ [table]: { columns: source.columns, rows: [] } }, [table], program.spec.types)
+      conn.query(`DROP TABLE IF EXISTS ${q(table)}`)
+      conn.query(statement.create)
+      this.parameter(conn, `DELETE FROM ${replicaSchema}.watermarks WHERE table_name=?`, table)
+      this.parameter(conn, `DELETE FROM ${privateSchema}.wal_sync WHERE name=?`, table)
+      this.parameter(conn, `DELETE FROM ${privateSchema}.chunks WHERE name=?`, table)
+      const wm = manifest.watermarks?.[table]
+      if (source.rows === 0 && wm !== undefined) {
+        this.parameter(conn, `INSERT INTO ${replicaSchema}.watermarks VALUES(?,?,CAST(? AS BIGINT),0)`,
+          table, JSON.stringify(source.columns), String(wm.targetLsn))
+      }
+      this.parameter(conn, `UPDATE ${privateSchema}.progress SET position=0 WHERE name=?`, table)
+      return { next: 0 }
+    })
+  }
+
+  cleanup(identity?: SnapshotIdentity) {
+    const cleaned = this.atomic(conn => {
+      const hasMeta = conn.query(`SELECT 1 FROM duckdb_tables() WHERE schema_name='${privateSchema}' AND table_name='metadata'`).toArray().length > 0
+      if (hasMeta && identity) {
+        const saved = conn.query(`SELECT value FROM ${privateSchema}.metadata WHERE key='manifest'`).toArray()
+        if (saved.length === 1) {
+          const manifest = JSON.parse(String(saved[0].value)) as SnapshotManifest
+          if (manifest.id !== identity.id || manifest.name !== identity.name || manifest.version !== identity.version || manifest.revision !== identity.revision) {
+            return false
+          }
+        }
+      }
+      const hasWatermarks = conn.query(`SELECT 1 FROM duckdb_tables() WHERE schema_name='${replicaSchema}' AND table_name='watermarks'`).toArray().length > 0
+      const watermarked = new Set(
+        hasWatermarks
+          ? conn.query(`SELECT table_name FROM ${replicaSchema}.watermarks`).toArray().map(row => String(row.table_name))
+          : [],
+      )
+      for (const row of conn.query(`SELECT table_name FROM duckdb_tables() WHERE schema_name='main'`).toArray()) {
+        const name = String(row.table_name)
+        if (!watermarked.has(name)) conn.query(`DROP TABLE IF EXISTS main.${q(name)}`)
+      }
+      conn.query(`DROP SCHEMA IF EXISTS ${privateSchema} CASCADE`)
+      conn.query(`DROP SCHEMA IF EXISTS duckdb_private CASCADE`)
+      return true
+    })
+    if (cleaned) {
+      const saved = this.db.connect()
+      try { saved.query('CHECKPOINT') }
+      finally { saved.close() }
+    }
+    return { cleared: true }
   }
 
   materialize(name: string) {

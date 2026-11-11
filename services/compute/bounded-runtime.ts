@@ -36,7 +36,8 @@ export interface BoundedOutput extends BoundedCapture {
 export interface BoundedOptions {
   spec: Spec;
   version: string;
-  source: string;
+  source?: string;
+  computation?: { calculate(value: unknown): Promise<unknown> };
   databaseUrl: string;
   directory: string;
   runner: Pick<Runner, "run">;
@@ -114,7 +115,7 @@ export class BoundedRuntime {
   ) {}
   static async create(options: BoundedOptions): Promise<BoundedRuntime> {
     if (
-      !options.version || !options.spec.name || !options.source ||
+      !options.version || !options.spec.name || (!options.source && !options.computation) ||
       [...options.reads, ...Object.keys(options.queries), ...options.spec.to]
         .some((name) => !identifier.test(name))
     ) {
@@ -665,11 +666,13 @@ export class BoundedRuntime {
     const output = { ...this.manifest(), capture };
     const held = await database(this.path(output, "output"));
     const { con } = held;
-    const cage = new StepCage({
-      file: this.options.spec.steps ?? this.options.spec.file,
-      source: this.options.source,
-      endowments: this.options.spec.endowments ?? [],
-    });
+    const cage = this.options.source
+      ? new StepCage({
+        file: this.options.spec.steps ?? this.options.spec.file,
+        source: this.options.source,
+        endowments: this.options.spec.endowments ?? [],
+      })
+      : null;
     const owned = new Set<string>();
     const fields = new Map<string, string>();
     const allowed = new Set(this.options.spec.wasm.map(stem));
@@ -708,50 +711,74 @@ export class BoundedRuntime {
       let steps = 0;
       for (;;) {
         jobs = 0;
-        const step = await cage.advance({
-          seed: this.seed,
-          query: (sql: string) => this.query(con, sql),
-          wasm: (name: string, value: unknown) => wasm(name, strictJson(value)),
-          wasmFromQuery: async (
-            name: string,
-            value: unknown,
-            query: WasmQueryInput,
-          ) => {
-            const encoded = await encodeWasmQueryInput(
-              value,
-              query,
-              async (after) => {
-                const rows = await this.query(
-                  con,
-                  `SELECT unnest(p.item) FROM (
-                    SELECT struct_pack(*COLUMNS(*)) AS item,
-                      sum(octet_length(encode(to_json(struct_pack(*COLUMNS(*)))::VARCHAR))+1)
-                      OVER (ORDER BY r.${quote(query.orderBy)} ROWS UNBOUNDED PRECEDING) AS total
-                    FROM (SELECT * FROM (${query.sql}) r WHERE ${
-                    quote(query.orderBy)
-                  } > ${after} ORDER BY ${quote(query.orderBy)} LIMIT 4096) r
-                  ) p WHERE CASE WHEN p.total>1048574 AND
-                    p.total=octet_length(encode(to_json(p.item)::VARCHAR))+1
-                    THEN error('execution query row exceeds page limit')
-                    ELSE p.total<=1048574 END ORDER BY p.item.${quote(query.orderBy)}`,
-                );
-                let next = after;
-                const values = rows.map((row) => {
-                  const position = row[query.orderBy];
-                  if (
-                    !Number.isSafeInteger(position) || Number(position) <= next
-                  ) throw new Error("invalid WASM query order");
-                  next = Number(position);
-                  const result = { ...row };
-                  delete result[query.orderBy];
-                  return result;
-                });
-                return { after, next, done: rows.length === 0, rows: values };
-              },
-            );
-            return wasm(name, new TextDecoder().decode(encoded));
-          },
-        }, checkpoint);
+        const step = cage
+          ? await cage.advance({
+            seed: this.seed,
+            query: (sql: string) => this.query(con, sql),
+            wasm: (name: string, value: unknown) => wasm(name, strictJson(value)),
+            wasmFromQuery: async (
+              name: string,
+              value: unknown,
+              query: WasmQueryInput,
+            ) => {
+              const encoded = await encodeWasmQueryInput(
+                value,
+                query,
+                async (after) => {
+                  const rows = await this.query(
+                    con,
+                    `SELECT unnest(p.item) FROM (
+                      SELECT struct_pack(*COLUMNS(*)) AS item,
+                        sum(octet_length(encode(to_json(struct_pack(*COLUMNS(*)))::VARCHAR))+1)
+                        OVER (ORDER BY r.${quote(query.orderBy)} ROWS UNBOUNDED PRECEDING) AS total
+                      FROM (SELECT * FROM (${query.sql}) r WHERE ${
+                      quote(query.orderBy)
+                    } > ${after} ORDER BY ${quote(query.orderBy)} LIMIT 4096) r
+                    ) p WHERE CASE WHEN p.total>1048574 AND
+                      p.total=octet_length(encode(to_json(p.item)::VARCHAR))+1
+                      THEN error('execution query row exceeds page limit')
+                      ELSE p.total<=1048574 END ORDER BY p.item.${quote(query.orderBy)}`,
+                  );
+                  let next = after;
+                  const values = rows.map((row) => {
+                    const position = row[query.orderBy];
+                    if (
+                      !Number.isSafeInteger(position) || Number(position) <= next
+                    ) throw new Error("invalid WASM query order");
+                    next = Number(position);
+                    const result = { ...row };
+                    delete result[query.orderBy];
+                    return result;
+                  });
+                  return { after, next, done: rows.length === 0, rows: values };
+                },
+              );
+              return wasm(name, new TextDecoder().decode(encoded));
+            },
+          }, checkpoint)
+          : await (async () => {
+            const inputs: Record<string, Row[]> = {};
+            for (const name of Object.keys(this.options.queries)) {
+              const result = await con.runAndReadAll(
+                `SELECT value FROM duckstream_private.${quote(`result_${name}`)} ORDER BY sequence`,
+              );
+              inputs[name] = result.getRowObjects().map((row) => parse(row.value));
+            }
+            const writes = await this.options.computation!.calculate(inputs);
+            if (!writes || typeof writes !== "object" || Array.isArray(writes)) {
+              throw new Error("invalid execution step");
+            }
+            return {
+              done: true,
+              checkpoint: null,
+              writes: writes as Record<string, Row[]>,
+            } as {
+              done: boolean;
+              checkpoint: unknown;
+              writes: Record<string, Row[]>;
+              statements?: string[];
+            };
+          })();
         if (bytes(strictJson(step)) > 8 * 1024 * 1024) {
           throw new Error("execution step exceeds byte limit");
         }
@@ -854,7 +881,7 @@ export class BoundedRuntime {
       completed = true;
       return output;
     } finally {
-      cage.close();
+      cage?.close();
       held.close();
       const path = this.path(output, "output");
       await removeOwned(`${path}.tmp`);

@@ -68,6 +68,36 @@ Deno.test("bounded captures survive restart and retain frozen multi-query inputs
 		await Deno.remove(directory, { recursive: true });
 	}
 });
+Deno.test("bounded runtime executes single-pass calculate computations without steps", async () => {
+	const directory = await Deno.makeTempDir();
+	try {
+		const config = options(directory);
+		delete config.spec.steps;
+		delete config.source;
+		config.computation = {
+			reads: [],
+			queries: config.queries,
+			calculate(inputs) {
+				const rows = (inputs.items as { id: string; value: number }[]) ?? [];
+				return { sink: rows.filter((r) => r.value < 5) };
+			},
+		};
+		const runtime = await BoundedRuntime.create(config);
+		const capture = await runtime.capture();
+		const output = await runtime.calculate(capture);
+		const pages = [];
+		for await (const page of runtime.pages(output, "sink")) pages.push(...page);
+		assertEquals(pages, [
+			{ id: "0", value: 0 },
+			{ id: "1", value: 1 },
+			{ id: "2", value: 2 },
+			{ id: "3", value: 3 },
+			{ id: "4", value: 4 },
+		]);
+	} finally {
+		await Deno.remove(directory, { recursive: true });
+	}
+});
 Deno.test("failed calculation removes scratch files while retaining replay inputs", async () => {
 	const directory = await Deno.makeTempDir();
 	try {
@@ -431,7 +461,7 @@ pgTest(
 					"SELECT a.id,a.value AS first,b.value AS second,a.note FROM slow_input a JOIN second_input b USING(id)",
 				other: "SELECT value FROM second_input",
 			};
-			config.source = config.source.replace(
+			config.source = config.source!.replace(
 				"const after=checkpoint??0;",
 				`const after=checkpoint??0;
       const other=await host.query('SELECT value FROM duckstream_private.result_other');

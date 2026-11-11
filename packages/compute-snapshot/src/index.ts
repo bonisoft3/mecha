@@ -61,6 +61,7 @@ export interface SnapshotWal extends SnapshotIdentity {
 }
 export interface SnapshotManifest extends SnapshotIdentity {
   tables: Record<string, { columns: SnapshotTable['columns']; rows: number }>;
+  watermarks?: Record<string, { targetLsn: number; pkColumns: string[] }>;
 }
 export interface SnapshotChunk extends SnapshotIdentity {
   table: string;
@@ -88,6 +89,7 @@ export interface SnapshotCoordinator {
   materialize(identity: SnapshotIdentity): Promise<boolean>;
   snapshot(identity: SnapshotIdentity): Promise<Snapshot>;
   wal?(identity: SnapshotIdentity, afterLsn?: Record<string, number>): Promise<SnapshotWal>;
+  tableWal?(identity: SnapshotIdentity, table: string, afterLsn: number, limits?: ChunkLimits): Promise<(SnapshotTableWal & SnapshotIdentity & { table: string }) | null>;
   manifest(identity: SnapshotIdentity): Promise<SnapshotManifest>;
   chunk(identity: SnapshotIdentity, table: string, after?: number, limits?: ChunkLimits): Promise<SnapshotChunk>;
   publish(snapshot: SnapshotIdentity, output: Output): Promise<void>;
@@ -229,7 +231,8 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.inbox(table_name text PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.wal(lsn bigserial PRIMARY KEY, table_name text NOT NULL, op "char" NOT NULL, row_data jsonb);
       CREATE INDEX IF NOT EXISTS wal_table_lsn ON ${PRIVATE}.wal(table_name, lsn);
-      CREATE TABLE IF NOT EXISTS ${PRIVATE}.table_watermarks(table_name text PRIMARY KEY, target_lsn bigint NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS ${PRIVATE}.table_watermarks(table_name text PRIMARY KEY, target_lsn bigint NOT NULL DEFAULT 0, pruned_lsn bigint NOT NULL DEFAULT 0);
+      ALTER TABLE ${PRIVATE}.table_watermarks ADD COLUMN IF NOT EXISTS pruned_lsn bigint NOT NULL DEFAULT 0;
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.revisions(name text PRIMARY KEY, revision bigint NOT NULL);
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.captures(id text PRIMARY KEY, name text NOT NULL, version text NOT NULL, revision bigint NOT NULL, snapshot jsonb, target_lsn bigint NOT NULL DEFAULT 0);
       ALTER TABLE ${PRIVATE}.captures ALTER COLUMN snapshot DROP NOT NULL;
@@ -270,11 +273,15 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
             END IF;
             v_lsn := currval('${PRIVATE}.wal_lsn_seq');
           END IF;
-          DELETE FROM ${PRIVATE}.wal
-          WHERE table_name = TG_TABLE_NAME
-            AND lsn < coalesce((SELECT w.lsn FROM ${PRIVATE}.wal w WHERE w.table_name = TG_TABLE_NAME ORDER BY w.lsn DESC OFFSET 4096 LIMIT 1), 0);
+          WITH deleted AS (
+            DELETE FROM ${PRIVATE}.wal
+            WHERE table_name = TG_TABLE_NAME
+              AND lsn < coalesce((SELECT w.lsn FROM ${PRIVATE}.wal w WHERE w.table_name = TG_TABLE_NAME ORDER BY w.lsn DESC OFFSET 4096 LIMIT 1), 0)
+            RETURNING lsn
+          )
           UPDATE ${PRIVATE}.table_watermarks
-          SET target_lsn = greatest(target_lsn, v_lsn)
+          SET target_lsn = greatest(target_lsn, v_lsn),
+              pruned_lsn = greatest(pruned_lsn, coalesce((SELECT max(lsn) FROM deleted), 0))
           WHERE table_name = TG_TABLE_NAME;
           INSERT INTO ${PRIVATE}.inbox(table_name) VALUES (TG_TABLE_NAME) ON CONFLICT DO NOTHING;
           PERFORM pg_notify('${NOTIFY_CHANNEL}',TG_TABLE_NAME); RETURN NULL;
@@ -479,8 +486,14 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
     return retained;
   }
   async function manifest(identity: SnapshotIdentity): Promise<SnapshotManifest> {
-    return await atomic(async tx => ({ ...identity, tables: Object.fromEntries((await readableTables(tx, identity))
-      .map(({ source, columns, rows }) => [source, { columns, rows }])) }));
+    return await atomic(async tx => {
+      const tables = await readableTables(tx, identity);
+      return {
+        ...identity,
+        tables: Object.fromEntries(tables.map(({ source, columns, rows }) => [source, { columns, rows }])),
+        watermarks: Object.fromEntries(tables.map(({ source, target_lsn, pk_columns }) => [source, { targetLsn: target_lsn, pkColumns: pk_columns ?? [] }])),
+      };
+    });
   }
   async function readChunk(tx: Queryable, identity: SnapshotIdentity, source: string, after: number, limits: ChunkLimits): Promise<SnapshotChunk> {
     const maxRows = limits.maxRows ?? CAPTURE_CHUNK_ROWS;
@@ -548,6 +561,56 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
   }
   async function wal(identity: SnapshotIdentity, afterLsn: Record<string, number> = {}): Promise<SnapshotWal> {
     return await atomic(tx => readWal(tx, identity, afterLsn));
+  }
+  async function tableWal(identity: SnapshotIdentity, source: string, afterLsn: number, limits: ChunkLimits = {}): Promise<(SnapshotTableWal & SnapshotIdentity & { table: string }) | null> {
+    const maxRows = limits.maxRows ?? CAPTURE_CHUNK_ROWS;
+    const maxBytes = limits.maxBytes ?? CAPTURE_CHUNK_BYTES;
+    if (!Number.isSafeInteger(afterLsn) || afterLsn < 0 || !Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > CAPTURE_CHUNK_ROWS ||
+      !Number.isSafeInteger(maxBytes) || maxBytes < 2 || maxBytes > CAPTURE_CHUNK_BYTES) throw new Error('invalid compute wal bounds');
+    return await atomic(async tx => {
+      const metadata = (await readableTables(tx, identity)).find(item => item.source === source);
+      if (!metadata) throw new Error(`compute capture has no table ${source}`);
+      if (afterLsn > metadata.target_lsn) return null;
+      const [{ pruned_lsn: prunedLsn }] = (await tx.query<{ pruned_lsn: number }>(
+        `SELECT coalesce((SELECT pruned_lsn::double precision FROM ${PRIVATE}.table_watermarks WHERE table_name=$1), 0) AS pruned_lsn`,
+        [source],
+      )).rows;
+      if (prunedLsn > 0 && afterLsn <= prunedLsn) return null;
+      if (afterLsn > 0) {
+        const anchor = await tx.query(`SELECT 1 FROM ${PRIVATE}.wal WHERE table_name=$1 AND lsn=$2`, [source, afterLsn]);
+        if (!anchor.rows.length) return null;
+      }
+      const [{ count }] = (await tx.query<{ count: number }>(
+        `SELECT count(*)::double precision AS count FROM ${PRIVATE}.wal WHERE table_name=$1 AND lsn>$2 AND lsn<=$3`,
+        [source, afterLsn, metadata.target_lsn],
+      )).rows;
+      if (count > maxRows) return null;
+      await tx.exec(transportSettings);
+      const projection = metadata.columns.map(field => `rec.${q(field.name)}::text AS ${q(field.name)}`).join(',');
+      const { rows } = await tx.query<SnapshotWalEntry>(
+        `SELECT w.lsn::double precision AS lsn, w.op AS op,
+          CASE WHEN w.op = 'T' THEN NULL ELSE (
+            SELECT row_to_json(r) FROM (
+              SELECT ${projection}
+              FROM jsonb_populate_record(NULL::${table(metadata.source)}, w.row_data) AS rec
+            ) r
+          ) END AS row
+         FROM ${PRIVATE}.wal w
+         WHERE w.table_name = $1 AND w.lsn > $2 AND w.lsn <= $3
+         ORDER BY w.lsn`,
+        [metadata.source, afterLsn, metadata.target_lsn],
+      );
+      if (new TextEncoder().encode(JSON.stringify(rows)).length > maxBytes) return null;
+      return {
+        ...identity,
+        table: source,
+        fromLsn: afterLsn,
+        targetLsn: metadata.target_lsn,
+        pkColumns: metadata.pk_columns ?? [],
+        columns: metadata.columns,
+        entries: rows,
+      };
+    });
   }
   async function snapshot(identity: SnapshotIdentity): Promise<Snapshot> {
     return await atomic(async tx => {
@@ -665,7 +728,7 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
           ? 'pending' : 'obsolete';
       });
     },
-    claim: next, materialize, snapshot, wal, manifest, chunk, reject,
+    claim: next, materialize, snapshot, wal, tableWal, manifest, chunk, reject,
     publish(identity, output) { return commit(identity, (tx, spec) => publish(tx, spec, output)); },
     outputChunk(identity, attempt, sink, ordinal, rows) {
       return atomic(async tx => stageOutput(tx, identity, await activeSpec(tx, identity), attempt, sink, ordinal, rows));

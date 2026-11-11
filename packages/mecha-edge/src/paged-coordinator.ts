@@ -1,4 +1,4 @@
-import type { SnapshotChunk, SnapshotManifest } from '../../compute-snapshot/src/index.ts'
+import type { SnapshotChunk, SnapshotIdentity, SnapshotManifest, SnapshotTableWal } from '../../compute-snapshot/src/index.ts'
 import { computeFailureKey, type ComputeCapture } from './compute.ts'
 import type { ComputeService } from './compute.ts'
 import type { ExecutionOutput, ExecutionState } from './paged-execution.ts'
@@ -8,6 +8,7 @@ import { strictJson } from './snapshot-program.ts'
 export interface PagedDatabase {
   computeManifest(capture: ComputeCapture): Promise<SnapshotManifest>
   computeChunk(capture: ComputeCapture, source: string, after: number): Promise<SnapshotChunk>
+  computeWal?(capture: ComputeCapture, source: string, afterLsn: number): Promise<(SnapshotTableWal & SnapshotIdentity & { table: string }) | null>
   computeOutputChunk(capture: ComputeCapture, attempt: string, sink: string, ordinal: number, rows: Record<string, unknown>[]): Promise<void>
   computeSealOutput(capture: ComputeCapture, attempt: string, manifest: Record<string, { chunks: number; rows: number }>): Promise<void>
   computePublishStaged(capture: ComputeCapture, attempt: string): Promise<void>
@@ -28,6 +29,7 @@ interface Storage {
 interface RemoteStatus {
   manifest: SnapshotManifest
   sources: { name: string; position: number }[]
+  walSources?: { name: string; fromLsn: number; targetLsn: number }[]
   queries: string[]
   declaredQueries: string[]
   sinks: string[]
@@ -85,11 +87,44 @@ export async function advancePaged(db: PagedDatabase, service: ComputeService, s
     progress.manifest = manifest
     await storage.put(key, progress)
   } else {
-    status = transfer?.key === key ? transfer.status : await pagedRequest<RemoteStatus>(service, { capture, action: 'status' })
+    try {
+      status = transfer?.key === key ? transfer.status : await pagedRequest<RemoteStatus>(service, { capture, action: 'status' })
+    } catch (error) {
+      if (!/compute object belongs to another capture|capture is not initialized/.test(String(error))) throw error
+      status = await pagedRequest<RemoteStatus>(service, { capture, action: 'initialize', manifest })
+    }
     if (strictJson(status.manifest) !== strictJson(manifest)) throw new Error('paged manifest differs from capture')
   }
   for (const field of ['id', 'name', 'version', 'revision'] as const) {
     if (manifest[field] !== capture.identity[field]) throw new Error('paged manifest belongs to another capture')
+  }
+  const walSource = status.walSources?.[0]
+  if (walSource) {
+    const wal = db.computeWal ? await db.computeWal(capture, walSource.name, walSource.fromLsn) : null
+    let applied = false
+    if (wal) {
+      try {
+        const acknowledgement = await pagedRequest<{ next: number }>(service, { capture, action: 'apply-wal', wal })
+        if (acknowledgement.next !== manifest.tables[walSource.name].rows) throw new Error('capture WAL acknowledgement differs')
+        const source = status.sources.find(item => item.name === walSource.name)
+        if (source) source.position = acknowledgement.next
+        status.walSources = status.walSources?.filter(item => item.name !== walSource.name)
+        applied = true
+      } catch (error) {
+        if (!/replica row count mismatch|capture WAL/.test(String(error))) throw error
+      }
+    }
+    if (!applied) {
+      const acknowledgement = await pagedRequest<{ next: number }>(service, { capture, action: 'reset-source', table: walSource.name })
+      if (acknowledgement.next !== 0) throw new Error('capture reset acknowledgement differs')
+      const source = status.sources.find(item => item.name === walSource.name)
+      if (source) source.position = 0
+      status.walSources = status.walSources?.filter(item => item.name !== walSource.name)
+    }
+    if (session && ((status.walSources?.length ?? 0) > 0 || status.sources.some(source => source.position < manifest.tables[source.name].rows))) {
+      session.transfer = { key, status }
+    }
+    return 'transfer'
   }
   const source = status.sources.find(source => source.position < manifest.tables[source.name].rows)
   if (source) {

@@ -1,7 +1,7 @@
 import { withComputeTimeout, type ComputeService } from './compute.ts'
 import type { ComputeCapture } from './compute.ts'
 import { EXECUTION_BYTES, type ExecutionStep } from './paged-execution.ts'
-import type { SnapshotChunk, SnapshotManifest } from '../../compute-snapshot/src/index.ts'
+import type { SnapshotChunk, SnapshotIdentity, SnapshotManifest, SnapshotTableWal } from '../../compute-snapshot/src/index.ts'
 import { strictJson, type SnapshotProgram } from './snapshot-program.ts'
 
 export interface PagedRequest {
@@ -9,6 +9,8 @@ export interface PagedRequest {
   action: string
   manifest?: SnapshotManifest
   chunk?: SnapshotChunk
+  wal?: SnapshotTableWal & SnapshotIdentity & { table: string }
+  table?: string
   query?: string
   orderBy?: string
   sql?: string

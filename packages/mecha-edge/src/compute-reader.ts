@@ -107,6 +107,14 @@ export function computeReader(assets: Assets, computations: Computation[], machi
       })
     }
 
+    async tableWal(capture: ComputeCapture, source: string, afterLsn: number) {
+      return await this.#serialize(async () => {
+        this.#verify(capture)
+        const { coordinator } = await (this.#opened ??= this.#open())
+        return coordinator.tableWal ? await coordinator.tableWal(capture.identity, source, afterLsn) : null
+      })
+    }
+
     async snapshot(capture: ComputeCapture) {
       return await this.#serialize(async () => {
         this.#verify(capture)

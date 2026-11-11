@@ -1,5 +1,5 @@
 import { bindBoundary, typedSql } from '../../../services/compute/portable-contract.ts'
-import { snapshotStatements, snapshotWalStatements, type Snapshot } from '../../../services/compute/snapshot-data.ts'
+import { planReplicaTable, snapshotStatements, type ReplicaWatermark, type Snapshot } from '../../../services/compute/snapshot-data.ts'
 import { identity, programFor, type SnapshotProgram } from './snapshot-program.ts'
 
 interface Connection {
@@ -9,7 +9,7 @@ interface Connection {
 }
 export interface QueryDatabase { connect(): Connection }
 
-const replicas = new WeakMap<QueryDatabase, Map<string, { colSig: string; lsn: number; rowSig: string }>>()
+const replicas = new WeakMap<QueryDatabase, Map<string, ReplicaWatermark>>()
 
 /** The database is scratch space; only the coordinator owns publication authority. */
 export function snapshotQuery(db: QueryDatabase, programs: readonly SnapshotProgram[], snapshot: Snapshot) {
@@ -25,39 +25,32 @@ export function snapshotQuery(db: QueryDatabase, programs: readonly SnapshotProg
         replicaState = new Map()
         replicas.set(db, replicaState)
       }
+      const pendingState = new Map<string, ReplicaWatermark>()
+      conn.query('BEGIN TRANSACTION')
+      began = true
       for (const [index, name] of program.reads.entries()) {
-        const table = statements[index]
-        const source = snapshot.tables[name]
-        const colSig = JSON.stringify({ cols: source.columns, types: program.spec.types ?? null })
-        const rowSig = table.values[0]
-        const tableWal = snapshot.wal[name]
-        const prior = replicaState.get(name)
-        if (prior && prior.colSig === colSig && tableWal && tableWal.fromLsn === prior.lsn && tableWal.targetLsn >= prior.lsn) {
-          for (const step of snapshotWalStatements(name, tableWal, program.spec.types, 'duckpipe_replica')) {
-            if (step.values.length) {
-              const statement = conn.prepare(step.sql)
-              try { statement.query(...step.values) }
-              finally { statement.close() }
-            } else {
-              conn.query(step.sql)
-            }
+        const replicaPlan = planReplicaTable(
+          name,
+          snapshot.tables[name],
+          statements[index],
+          snapshot.wal[name],
+          program.spec.types,
+          replicaState.get(name),
+        )
+        for (const step of replicaPlan.steps) {
+          if (step.values.length) {
+            const statement = conn.prepare(step.sql)
+            try { statement.query(...step.values) }
+            finally { statement.close() }
+          } else {
+            conn.query(step.sql)
           }
-          replicaState.set(name, { colSig, lsn: tableWal.targetLsn, rowSig })
-        } else if (prior && prior.colSig === colSig && prior.rowSig === rowSig) {
-          replicaState.set(name, { colSig, lsn: tableWal?.targetLsn ?? prior.lsn, rowSig })
-        } else {
-          conn.query(`DROP TABLE IF EXISTS "duckpipe_replica"."${name}"`)
-          conn.query(table.create.replace(`CREATE TABLE "${name}"`, `CREATE TABLE "duckpipe_replica"."${name}"`))
-          const statement = conn.prepare(table.insert.replace(`INTO "${name}"`, `INTO "duckpipe_replica"."${name}"`))
-          try {
-            const rows = source.rows
-            for (let offset = 0; offset < rows.length; offset += 32) {
-              statement.query(JSON.stringify(rows.slice(offset, offset + 32)))
-            }
-          } finally { statement.close() }
-          replicaState.set(name, { colSig, lsn: tableWal?.targetLsn ?? 0, rowSig })
         }
+        pendingState.set(name, replicaPlan.next)
       }
+      conn.query('COMMIT')
+      began = false
+      for (const [name, next] of pendingState) replicaState.set(name, next)
       conn.query('BEGIN TRANSACTION')
       began = true
       for (const name of program.reads) {

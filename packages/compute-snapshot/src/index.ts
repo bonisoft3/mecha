@@ -253,9 +253,13 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
         DECLARE v_lsn bigint;
         BEGIN
           IF TG_OP = 'TRUNCATE' THEN
+            INSERT INTO ${PRIVATE}.table_watermarks(table_name, target_lsn) VALUES (TG_TABLE_NAME, 0) ON CONFLICT(table_name) DO NOTHING;
+            PERFORM 1 FROM ${PRIVATE}.table_watermarks WHERE table_name = TG_TABLE_NAME FOR UPDATE;
             INSERT INTO ${PRIVATE}.wal(table_name, op, row_data) VALUES (TG_TABLE_NAME, 'T', NULL) RETURNING lsn INTO v_lsn;
           ELSE
             IF NOT EXISTS (SELECT 1 FROM changed_rows) THEN RETURN NULL; END IF;
+            INSERT INTO ${PRIVATE}.table_watermarks(table_name, target_lsn) VALUES (TG_TABLE_NAME, 0) ON CONFLICT(table_name) DO NOTHING;
+            PERFORM 1 FROM ${PRIVATE}.table_watermarks WHERE table_name = TG_TABLE_NAME FOR UPDATE;
             IF TG_OP = 'INSERT' THEN
               INSERT INTO ${PRIVATE}.wal(table_name, op, row_data) SELECT TG_TABLE_NAME, 'I', to_jsonb(r) FROM changed_rows r;
             ELSIF TG_OP = 'DELETE' THEN
@@ -266,8 +270,12 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
             END IF;
             v_lsn := currval('${PRIVATE}.wal_lsn_seq');
           END IF;
-          INSERT INTO ${PRIVATE}.table_watermarks(table_name, target_lsn) VALUES (TG_TABLE_NAME, v_lsn)
-            ON CONFLICT(table_name) DO UPDATE SET target_lsn = EXCLUDED.target_lsn;
+          DELETE FROM ${PRIVATE}.wal
+          WHERE table_name = TG_TABLE_NAME
+            AND lsn < coalesce((SELECT w.lsn FROM ${PRIVATE}.wal w WHERE w.table_name = TG_TABLE_NAME ORDER BY w.lsn DESC OFFSET 4096 LIMIT 1), 0);
+          UPDATE ${PRIVATE}.table_watermarks
+          SET target_lsn = greatest(target_lsn, v_lsn)
+          WHERE table_name = TG_TABLE_NAME;
           INSERT INTO ${PRIVATE}.inbox(table_name) VALUES (TG_TABLE_NAME) ON CONFLICT DO NOTHING;
           PERFORM pg_notify('${NOTIFY_CHANNEL}',TG_TABLE_NAME); RETURN NULL;
         END $$;
@@ -635,10 +643,10 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
         const snapWal = await wal(identity, canUseWal ? afterLsn : {});
         Object.defineProperty(snap, 'wal', { value: snapWal.tables, enumerable: false });
         const output = await config.execute(snap);
+        await commit(identity, (tx, spec) => publish(tx, spec, output));
         for (const [source, tableWal] of Object.entries(snapWal.tables)) {
           executorWatermarks.set(source, tableWal.targetLsn);
         }
-        await commit(identity, (tx, spec) => publish(tx, spec, output));
       } catch (error) {
         await reject(identity, error instanceof Error ? error.message : String(error));
         throw error;

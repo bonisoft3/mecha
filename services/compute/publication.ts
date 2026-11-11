@@ -288,7 +288,12 @@ export async function stagePages(
     }
     return { stages, rows };
   } catch (error) {
-    await dropStagedPages(client, { stages, rows }).catch(() => {});
+    await dropStagedPages(client, { stages, rows }).catch((cleanupError) => {
+      throw new AggregateError(
+        [error, cleanupError],
+        "staging and cleanup failed",
+      );
+    });
     throw error;
   }
 }
@@ -350,9 +355,23 @@ export async function publishStagedPages(
   claims: Row,
 ): Promise<Summary> {
   const previous = await enterAuthority(client, claims);
-  const summary = await applyStagedPages(client, spec, staged);
-  await leaveAuthority(client, previous);
-  return summary;
+  let applyError: unknown;
+  try {
+    return await applyStagedPages(client, spec, staged);
+  } catch (error) {
+    applyError = error;
+    throw error;
+  } finally {
+    await leaveAuthority(client, previous).catch((cleanupError) => {
+      if (applyError !== undefined) {
+        throw new AggregateError(
+          [applyError, cleanupError],
+          "publication and authority cleanup failed",
+        );
+      }
+      throw cleanupError;
+    });
+  }
 }
 
 /** Caller owns the transaction and must roll it back if publication fails. */
@@ -363,11 +382,27 @@ export async function publishPages(
   claims: Row,
 ): Promise<Summary> {
   const previous = await enterAuthority(client, claims);
-  const staged = await stagePages(client, spec, pages);
-  const summary = await applyStagedPages(client, spec, staged);
-  await dropStagedPages(client, staged);
-  await leaveAuthority(client, previous);
-  return summary;
+  let staged: StagedPages | undefined;
+  let mainError: unknown;
+  try {
+    staged = await stagePages(client, spec, pages);
+    return await applyStagedPages(client, spec, staged);
+  } catch (error) {
+    mainError = error;
+    throw error;
+  } finally {
+    const errors: unknown[] = mainError !== undefined ? [mainError] : [];
+    if (staged) {
+      await dropStagedPages(client, staged).catch((err) => errors.push(err));
+    }
+    await leaveAuthority(client, previous).catch((err) => errors.push(err));
+    if (mainError !== undefined && errors.length > 1) {
+      throw new AggregateError(errors, "publication and cleanup failed");
+    }
+    if (mainError === undefined && errors.length > 0) {
+      throw errors[0];
+    }
+  }
 }
 
 async function enterAuthority(client: pg.PoolClient, claims: Row) {

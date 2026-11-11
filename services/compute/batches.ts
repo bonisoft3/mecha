@@ -8,6 +8,7 @@ export type BatchSpec = {
 	to: string[];
 	version: string;
 	initialize?(client: pg.PoolClient): Promise<void>;
+	hasCapture?(inputs: unknown): Promise<boolean>;
 	capture(client: pg.PoolClient): Promise<unknown>;
 	captured?(inputs: unknown): Promise<void>;
 	supersedeOnForeignKey?: boolean;
@@ -16,7 +17,7 @@ export type BatchSpec = {
 		client: pg.PoolClient,
 		output: unknown,
 	): Promise<{
-		publish(client: pg.PoolClient): Promise<void>;
+		publish(client: pg.PoolClient): Promise<(() => void) | void>;
 		close(): Promise<void>;
 	}>;
 	publish(client: pg.PoolClient, output: unknown): Promise<void>;
@@ -346,6 +347,7 @@ export async function openBatches(
 				client: pg.PoolClient,
 				spec: BatchSpec,
 				work: Awaited<ReturnType<typeof getWork>>,
+				alreadyClaimed: boolean,
 				beforeRequested: string,
 				beforeCompleted: string,
 				beforeCoverage: {
@@ -362,10 +364,12 @@ export async function openBatches(
 				inputs: string,
 				digest: string | null,
 			) => {
-				await client.query(
-					'SELECT hybrid_compute_batch.deliver($1,\'{"kind":"claim","payload":{}}\'::jsonb)',
-					[work.instance],
-				);
+				if (!alreadyClaimed) {
+					await client.query(
+						'SELECT hybrid_compute_batch.deliver($1,\'{"kind":"claim","payload":{}}\'::jsonb)',
+						[work.instance],
+					);
+				}
 				if (
 					BigInt(afterRequested) > BigInt(beforeRequested) ||
 					strictJson(afterCoverage?.input ?? null, true) !==
@@ -408,6 +412,7 @@ export async function openBatches(
 					| {
 						spec: BatchSpec;
 						work: Awaited<ReturnType<typeof getWork>>;
+						alreadyClaimed: boolean;
 						requested: string;
 						completed: string;
 						coverage: {
@@ -415,6 +420,7 @@ export async function openBatches(
 							sink: Record<string, unknown> | null;
 							completed: Record<string, unknown> | null;
 						} | undefined;
+						captured: unknown;
 						inputs: string;
 						digest: string | null;
 					}
@@ -443,8 +449,10 @@ export async function openBatches(
 								throw new Error(`incompatible computation ${name}`);
 							}
 							if (state.claimed !== null) {
-								await client.query("COMMIT");
-								return { spec, work, inputs: state.inputs, unchanged: false };
+								if (!spec.hasCapture || await spec.hasCapture(state.inputs)) {
+									await client.query("COMMIT");
+									return { spec, work, inputs: state.inputs, unchanged: false };
+								}
 							}
 							const { rows: [coverage] } = await client.query<{
 								input: Record<string, unknown> | null;
@@ -474,6 +482,7 @@ export async function openBatches(
 									client,
 									spec,
 									lockedWork,
+									state.claimed !== null,
 									state.requested,
 									state.completed,
 									coverage,
@@ -489,9 +498,11 @@ export async function openBatches(
 							deferred = {
 								spec,
 								work,
+								alreadyClaimed: state.claimed !== null,
 								requested: state.requested,
 								completed: state.completed,
 								coverage,
+								captured,
 								inputs,
 								digest,
 							};
@@ -509,23 +520,24 @@ export async function openBatches(
 					client.release();
 				}
 				if (!deferred) return;
-				return await transaction(db, async (claimClient) => {
+				let discardDeferred = false;
+				const claimed = await transaction(db, async (claimClient) => {
 					const work = await getWork(claimClient, key);
-					if (work.outcome !== null) return;
+					if (work.outcome !== null) {
+						discardDeferred = true;
+						return;
+					}
 					const { rows: [afterState] } = await claimClient.query(
 						"SELECT * FROM compute.batch WHERE name=$1",
 						[deferred.spec.name],
 					);
 					if (afterState.version !== deferred.spec.version) {
+						discardDeferred = true;
 						throw new Error(`incompatible computation ${deferred.spec.name}`);
 					}
-					if (afterState.claimed !== null) {
-						return {
-							spec: deferred.spec,
-							work,
-							inputs: afterState.inputs,
-							unchanged: false,
-						};
+					if (!deferred.alreadyClaimed && afterState.claimed !== null) {
+						discardDeferred = true;
+						return;
 					}
 					const { rows: [afterCoverage] } = await claimClient.query<{
 						input: Record<string, unknown> | null;
@@ -538,10 +550,12 @@ export async function openBatches(
              FROM compute.capture c WHERE c.instance_id=$1`,
 						[work.instance, deferred.spec.name],
 					);
+					discardDeferred = false;
 					return await finishClaim(
 						claimClient,
 						deferred.spec,
 						work,
+						deferred.alreadyClaimed,
 						deferred.requested,
 						deferred.completed,
 						deferred.coverage,
@@ -550,7 +564,28 @@ export async function openBatches(
 						deferred.inputs,
 						deferred.digest,
 					);
+				}).catch(async (error) => {
+					if (
+						deferred.captured && typeof deferred.captured === "object" &&
+						deferred.spec.release
+					) {
+						await deferred.spec.release(deferred.captured, {
+							...(deferred.captured as Record<string, unknown>),
+							capture: deferred.captured,
+						});
+					}
+					throw error;
 				});
+				if (
+					discardDeferred && deferred.captured &&
+					typeof deferred.captured === "object" && deferred.spec.release
+				) {
+					await deferred.spec.release(deferred.captured, {
+						...(deferred.captured as Record<string, unknown>),
+						capture: deferred.captured,
+					});
+				}
+				return claimed;
 			})();
 			if (!claim) return;
 			await claim.spec.captured?.(claim.inputs);
@@ -599,31 +634,57 @@ export async function openBatches(
 					};
 					if (claim.spec.stage) {
 						const client = await db.connect();
+						let releaseError: Error | undefined;
 						try {
 							const staged = await claim.spec.stage(client, output);
+							let publishError: unknown;
 							try {
 								for (let attempt = 0;; attempt++) {
 									await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
 									try {
 										await client.query("SELECT compute.lock_batches()");
-										await staged.publish(client);
+										const onCommit = await staged.publish(client);
 										await settleClaim(client);
 										await client.query("COMMIT");
+										onCommit?.();
 										break;
 									} catch (error) {
-										await client.query("ROLLBACK");
+										await client.query("ROLLBACK").catch((rollbackError) => {
+											releaseError = rollbackError instanceof Error
+												? rollbackError
+												: new Error(String(rollbackError));
+										});
 										if (
+											releaseError ||
 											!(error instanceof pg.DatabaseError) ||
 											!["40001", "40P01"].includes(error.code ?? "") ||
 											attempt >= TRANSACTION_ATTEMPTS - 1
 										) throw error;
 									}
 								}
+							} catch (error) {
+								publishError = error;
+								throw error;
 							} finally {
-								await staged.close();
+								try {
+									await staged.close();
+								} catch (closeError) {
+									releaseError = closeError instanceof Error
+										? closeError
+										: new Error(String(closeError));
+									if (publishError !== undefined) {
+										// deno-lint-ignore no-unsafe-finally
+										throw new AggregateError(
+											[publishError, closeError],
+											"staged publication and cleanup failed",
+										);
+									}
+									// deno-lint-ignore no-unsafe-finally
+									throw closeError;
+								}
 							}
 						} finally {
-							client.release();
+							client.release(releaseError);
 						}
 					} else {
 						await transaction(db, async (client) => {

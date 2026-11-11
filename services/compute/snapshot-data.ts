@@ -39,6 +39,18 @@ export type SnapshotWalStep = {
   values: string[];
 };
 
+export type ReplicaWatermark = {
+  colSig: string;
+  lsn: number;
+  rowSig: string;
+};
+
+export type ReplicaTablePlan = {
+  mode: "noop" | "wal" | "seed";
+  steps: SnapshotWalStep[];
+  next: ReplicaWatermark;
+};
+
 const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const quote = (name: string) => {
   if (!identifier.test(name)) {
@@ -316,6 +328,62 @@ export function snapshotWalStatements(
     }
   }
   return steps;
+}
+
+export function planReplicaTable(
+  name: string,
+  table: SnapshotTable,
+  statement: SnapshotStatement,
+  tableWal: SnapshotTableWal | undefined,
+  types: TypeTable | undefined,
+  prior: ReplicaWatermark | undefined,
+  schema = "duckpipe_replica",
+): ReplicaTablePlan {
+  const colSig = JSON.stringify({ cols: table.columns, types: types ?? null });
+  const rowSig = statement.values[0];
+  if (
+    prior && prior.colSig === colSig && tableWal &&
+    tableWal.fromLsn === prior.lsn && tableWal.targetLsn >= prior.lsn
+  ) {
+    return {
+      mode: "wal",
+      steps: snapshotWalStatements(name, tableWal, types, schema),
+      next: { colSig, lsn: tableWal.targetLsn, rowSig },
+    };
+  }
+  if (prior && prior.colSig === colSig && prior.rowSig === rowSig) {
+    return {
+      mode: "noop",
+      steps: [],
+      next: { colSig, lsn: tableWal?.targetLsn ?? prior.lsn, rowSig },
+    };
+  }
+  const target = `${quote(schema)}.${quote(name)}`;
+  const steps: SnapshotWalStep[] = [
+    { sql: `DROP TABLE IF EXISTS ${target}`, values: [] },
+    {
+      sql: statement.create.replace(
+        `CREATE TABLE ${quote(name)}`,
+        `CREATE TABLE ${target}`,
+      ),
+      values: [],
+    },
+  ];
+  const insertSql = statement.insert.replace(
+    `INTO ${quote(name)}`,
+    `INTO ${target}`,
+  );
+  for (let offset = 0; offset < table.rows.length; offset += 32) {
+    steps.push({
+      sql: insertSql,
+      values: [JSON.stringify(table.rows.slice(offset, offset + 32))],
+    });
+  }
+  return {
+    mode: "seed",
+    steps,
+    next: { colSig, lsn: tableWal?.targetLsn ?? 0, rowSig },
+  };
 }
 
 export function validateSnapshot(value: unknown): asserts value is Snapshot {

@@ -1404,20 +1404,59 @@ pgTest(
     const releaseStage = Promise.withResolvers<void>();
     let stageCalls = 0;
     let publishCalls = 0;
+    let closeCalls = 0;
+    let tempTablesAfterClose = -1;
+    let hasLocalCapture = false;
     const pubSpec = { name: "ratings", file: "fixture.js", to: ["ratings"] };
+    // Pre-seed a claimed batch whose local capture artifact was lost across an ephemeral container restart.
+    const warmupClaimed = Promise.withResolvers<void>();
+    const warmup = await openBatches(server.url, [
+      spec({
+        name: "ratings",
+        reads: ["source"],
+        to: ["ratings"],
+        capture: () => Promise.resolve([{ id: "stale", value: 0 }]),
+        calculate: () => {
+          warmupClaimed.resolve();
+          return Promise.reject(new Error("container stopped before calculate finished"));
+        },
+      }),
+    ], options);
+    await warmup.invalidate(["source"]);
+    await warmupClaimed.promise;
+    await warmup.close();
+    await db.query("UPDATE graphile_worker._private_jobs SET run_at = now()");
+
     const batches = await openBatches(server.url, [
       spec({
         name: "ratings",
         reads: ["source"],
         to: ["ratings"],
+        hasCapture: () => Promise.resolve(hasLocalCapture),
         capture: async (client) => {
           const rows = (await client.query("SELECT id, value FROM source ORDER BY id")).rows;
+          hasLocalCapture = true;
           capturePaused.resolve();
           await releaseCapture.promise;
           return rows;
         },
         stage: async (client, output) => {
           stageCalls++;
+          await assertRejects(
+            () =>
+              stagePages(client, pubSpec, async function* () {
+                yield [{ id: "bad", value: 1 }];
+                throw new Error("mid-stream stage failure");
+              }),
+            Error,
+            "mid-stream stage failure",
+          );
+          assertEquals(
+            (await client.query(
+              "SELECT count(*)::int AS n FROM pg_class c WHERE c.relnamespace = pg_my_temp_schema() AND c.relname LIKE 'publication_%'",
+            )).rows[0].n,
+            0,
+          );
           const staged = await stagePages(client, pubSpec, async function* () {
             stagePaused.resolve();
             await releaseStage.promise;
@@ -1431,15 +1470,19 @@ pgTest(
               }
               await publishStagedPages(tx, pubSpec, staged, { role: "service" });
             },
-            close: () => dropStagedPages(client, staged),
+            close: async () => {
+              closeCalls++;
+              await dropStagedPages(client, staged);
+              tempTablesAfterClose = (await client.query(
+                "SELECT count(*)::int AS n FROM pg_class c WHERE c.relnamespace = pg_my_temp_schema() AND c.relname LIKE 'publication_%'",
+              )).rows[0].n;
+            },
           };
         },
       }),
     ], options);
     try {
-      await batches.invalidate(["source"]);
       await capturePaused.promise;
-      // While capture is running, neither durex.work nor hybrid_compute_batch.instance is locked.
       const probe = await db.connect();
       try {
         await probe.query("BEGIN");
@@ -1453,7 +1496,6 @@ pgTest(
       releaseCapture.resolve();
 
       await stagePaused.promise;
-      // While stagePages is streaming JS pages into pg_temp, coordinator tables remain completely unlocked.
       const probe2 = await db.connect();
       try {
         await probe2.query("BEGIN");
@@ -1471,6 +1513,8 @@ pgTest(
       );
       assertEquals(stageCalls, 1);
       assertEquals(publishCalls, 2);
+      assertEquals(closeCalls, 1);
+      assertEquals(tempTablesAfterClose, 0);
       assertEquals((await db.query("SELECT id, value FROM ratings")).rows, [{ id: "one", value: 10 }]);
     } finally {
       releaseCapture.resolve();

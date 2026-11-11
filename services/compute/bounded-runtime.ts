@@ -164,10 +164,20 @@ export class BoundedRuntime {
       this.options.reads,
     );
   }
+  async hasCapture(value: BoundedCapture): Promise<boolean> {
+    try {
+      const info = await Deno.stat(this.path(value, "capture"));
+      return info.isFile && info.size > 0;
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) return false;
+      throw error;
+    }
+  }
   static async syncReplica(
     directory: string,
     databaseUrl: string,
     reads: readonly string[],
+    maxFenceAttempts = 500,
   ): Promise<boolean> {
     if (!databaseUrl || !reads.length) return false;
     return await withReplicaLock(directory, async () => {
@@ -209,7 +219,8 @@ export class BoundedRuntime {
           )`,
         );
         if (Number(hasDuckpipe)) {
-          for (let attempt = 0; attempt < 500; attempt++) {
+          for (let attempt = 0; attempt < maxFenceAttempts; attempt++) {
+            await con.run("BEGIN");
             const lagging = await readerOf(con).query(
               `SELECT * FROM postgres_query('pg', ${
                 literal(`
@@ -222,18 +233,20 @@ export class BoundedRuntime {
               })`,
             );
             if (!lagging.length) break;
+            await con.run("ROLLBACK");
             if (attempt === 0) {
               await con.run(
-                "CALL postgres_execute('pg', 'SELECT duckpipe.start_worker()')",
-              ).catch(() => {});
+                "CALL postgres_execute('pg', 'DO $$ BEGIN IF to_regprocedure(''duckpipe.start_worker()'') IS NOT NULL THEN PERFORM duckpipe.start_worker(); END IF; END $$')",
+              );
             }
-            if (attempt === 499) {
+            if (attempt === maxFenceAttempts - 1) {
               throw new Error("duckpipe replica did not reach target LSN fence");
             }
             await new Promise((resolve) => setTimeout(resolve, 20));
           }
+        } else {
+          await con.run("BEGIN");
         }
-        await con.run("BEGIN");
         const sourceRows = await readerOf(con).query(
           `SELECT name, revision::BIGINT AS revision, lsn::VARCHAR AS lsn, wal_seq::BIGINT AS wal_seq
            FROM pg.compute.source WHERE name IN (${list})`,
@@ -343,19 +356,21 @@ export class BoundedRuntime {
             continue;
           }
           if (wm && wm.schemaSig === meta.schemaSig && source.walSeq >= wm.walSeq) {
-            const [{ n: prevCount }] = await readerOf(con).query(
-              `SELECT count(*)::BIGINT AS n FROM pg.compute.wal
-               WHERE table_name = ${literal(name)} AND seq <= ${wm.walSeq}`,
-            );
+            const [{ n: hasAnchor }] = wm.walSeq > 0
+              ? await readerOf(con).query(
+                `SELECT count(*)::BIGINT AS n FROM pg.compute.wal
+                 WHERE table_name = ${literal(name)} AND seq = ${wm.walSeq}`,
+              )
+              : [{ n: 1n }];
             if (
               wm.revision === source.revision &&
               wm.walSeq === source.walSeq &&
               wm.lsn === source.lsn &&
-              Number(prevCount) === wm.walCount
+              Number(hasAnchor) === wm.walCount
             ) {
               continue;
             }
-            if (source.walSeq > wm.walSeq && Number(prevCount) === wm.walCount) {
+            if (source.walSeq > wm.walSeq && Number(hasAnchor) === wm.walCount) {
               const walEntries = await readerOf(con).query(
                 `SELECT seq::BIGINT AS seq, op::VARCHAR AS op
                  FROM pg.compute.wal
@@ -447,7 +462,7 @@ export class BoundedRuntime {
                     source.revision,
                     source.lsn,
                     source.walSeq,
-                    Number(prevCount) + walEntries.length,
+                    1,
                     meta.schemaSig,
                     wm.seededCount,
                     wm.incrementalCount + 1,
@@ -460,10 +475,12 @@ export class BoundedRuntime {
           await con.run(
             `CREATE OR REPLACE TABLE main.${quote(name)} AS SELECT * FROM pg.public.${quote(name)}`,
           );
-          const [{ n: totalWalCount }] = await readerOf(con).query(
-            `SELECT count(*)::BIGINT AS n FROM pg.compute.wal
-             WHERE table_name = ${literal(name)} AND seq <= ${source.walSeq}`,
-          );
+          const [{ n: hasSourceAnchor }] = source.walSeq > 0
+            ? await readerOf(con).query(
+              `SELECT count(*)::BIGINT AS n FROM pg.compute.wal
+               WHERE table_name = ${literal(name)} AND seq = ${source.walSeq}`,
+            )
+            : [{ n: 1n }];
           await con.run(
             "INSERT OR REPLACE INTO duckstream_replica.watermarks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -471,7 +488,7 @@ export class BoundedRuntime {
               source.revision,
               source.lsn,
               source.walSeq,
-              Number(totalWalCount),
+              Number(hasSourceAnchor),
               meta.schemaSig,
               (wm?.seededCount ?? 0) + 1,
               wm?.incrementalCount ?? 0,

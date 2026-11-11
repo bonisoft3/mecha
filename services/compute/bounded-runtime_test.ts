@@ -709,7 +709,6 @@ pgTest(
         { table_name: "teams", seeded: 1, incremental: 0 },
       ]);
 
-      // Incremental INSERT, UPDATE (including primary key change), and DELETE on games; teams stays untouched.
       await admin.query(`
         INSERT INTO games VALUES ('g3', 4);
         UPDATE games SET id = 'g2_renamed', goals = 10 WHERE id = 'g2';
@@ -721,7 +720,6 @@ pgTest(
         { table_name: "teams", seeded: 1, incremental: 0 },
       ]);
 
-      // Incremental TRUNCATE + INSERT within the WAL stream.
       await admin.query("TRUNCATE games; INSERT INTO games VALUES ('g4', 7)");
       assertEquals(await runCapture(), [{ id: "t1", value: 7 }]);
       assertEquals(await readWatermarks(), [
@@ -729,7 +727,17 @@ pgTest(
         { table_name: "teams", seeded: 1, incremental: 0 },
       ]);
 
-      // Simulate pg_duckpipe schema + LSN fence: games_ducklake advances past compute.source.lsn.
+      // Clearing compute.wal forces a clean reseed on the next capture instead of reading a broken WAL chain.
+      await admin.query(`
+        DELETE FROM compute.wal WHERE table_name = 'games';
+        UPDATE games SET goals = 11 WHERE id = 'g4';
+      `);
+      assertEquals(await runCapture(), [{ id: "t1", value: 11 }]);
+      assertEquals(await readWatermarks(), [
+        { table_name: "games", seeded: 2, incremental: 2 },
+        { table_name: "teams", seeded: 1, incremental: 0 },
+      ]);
+
       await admin.query(`
         CREATE SCHEMA duckpipe;
         CREATE TABLE duckpipe.table_mappings (
@@ -746,13 +754,18 @@ pgTest(
         INSERT INTO duckpipe.table_mappings
         SELECT 'public', name, name || '_ducklake', 'SNAPSHOT', '0/0'::pg_lsn FROM compute.source;
       `);
+      await assertRejects(
+        () => BoundedRuntime.syncReplica(directory, server.url, ["games", "teams"], 2),
+        Error,
+        "duckpipe replica did not reach target LSN fence",
+      );
       const fenced = runCapture();
       await new Promise((r) => setTimeout(r, 80));
       await admin.query(`
         UPDATE duckpipe.table_mappings
         SET state = 'STREAMING', applied_lsn = pg_current_wal_insert_lsn()
       `);
-      assertEquals(await fenced, [{ id: "t1", value: 15 }]);
+      assertEquals(await fenced, [{ id: "t1", value: 19 }]);
     } finally {
       await admin.end();
       await Deno.remove(directory, { recursive: true });

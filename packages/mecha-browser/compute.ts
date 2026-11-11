@@ -1,6 +1,6 @@
 import * as duckdb from 'npm:@duckdb/duckdb-wasm@1.33.1-dev57.0/dist/duckdb-browser.mjs'
 import { types, typedSql, type TypeTable, type TypeField } from '../../services/compute/portable-contract.ts'
-import { snapshotStatements, snapshotWalStatements } from '../../services/compute/snapshot-data.ts'
+import { planReplicaTable, snapshotStatements, type ReplicaWatermark } from '../../services/compute/snapshot-data.ts'
 import type { Snapshot, Output } from '../compute-snapshot/src/index.ts'
 
 export interface BrowserProgram {
@@ -64,7 +64,7 @@ export async function browserCompute(config: BrowserCompute) {
   }
   finally { await setup.close() }
   const programs = new Map(config.programs.map((p) => [p.spec.name, p]))
-  const replicaState = new Map<string, { colSig: string; lsn: number; rowSig: string }>()
+  const replicaState = new Map<string, ReplicaWatermark>()
   let chain: Promise<unknown> = Promise.resolve()
   const execute = (snapshot: Snapshot): Promise<Output> => {
     const work = chain.then(() => run(snapshot))
@@ -80,35 +80,32 @@ export async function browserCompute(config: BrowserCompute) {
     let inTx = false
     try {
       const plans = snapshotStatements(snapshot.tables, p.reads, p.spec.types)
+      const pendingState = new Map<string, ReplicaWatermark>()
+      await conn.query('BEGIN TRANSACTION')
+      inTx = true
       for (const [index, name] of p.reads.entries()) {
-        const plan = plans[index]
-        const table = snapshot.tables[name]
-        const colSig = JSON.stringify({ cols: table.columns, types: p.spec.types ?? null })
-        const rowSig = plan.values[0]
-        const tableWal = snapshot.wal?.[name]
-        const prior = replicaState.get(name)
-        if (prior && prior.colSig === colSig && tableWal && tableWal.fromLsn === prior.lsn && tableWal.targetLsn >= prior.lsn) {
-          for (const step of snapshotWalStatements(name, tableWal, p.spec.types, 'duckpipe_replica')) {
-            if (step.values.length) {
-              const statement = await conn.prepare(step.sql)
-              try { await statement.query(...step.values) }
-              finally { await statement.close() }
-            } else {
-              await conn.query(step.sql)
-            }
+        const replicaPlan = planReplicaTable(
+          name,
+          snapshot.tables[name],
+          plans[index],
+          snapshot.wal?.[name],
+          p.spec.types,
+          replicaState.get(name),
+        )
+        for (const step of replicaPlan.steps) {
+          if (step.values.length) {
+            const statement = await conn.prepare(step.sql)
+            try { await statement.query(...step.values) }
+            finally { await statement.close() }
+          } else {
+            await conn.query(step.sql)
           }
-          replicaState.set(name, { colSig, lsn: tableWal.targetLsn, rowSig })
-        } else if (prior && prior.colSig === colSig && prior.rowSig === rowSig) {
-          replicaState.set(name, { colSig, lsn: tableWal?.targetLsn ?? prior.lsn, rowSig })
-        } else {
-          await conn.query(`DROP TABLE IF EXISTS "duckpipe_replica"."${name}"`)
-          await conn.query(plan.create.replace(`CREATE TABLE "${name}"`, `CREATE TABLE "duckpipe_replica"."${name}"`))
-          const statement = await conn.prepare(plan.insert.replace(`INTO "${name}"`, `INTO "duckpipe_replica"."${name}"`))
-          try { await statement.query(...plan.values) }
-          finally { await statement.close() }
-          replicaState.set(name, { colSig, lsn: tableWal?.targetLsn ?? 0, rowSig })
         }
+        pendingState.set(name, replicaPlan.next)
       }
+      await conn.query('COMMIT')
+      inTx = false
+      for (const [name, next] of pendingState) replicaState.set(name, next)
       await conn.query('BEGIN TRANSACTION')
       inTx = true
       for (const name of p.reads) {

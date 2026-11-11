@@ -42,10 +42,17 @@ REVOKE ALL ON ALL TABLES IN SCHEMA compute FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA compute FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION compute.touch_source() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog
+SET timezone = 'UTC'
+SET datestyle = 'ISO, YMD'
+SET intervalstyle = 'iso_8601'
+SET bytea_output = 'hex'
+AS $$
 DECLARE v_seq bigint;
 BEGIN
   IF current_setting('compute.restoring_source', true) IS DISTINCT FROM pg_current_xact_id()::text THEN
+    PERFORM 1 FROM compute.source WHERE name = TG_ARGV[0] FOR UPDATE;
     IF TG_NARGS > 1 AND TG_ARGV[1] = 'true' THEN
       INSERT INTO compute.wal(lsn, table_name, op, row_data)
       VALUES (pg_current_wal_insert_lsn(), TG_ARGV[0], 'T', NULL)
@@ -54,8 +61,8 @@ BEGIN
     UPDATE compute.source
     SET revision = nextval('compute.source_revision_seq'),
         txid = pg_current_xact_id(),
-        lsn = pg_current_wal_insert_lsn(),
-        wal_seq = coalesce(v_seq, wal_seq)
+        lsn = greatest(lsn, pg_current_wal_insert_lsn()),
+        wal_seq = greatest(wal_seq, coalesce(v_seq, wal_seq))
     WHERE name = TG_ARGV[0];
   END IF;
   RETURN NULL;
@@ -63,11 +70,18 @@ END;
 $$;
 
 CREATE OR REPLACE FUNCTION compute.touch_source_rows() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog
+SET timezone = 'UTC'
+SET datestyle = 'ISO, YMD'
+SET intervalstyle = 'iso_8601'
+SET bytea_output = 'hex'
+AS $$
 DECLARE v_seq bigint;
 BEGIN
   IF current_setting('compute.restoring_source', true) IS DISTINCT FROM pg_current_xact_id()::text
      AND EXISTS (SELECT 1 FROM affected) THEN
+    PERFORM 1 FROM compute.source WHERE name = TG_ARGV[0] FOR UPDATE;
     IF TG_NARGS > 1 AND TG_ARGV[1] = 'true' THEN
       IF TG_OP = 'INSERT' THEN
         INSERT INTO compute.wal(lsn, table_name, op, row_data)
@@ -82,12 +96,20 @@ BEGIN
         SELECT pg_current_wal_insert_lsn(), TG_ARGV[0], 'I', to_jsonb(r) FROM affected r;
       END IF;
       v_seq := currval('compute.wal_seq_seq');
+      DELETE FROM compute.wal
+      WHERE table_name = TG_ARGV[0]
+        AND seq < coalesce(
+          (SELECT w.seq FROM compute.wal w
+           WHERE w.table_name = TG_ARGV[0]
+           ORDER BY w.seq DESC OFFSET 4096 LIMIT 1),
+          0
+        );
     END IF;
     UPDATE compute.source
     SET revision = nextval('compute.source_revision_seq'),
         txid = pg_current_xact_id(),
-        lsn = pg_current_wal_insert_lsn(),
-        wal_seq = coalesce(v_seq, wal_seq)
+        lsn = greatest(lsn, pg_current_wal_insert_lsn()),
+        wal_seq = greatest(wal_seq, coalesce(v_seq, wal_seq))
     WHERE name = TG_ARGV[0];
   END IF;
   RETURN NULL;

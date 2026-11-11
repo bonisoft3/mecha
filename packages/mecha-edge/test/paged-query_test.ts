@@ -132,13 +132,15 @@ Deno.test('PGlite transition-table WAL and LSN fence drive incremental DuckDB WA
   const { snapshotQuery } = await import('../src/snapshot-query.ts')
   const pg = await PGlite.create({ icuDataDir: await icuDataDir() })
   const duck = await fixture()
-  let createCount = 0
+  const createCounts = { games: 0, teams: 0, notes: 0 }
   const wrapped = {
     connect() {
       const conn = host(duck).connect()
       return {
         query(sql: string) {
-          if (sql.startsWith('CREATE TABLE "duckpipe_replica"."games"')) createCount++
+          if (sql.startsWith('CREATE TABLE "duckpipe_replica"."games"')) createCounts.games++
+          if (sql.startsWith('CREATE TABLE "duckpipe_replica"."teams"')) createCounts.teams++
+          if (sql.startsWith('CREATE TABLE "duckpipe_replica"."notes"')) createCounts.notes++
           return conn.query(sql)
         },
         prepare: (sql: string) => conn.prepare(sql),
@@ -148,9 +150,9 @@ Deno.test('PGlite transition-table WAL and LSN fence drive incremental DuckDB WA
   }
   const program: SnapshotProgram = {
     version: 'v1',
-    reads: ['games', 'teams'],
+    reads: ['games', 'teams', 'notes'],
     queries: {
-      summary: 'SELECT t.id AS id, (SELECT coalesce(sum(goals), 0)::INTEGER FROM games) AS total FROM teams t ORDER BY t.id',
+      summary: 'SELECT t.id AS id, ((SELECT coalesce(sum(goals), 0)::INTEGER FROM games) + (SELECT coalesce(sum(weight), 0)::INTEGER FROM notes)) AS total FROM teams t ORDER BY t.id',
     },
     spec: { name: 'standings', file: 'standings.js', to: ['standings'] },
   }
@@ -198,16 +200,18 @@ Deno.test('PGlite transition-table WAL and LSN fence drive incremental DuckDB WA
       CREATE ROLE service NOLOGIN;
       CREATE TABLE games (id text PRIMARY KEY, goals integer NOT NULL);
       CREATE TABLE teams (id text PRIMARY KEY, name text NOT NULL);
+      CREATE TABLE notes (tag text NOT NULL, weight integer NOT NULL);
       CREATE TABLE standings (id text PRIMARY KEY, total integer NOT NULL);
       GRANT ALL ON standings TO service;
       INSERT INTO games VALUES ('g1', 2), ('g2', 3);
       INSERT INTO teams VALUES ('t1', 'Alpha');
+      INSERT INTO notes VALUES ('dup', 1), ('dup', 1);
     `)
     const seenWals: (Record<string, unknown> | undefined)[] = []
     const coordinator = await createSnapshotCoordinator({
       db: pg,
       serialize,
-      computations: [{ name: 'standings', version: 'v1', reads: ['games', 'teams'], to: ['standings'], coalesceMs: 0 }],
+      computations: [{ name: 'standings', version: 'v1', reads: ['games', 'teams', 'notes'], to: ['standings'], coalesceMs: 0 }],
       machine,
       execute: async (snapshot) => {
         seenWals.push(snapshot.wal)
@@ -217,30 +221,35 @@ Deno.test('PGlite transition-table WAL and LSN fence drive incremental DuckDB WA
     })
     await pg.exec("UPDATE games SET goals = 2 WHERE id = 'g1'")
     await coordinator.resume()
-    assert.equal(createCount, 1)
+    assert.deepEqual(createCounts, { games: 1, teams: 1, notes: 1 })
     assert.equal(seenWals.length, 1)
     assert.equal((seenWals[0]?.games as { fromLsn: number; targetLsn: number }).fromLsn, 0)
-    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 5 }])
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 7 }])
 
-    // Incremental INSERT, UPDATE (with PK change), and DELETE on games; teams unchanged.
     await pg.exec(`
       INSERT INTO games VALUES ('g3', 4);
       UPDATE games SET id = 'g2_renamed', goals = 10 WHERE id = 'g2';
       DELETE FROM games WHERE id = 'g1';
+      DELETE FROM notes WHERE ctid = (SELECT ctid FROM notes WHERE tag = 'dup' LIMIT 1);
+      INSERT INTO notes VALUES ('extra', 2);
     `)
     await coordinator.resume()
-    assert.equal(createCount, 1)
+    assert.deepEqual(createCounts, { games: 1, teams: 1, notes: 1 })
     assert.equal(seenWals.length, 2)
     assert.ok((seenWals[1]?.games as { entries: unknown[] }).entries.length > 0)
     assert.equal((seenWals[1]?.teams as { entries: unknown[] }).entries.length, 0)
-    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 14 }])
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 17 }])
 
-    // Incremental TRUNCATE + INSERT on games.
     await pg.exec(`TRUNCATE games; INSERT INTO games VALUES ('g4', 9);`)
     await coordinator.resume()
-    assert.equal(createCount, 1)
+    assert.deepEqual(createCounts, { games: 1, teams: 1, notes: 1 })
     assert.equal(seenWals.length, 3)
-    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 9 }])
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 12 }])
+
+    await pg.exec(`TRUNCATE games; TRUNCATE notes;`)
+    await coordinator.resume()
+    assert.deepEqual(createCounts, { games: 1, teams: 1, notes: 1 })
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 0 }])
     await coordinator.stop()
   } finally {
     duck.reset()

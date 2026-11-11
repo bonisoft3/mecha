@@ -644,6 +644,7 @@ async function main() {
           await collectBoundedFiles(directory, rows.map(row => row.inputs));
           collected = true;
         },
+        hasCapture: input => runtime.hasCapture(input as BoundedCapture),
         capture: () => runtime.capture(),
         calculate: input => runtime.calculate(input as BoundedCapture),
         async stage(client, output) {
@@ -651,7 +652,7 @@ async function main() {
           return {
             async publish(client) {
               const sinks = await publishStagedPages(client, spec, staged, claims);
-              console.log(JSON.stringify({ computation: c.name, sinks }));
+              return () => console.log(JSON.stringify({ computation: c.name, sinks }));
             },
             close: () => dropStagedPages(client, staged),
           };
@@ -692,7 +693,7 @@ async function main() {
         return Promise.resolve({
           async publish(client) {
             const sinks = await publishPrepared(client, c, prepared, claims);
-            console.log(JSON.stringify({ computation: c.name, sinks }));
+            return () => console.log(JSON.stringify({ computation: c.name, sinks }));
           },
           close: () => Promise.resolve(),
         });

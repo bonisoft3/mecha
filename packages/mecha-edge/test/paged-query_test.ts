@@ -124,3 +124,126 @@ Deno.test('source ingestion admits exactly 256KiB of row JSON and rejects one ad
     assert.deepEqual(query.progress().sources, [{ name: 'source', position: 1 }])
   } finally { db.reset() }
 })
+
+Deno.test('PGlite transition-table WAL and LSN fence drive incremental DuckDB WASM replica updates without reseeding', async () => {
+  const { PGlite } = await import('@electric-sql/pglite')
+  const { icuDataDir } = await import('@electric-sql/pglite-icu-full')
+  const { createSnapshotCoordinator } = await import('../../compute-snapshot/src/index.ts')
+  const { snapshotQuery } = await import('../src/snapshot-query.ts')
+  const pg = await PGlite.create({ icuDataDir: await icuDataDir() })
+  const duck = await fixture()
+  let createCount = 0
+  const wrapped = {
+    connect() {
+      const conn = host(duck).connect()
+      return {
+        query(sql: string) {
+          if (sql.startsWith('CREATE TABLE "duckpipe_replica"."games"')) createCount++
+          return conn.query(sql)
+        },
+        prepare: (sql: string) => conn.prepare(sql),
+        close: () => conn.close(),
+      }
+    },
+  }
+  const program: SnapshotProgram = {
+    version: 'v1',
+    reads: ['games', 'teams'],
+    queries: {
+      summary: 'SELECT t.id AS id, (SELECT coalesce(sum(goals), 0)::INTEGER FROM games) AS total FROM teams t ORDER BY t.id',
+    },
+    spec: { name: 'standings', file: 'standings.js', to: ['standings'] },
+  }
+  let state: import('../../compute-snapshot/src/index.ts').BatchState = {
+    phase: 'idle', name: 'standings', requested: 0, completed: 0, wake: 0, claimed: 0, required: [], due: 0, coalesce: 0, attempts: 25,
+  }
+  const machine = {
+    execute(raw: unknown) {
+      const input = raw as {
+        initialize?: boolean
+        payload?: { name: string; coalesce: number; attempts: number; revision: number }
+        state?: typeof state
+        event?: { kind: string; payload: Record<string, unknown> }
+      }
+      if (input.initialize && input.payload) {
+        state = {
+          phase: 'idle', name: input.payload.name, requested: input.payload.revision,
+          completed: input.payload.revision, wake: 0, claimed: 0, required: [],
+          due: 0, coalesce: input.payload.coalesce, attempts: input.payload.attempts,
+        }
+        return { kind: 'accepted' as const, state }
+      }
+      const s = { ...input.state! }
+      const { kind, payload } = input.event!
+      if (kind === 'invalidate') { s.requested++ }
+      else if (kind === 'schedule') { s.wake = s.requested; s.phase = 'active' }
+      else if (kind === 'claim') { s.claimed = s.requested; s.wake = 0 }
+      else if (kind === 'complete') {
+        s.completed = s.claimed
+        s.claimed = 0
+        s.phase = 'idle'
+      }
+      state = s
+      return { kind: 'accepted' as const, state: s }
+    },
+  }
+  let queue = Promise.resolve()
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    const p = queue.then(fn)
+    queue = p.then(() => undefined, () => undefined)
+    return p
+  }
+  try {
+    await pg.exec(`
+      CREATE ROLE service NOLOGIN;
+      CREATE TABLE games (id text PRIMARY KEY, goals integer NOT NULL);
+      CREATE TABLE teams (id text PRIMARY KEY, name text NOT NULL);
+      CREATE TABLE standings (id text PRIMARY KEY, total integer NOT NULL);
+      GRANT ALL ON standings TO service;
+      INSERT INTO games VALUES ('g1', 2), ('g2', 3);
+      INSERT INTO teams VALUES ('t1', 'Alpha');
+    `)
+    const seenWals: (Record<string, unknown> | undefined)[] = []
+    const coordinator = await createSnapshotCoordinator({
+      db: pg,
+      serialize,
+      computations: [{ name: 'standings', version: 'v1', reads: ['games', 'teams'], to: ['standings'], coalesceMs: 0 }],
+      machine,
+      execute: async (snapshot) => {
+        seenWals.push(snapshot.wal)
+        const { inputs } = snapshotQuery(wrapped, [program], snapshot)
+        return { standings: inputs.summary as Record<string, unknown>[] }
+      },
+    })
+    await pg.exec("UPDATE games SET goals = 2 WHERE id = 'g1'")
+    await coordinator.resume()
+    assert.equal(createCount, 1)
+    assert.equal(seenWals.length, 1)
+    assert.equal((seenWals[0]?.games as { fromLsn: number; targetLsn: number }).fromLsn, 0)
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 5 }])
+
+    // Incremental INSERT, UPDATE (with PK change), and DELETE on games; teams unchanged.
+    await pg.exec(`
+      INSERT INTO games VALUES ('g3', 4);
+      UPDATE games SET id = 'g2_renamed', goals = 10 WHERE id = 'g2';
+      DELETE FROM games WHERE id = 'g1';
+    `)
+    await coordinator.resume()
+    assert.equal(createCount, 1)
+    assert.equal(seenWals.length, 2)
+    assert.ok((seenWals[1]?.games as { entries: unknown[] }).entries.length > 0)
+    assert.equal((seenWals[1]?.teams as { entries: unknown[] }).entries.length, 0)
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 14 }])
+
+    // Incremental TRUNCATE + INSERT on games.
+    await pg.exec(`TRUNCATE games; INSERT INTO games VALUES ('g4', 9);`)
+    await coordinator.resume()
+    assert.equal(createCount, 1)
+    assert.equal(seenWals.length, 3)
+    assert.deepEqual((await pg.query('SELECT id, total FROM standings')).rows, [{ id: 't1', total: 9 }])
+    await coordinator.stop()
+  } finally {
+    duck.reset()
+    await pg.close()
+  }
+})

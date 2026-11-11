@@ -11,12 +11,32 @@ export type Snapshot = {
   version: string;
   revision: number;
   tables: Record<string, SnapshotTable>;
+  wal?: Record<string, SnapshotTableWal>;
+};
+
+export type SnapshotWalEntry = {
+  lsn: number;
+  op: "I" | "D" | "T";
+  row: Record<string, string | null> | null;
+};
+
+export type SnapshotTableWal = {
+  fromLsn: number;
+  targetLsn: number;
+  pkColumns: string[];
+  columns: { name: string; type: string }[];
+  entries: SnapshotWalEntry[];
 };
 
 export type SnapshotStatement = {
   create: string;
   insert: string;
   values: [string];
+};
+
+export type SnapshotWalStep = {
+  sql: string;
+  values: string[];
 };
 
 const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -180,6 +200,122 @@ export function snapshotStatements(
       values: [JSON.stringify(table.rows)],
     };
   });
+}
+
+export function snapshotWalStatements(
+  name: string,
+  wal: SnapshotTableWal,
+  types?: TypeTable,
+  schema?: string,
+): SnapshotWalStep[] {
+  if (
+    !Number.isSafeInteger(wal.fromLsn) || wal.fromLsn < 0 ||
+    !Number.isSafeInteger(wal.targetLsn) || wal.targetLsn < wal.fromLsn
+  ) {
+    throw new Error(`invalid snapshot WAL LSN bounds for ${name}`);
+  }
+  const target = schema ? `${quote(schema)}.${quote(name)}` : quote(name);
+  const fenced = wal.entries.filter((entry) =>
+    entry.lsn > wal.fromLsn && entry.lsn <= wal.targetLsn
+  );
+  if (!fenced.length) return [];
+  const steps: SnapshotWalStep[] = [];
+  let delta = fenced;
+  const lastTruncate = fenced.findLastIndex((entry) => entry.op === "T");
+  if (lastTruncate >= 0) {
+    steps.push({ sql: `DELETE FROM ${target}`, values: [] });
+    delta = fenced.slice(lastTruncate + 1);
+  }
+  if (!delta.length) return steps;
+  const rowsToValidate = delta.flatMap((entry) => entry.row ? [entry.row] : []);
+  const [base] = snapshotStatements(
+    { [name]: { columns: wal.columns, rows: rowsToValidate } },
+    [name],
+    types,
+  );
+  const columns = wal.columns.map((column) => ({
+    name: column.name,
+    quoted: quote(column.name),
+    type: physical(column.type, types),
+  }));
+  const projection = columns.map((column) => {
+    const cell = `(value ->> '${column.name}')`;
+    const expr = column.type === "BLOB"
+      ? `from_hex(substring(${cell}, 3))`
+      : `CAST(${cell} AS ${column.type})`;
+    return `${expr} AS ${column.quoted}`;
+  });
+  const pks = wal.pkColumns.map((pk) => {
+    const col = columns.find((c) => c.name === pk);
+    if (!col) throw new Error(`invalid snapshot WAL primary key ${name}.${pk}`);
+    return col;
+  });
+  if (pks.length > 0) {
+    const touched = new Map<string, Record<string, string | null>>();
+    const latest = new Map<
+      string,
+      { op: "I" | "D"; row: Record<string, string | null> }
+    >();
+    for (const entry of delta) {
+      if ((entry.op !== "I" && entry.op !== "D") || !entry.row) {
+        throw new Error(`invalid snapshot WAL entry in ${name}`);
+      }
+      const key = JSON.stringify(pks.map((pk) => entry.row![pk.name]));
+      touched.set(
+        key,
+        Object.fromEntries(pks.map((pk) => [pk.name, entry.row![pk.name]])),
+      );
+      latest.set(key, { op: entry.op, row: entry.row });
+    }
+    const pkProjection = pks.map((column) => {
+      const cell = `(value ->> '${column.name}')`;
+      const expr = column.type === "BLOB"
+        ? `from_hex(substring(${cell}, 3))`
+        : `CAST(${cell} AS ${column.type})`;
+      return `${expr} AS ${column.quoted}`;
+    });
+    steps.push({
+      sql: `DELETE FROM ${target} AS t USING (SELECT ${
+        pkProjection.join(", ")
+      } FROM json_each(CAST(? AS JSON))) AS d WHERE ${
+        pks.map((pk) => `t.${pk.quoted} IS NOT DISTINCT FROM d.${pk.quoted}`)
+          .join(" AND ")
+      }`,
+      values: [JSON.stringify([...touched.values()])],
+    });
+    const inserts = [...latest.values()]
+      .filter((item) => item.op === "I")
+      .map((item) => item.row);
+    if (inserts.length > 0) {
+      steps.push({
+        sql: base.insert.replace(`INTO ${quote(name)}`, `INTO ${target}`),
+        values: [JSON.stringify(inserts)],
+      });
+    }
+  } else {
+    for (const entry of delta) {
+      if ((entry.op !== "I" && entry.op !== "D") || !entry.row) {
+        throw new Error(`invalid snapshot WAL entry in ${name}`);
+      }
+      if (entry.op === "D") {
+        steps.push({
+          sql: `DELETE FROM ${target} WHERE rowid = (SELECT t.rowid FROM ${target} AS t, (SELECT ${
+            projection.join(", ")
+          } FROM json_each(CAST(? AS JSON))) AS d WHERE ${
+            columns.map((c) => `t.${c.quoted} IS NOT DISTINCT FROM d.${c.quoted}`)
+              .join(" AND ")
+          } LIMIT 1)`,
+          values: [JSON.stringify([entry.row])],
+        });
+      } else {
+        steps.push({
+          sql: base.insert.replace(`INTO ${quote(name)}`, `INTO ${target}`),
+          values: [JSON.stringify([entry.row])],
+        });
+      }
+    }
+  }
+  return steps;
 }
 
 export function validateSnapshot(value: unknown): asserts value is Snapshot {

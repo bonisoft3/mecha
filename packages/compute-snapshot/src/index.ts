@@ -33,6 +33,18 @@ export interface SnapshotTable {
   columns: { name: string; type: string }[];
   rows: Record<string, string | null>[];
 }
+export interface SnapshotWalEntry {
+  lsn: number;
+  op: 'I' | 'D' | 'T';
+  row: Record<string, string | null> | null;
+}
+export interface SnapshotTableWal {
+  fromLsn: number;
+  targetLsn: number;
+  pkColumns: string[];
+  columns: SnapshotTable['columns'];
+  entries: SnapshotWalEntry[];
+}
 export interface SnapshotIdentity {
   id: string;
   name: string;
@@ -41,6 +53,11 @@ export interface SnapshotIdentity {
 }
 export interface Snapshot extends SnapshotIdentity {
   tables: Record<string, SnapshotTable>;
+  wal?: Record<string, SnapshotTableWal>;
+}
+export interface SnapshotWal extends SnapshotIdentity {
+  targetLsn: number;
+  tables: Record<string, SnapshotTableWal>;
 }
 export interface SnapshotManifest extends SnapshotIdentity {
   tables: Record<string, { columns: SnapshotTable['columns']; rows: number }>;
@@ -70,6 +87,7 @@ export interface SnapshotCoordinator {
   claim(): Promise<SnapshotIdentity | null>;
   materialize(identity: SnapshotIdentity): Promise<boolean>;
   snapshot(identity: SnapshotIdentity): Promise<Snapshot>;
+  wal?(identity: SnapshotIdentity, afterLsn?: Record<string, number>): Promise<SnapshotWal>;
   manifest(identity: SnapshotIdentity): Promise<SnapshotManifest>;
   chunk(identity: SnapshotIdentity, table: string, after?: number, limits?: ChunkLimits): Promise<SnapshotChunk>;
   publish(snapshot: SnapshotIdentity, output: Output): Promise<void>;
@@ -91,7 +109,7 @@ function identifier(s: string) {
   if (!/^[a-z_][a-z0-9_]{0,62}$/.test(s)) throw new Error(`invalid compute identifier: ${s}`);
 }
 interface Stored { name: string; version: string; state: BatchState; failures: number; retry_at: number | null; error: string | null }
-interface CaptureTable { source: string; relation: string; columns: SnapshotTable['columns']; rows: number }
+interface CaptureTable { source: string; relation: string; columns: SnapshotTable['columns']; rows: number; target_lsn: number; pk_columns: string[] }
 interface CaptureProgress extends CaptureTable { source_oid: number; filenode: number; next_block: number; total_blocks: number }
 const captured = (relation: string) => `${PRIVATE}.${q(relation)}`;
 const transportSettings = `SET LOCAL timezone='UTC'; SET LOCAL datestyle='ISO, YMD'; SET LOCAL intervalstyle='iso_8601'; SET LOCAL bytea_output='hex';`;
@@ -109,6 +127,21 @@ async function columns(tx: Queryable, name: string): Promise<Column[]> {
     FROM pg_attribute a WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, [table(name)]);
   if (!found.rows.length) throw new Error(`compute table ${name} has no columns`);
   return found.rows;
+}
+async function pkColumns(tx: Queryable, name: string): Promise<string[]> {
+  const found = await tx.query<{ name: string }>(
+    `SELECT a.attname AS name FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+     WHERE i.indrelid = $1::regclass AND i.indisprimary ORDER BY a.attnum`,
+    [table(name)],
+  );
+  return found.rows.map(row => row.name);
+}
+async function tableTargetLsn(tx: Queryable, name: string): Promise<number> {
+  const found = await tx.query<{ lsn: number }>(
+    `SELECT coalesce((SELECT target_lsn::double precision FROM ${PRIVATE}.table_watermarks WHERE table_name=$1), 0) AS lsn`,
+    [name],
+  );
+  return found.rows[0].lsn;
 }
 function ordered(specs: Computation[]) {
   const names = new Set<string>();
@@ -183,8 +216,10 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
     await tx.exec(`ALTER TABLE ${captured(relation)} ADD PRIMARY KEY (sequence)`);
     const count = (await tx.query<{ rows: number }>(`SELECT count(*)::double precision AS rows FROM ${captured(relation)}`)).rows[0].rows;
     if (!Number.isSafeInteger(count)) throw new Error('compute capture exceeds exact sequence range');
-    await tx.query(`INSERT INTO ${PRIVATE}.capture_tables(capture_id,source,relation,columns,row_count) VALUES($1,$2,$3,$4::jsonb,$5)`,
-      [id, source, relation, JSON.stringify(fields), count]);
+    const pks = await pkColumns(tx, source);
+    const lsn = await tableTargetLsn(tx, source);
+    await tx.query(`INSERT INTO ${PRIVATE}.capture_tables(capture_id,source,relation,columns,row_count,target_lsn,pk_columns) VALUES($1,$2,$3,$4::jsonb,$5,$6,$7::jsonb)`,
+      [id, source, relation, JSON.stringify(fields), count, lsn, JSON.stringify(pks)]);
   }
   await atomic(async tx => {
     const hadRevisions = (await tx.query<{ exists: boolean }>(`SELECT to_regclass('${PRIVATE}.revisions') IS NOT NULL AS exists`)).rows[0].exists;
@@ -192,23 +227,47 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.batches(name text PRIMARY KEY, version text NOT NULL, state jsonb NOT NULL,
         failures integer NOT NULL DEFAULT 0, retry_at bigint, error text);
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.inbox(table_name text PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS ${PRIVATE}.wal(lsn bigserial PRIMARY KEY, table_name text NOT NULL, op "char" NOT NULL, row_data jsonb);
+      CREATE INDEX IF NOT EXISTS wal_table_lsn ON ${PRIVATE}.wal(table_name, lsn);
+      CREATE TABLE IF NOT EXISTS ${PRIVATE}.table_watermarks(table_name text PRIMARY KEY, target_lsn bigint NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.revisions(name text PRIMARY KEY, revision bigint NOT NULL);
-      CREATE TABLE IF NOT EXISTS ${PRIVATE}.captures(id text PRIMARY KEY, name text NOT NULL, version text NOT NULL, revision bigint NOT NULL, snapshot jsonb);
+      CREATE TABLE IF NOT EXISTS ${PRIVATE}.captures(id text PRIMARY KEY, name text NOT NULL, version text NOT NULL, revision bigint NOT NULL, snapshot jsonb, target_lsn bigint NOT NULL DEFAULT 0);
       ALTER TABLE ${PRIVATE}.captures ALTER COLUMN snapshot DROP NOT NULL;
+      ALTER TABLE ${PRIVATE}.captures ADD COLUMN IF NOT EXISTS target_lsn bigint NOT NULL DEFAULT 0;
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.capture_tables(capture_id text NOT NULL REFERENCES ${PRIVATE}.captures(id) ON DELETE CASCADE,
         source text NOT NULL, relation text NOT NULL UNIQUE, columns jsonb NOT NULL, row_count bigint NOT NULL,
+        target_lsn bigint NOT NULL DEFAULT 0, pk_columns jsonb NOT NULL DEFAULT '[]'::jsonb,
         PRIMARY KEY(capture_id,source));
+      ALTER TABLE ${PRIVATE}.capture_tables ADD COLUMN IF NOT EXISTS target_lsn bigint NOT NULL DEFAULT 0;
+      ALTER TABLE ${PRIVATE}.capture_tables ADD COLUMN IF NOT EXISTS pk_columns jsonb NOT NULL DEFAULT '[]'::jsonb;
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.capture_progress(capture_id text NOT NULL REFERENCES ${PRIVATE}.captures(id) ON DELETE CASCADE,
         source text NOT NULL, relation text NOT NULL UNIQUE, columns jsonb NOT NULL,
         source_oid oid NOT NULL, filenode oid NOT NULL, next_block bigint NOT NULL DEFAULT 0,
         total_blocks bigint NOT NULL, row_count bigint NOT NULL DEFAULT 0,
+        target_lsn bigint NOT NULL DEFAULT 0, pk_columns jsonb NOT NULL DEFAULT '[]'::jsonb,
         CHECK(next_block>=0 AND next_block<=total_blocks), CHECK(row_count>=0), PRIMARY KEY(capture_id,source));
+      ALTER TABLE ${PRIVATE}.capture_progress ADD COLUMN IF NOT EXISTS target_lsn bigint NOT NULL DEFAULT 0;
+      ALTER TABLE ${PRIVATE}.capture_progress ADD COLUMN IF NOT EXISTS pk_columns jsonb NOT NULL DEFAULT '[]'::jsonb;
       CREATE TABLE IF NOT EXISTS ${PRIVATE}.receipts(id text PRIMARY KEY, name text NOT NULL, version text NOT NULL, revision bigint NOT NULL, committed_at bigint NOT NULL);
-      CREATE OR REPLACE FUNCTION ${PRIVATE}.changed() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+      CREATE OR REPLACE FUNCTION ${PRIVATE}.changed() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog SET timezone='UTC' SET datestyle='ISO, YMD' SET intervalstyle='iso_8601' SET bytea_output='hex' AS $$
+        DECLARE v_lsn bigint;
         BEGIN
-          IF TG_OP <> 'TRUNCATE' THEN
+          IF TG_OP = 'TRUNCATE' THEN
+            INSERT INTO ${PRIVATE}.wal(table_name, op, row_data) VALUES (TG_TABLE_NAME, 'T', NULL) RETURNING lsn INTO v_lsn;
+          ELSE
             IF NOT EXISTS (SELECT 1 FROM changed_rows) THEN RETURN NULL; END IF;
+            IF TG_OP = 'INSERT' THEN
+              INSERT INTO ${PRIVATE}.wal(table_name, op, row_data) SELECT TG_TABLE_NAME, 'I', to_jsonb(r) FROM changed_rows r;
+            ELSIF TG_OP = 'DELETE' THEN
+              INSERT INTO ${PRIVATE}.wal(table_name, op, row_data) SELECT TG_TABLE_NAME, 'D', to_jsonb(r) FROM changed_rows r;
+            ELSIF TG_OP = 'UPDATE' THEN
+              INSERT INTO ${PRIVATE}.wal(table_name, op, row_data) SELECT TG_TABLE_NAME, 'D', to_jsonb(r) FROM old_rows r;
+              INSERT INTO ${PRIVATE}.wal(table_name, op, row_data) SELECT TG_TABLE_NAME, 'I', to_jsonb(r) FROM changed_rows r;
+            END IF;
+            v_lsn := currval('${PRIVATE}.wal_lsn_seq');
           END IF;
+          INSERT INTO ${PRIVATE}.table_watermarks(table_name, target_lsn) VALUES (TG_TABLE_NAME, v_lsn)
+            ON CONFLICT(table_name) DO UPDATE SET target_lsn = EXCLUDED.target_lsn;
           INSERT INTO ${PRIVATE}.inbox(table_name) VALUES (TG_TABLE_NAME) ON CONFLICT DO NOTHING;
           PERFORM pg_notify('${NOTIFY_CHANNEL}',TG_TABLE_NAME); RETURN NULL;
         END $$;
@@ -229,7 +288,7 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
       if (reads.includes(name)) await tx.exec(`CREATE TRIGGER compute_snapshot_inserted AFTER INSERT ON ${table(name)}
         REFERENCING NEW TABLE AS changed_rows FOR EACH STATEMENT EXECUTE FUNCTION ${PRIVATE}.changed();
         CREATE TRIGGER compute_snapshot_updated AFTER UPDATE ON ${table(name)}
-        REFERENCING NEW TABLE AS changed_rows FOR EACH STATEMENT EXECUTE FUNCTION ${PRIVATE}.changed();
+        REFERENCING OLD TABLE AS old_rows NEW TABLE AS changed_rows FOR EACH STATEMENT EXECUTE FUNCTION ${PRIVATE}.changed();
         CREATE TRIGGER compute_snapshot_deleted AFTER DELETE ON ${table(name)}
         REFERENCING OLD TABLE AS changed_rows FOR EACH STATEMENT EXECUTE FUNCTION ${PRIVATE}.changed();
         CREATE TRIGGER compute_snapshot_truncated AFTER TRUNCATE ON ${table(name)}
@@ -320,8 +379,12 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
           const identity = { id, name: spec.name, version: spec.version, revision: item.state.claimed };
           const saved = await tx.query(`SELECT id FROM ${PRIVATE}.captures WHERE id=$1`, [id]);
           if (saved.rows.length) return identity;
-          await tx.query(`INSERT INTO ${PRIVATE}.captures(id,name,version,revision) VALUES($1,$2,$3,$4)`,
-            [id, spec.name, spec.version, identity.revision]);
+          const targetLsn = (await tx.query<{ lsn: number }>(
+            `SELECT coalesce(max(target_lsn), 0)::double precision AS lsn FROM ${PRIVATE}.table_watermarks WHERE table_name = ANY($1::text[])`,
+            [spec.reads],
+          )).rows[0].lsn;
+          await tx.query(`INSERT INTO ${PRIVATE}.captures(id,name,version,revision,target_lsn) VALUES($1,$2,$3,$4,$5)`,
+            [id, spec.name, spec.version, identity.revision, targetLsn]);
           for (const source of config.retainSnapshot ? [] : spec.reads) {
             const fields = (await columns(tx, source)).map(({ name, type }) => ({ name, type }));
             await retainTable(tx, id, source, fields, `SELECT row_number() OVER () AS sequence,
@@ -351,17 +414,20 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
           FROM pg_class c WHERE c.oid=$1::regclass`, [table(source)])).rows[0];
         if (!physical?.ordinary) throw new Error(`compute materialize requires an ordinary logged heap table without inheritance: ${source}`);
         let progress = (await tx.query<CaptureProgress>(`SELECT source,relation,columns,source_oid,filenode,
-          next_block::double precision,total_blocks::double precision,row_count::double precision AS rows
+          next_block::double precision,total_blocks::double precision,row_count::double precision AS rows,
+          target_lsn::double precision AS target_lsn,pk_columns
           FROM ${PRIVATE}.capture_progress WHERE capture_id=$1 AND source=$2`, [identity.id, source])).rows[0];
         if (!progress) {
           const fields = (await columns(tx, source)).map(({ name, type }) => ({ name, type }));
+          const pks = await pkColumns(tx, source);
+          const lsn = await tableTargetLsn(tx, source);
           const relation = `capture_${crypto.randomUUID().replaceAll('-', '')}`;
           await tx.exec(`CREATE TABLE ${captured(relation)} AS SELECT 0::bigint AS sequence,
             ${fields.map((field, index) => `${q(field.name)} AS c${index}`).join(',')} FROM ONLY ${table(source)} WITH NO DATA;
             ALTER TABLE ${captured(relation)} ADD PRIMARY KEY(sequence);`);
-          await tx.query(`INSERT INTO ${PRIVATE}.capture_progress(capture_id,source,relation,columns,source_oid,filenode,total_blocks)
-            VALUES($1,$2,$3,$4::jsonb,$5,$6,$7)`, [identity.id, source, relation, JSON.stringify(fields), physical.source_oid, physical.filenode, physical.total_blocks]);
-          progress = { source, relation, columns: fields, rows: 0, next_block: 0, ...physical };
+          await tx.query(`INSERT INTO ${PRIVATE}.capture_progress(capture_id,source,relation,columns,source_oid,filenode,total_blocks,target_lsn,pk_columns)
+            VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9::jsonb)`, [identity.id, source, relation, JSON.stringify(fields), physical.source_oid, physical.filenode, physical.total_blocks, lsn, JSON.stringify(pks)]);
+          progress = { source, relation, columns: fields, rows: 0, next_block: 0, target_lsn: lsn, pk_columns: pks, ...physical };
         }
         if (progress.source_oid !== physical.source_oid || progress.filenode !== physical.filenode || progress.total_blocks !== physical.total_blocks) {
           throw new Error(`compute materialize source changed: ${source}`);
@@ -375,8 +441,8 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
         const rows = progress.rows + count;
         if (!Number.isSafeInteger(rows)) throw new Error('compute capture exceeds exact sequence range');
         if (end === progress.total_blocks) {
-          await tx.query(`INSERT INTO ${PRIVATE}.capture_tables(capture_id,source,relation,columns,row_count) VALUES($1,$2,$3,$4::jsonb,$5)`,
-            [identity.id, source, progress.relation, JSON.stringify(progress.columns), rows]);
+          await tx.query(`INSERT INTO ${PRIVATE}.capture_tables(capture_id,source,relation,columns,row_count,target_lsn,pk_columns) VALUES($1,$2,$3,$4::jsonb,$5,$6,$7::jsonb)`,
+            [identity.id, source, progress.relation, JSON.stringify(progress.columns), rows, progress.target_lsn, JSON.stringify(progress.pk_columns)]);
           await tx.query(`DELETE FROM ${PRIVATE}.capture_progress WHERE capture_id=$1 AND source=$2`, [identity.id, source]);
           return retained.length + 1 === spec.reads.length;
         }
@@ -392,7 +458,8 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
     const saved = await tx.query(`SELECT id FROM ${PRIVATE}.captures WHERE id=$1 AND name=$2 AND version=$3 AND revision=$4`,
       [identity.id, identity.name, identity.version, identity.revision]);
     if (!saved.rows.length) throw new Error('compute capture is no longer available');
-    return (await tx.query<CaptureTable>(`SELECT source,relation,columns,row_count::double precision AS rows
+    return (await tx.query<CaptureTable>(`SELECT source,relation,columns,row_count::double precision AS rows,
+      target_lsn::double precision AS target_lsn,pk_columns
       FROM ${PRIVATE}.capture_tables WHERE capture_id=$1 ORDER BY source`, [identity.id])).rows;
   }
   async function readableTables(tx: Queryable, identity: SnapshotIdentity): Promise<CaptureTable[]> {
@@ -435,6 +502,44 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
   }
   async function chunk(identity: SnapshotIdentity, source: string, after = 0, limits: ChunkLimits = {}): Promise<SnapshotChunk> {
     return await atomic(tx => readChunk(tx, identity, source, after, limits));
+  }
+  async function readWal(tx: Queryable, identity: SnapshotIdentity, afterLsn: Record<string, number> = {}): Promise<SnapshotWal> {
+    const tables = await readableTables(tx, identity);
+    const [{ target_lsn: captureTargetLsn }] = (await tx.query<{ target_lsn: number }>(
+      `SELECT target_lsn::double precision AS target_lsn FROM ${PRIVATE}.captures WHERE id=$1`,
+      [identity.id],
+    )).rows;
+    await tx.exec(transportSettings);
+    const walTables: Record<string, SnapshotTableWal> = {};
+    for (const metadata of tables) {
+      const fromLsn = afterLsn[metadata.source] ?? 0;
+      const targetLsn = metadata.target_lsn;
+      const projection = metadata.columns.map(field => `rec.${q(field.name)}::text AS ${q(field.name)}`).join(',');
+      const { rows } = await tx.query<SnapshotWalEntry>(
+        `SELECT w.lsn::double precision AS lsn, w.op AS op,
+          CASE WHEN w.op = 'T' THEN NULL ELSE (
+            SELECT row_to_json(r) FROM (
+              SELECT ${projection}
+              FROM jsonb_populate_record(NULL::${table(metadata.source)}, w.row_data) AS rec
+            ) r
+          ) END AS row
+         FROM ${PRIVATE}.wal w
+         WHERE w.table_name = $1 AND w.lsn > $2 AND w.lsn <= $3
+         ORDER BY w.lsn`,
+        [metadata.source, fromLsn, targetLsn],
+      );
+      walTables[metadata.source] = {
+        fromLsn,
+        targetLsn,
+        pkColumns: metadata.pk_columns ?? [],
+        columns: metadata.columns,
+        entries: rows,
+      };
+    }
+    return { ...identity, targetLsn: captureTargetLsn, tables: walTables };
+  }
+  async function wal(identity: SnapshotIdentity, afterLsn: Record<string, number> = {}): Promise<SnapshotWal> {
+    return await atomic(tx => readWal(tx, identity, afterLsn));
   }
   async function snapshot(identity: SnapshotIdentity): Promise<Snapshot> {
     return await atomic(async tx => {
@@ -513,13 +618,26 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
   }
   let stopped = false;
   let running: Promise<void> | null = null;
+  const executorWatermarks = new Map<string, number>();
   async function run() {
     if (!config.execute) throw new Error('local compute execution is not configured');
     while (!stopped) {
       const identity = await next();
       if (!identity) return;
       try {
-        const output = await config.execute(await snapshot(identity));
+        const snap = await snapshot(identity);
+        const afterLsn: Record<string, number> = {};
+        let canUseWal = true;
+        for (const source of Object.keys(snap.tables)) {
+          if (!executorWatermarks.has(source)) { canUseWal = false; break; }
+          afterLsn[source] = executorWatermarks.get(source)!;
+        }
+        const snapWal = await wal(identity, canUseWal ? afterLsn : {});
+        Object.defineProperty(snap, 'wal', { value: snapWal.tables, enumerable: false });
+        const output = await config.execute(snap);
+        for (const [source, tableWal] of Object.entries(snapWal.tables)) {
+          executorWatermarks.set(source, tableWal.targetLsn);
+        }
         await commit(identity, (tx, spec) => publish(tx, spec, output));
       } catch (error) {
         await reject(identity, error instanceof Error ? error.message : String(error));
@@ -539,7 +657,7 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
           ? 'pending' : 'obsolete';
       });
     },
-    claim: next, materialize, snapshot, manifest, chunk, reject,
+    claim: next, materialize, snapshot, wal, manifest, chunk, reject,
     publish(identity, output) { return commit(identity, (tx, spec) => publish(tx, spec, output)); },
     outputChunk(identity, attempt, sink, ordinal, rows) {
       return atomic(async tx => stageOutput(tx, identity, await activeSpec(tx, identity), attempt, sink, ordinal, rows));

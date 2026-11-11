@@ -24,10 +24,13 @@ transactional inbox survives missed notifications. The coordinator never polls
 source tables to detect changes.
 
 Source triggers mark the inbox once per nonempty statement transition table,
-not once per row. Empty inserts, updates, deletes and conflict no-ops do not
-schedule work; truncation does. This keeps bulk publication from repeating
-the same table notification for every output row. Trigger installation replaces
-the older row triggers transactionally and removes triggers for retired sources.
+not once per row, and record transition-table row deltas (`'T'`, `'D'`, `'I'`)
+in `compute_snapshot_private.wal` alongside per-table watermarks in
+`compute_snapshot_private.table_watermarks`. Empty inserts, updates, deletes
+and conflict no-ops do not schedule work; truncation does. This keeps bulk
+publication from repeating the same table notification for every output row.
+Trigger installation replaces the older row triggers transactionally and removes
+triggers for retired sources.
 
 `wakeAt()` performs durable scheduling and returns an absolute millisecond
 deadline or null. It does not execute computations. `resume()` drains currently
@@ -36,11 +39,15 @@ due work and returns before future coalescing or retry deadlines. Repeated
 for that promise and prevents further execution; the host removes its listener
 and timer.
 
-Remote hosts may use `claim()`, `snapshot(identity)`, `publish(identity, output)`
-and `reject(identity, error)` without providing a local executor. `claim()` returns
-only the capture identity. `manifest(identity)` returns column types and row counts;
-`chunk(identity, table, after, limits)` exports retained rows using a stable numeric
-sequence cursor. `snapshot(identity)` assembles the same chunks for legacy hosts.
+Remote hosts may use `claim()`, `snapshot(identity)`, `wal(identity, afterLsn)`,
+`publish(identity, output)` and `reject(identity, error)` without providing a local
+executor. `claim()` returns only the capture identity. `manifest(identity)` returns
+column types and row counts; `chunk(identity, table, after, limits)` exports retained
+rows using a stable numeric sequence cursor. `wal(identity, afterLsn)` exports
+LSN-fenced transition-table deltas (`fromLsn`, `targetLsn`, `pkColumns`, `entries`)
+for incremental replica maintenance, and local `execute(snapshot)` receives the same
+delta map on `snapshot.wal`. `snapshot(identity)` assembles the same chunks for legacy
+hosts.
 Publication and rejection are fenced by the
 active claim; a rejection received after a committed receipt cannot change it.
 The Cloudflare host runs this protocol from a separate Durable Object and fences

@@ -1,5 +1,5 @@
 import pg from "npm:pg@8.16.3";
-import { getWork, openWork, settleWork } from "../durex/work.ts";
+import { getWork, openWork, settleWork, type WorkDelivery } from "../durex/work.ts";
 import { strictJson } from "./workers.ts";
 
 export type BatchSpec = {
@@ -12,6 +12,13 @@ export type BatchSpec = {
 	captured?(inputs: unknown): Promise<void>;
 	supersedeOnForeignKey?: boolean;
 	calculate(inputs: unknown): Promise<unknown>;
+	stage?(
+		client: pg.PoolClient,
+		output: unknown,
+	): Promise<{
+		publish(client: pg.PoolClient): Promise<void>;
+		close(): Promise<void>;
+	}>;
 	publish(client: pg.PoolClient, output: unknown): Promise<void>;
 	release?(inputs: unknown, output: unknown): Promise<void>;
 	discard?(output: unknown): Promise<void>;
@@ -256,35 +263,48 @@ export async function openBatches(
 						[trackedNames],
 					);
 					if (physical.length) {
+						const { rows: [{ duckpipe }] } = await client.query<{ duckpipe: boolean }>(
+							"SELECT to_regnamespace('duckpipe') IS NOT NULL AS duckpipe",
+						);
 						await client.query(
 							`LOCK TABLE ${
 								physical.map(({ name }) => `public."${name}"`).join(",")
 							} IN SHARE ROW EXCLUSIVE MODE`,
 						);
 						for (const { name } of physical) {
+							const isRead = readSet.has(name);
+							const args = isRead && !duckpipe ? `'${name}', 'true'` : `'${name}'`;
 							await client.query(
 								"INSERT INTO compute.source(name) VALUES ($1) ON CONFLICT(name) DO NOTHING",
 								[name],
 							);
+							if (isRead && duckpipe) {
+								await client.query(
+									`SELECT duckpipe.add_table($1) WHERE NOT EXISTS (
+                    SELECT FROM duckpipe.table_mappings WHERE source_schema='public' AND source_table=$2
+                  )`,
+									[`public.${name}`, name],
+								);
+							}
 							await client.query(
 								`DROP TRIGGER IF EXISTS compute_source_touch ON public."${name}";
                 CREATE OR REPLACE TRIGGER compute_source_touch_insert
                 AFTER INSERT ON public."${name}" REFERENCING NEW TABLE AS affected
-                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('${name}');
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows(${args});
                 ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_insert;
                 CREATE OR REPLACE TRIGGER compute_source_touch_delete
                 AFTER DELETE ON public."${name}" REFERENCING OLD TABLE AS affected
-                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('${name}');
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows(${args});
                 ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_delete;
                 CREATE OR REPLACE TRIGGER compute_source_touch_truncate
                 AFTER TRUNCATE ON public."${name}"
-                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source('${name}');
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source(${args});
                 ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_truncate;
                 ${
-									readSet.has(name)
+									isRead
 										? `CREATE OR REPLACE TRIGGER compute_source_touch_update
-                AFTER UPDATE ON public."${name}" REFERENCING NEW TABLE AS affected
-                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('${name}');
+                AFTER UPDATE ON public."${name}" REFERENCING OLD TABLE AS old_affected NEW TABLE AS affected
+                FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows(${args});
                 ALTER TABLE public."${name}" ENABLE ALWAYS TRIGGER compute_source_touch_update;`
 										: `DROP TRIGGER IF EXISTS compute_source_touch_update ON public."${name}";`
 								}`,
@@ -403,7 +423,11 @@ export async function openBatches(
 					for (let attempt = 0;; attempt++) {
 						await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
 						try {
-							const work = await getWork(client, key);
+							const { rows: [work] } = await client.query<WorkDelivery>(
+								"SELECT * FROM durex.work WHERE key = $1",
+								[key],
+							);
+							if (!work) throw new Error(`durex.work holds no ${key}`);
 							if (work.outcome !== null) {
 								await client.query("COMMIT");
 								return;
@@ -441,10 +465,15 @@ export async function openBatches(
 							);
 							if (wrote) {
 								await client.query("SELECT compute.lock_batches()");
+								const lockedWork = await getWork(client, key);
+								if (lockedWork.outcome !== null) {
+									await client.query("COMMIT");
+									return;
+								}
 								const result = await finishClaim(
 									client,
 									spec,
-									work,
+									lockedWork,
 									state.requested,
 									state.completed,
 									coverage,
@@ -552,8 +581,7 @@ export async function openBatches(
 			let settled = false;
 			try {
 				try {
-					await transaction(db, async (client) => {
-						await claim.spec.publish(client, output);
+					const settleClaim = async (client: pg.PoolClient) => {
 						await settleWork(client, key, "done", {});
 						await client.query(
 							`UPDATE compute.capture SET inputs=NULL,
@@ -568,7 +596,41 @@ export async function openBatches(
 						await client.query("SELECT compute.after_work($1,true)", [
 							claim.spec.name,
 						]);
-					});
+					};
+					if (claim.spec.stage) {
+						const client = await db.connect();
+						try {
+							const staged = await claim.spec.stage(client, output);
+							try {
+								for (let attempt = 0;; attempt++) {
+									await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+									try {
+										await client.query("SELECT compute.lock_batches()");
+										await staged.publish(client);
+										await settleClaim(client);
+										await client.query("COMMIT");
+										break;
+									} catch (error) {
+										await client.query("ROLLBACK");
+										if (
+											!(error instanceof pg.DatabaseError) ||
+											!["40001", "40P01"].includes(error.code ?? "") ||
+											attempt >= TRANSACTION_ATTEMPTS - 1
+										) throw error;
+									}
+								}
+							} finally {
+								await staged.close();
+							}
+						} finally {
+							client.release();
+						}
+					} else {
+						await transaction(db, async (client) => {
+							await claim.spec.publish(client, output);
+							await settleClaim(client);
+						});
+					}
 				} catch (error) {
 					if (
 						claim.spec.supersedeOnForeignKey === false ||

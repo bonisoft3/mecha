@@ -1379,3 +1379,104 @@ pgTest(
     }
   },
 );
+
+pgTest(
+  "capture and staging hold zero coordinator locks and serialization retry reuses staged tables",
+  async () => {
+    const { stagePages, publishStagedPages, dropStagedPages } = await import("./publication.ts");
+    await using server = await postgres();
+    const db = new pg.Pool({ connectionString: server.url });
+    await db.query(`
+      DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+      DO $$ BEGIN CREATE ROLE service NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+      CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$;
+      CREATE TABLE source (id text PRIMARY KEY, value int NOT NULL);
+      CREATE TABLE ratings (
+        id text PRIMARY KEY,
+        value int NOT NULL
+      );
+      GRANT ALL ON ratings TO service;
+      INSERT INTO source VALUES ('one', 10);
+    `);
+    const capturePaused = Promise.withResolvers<void>();
+    const releaseCapture = Promise.withResolvers<void>();
+    const stagePaused = Promise.withResolvers<void>();
+    const releaseStage = Promise.withResolvers<void>();
+    let stageCalls = 0;
+    let publishCalls = 0;
+    const pubSpec = { name: "ratings", file: "fixture.js", to: ["ratings"] };
+    const batches = await openBatches(server.url, [
+      spec({
+        name: "ratings",
+        reads: ["source"],
+        to: ["ratings"],
+        capture: async (client) => {
+          const rows = (await client.query("SELECT id, value FROM source ORDER BY id")).rows;
+          capturePaused.resolve();
+          await releaseCapture.promise;
+          return rows;
+        },
+        stage: async (client, output) => {
+          stageCalls++;
+          const staged = await stagePages(client, pubSpec, async function* () {
+            stagePaused.resolve();
+            await releaseStage.promise;
+            yield output as Record<string, unknown>[];
+          });
+          return {
+            publish: async (tx) => {
+              publishCalls++;
+              if (publishCalls === 1) {
+                await tx.query("DO $$ BEGIN RAISE SQLSTATE '40001'; END $$");
+              }
+              await publishStagedPages(tx, pubSpec, staged, { role: "service" });
+            },
+            close: () => dropStagedPages(client, staged),
+          };
+        },
+      }),
+    ], options);
+    try {
+      await batches.invalidate(["source"]);
+      await capturePaused.promise;
+      // While capture is running, neither durex.work nor hybrid_compute_batch.instance is locked.
+      const probe = await db.connect();
+      try {
+        await probe.query("BEGIN");
+        await probe.query("SET LOCAL lock_timeout = '100ms'");
+        assertEquals((await probe.query("SELECT 1 FROM durex.work FOR UPDATE NOWAIT")).rowCount, 1);
+        assertEquals((await probe.query("SELECT 1 FROM hybrid_compute_batch.instance FOR UPDATE NOWAIT")).rowCount, 1);
+        await probe.query("ROLLBACK");
+      } finally {
+        probe.release();
+      }
+      releaseCapture.resolve();
+
+      await stagePaused.promise;
+      // While stagePages is streaming JS pages into pg_temp, coordinator tables remain completely unlocked.
+      const probe2 = await db.connect();
+      try {
+        await probe2.query("BEGIN");
+        await probe2.query("SET LOCAL lock_timeout = '100ms'");
+        assertEquals((await probe2.query("SELECT 1 FROM durex.work FOR UPDATE NOWAIT")).rowCount, 1);
+        assertEquals((await probe2.query("SELECT 1 FROM hybrid_compute_batch.instance FOR UPDATE NOWAIT")).rowCount, 1);
+        await probe2.query("ROLLBACK");
+      } finally {
+        probe2.release();
+      }
+      releaseStage.resolve();
+
+      await until(async () =>
+        (await db.query("SELECT requested = completed AND completed = 1 AS done FROM compute.batch WHERE name = 'ratings'")).rows[0].done
+      );
+      assertEquals(stageCalls, 1);
+      assertEquals(publishCalls, 2);
+      assertEquals((await db.query("SELECT id, value FROM ratings")).rows, [{ id: "one", value: 10 }]);
+    } finally {
+      releaseCapture.resolve();
+      releaseStage.resolve();
+      await batches.close();
+      await db.end();
+    }
+  },
+);

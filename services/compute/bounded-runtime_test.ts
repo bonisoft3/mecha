@@ -636,3 +636,126 @@ Deno.test("bounded sink batches preserve JSON strings and replace keys only acro
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+pgTest(
+  "bounded persistent replica seeds once and applies LSN-fenced WAL deltas and duckpipe tables",
+  async () => {
+    await using server = await postgres();
+    const admin = new pg.Client({ connectionString: server.url });
+    const directory = await Deno.makeTempDir();
+    await admin.connect();
+    try {
+      const batchesSql = await Deno.readTextFile(new URL("./batches.sql", import.meta.url));
+      await admin.query(`
+        CREATE SCHEMA hybrid_compute_batch;
+        CREATE TABLE hybrid_compute_batch.instance (id uuid PRIMARY KEY, state jsonb NOT NULL DEFAULT '{}'::jsonb);
+        CREATE SCHEMA compute;
+        CREATE TABLE compute.machine_version (fingerprint text NOT NULL);
+      `);
+      await admin.query(batchesSql);
+      await admin.query(`
+        CREATE TABLE games (id text PRIMARY KEY, goals int NOT NULL);
+        CREATE TABLE teams (id text PRIMARY KEY, name text NOT NULL);
+        INSERT INTO games VALUES ('g1', 2), ('g2', 3);
+        INSERT INTO teams VALUES ('t1', 'Alpha');
+        INSERT INTO compute.source (name) VALUES ('games'), ('teams');
+        CREATE TRIGGER compute_source_games_truncate AFTER TRUNCATE ON games
+          FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source('games', 'true');
+        CREATE TRIGGER compute_source_games_insert AFTER INSERT ON games
+          REFERENCING NEW TABLE AS affected
+          FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('games', 'true');
+        CREATE TRIGGER compute_source_games_update AFTER UPDATE ON games
+          REFERENCING OLD TABLE AS old_affected NEW TABLE AS affected
+          FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('games', 'true');
+        CREATE TRIGGER compute_source_games_delete AFTER DELETE ON games
+          REFERENCING OLD TABLE AS affected
+          FOR EACH STATEMENT EXECUTE FUNCTION compute.touch_source_rows('games', 'true');
+      `);
+
+      const config = options(directory);
+      config.databaseUrl = server.url;
+      config.reads = ["games", "teams"];
+      config.queries = {
+        items: "SELECT t.id AS id, (SELECT coalesce(sum(goals), 0)::INTEGER FROM games) AS value FROM teams t ORDER BY t.id",
+      };
+      const runtime = await BoundedRuntime.create(config);
+
+      const readWatermarks = async () => {
+        const db = await DuckDBInstance.create(`${directory}/replica.duckdb`, { access_mode: "READ_ONLY" });
+        const conn = await db.connect();
+        try {
+          const rows = await conn.runAndReadAll(
+            "SELECT table_name, seeded_count::INTEGER AS seeded, incremental_count::INTEGER AS incremental FROM duckstream_replica.watermarks ORDER BY table_name",
+          );
+          return rows.getRowObjects();
+        } finally {
+          conn.closeSync();
+          db.closeSync();
+        }
+      };
+
+      const runCapture = async () => {
+        const cap = await runtime.capture();
+        const out = await runtime.calculate(cap);
+        const rows = [];
+        for await (const page of runtime.pages(out, "sink")) rows.push(...page);
+        await runtime.release(cap, out);
+        return rows;
+      };
+
+      assertEquals(await runCapture(), [{ id: "t1", value: 5 }]);
+      assertEquals(await readWatermarks(), [
+        { table_name: "games", seeded: 1, incremental: 0 },
+        { table_name: "teams", seeded: 1, incremental: 0 },
+      ]);
+
+      // Incremental INSERT, UPDATE (including primary key change), and DELETE on games; teams stays untouched.
+      await admin.query(`
+        INSERT INTO games VALUES ('g3', 4);
+        UPDATE games SET id = 'g2_renamed', goals = 10 WHERE id = 'g2';
+        DELETE FROM games WHERE id = 'g1';
+      `);
+      assertEquals(await runCapture(), [{ id: "t1", value: 14 }]);
+      assertEquals(await readWatermarks(), [
+        { table_name: "games", seeded: 1, incremental: 1 },
+        { table_name: "teams", seeded: 1, incremental: 0 },
+      ]);
+
+      // Incremental TRUNCATE + INSERT within the WAL stream.
+      await admin.query("TRUNCATE games; INSERT INTO games VALUES ('g4', 7)");
+      assertEquals(await runCapture(), [{ id: "t1", value: 7 }]);
+      assertEquals(await readWatermarks(), [
+        { table_name: "games", seeded: 1, incremental: 2 },
+        { table_name: "teams", seeded: 1, incremental: 0 },
+      ]);
+
+      // Simulate pg_duckpipe schema + LSN fence: games_ducklake advances past compute.source.lsn.
+      await admin.query(`
+        CREATE SCHEMA duckpipe;
+        CREATE TABLE duckpipe.table_mappings (
+          source_schema text NOT NULL,
+          source_table text NOT NULL,
+          target_table text NOT NULL,
+          state text NOT NULL,
+          applied_lsn pg_lsn NOT NULL
+        );
+        CREATE TABLE games_ducklake AS SELECT * FROM games;
+        CREATE TABLE teams_ducklake AS SELECT * FROM teams;
+        INSERT INTO games VALUES ('g5', 8);
+        INSERT INTO games_ducklake VALUES ('g5', 8);
+        INSERT INTO duckpipe.table_mappings
+        SELECT 'public', name, name || '_ducklake', 'SNAPSHOT', '0/0'::pg_lsn FROM compute.source;
+      `);
+      const fenced = runCapture();
+      await new Promise((r) => setTimeout(r, 80));
+      await admin.query(`
+        UPDATE duckpipe.table_mappings
+        SET state = 'STREAMING', applied_lsn = pg_current_wal_insert_lsn()
+      `);
+      assertEquals(await fenced, [{ id: "t1", value: 15 }]);
+    } finally {
+      await admin.end();
+      await Deno.remove(directory, { recursive: true });
+    }
+  },
+);

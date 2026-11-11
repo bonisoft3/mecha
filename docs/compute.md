@@ -118,13 +118,22 @@ numerical steps as Cloudflare. Generation bundles the authored module into
 worker and never invokes a compiler. Its bytes participate in computation
 identity, so incompatible retained work is refused.
 
-Capture copies declared tables from one repeatable-read PostgreSQL transaction
-and materializes query results in an immutable DuckDB file. The batch ledger
-retains its identity, not the full relation as JSON. Generated SQL stages execute
-in DuckDB. Numerical steps read bounded pages, run WASM, and accumulate outputs
-in a separate DuckDB file. Outputs are sorted once for publication; pages read
-bounded ordinal ranges instead of repeatedly sorting the remaining output.
-PostgreSQL stages those output pages and applies all
+Capture runs without holding coordinator or `durex.work` row locks. When
+`compute.source` is present in PostgreSQL, a persistent `replica.duckdb` in
+`COMPUTE_STATE_DIR` seeds each declared source table once and advances it
+incrementally from one repeatable-read PostgreSQL transaction: either waiting on
+`pg_duckpipe` (`duckpipe.table_mappings` with `state = 'STREAMING'` and
+`applied_lsn >= compute.source.lsn`) or applying statement-level transition-table
+deltas (`'T'`, `'D'`, `'I'`) recorded in `compute.wal` up to `compute.source.wal_seq`
+when the visible WAL count matches the watermark. Unchanged source tables are
+reused without rescanning PostgreSQL. Capture then attaches `replica.duckdb`
+read-only and materializes query results in an immutable DuckDB file. The batch
+ledger retains its identity, not the full relation as JSON. Generated SQL stages
+execute in DuckDB. Numerical steps read bounded pages, run WASM, and accumulate
+outputs in a separate DuckDB file. Outputs are sorted once for publication; pages
+read bounded ordinal ranges instead of repeatedly sorting the remaining output.
+PostgreSQL stages those output pages into session-scoped temporary tables before
+entering the `SERIALIZABLE` coordinator lock transaction, then applies all
 sinks, the completion hook, and the batch receipt in one transaction. A failed
 publication retains the original input file for replay; a process restart can
 repeat numerical work but cannot silently recapture newer source rows.
@@ -158,9 +167,10 @@ before a successor captures newer data. Restoring `compute.source` in the same
 transaction as `public` source and sink tables preserves the recorded revisions
 across archive import.
 
-Computations without `steps` retain the small-input array-based snapshot path.
-Neither path provides incremental SQL maintenance: source copying and query
-execution recur for each coalesced batch.
+Computations without `steps` retain the small-input array-based snapshot path
+over the same LSN-fenced `replica.duckdb` sync and pre-validated publication
+staging. Source replication is incremental when `compute.source` is present;
+query evaluation and numerical execution still run per coalesced batch.
 
 ## Cloudflare snapshot execution
 

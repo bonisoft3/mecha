@@ -24,18 +24,38 @@ CREATE SEQUENCE IF NOT EXISTS compute.source_revision_seq;
 CREATE TABLE IF NOT EXISTS compute.source (
   name text PRIMARY KEY,
   revision bigint NOT NULL DEFAULT nextval('compute.source_revision_seq'),
-  txid xid8 NOT NULL DEFAULT pg_current_xact_id()
+  txid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+  lsn pg_lsn NOT NULL DEFAULT pg_current_wal_insert_lsn(),
+  wal_seq bigint NOT NULL DEFAULT 0
 );
+ALTER TABLE compute.source ADD COLUMN IF NOT EXISTS lsn pg_lsn NOT NULL DEFAULT pg_current_wal_insert_lsn();
+ALTER TABLE compute.source ADD COLUMN IF NOT EXISTS wal_seq bigint NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS compute.wal (
+  seq bigserial PRIMARY KEY,
+  lsn pg_lsn NOT NULL DEFAULT pg_current_wal_insert_lsn(),
+  table_name text NOT NULL,
+  op "char" NOT NULL,
+  row_data jsonb
+);
+CREATE INDEX IF NOT EXISTS wal_table_seq ON compute.wal (table_name, seq);
 REVOKE ALL ON ALL TABLES IN SCHEMA compute FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA compute FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION compute.touch_source() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE v_seq bigint;
 BEGIN
   IF current_setting('compute.restoring_source', true) IS DISTINCT FROM pg_current_xact_id()::text THEN
+    IF TG_NARGS > 1 AND TG_ARGV[1] = 'true' THEN
+      INSERT INTO compute.wal(lsn, table_name, op, row_data)
+      VALUES (pg_current_wal_insert_lsn(), TG_ARGV[0], 'T', NULL)
+      RETURNING seq INTO v_seq;
+    END IF;
     UPDATE compute.source
     SET revision = nextval('compute.source_revision_seq'),
-        txid = pg_current_xact_id()
+        txid = pg_current_xact_id(),
+        lsn = pg_current_wal_insert_lsn(),
+        wal_seq = coalesce(v_seq, wal_seq)
     WHERE name = TG_ARGV[0];
   END IF;
   RETURN NULL;
@@ -44,12 +64,30 @@ $$;
 
 CREATE OR REPLACE FUNCTION compute.touch_source_rows() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE v_seq bigint;
 BEGIN
   IF current_setting('compute.restoring_source', true) IS DISTINCT FROM pg_current_xact_id()::text
      AND EXISTS (SELECT 1 FROM affected) THEN
+    IF TG_NARGS > 1 AND TG_ARGV[1] = 'true' THEN
+      IF TG_OP = 'INSERT' THEN
+        INSERT INTO compute.wal(lsn, table_name, op, row_data)
+        SELECT pg_current_wal_insert_lsn(), TG_ARGV[0], 'I', to_jsonb(r) FROM affected r;
+      ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO compute.wal(lsn, table_name, op, row_data)
+        SELECT pg_current_wal_insert_lsn(), TG_ARGV[0], 'D', to_jsonb(r) FROM affected r;
+      ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO compute.wal(lsn, table_name, op, row_data)
+        SELECT pg_current_wal_insert_lsn(), TG_ARGV[0], 'D', to_jsonb(r) FROM old_affected r;
+        INSERT INTO compute.wal(lsn, table_name, op, row_data)
+        SELECT pg_current_wal_insert_lsn(), TG_ARGV[0], 'I', to_jsonb(r) FROM affected r;
+      END IF;
+      v_seq := currval('compute.wal_seq_seq');
+    END IF;
     UPDATE compute.source
     SET revision = nextval('compute.source_revision_seq'),
-        txid = pg_current_xact_id()
+        txid = pg_current_xact_id(),
+        lsn = pg_current_wal_insert_lsn(),
+        wal_seq = coalesce(v_seq, wal_seq)
     WHERE name = TG_ARGV[0];
   END IF;
   RETURN NULL;
@@ -59,7 +97,10 @@ $$;
 CREATE OR REPLACE FUNCTION compute.restore_source() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 BEGIN
-  PERFORM set_config('compute.restoring_source', pg_current_xact_id()::text, true);
+  IF current_setting('compute.restoring_source', true) IS DISTINCT FROM pg_current_xact_id()::text THEN
+    PERFORM set_config('compute.restoring_source', pg_current_xact_id()::text, true);
+    DELETE FROM compute.wal;
+  END IF;
   RETURN NULL;
 END;
 $$;
@@ -246,6 +287,7 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA compute FROM PUBLIC;
 ALTER TABLE compute.definition ENABLE ROW LEVEL SECURITY;
 ALTER TABLE compute.capture ENABLE ROW LEVEL SECURITY;
 ALTER TABLE compute.source ENABLE ROW LEVEL SECURITY;
+ALTER TABLE compute.wal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE compute.machine_version ENABLE ROW LEVEL SECURITY;
 DO $private$
 DECLARE grant_ record;

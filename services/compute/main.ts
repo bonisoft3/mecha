@@ -61,7 +61,15 @@ import { compilationProfile } from "./native-feldera.ts";
 import { reconcileNativeResources } from "./native-cleanup.ts";
 import type { BatchSpec } from "./batches.ts";
 import { Feldera, type FelderaProgram } from "./feldera.ts";
-import { publish, publishPages } from "./publication.ts";
+import {
+  dropStagedPages,
+  preparePublish,
+  publish,
+  publishPages,
+  publishPrepared,
+  publishStagedPages,
+  stagePages,
+} from "./publication.ts";
 import { BoundedRuntime, collectBoundedFiles, type BoundedCapture, type BoundedOutput } from "./bounded-runtime.ts";
 import { type SinkWrites, validateSinkWrites } from "../../packages/compute-snapshot/src/sink-writes.ts";
 import { PostgresJobCache } from "./job-cache.ts";
@@ -351,6 +359,7 @@ export class Computation implements Runnable {
 export class Lake implements Reader {
   private constructor(
     private databaseUrl: string,
+    private lakeDir: string,
     private con: DuckDBConnection,
     private reader: Reader,
   ) {}
@@ -371,7 +380,7 @@ export class Lake implements Reader {
     );
     const reader = await db.connect();
     await reader.run("USE lake");
-    return new Lake(databaseUrl, con, readerOf(reader));
+    return new Lake(databaseUrl, lakeDir, con, readerOf(reader));
   }
 
   /** A failed delivery may have left Postgres attached; each one starts clean. */
@@ -389,6 +398,37 @@ export class Lake implements Reader {
   /** CDC can arrive before Postgres statistics catch up. Always copy the
    * declared inputs in one transaction instead of caching by those counters. */
   async hold(tables: string[]) {
+    if (await BoundedRuntime.syncReplica(this.lakeDir, this.databaseUrl, tables)) {
+      await this.con.run(
+        `ATTACH ${literal(`${this.lakeDir}/replica.duckdb`)} AS __duckstream_replica (READ_ONLY)`,
+      );
+      try {
+        await this.con.run("BEGIN");
+        try {
+          for (const t of tables) {
+            await this.con.run(`DROP TABLE IF EXISTS lake.${t}`);
+            await this.con.run(
+              `CREATE TABLE lake.${t} AS SELECT * FROM __duckstream_replica.main.${t}`,
+            );
+          }
+          await this.con.run("COMMIT");
+        } catch (e) {
+          await this.con.run("ROLLBACK").catch((r) => {
+            throw new AggregateError([e, r], "a snapshot failed, and so did its rollback");
+          });
+          throw e;
+        }
+      } finally {
+        await this.con.run("DETACH DATABASE IF EXISTS __duckstream_replica");
+      }
+      await this.con.run(
+        "CALL ducklake_expire_snapshots('lake', older_than => now())",
+      );
+      await this.con.run(
+        "CALL ducklake_cleanup_old_files('lake', cleanup_all => true)",
+      );
+      return;
+    }
     await this.con.run("BEGIN");
     try {
       for (const t of tables) {
@@ -606,6 +646,16 @@ async function main() {
         },
         capture: () => runtime.capture(),
         calculate: input => runtime.calculate(input as BoundedCapture),
+        async stage(client, output) {
+          const staged = await stagePages(client, spec, sink => runtime.pages(output as BoundedOutput, sink));
+          return {
+            async publish(client) {
+              const sinks = await publishStagedPages(client, spec, staged, claims);
+              console.log(JSON.stringify({ computation: c.name, sinks }));
+            },
+            close: () => dropStagedPages(client, staged),
+          };
+        },
         async publish(client, output) {
           const sinks = await publishPages(client, spec, sink => runtime.pages(output as BoundedOutput, sink), claims);
           console.log(JSON.stringify({ computation: c.name, sinks }));
@@ -637,6 +687,16 @@ async function main() {
         return await c.capture(lake);
       },
       calculate: (input) => c.calculate(input),
+      stage(_client, out) {
+        const prepared = preparePublish(c, out);
+        return Promise.resolve({
+          async publish(client) {
+            const sinks = await publishPrepared(client, c, prepared, claims);
+            console.log(JSON.stringify({ computation: c.name, sinks }));
+          },
+          close: () => Promise.resolve(),
+        });
+      },
       async publish(client, out) {
         const sinks = await publish(client, c, out, claims);
         console.log(JSON.stringify({ computation: c.name, sinks }));

@@ -181,8 +181,8 @@
       "upClosure": [
         "libraries/mecha/.bayt/compose.electric.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
       ]
     },
     "outs": {
@@ -212,8 +212,8 @@
       "upClosure": [
         "libraries/mecha/.bayt/compose.electric.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
       ]
     }
   },
@@ -235,8 +235,8 @@
   "upClosure": [
     "libraries/mecha/.bayt/compose.electric.yaml",
     "libraries/mecha/.bayt/compose.database.yaml",
-    "libraries/mecha/.bayt/compose.database-image.yaml",
-    "libraries/mecha/.bayt/compose.migrate.yaml"
+    "libraries/mecha/.bayt/compose.migrate.yaml",
+    "libraries/mecha/.bayt/compose.database-image.yaml"
   ],
   "chainedDeps": [
     {

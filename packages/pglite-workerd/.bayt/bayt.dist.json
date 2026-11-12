@@ -8,10 +8,10 @@
     },
     "add": [
       {
-        "url": "https://github.com/electric-sql/pglite/archive/ae182ff8bd5ba4acb887d6c925d607a1498aa0b5.tar.gz",
         "dest": "/src/",
         "sha256": "10b24517c31d23bbe952fa8cf9810952cd69cc72e8527f842b23125967dbf72c",
-        "unpack": true
+        "unpack": true,
+        "url": "https://github.com/electric-sql/pglite/archive/ae182ff8bd5ba4acb887d6c925d607a1498aa0b5.tar.gz"
       }
     ],
     "mounts": [],
@@ -183,11 +183,11 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
+      "name": "patch",
       "shell": "sh",
       "dockerfile": {
         "do": "git -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 apply \"$PWD/patches/pglite.patch\" && cp -R release /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/release"
       },
-      "name": "patch",
       "stop": false
     },
     {
@@ -199,11 +199,11 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
+      "name": "pnpm",
       "shell": "sh",
       "dockerfile": {
         "do": "corepack enable pnpm && corepack install -g pnpm@9.7.0+sha512.dc09430156b427f5ecfc79888899e1c39d2d690f004be70e05230b72cb173d96839587545d09429b55ac3c429c801b4dc3c0e002f653830a420fa2dd4e3cf9cf"
       },
-      "name": "pnpm",
       "stop": false
     },
     {
@@ -215,6 +215,7 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
+      "name": "install",
       "dockerfile": {
         "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 install --prefer-offline --frozen-lockfile --package-import-method copy --filter @electric-sql/pglite...",
         "mounts": [
@@ -226,7 +227,6 @@
           }
         ]
       },
-      "name": "install",
       "shell": "exec",
       "stop": false
     },
@@ -239,11 +239,11 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
+      "name": "builtin",
       "shell": "sh",
       "dockerfile": {
         "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 -r --filter @electric-sql/pglite... build && cp -R /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/dist dist"
       },
-      "name": "builtin",
       "stop": false
     }
   ],

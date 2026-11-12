@@ -94,8 +94,8 @@
       "upClosure": [
         "libraries/mecha/packages/pglite-workerd/.bayt/compose.package.yaml",
         "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
-        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml",
-        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
       ]
     },
     "outs": {
@@ -125,8 +125,8 @@
       "upClosure": [
         "libraries/mecha/packages/pglite-workerd/.bayt/compose.package.yaml",
         "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
-        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml",
-        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml",
+        "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
       ]
     }
   },
@@ -139,8 +139,8 @@
   "upClosure": [
     "libraries/mecha/packages/pglite-workerd/.bayt/compose.package.yaml",
     "libraries/mecha/packages/pglite-workerd/.bayt/compose.dist.yaml",
-    "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml",
-    "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml"
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.icu.yaml",
+    "libraries/mecha/packages/pglite-workerd/.bayt/compose.wasm.yaml"
   ],
   "chainedDeps": [],
   "cmds": [],

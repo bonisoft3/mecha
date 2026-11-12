@@ -21,4 +21,7 @@ import "strings"
 // compose service and fragment an app builds from in the monorepo follow from
 // the key (libraries_mecha-<service>-image).
 #Pin: =~"^bonitao/mecha-[a-z0-9-]+:[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?@sha256:[0-9a-f]{64}$"
-#Published: close({for s in #Images {(s)?: #Pin & strings.HasPrefix("bonitao/mecha-\(s):")}})
+#Published: {
+	[!~"^(\(strings.Join(#Images, "|")))$"]~(K,_): error("\(K): field not allowed")
+	for s in #Images {(s)?: #Pin & strings.HasPrefix("bonitao/mecha-\(s):")}
+}

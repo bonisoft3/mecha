@@ -157,7 +157,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 
 #AirlockUpgradeSql: {
 	interpreters: string
-	_body:        """
+	_body: """
 		BEGIN
 		  IF EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'airlock' AND table_name = 'external_effect_ledger' AND column_name = 'request') THEN
 		    ALTER TABLE airlock.external_effect_ledger RENAME COLUMN request TO input;
@@ -166,7 +166,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 		  PERFORM input FROM airlock.external_effect_ledger LIMIT 0;
 		END
 		"""
-	sql:          """
+	sql: """
 		SET LOCAL lock_timeout = '5s';
 		SET LOCAL statement_timeout = '60s';
 		LOCK TABLE airlock.external_effect_ledger IN ACCESS EXCLUSIVE MODE;
@@ -177,7 +177,8 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // The airlock daprd's wall, against mistakes rather than an attacker: declared
 // destinations are the only ones reached by accident. Only the declared endpoints'
 // paths pass, the blob plane's binding where there is one, and daprd's health.
-#AirlockWall: W={
+#AirlockWall: {
+	let W = self
 	effects: [...string]
 	blobs:   bool
 	let blobPath = [if W.blobs {"bindings/blobs|"}, ""][0]
@@ -198,7 +199,8 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // daprd's built-in retries, which know nothing of what a repeat costs at the
 // sink; the ledger decides that. A sink's 4xx counts toward the trip, which no
 // policy can filter, so the threshold is one a run of refusals rarely reaches.
-#AirlockResiliency: R={
+#AirlockResiliency: {
+	let R = self
 	effects: [...string]
 	out: """
 		apiVersion: dapr.io/v1alpha1
@@ -236,14 +238,15 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // omnishell module with Intl. services/compute/language.ts holds the same
 // list (ENDOWABLE), and cluster_test.ts holds them to each other.
 #CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio", "Pdf"]
-#CageEndowment: or(#CageEndowments)
+#CageEndowment:  or(#CageEndowments)
 
 // An environment variable's name: where a secret reaches the airlock.
 #SecretName: "^[A-Z][A-Z0-9_]*$"
 
 // An Airlock endpoint supplied by a container hatch. The role grants no
 // database credential or protocol-specific confinement.
-#Bridge: BR={
+#Bridge: {
+	let BR = self
 	name:      =~#EffectName
 	container: =~#EffectName
 	action?:   =~"^[a-zA-Z][a-zA-Z0-9_]*$"
@@ -270,9 +273,9 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	// container's name. The appliance's own services hold their ports
 	// (#AppliancePorts) on that one address.
 	appliance?: {
-		srcs: [string, ...string]
+		srcs:    [string, ...string]
 		command: [string, ...string]
-		port: *BR.port | int & >=1 & <=65535
+		port:    *BR.port | int & >=1 & <=65535
 	}
 }
 
@@ -327,21 +330,23 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 }
 
 #AiTierOverrides: {
-	text?: [("browser" | "cheap" | "heavy")]:  #AiModelSpec | (string & !="")
-	image?: [("browser" | "cheap" | "heavy")]: #AiModelSpec | (string & !="")
+	text?:  {for t in ["browser", "cheap", "heavy"] {(t)?: #AiModelSpec | (string & !="")}}
+	image?: {for t in ["browser", "cheap", "heavy"] {(t)?: #AiModelSpec | (string & !="")}}
 }
 
 #AiCapability: {
-	text?: [...#AiTier]
-	image?: [...#AiTier]
-	models?: #AiTierOverrides
-	targets?: [("browser" | "pages" | "docker" | "local" | "cloudflare" | "gcp" | "k8s" | "aws")]: #AiTierOverrides
+	text?:    [...#AiTier]
+	image?:   [...#AiTier]
+	models?:  #AiTierOverrides
+	targets?: {for t in ["browser", "pages", "docker", "local", "cloudflare", "gcp", "k8s", "aws"] {(t)?: #AiTierOverrides}}
 }
 
 // An external effect as the cluster places it: its name, the one origin it
 // may reach, the bridge it reaches through, or the AI modality/tier it routes
 // through tsbifrost, and where the app keeps its handler and its binding.
-#Effect: E={
+#Effect: {
+	let E = self
+
 	// The rest of the airlock's daprd's resources, in the directory an effect's
 	// endpoint is written to.
 	name: =~#EffectName & !="blobs" & !="wall" & !="resiliency"
@@ -398,8 +403,9 @@ _completed: {condition: "service_completed_successfully"}
 
 // A #From handed to bayt as a plain struct: the definition is closed, and
 // bayt's ref arm adds the qualified `name` to it.
-_from: F={
-	in: #From
+_from: {
+	let F = self
+	in:  #From
 	out: {for k, v in F.in {(k): v}}
 }
 
@@ -419,22 +425,25 @@ _devElectricSecret:        "dev-electric-secret"
 _devElectricPassword:      "dev-electric-password"
 _devAuthenticatorPassword: "dev-authenticator-password"
 
+#ComputationRpc: "^[a-z_][a-z0-9_]{0,62}$"
+
 #ComputationField: {
-	name: string & !=""
-	type: string
-	required: *true | bool
+	name:       string & !=""
+	type:       string
+	required:   *true | bool
 	precision?: int & >=1 & <=38
-	scale?: int & >=0
+	scale?:     int & >=0
 	if type == "decimal" {
 		precision!: int
-		scale!: int & <=precision
+		scale!:     int & <=precision
 	}
 }
 
-#Cluster: X={
+#Cluster: {
+	let X = self
 	state: {
 		duckstreamEngine: *"duckdb-snapshot" | "feldera"
-		migrations: [...string] & list.UniqueItems()
+		migrations:       [...string] & list.UniqueItems()
 		// Changes to a schema that already exists, in pgroll's own grammar and
 		// keyed by the version each creates. `migrations` build the schema on a
 		// fresh volume; these carry a volume that outlived a change forward, and
@@ -444,23 +453,29 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		reconcile: [=~"^[a-z][a-z0-9_]*$"]: string & !=""
 		// Materialized JSON, one <name>.json per vetted pgroll value, relative to the app.
 		pgrollDir?: string & !=""
-		pipelines: [...{name: string, file: string}]
+		pipelines:  [...{name: string, file: string}]
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
 		computations: [...{
-			name: string
-			file: string
+			name:     string
+			file:     string
 			feldera?: string & !=""
-			steps?: string & !=""
-			to: [...string] & [_, ...]
+			steps?:   string & !=""
+			to:       [...string] & [_, ...]
 			sinkWrites?: [string]: "replace" | "upsert"
 			wasm: [...string]
-			onComplete?: string & =~"^[a-z_][a-z0-9_]{0,62}$"
+			// Checked via #ComputationRpc rather than =~ on the optional field:
+			// an invalid =~ makes c.onComplete bottom, which `if c.onComplete != _|_`
+			// in COMPUTATIONS would skip as absent.
+			onComplete?: string
+			if onComplete != _|_ if !regexp.Match(#ComputationRpc, onComplete) {
+				_onCompleteValid: error("onComplete: invalid value \(json.Marshal(onComplete))")
+			}
 			endowments: *[] | [...#CageEndowment]
-			types?: {types: [string]: {...}, aliases: [string]: string}
+			types?:     {types: [string]: {...}, aliases: [string]: string}
 			queryTypes?: [string]: [...#ComputationField]
-			sinkTypes?: [string]: [...#ComputationField]
+			sinkTypes?: [string]:  [...#ComputationField]
 			declaredReads?: [...string]
 		}]
 		// Names only: the cluster needs to know whether any schedule exists,
@@ -485,8 +500,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 
 		// Where the effect steps run (#GraphileMigration), the ledger first.
 		steps: {
-			graphile: *#GraphileMigration | #GraphileStep
-			airlock:  *#AirlockMigration | #AirlockStep
+			graphile:     *#GraphileMigration | #GraphileStep
+			airlock:      *#AirlockMigration | #AirlockStep
 			_ledgerFirst: true & (graphile < airlock)
 		}
 	}
@@ -517,8 +532,16 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// another still; a provider whose client neither gives refuses to start.
 		// A secret is the deployment's alone. A provider signs a person in, so
 		// it presupposes `auth`.
-		signIn: [("google")]: {
-			[("issuer" | "internal" | "client" | "scope" | "params")]: string & !="" & !~"[$}]"
+		signIn: {
+			[!="google"]~(K,_): error("signIn.\(K): field not allowed")
+			google?: {
+				[!~"^(issuer|internal|client|scope|params)$"]~(K,_): error("signIn.google.\(K): field not allowed")
+				issuer?:                                             string & !="" & !~"[$}]"
+				internal?:                                           string & !="" & !~"[$}]"
+				client?:                                             string & !="" & !~"[$}]"
+				scope?:                                              string & !="" & !~"[$}]"
+				params?:                                             string & !="" & !~"[$}]"
+			}
 		}
 		if len(signIn) > 0 {
 			auth: true
@@ -564,7 +587,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// digits no other step holds, then `_`, put both in one order. The database copies the caller's
 	// steps out of this, so a name it refuses fails the cluster where it is
 	// built.
-	_initdb: [K=string]: =~"(^|/)[0-9]{3}_[^/]*$" & =~"(^|/)\(K)_[^/]*$"
+	_initdb: [string]~(K,_): =~"(^|/)[0-9]{3}_[^/]*$" & =~"(^|/)\(K)_[^/]*$"
 	_initdb: {
 		let tenancy = [for migration in X.state.migrations if path.Base(migration, path.Unix) == #TenancyMigration {migration}]
 		if len(tenancy) == 0 {
@@ -586,7 +609,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		}
 	}
 
-	#_renderClusterRef: R={
+	#_renderClusterRef: {
+		let R = self
 		expose?: _
 		ref:     bayt.#portRef
 		if len(R.ref.port) > 0 {
@@ -605,7 +629,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			out: "\(R.ref.prefix)\(_body)\(R.ref.suffix)"
 		}
 	}
-	#_renderClusterEnv: V={
+	#_renderClusterEnv: {
+		let V = self
 		expose?: _
 		val:     bayt.#envValue
 		out: [
@@ -623,7 +648,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// No target runs a lifecycle command: the image is the recipe, the
 	// process is the base image's own entrypoint, and no toolchain
 	// activator wraps it — these images carry none.
-	_image: T={
+	_image: {
+		let T = self
 		cmd: "builtin": null
 		activate: ""
 		if T.entrypoint != _|_ if T.entrypoint.after != _|_ {
@@ -660,7 +686,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// is matched here; one refused leaves an index out of range in every
 	// command line and path built from it.
 	_effects: [for e in X.state.effects {
-		name: [if regexp.Match(#EffectName, e.name) {e.name}][0]
+		name:     [if regexp.Match(#EffectName, e.name) {e.name}][0]
 		handler:  e.handler
 		endpoint: e.endpoint
 	}]
@@ -671,22 +697,26 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	_reached: [for e in X.state.effects if e.bridge != _|_ {[if list.Contains(_bridgeNames, e.bridge) {e.bridge}][0]}]
 	_aiEffects: [for e in X.state.effects if e.ai != _|_ {{
 		modality: [if regexp.Match("^(text|image)$", e.ai) {e.ai}][0]
-		tier: [if regexp.Match("^(cheap|heavy)$", e.tier) {e.tier}][0]
+		tier:     [if regexp.Match("^(cheap|heavy)$", e.tier) {e.tier}][0]
 	}}]
-	_aiOn: len(_aiEffects) > 0 || X.capabilities.ai != _|_
+	_aiOn:        len(_aiEffects) > 0 || X.capabilities.ai != _|_
 	_bridgeNames: [for b in X.state.bridges {b.name}]
 	_bridges: [for b in X.state.bridges if b.simulator != _|_ {
-		name: [if regexp.Match(#EffectName, b.name) {b.name}][0]
+		name:      [if regexp.Match(#EffectName, b.name) {b.name}][0]
 		container: [if regexp.Match(#EffectName, b.container) {b.container}][0]
-		port: b.port
+		port:      b.port
 		if b.action != _|_ {action: b.action}
 	}]
 
 	// The secrets, each matched like the fields above. Read from the
 	// declaration, so a refused name fails the export instead of silently
 	// leaving the airlock without it.
-	_secrets: [for e in X.state.effects if e.secrets != _|_ for s in e.secrets {[if regexp.Match(#SecretName, s) {s}][0]}]
-	_simulatedSecrets: [for e in X.state.effects if e.secrets != _|_ if e.simulated != _|_ for s in e.secrets {s}]
+	_secrets:          [for e in X.state.effects if e.secrets != _|_ for s in e.secrets {[if regexp.Match(#SecretName, s) {s}][0]}]
+	_simulatedSecrets: {for e in X.state.effects if e.secrets != _|_ if e.simulated != _|_ for s in e.secrets {(s): true}}
+	_onComplete: {
+		in:  string
+		out: [if regexp.Match(#ComputationRpc, in) {in}, error("onComplete: invalid value \(json.Marshal(in))")][0]
+	}
 
 	// The steps the database image stages and this cluster places.
 	// A schedule or an effect is woken by the ticker: a declared schedule by
@@ -773,7 +803,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// the targets below join them by name.
 		if len(X.state.effects) > 0 {
 			networks: {
-				#AirlockNetworks
+				#AirlockNetworks...
 				for b in X._bridges {"bridge-\(b.name)-egress": {}}
 			}
 		}
@@ -854,14 +884,14 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// on a fresh data directory. That directory lives on the
 						// container's writable layer, which `--force-recreate`
 						// discards with it.
-						copy: list.Concat([
-							[{srcs: [for _, m in X._initdb if m != #TenancyMigration && !list.Contains([for s in X._staged {s.dst}], m) {m}], dst: "\(#InitdbDir)/"}],
-							[for s in X._staged {
+						copy: [
+							{srcs: [for _, m in X._initdb if m != #TenancyMigration && !list.Contains([for s in X._staged {s.dst}], m) {m}], dst: "\(#InitdbDir)/"},
+							for s in X._staged {
 								from: (_from & {in: X.meta.images.database}).out
 								srcs: ["\(#StagedDir)/\(s.src)"]
-								dst: "\(#InitdbDir)/\(s.dst)"
-							}],
-						])
+								dst:  "\(#InitdbDir)/\(s.dst)"
+							},
+						]
 					}
 					compose: {
 						ports: ["5432"]
@@ -894,9 +924,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						}
 						dockerfile: {
 							// The database's own image, run as the runner.
-							from: (_from & {in: X.meta.images.database}).out
+							from:       (_from & {in: X.meta.images.database}).out
 							entrypoint: ["/migrate.sh"]
-							cmd: [#PgRollDir, grammar.#Baseline]
+							cmd:        [#PgRollDir, grammar.#Baseline]
 							// Docker's heredoc parser limits each input line to 64 KiB.
 							// Base64 keeps each chunk ASCII and preserves the vetted JSON.
 							if X.state.pgrollDir != _|_ {
@@ -913,9 +943,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 									"COPY <<'PGROLL' /tmp/\(n).json.parts\n\(strings.Join(chunks, "\n"))\nPGROLL\nRUN mkdir -p \(#PgRollDir) && base64 -d < /tmp/\(n).json.parts > \(#PgRollDir)/\(n).json && rm /tmp/\(n).json.parts"
 								}
 							}],
-								[for n, sql in X.state.reconcile {
-									"COPY <<'RECONCILE' \(#PgRollDir)/\(n).sql\n\(sql)\nRECONCILE"
-								}],
+							[for n, sql in X.state.reconcile {
+								"COPY <<'RECONCILE' \(#PgRollDir)/\(n).sql\n\(sql)\nRECONCILE"
+							}],
 							])
 						}
 						compose: {}
@@ -939,10 +969,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							after: database: "healthy"
 						}
 						dockerfile: {
-							from: (_from & {in: X.meta.images.database}).out
+							from:       (_from & {in: X.meta.images.database}).out
 							entrypoint: ["psql"]
-							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/airlock-upgrade.sql"]
-							epilogue: ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\((#AirlockUpgradeSql & {interpreters: X.state.effectInterpreters}).sql)\nAIRLOCK"]
+							cmd:        ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/airlock-upgrade.sql"]
+							epilogue:   ["COPY <<'AIRLOCK' /airlock-upgrade.sql\n\((#AirlockUpgradeSql & {interpreters: X.state.effectInterpreters}).sql)\nAIRLOCK"]
 						}
 						compose: {}
 					}
@@ -970,10 +1000,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							}
 						}
 						dockerfile: {
-							from: (_from & {in: X.meta.images.database}).out
+							from:       (_from & {in: X.meta.images.database}).out
 							entrypoint: ["psql"]
-							cmd: ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/timer-check.sql"]
-							epilogue: ["COPY <<'TIMERS' /timer-check.sql\n\(X.state.timerCheck)\nTIMERS"]
+							cmd:        ["-X", "--set=ON_ERROR_STOP=1", "--single-transaction", "--file=/timer-check.sql"]
+							epilogue:   ["COPY <<'TIMERS' /timer-check.sql\n\(X.state.timerCheck)\nTIMERS"]
 						}
 						compose: {}
 					}
@@ -990,7 +1020,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						from: name: "postgrest/postgrest:v16.4@sha256:d155c6718ed9a9f990d159a2ab7c0a3f16944dbb6d0a0344557421042acfe0df"
 					}
 					expose: {
-						http: {port: 3000, env: "PGRST_SERVER_PORT"}
+						http:  {port: 3000, env: "PGRST_SERVER_PORT"}
 						admin: {port: 3001, env: "PGRST_ADMIN_SERVER_PORT"}
 					}
 					"process-compose": activate: "mise x --"
@@ -1031,7 +1061,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						from: (_from & {in: X.meta.images.auth}).out
 						// deno runs `main.ts` from the working directory, and bayt
 						// sets one per stage.
-						workdir: "/app"
+						workdir:  "/app"
 						epilogue: ["RUN mkdir -p /monorepo"]
 					}
 					expose: http: {port: 9999, env: "PORT"}
@@ -1050,7 +1080,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// The door's port is the host's pick; auth reads this
 							// default as whichever port the request came through.
 							WEBAUTHN_ORIGIN: "${WEBAUTHN_ORIGIN:-https://localhost:*}"
-							OIDC_PROVIDERS: strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
+							OIDC_PROVIDERS:  strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
 							for p, d in X.capabilities.signIn {
 								let k = "OIDC_\(strings.ToUpper(p))_CLIENT_ID"
 								if d.client == _|_ {
@@ -1068,7 +1098,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				}
 			}
 			caddy: bayt.healthcheck.http & X._image & {
-				"process-compose": activate: "mise x --"
+				"process-compose": {activate: "mise x --", ...}
 				healthcheck: {
 					port:           8080
 					path:           "/health"
@@ -1260,9 +1290,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					compose: {
 						healthcheck: {
-							test: ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
-							interval:     "5s", timeout:         "5s", retries: 12
-							start_period: "60s", start_interval: "500ms"
+							test:           ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
+							interval:       "5s"
+							timeout:        "5s"
+							retries:        12
+							start_period:   "60s"
+							start_interval: "500ms"
 						}
 						restart: "on-failure"
 					}
@@ -1288,7 +1321,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						from: name: "redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933"
 						workdir: "/data"
 						healthcheck: {
-							test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+							test:         ["CMD-SHELL", "redis-cli ping | grep PONG"]
 							interval:     "5s"
 							timeout:      "3s"
 							retries:      6
@@ -1297,7 +1330,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					compose: {
 						healthcheck: {
-							test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+							test:           ["CMD-SHELL", "redis-cli ping | grep PONG"]
 							interval:       "5s"
 							timeout:        "3s"
 							retries:        6
@@ -1329,7 +1362,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						after: {caddy: "started", redis: "started"}
 					}
 					dockerfile: {
-						from: (_from & {in: X.meta.images.mesh}).out
+						from:     (_from & {in: X.meta.images.mesh}).out
 						preamble: ["COPY <<'REDIS' /dapr/components/redis-streams.yaml\n\(_redisStreams)\nREDIS"]
 					}
 					compose: {
@@ -1346,7 +1379,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						start_interval: "500ms"
 					}
 					"process-compose": activate: "mise x --"
-					expose: http: {port: 8080, env: "CONDUIT_API_HTTP_ADDRESS_PORT"}
+					expose: http:                {port: 8080, env: "CONDUIT_API_HTTP_ADDRESS_PORT"}
 					entrypoint: {
 						shell: "nu"
 						do:    "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'conduit-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'pipelines') ($dir | path join 'connectors'); let conn = (which conduit-connector-http | first | get path); cp -f $conn ($dir | path join 'connectors' ($conn | path basename)); open --raw '\(X.meta.conduitTemplate)' | str replace -a '${DATABASE_URL}' $env.DATABASE_URL | str replace -a '${MESH_EVENTS_URL}' $env.MESH_EVENTS_URL | save -f ($dir | path join 'pipelines/cdc-to-bus.yaml'); exec conduit run --db.type inmemory --pipelines.path ($dir | path join 'pipelines') --connectors.path ($dir | path join 'connectors') --api.http.address $\"127.0.0.1:($env.CONDUIT_API_HTTP_ADDRESS_PORT)\" --api.grpc.address '127.0.0.1:0'"
@@ -1368,7 +1401,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// so the rendered file is the only pipeline conduit finds and
 						// every start of the container can render it again.
 						copy: [{srcs: [X.meta.conduitTemplate], dst: "/conduit/cdc-to-bus.yaml.tmpl"}]
-						cmd: ["sh", "-c", "mkdir -p /conduit/pipelines && envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml && exec /app/conduit run"]
+						cmd:  ["sh", "-c", "mkdir -p /conduit/pipelines && envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml && exec /app/conduit run"]
 					}
 					compose: {
 						develop: watch: [{action: "sync+restart", path: "../\(X.meta.conduitTemplate)", target: "/conduit/cdc-to-bus.yaml.tmpl"}]
@@ -1406,9 +1439,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// which reaches only what stands on airlock-egress.
 						if len(X._effects) > 0 {networks: ["default", "airlock-egress"]}
 						healthcheck: {
-							test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:3900/ 2>&1 | grep -q 'HTTP/'"]
-							interval:     "5s", timeout:         "5s", retries: 6
-							start_period: "10s", start_interval: "500ms"
+							test:           ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:3900/ 2>&1 | grep -q 'HTTP/'"]
+							interval:       "5s"
+							timeout:        "5s"
+							retries:        6
+							start_period:   "10s"
+							start_interval: "500ms"
 						}
 					}
 				}
@@ -1445,9 +1481,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					compose: {
 						environment: IMGPROXY_BIND: ":8081"
 						healthcheck: {
-							test: ["CMD-SHELL", #"bash -c 'echo -e "GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n" > /dev/tcp/127.0.0.1/8081'"#]
-							interval:     "5s", timeout:         "5s", retries: 6
-							start_period: "10s", start_interval: "500ms"
+							test:           ["CMD-SHELL", #"bash -c 'echo -e "GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n" > /dev/tcp/127.0.0.1/8081'"#]
+							interval:       "5s"
+							timeout:        "5s"
+							retries:        6
+							start_period:   "10s"
+							start_interval: "500ms"
 						}
 						restart: "on-failure"
 					}
@@ -1550,7 +1589,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						interval:       "5s"
 						start_interval: "1s"
 						// Native programs compile and bootstrap sequentially before the listener opens.
-						if X.state.duckstreamEngine == "feldera" {start_period: "\(30 * len(X.state.computations))m"}
+						if X.state.duckstreamEngine == "feldera" {start_period: "\(30*len(X.state.computations))m"}
 						if X.state.duckstreamEngine == "duckdb-snapshot" {start_period: "15m"}
 					}
 					expose: tcp: {port: 9997, env: "PORT"}
@@ -1565,15 +1604,15 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							COMPUTE_STATE_DIR: "${COMPUTE_STATE_DIR:-.pronto/live/duckstream}"
 							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-duckdb-snapshot}"
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
-								name:       c.name
-								file:       c.file
+								name: c.name
+								file: c.file
 								if c.feldera != _|_ {feldera: c.feldera}
 								if c.steps != _|_ {steps: c.steps}
-								to:         c.to
+								to: c.to
 								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
 								wasm:       c.wasm
 								endowments: c.endowments
-								if c.onComplete != _|_ {onComplete: c.onComplete}
+								if c.onComplete != _|_ {onComplete: (_onComplete & {in: c.onComplete}).out}
 								if c.types != _|_ {types: c.types}
 								if c.queryTypes != _|_ {queryTypes: c.queryTypes}
 								if c.sinkTypes != _|_ {sinkTypes: c.sinkTypes}
@@ -1617,9 +1656,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								if c.steps != _|_ {steps: "/app/computations/\(c.name).steps"}
 								to: c.to
 								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
-								wasm: [for w in c.wasm {_target[w]}]
+								wasm:       [for w in c.wasm {_target[w]}]
 								endowments: c.endowments
-								if c.onComplete != _|_ {onComplete: c.onComplete}
+								if c.onComplete != _|_ {onComplete: (_onComplete & {in: c.onComplete}).out}
 								if c.types != _|_ {types: c.types}
 								if c.queryTypes != _|_ {queryTypes: c.queryTypes}
 								if c.sinkTypes != _|_ {sinkTypes: c.sinkTypes}
@@ -1654,7 +1693,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			if X._wakes {
 				ticker: X._image & {
 					"process-compose": activate: "mise x --"
-					expose: http: {port: 9998, env: "PORT"}
+					expose: http:                {port: 9998, env: "PORT"}
 					entrypoint: {
 						shell:      "nu"
 						do:         "let app = (if (($env.TICKER_APP_DIR? | default '') != '') { $env.TICKER_APP_DIR } else if ('services/ticker/main.ts' | path exists) { 'services/ticker' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/ticker') }); exec deno run --allow-net --allow-env --config ($app | path join 'deno.json') ($app | path join 'main.ts')"
@@ -1677,7 +1716,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						after: crud: "healthy"
 					}
 					dockerfile: {
-						from: (_from & {in: X.meta.images.ticker}).out
+						from:    (_from & {in: X.meta.images.ticker}).out
 						workdir: "/app"
 					}
 					compose: {
@@ -1747,6 +1786,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// that calls or links back (handler.ts's sink.origin).
 							ORIGIN: origin
 							if len(X.state.bridges) > 0 {AIRLOCK_TARGET: "local"}
+
 							// An answer's bytes go to the blob plane, served by imgproxy
 							// (services/airlock/blobs.ts).
 							if X.capabilities.blobs {BLOB_URL: "/img/insecure/plain/s3://mecha-objects/"}
@@ -1755,7 +1795,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// it rather than hand a handler a guessable one.
 							for k in X._secrets {
 								"\(k)": [
-									if list.Contains(X._simulatedSecrets, k) {"${\(k):-simulator}"},
+									if X._simulatedSecrets[k] != _|_ {"${\(k):-simulator}"},
 									"${\(k):?\(k) is required: an effect declares it}",
 								][0]
 							}
@@ -1764,7 +1804,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					srcs: globs: list.Concat([[X.meta.airlock], [for e in X._effects {e.handler}]])
 					dockerfile: {
-						from: (_from & {in: X.meta.images.airlock}).out
+						from:    (_from & {in: X.meta.images.airlock}).out
 						workdir: "/app/airlock"
 						// Delivered where the manifest names them: AIRLOCK_DIR's
 						// effects.json, and effects/<name>.js beside it.
@@ -1781,7 +1821,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					compose: {
 						environment: AIRLOCK_DIR: "/airlock"
 						networks: ["airlock", "airlock-wake"]
-						restart: "on-failure"
+						restart:  "on-failure"
 						develop: watch: list.Concat([
 							[{action: "sync+restart", path: "../\(X.meta.airlock)", target: "/airlock/effects.json"}],
 							[for e in X._effects {action: "sync+restart", path: "../\(e.handler)", target: "/airlock/effects/\(e.name).js"}],
@@ -1793,6 +1833,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// made once and the ledger's `entered` counts every attempt.
 				"airlock-mesh": bayt.healthcheck.tcp & X._image & {
 					let names = [for e in X._effects {e.name}]
+
 					// Longest first, so a bridge's action URL is replaced before its
 					// container's bare one.
 					let _peerUrls = list.Sort(list.Concat([
@@ -1811,7 +1852,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					"process-compose": activate: "mise x --"
 					expose: {
 						http: {port: 3500, env: "DAPR_HTTP_PORT"}
-						api: {port: 50001, env: "DAPR_GRPC_PORT"}
+						api:  {port: 50001, env: "DAPR_GRPC_PORT"}
 						grpc: {port: 50002, env: "DAPR_INTERNAL_GRPC_PORT"}
 					}
 					entrypoint: {
@@ -1878,7 +1919,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					compose: {
 						networks: ["airlock", "airlock-out", "airlock-egress"]
-						restart: "on-failure"
+						restart:  "on-failure"
 						develop: watch: [for e in X._effects {action: "sync+restart", path: "../\(e.endpoint)", target: "/dapr/airlock/\(e.name).yaml"}]
 					}
 				}
@@ -1915,7 +1956,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							}
 						}
 						dockerfile: {
-							from: (_from & {in: X.meta.images.airlock}).out
+							from:    (_from & {in: X.meta.images.airlock}).out
 							workdir: "/app/airlock"
 							preamble: [
 								"COPY <<'TSBIFROST' /app/airlock/tsbifrost.ts\n\(_tsbifrostTs)\nTSBIFROST",
@@ -1933,7 +1974,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								AI_LOCAL_SDCPP_HOST:  "${AI_LOCAL_SDCPP_HOST:-http://host.docker.internal:8000}"
 							}
 							networks: ["airlock-out", "default", "airlock-egress"]
-							restart: "on-failure"
+							restart:  "on-failure"
 						}
 					}
 				}
@@ -2004,7 +2045,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						...
 					}
 					healthcheck: {
-						test: ["CMD", "echo", "\(X.meta.app) is healthy"]
+						test:     ["CMD", "echo", "\(X.meta.app) is healthy"]
 						interval: "5s"
 						timeout:  "2s"
 						retries:  3
@@ -2018,8 +2059,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// routes each into the matching rulemap and owns this vocabulary; it is
 		// restated here because mecha is consumed on its own and cannot import
 		// a sibling plugin.
-		verbs: [Name=string]: {verb: "setup" | "generate" | "build" | "launch" | "release", cmds: [...string], note: string}
-		checks: [Name=string]: {verb: "lint" | "test" | "integrate", cmds: [...string], note: string}
+		verbs: [string]~(Name,_):  {verb: "setup" | "generate" | "build" | "launch" | "release", cmds: [...string], note: string}
+		checks: [string]~(Name,_): {verb: "lint" | "test" | "integrate", cmds: [...string], note: string}
 		if len([for c in X.state.computations if c.steps != _|_ {c.steps}]) > 0 {
 			let _sources = base64.Encode(null, json.Marshal([for c in X.state.computations if c.steps != _|_ {c.steps}]))
 			verbs: computeSteps: {
@@ -2089,12 +2130,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			// pljs and pg_ivm for the docker appliance's own PostgreSQL.
 			extensions: #From
 			mesh:       #From
-			conduit:  #From
-			auth:     #From
-			ticker:   #From
-			clock:    #From
-			compute:  #From
-			airlock:  #From
+			conduit:    #From
+			auth:       #From
+			ticker:     #From
+			clock:      #From
+			compute:    #From
+			airlock:    #From
 		}
 		// The program's effects.json (services/airlock/README.md), relative to
 		// the app dir.
@@ -2118,7 +2159,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		}
 		// The conduit pipeline, an envsubst template, relative to the app dir.
 		conduitTemplate: *"docker/conduit-pipeline.yaml" | string
-		statics: [...#Static]
+		statics:         [...#Static]
 		// Where the door's tree is built as a release rather than copied file
 		// by file: a target of the consumer's whose image holds the statics,
 		// each at its URL's path under `tree`, and the inline scripts their
@@ -2147,9 +2188,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 // here rather than at `up`. A target joins the networks its compose block
 // names, under its bare name on each, and the default network only when it
 // names none.
-#Runtime: R={
-	project: string
-	cluster: #Cluster
+#Runtime: {
+	let R = self
+	project:  string
+	cluster!: _
 
 	_live: {for n, t in R.cluster.surface.targets if t != null {(n): t}}
 	_afterCondition: {
@@ -2158,7 +2200,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		service_completed_successfully: "completed"
 	}
 	// What a target waits on; a target that waits on nothing has no field.
-	_waits: W={
+	_waits: {
+		let W = self
 		t: _
 		out: {
 			if W.t.compose != _|_ if W.t.compose.depends_on != _|_ {for k, v in W.t.compose.depends_on {(k): v}}
@@ -2167,21 +2210,24 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			}
 		}
 	}
-	_networks: N={
-		name: string
-		t:    _
+	_networks: {
+		let N = self
+		name:     string
+		t:        _
 		_bridges: [for b in R.cluster.state.bridges if b.container == N.name if b.simulator != _|_ {b}]
-		_base: [if N.t.compose.networks != _|_ {N.t.compose.networks}, if len(_bridges) > 0 {[]}, ["default"]][0]
-		out: [for nw, _ in {for n in list.Concat([_base, [if len(_bridges) > 0 {"airlock-out"}], [for b in _bridges {"bridge-\(b.name)-egress"}]]) {(n): true}} {nw}]
+		_base:    [if N.t.compose.networks != _|_ {N.t.compose.networks}, if len(_bridges) > 0 {[]}, ["default"]][0]
+		out:      [for nw, _ in {for n in list.Concat([_base, [if len(_bridges) > 0 {"airlock-out"}], [for b in _bridges {"bridge-\(b.name)-egress"}]]) {(n): true}} {nw}]
 	}
 	// A bridge's container runs here only as its simulator.
-	_bridged: {for b in R.cluster.state.bridges {(b.container): true}}
+	_bridged:    {for b in R.cluster.state.bridges {(b.container): true}}
 	_simulators: {for b in R.cluster.state.bridges if b.simulator != _|_ {(b.container): b.simulator}}
 	_local: {for n, t in R._live if R._bridged[n] == _|_ {(n): t}
-		for n, sim in R._simulators {(n): {
-			for f, v in R._live[n] if sim[f] == _|_ {(f): v}
-			for f, v in sim {(f): v}
-		}}
+		for n, sim in R._simulators {
+			(n): {
+				for f, v in R._live[n] if sim[f] == _|_ {(f): v}
+				for f, v in sim {(f): v}
+			}
+		}
 	}
 	targets: {
 		// Every bridge's container is declared and built, run here or not: a
@@ -2198,6 +2244,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				}
 			}
 		}
+
 		// A bridge the docker appliance deploys runs there only in its appliance
 		// form, whichever effect calls it.
 		for b in R.cluster.state.bridges if list.Contains(b.targets, "docker") if b.appliance == _|_ {
@@ -2206,11 +2253,13 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for b in R.cluster.state.bridges if b.appliance != _|_ if list.Contains(#AppliancePorts, b.appliance.port) {
 			("\(b.container)-appliance"): error("bridge \(b.name)'s appliance port is one the docker appliance's own services hold (#AppliancePorts): name another")
 		}
+
 		// Cloudflare runs the image `wrangler deploy` builds from the container's
 		// Dockerfile, so a container that only pulls one has nothing to ship.
 		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare") if R._live[b.container].dockerfile.from == null {
 			("\(b.container)-appliance"): error("bridge \(b.name) names cloudflare but its container \(b.container) builds no image from a Dockerfile: Cloudflare Containers ships what the publish builds")
 		}
+
 		// Bridges share a container on its one port; on cloudflare a container
 		// is one bridge's, since each bridge is a class with a container of its
 		// own, and two would build two containers from one image.
@@ -2222,11 +2271,13 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for o in R.cluster.state.bridges if o.container == b.container if o.name != b.name {
 			(b.container): error("bridges \(b.name) and \(o.name) both name container \(b.container), which cloudflare runs as one bridge's container")
 		}
+
 		// Cloudflare runs the image's ENTRYPOINT and CMD: a command only the
 		// compose service would run is not what ships.
 		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare") if R._live[b.container].compose != _|_ if R._live[b.container].compose.command != _|_ || R._live[b.container].compose.entrypoint != _|_ {
 			("\(b.container)-appliance"): error("bridge \(b.name) names cloudflare but its container \(b.container) sets compose.command or compose.entrypoint, which only compose runs: state the process in dockerfile.entrypoint or dockerfile.cmd")
 		}
+
 		// The real container, built and never started here: the docker appliance
 		// copies from it and the cloudflare publish ships it. The local stack
 		// runs only a bridge's simulator. It keeps its own build's dependencies
@@ -2246,13 +2297,17 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			}
 		}
 		for n, t in R._local {
+			let restartOnFailure = [if t.compose != _|_ if t.compose.restart != _|_ {t.compose.restart == "on-failure"}, false][0]
 			(n): {
-				for f, v in t if f != "compose" && f != "deps" && f != "entrypoint" {(f): v}
-				if t.compose != _|_ if t.compose.restart != _|_ if t.compose.restart == "on-failure" {
-					"process-compose": availability: {
-						restart:         "on_failure"
-						backoff_seconds: 1
-						max_restarts:    15
+				for f, v in t if f != "compose" && f != "deps" && f != "entrypoint" && (!restartOnFailure || f != "process-compose") {(f): v}
+				if restartOnFailure {
+					"process-compose": {
+						if t["process-compose"] != _|_ {for pf, pv in t["process-compose"] {(pf): pv}}
+						availability: {
+							restart:         "on_failure"
+							backoff_seconds: 1
+							max_restarts:    15
+						}
 					}
 				}
 
@@ -2273,7 +2328,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				compose: {
 					for f, v in t.compose if f != "depends_on" && f != "networks" {(f): v}
 					depends_on: {for k, v in (R._waits & {"t": t}).out {("\(R.project)-\(k)"): v}}
-					networks: {for nw in (R._networks & {name: n, "t": t}).out {(nw): aliases: [n]}}
+					networks:   {for nw in (R._networks & {name: n, "t": t}).out {(nw): aliases: [n]}}
 				}
 			}
 		}

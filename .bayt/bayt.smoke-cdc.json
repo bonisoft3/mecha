@@ -3,6 +3,11 @@
   "compose": {
     "up": false,
     "manual": true,
+    "environment": {
+      "CRUD_URL": "http://crud:3000"
+    },
+    "ports": [],
+    "volumes": [],
     "depends_on": {
       "libraries_mecha-conduit": {
         "condition": "service_healthy"
@@ -13,12 +18,7 @@
       "libraries_mecha-transform": {
         "condition": "service_started"
       }
-    },
-    "environment": {
-      "CRUD_URL": "http://crud:3000"
-    },
-    "ports": [],
-    "volumes": []
+    }
   },
   "dockerfile": {
     "preamble": [],

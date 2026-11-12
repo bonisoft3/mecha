@@ -4,6 +4,10 @@
     "up": false,
     "manual": false,
     "environment": {},
+    "ports": [
+      "5115"
+    ],
+    "volumes": [],
     "depends_on": {
       "libraries_mecha-redpanda": {
         "condition": "service_healthy"
@@ -15,10 +19,6 @@
         "condition": "service_started"
       }
     },
-    "ports": [
-      "5115"
-    ],
-    "volumes": [],
     "networks": {
       "default": {
         "aliases": [

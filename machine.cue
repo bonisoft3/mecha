@@ -25,7 +25,7 @@ package cluster
 	// reach the machine. A state does not take the same event: XState would
 	// fall back to the machine's transition when the state's guard refuses,
 	// and one event names one transition here.
-	on?: [string]: #XStateTransitions
+	on?: [string]:    #XStateTransitions
 	states: [string]: #XStateState
 }
 
@@ -33,8 +33,8 @@ package cluster
 	type?:        "final" | "parallel"
 	initial?:     string
 	description?: string
-	tags?: [...string]
-	meta?: {...}
+	tags?:        [...string]
+	meta?:        {...}
 	on?: [string]: #XStateTransitions
 	always?: #XStateTransitions
 	invoke?: #XStateInvoke | [...#XStateInvoke]
@@ -42,9 +42,9 @@ package cluster
 })
 
 #XStateInvoke: close({
-	id?:    string
-	src:    string
-	input?: {...}
+	id?:      string
+	src:      string
+	input?:   {...}
 	onDone?:  #XStateTransitions
 	onError?: #XStateTransitions
 })
@@ -61,13 +61,14 @@ package cluster
 
 // A value's shape, checked at every step: what XState's `types` states for
 // context, input and events, as data the database and the browser both check.
-#Shape: S={
+#Shape: {
+	let S = self
 	type: "string" | "integer" | "boolean" | "array" | "object"
 	if S.type == "string" {
 		close({
 			type:      "string"
 			maxLength: int & >=0 & <=65536
-			values?: [...string]
+			values?:   [...string]
 		})
 	}
 	if S.type == "integer" {
@@ -101,6 +102,7 @@ package cluster
 // step's time and draw, and the event's payload fields. The event's kind and
 // tier are every rule's.
 #Reads: [...("actor" | "now" | "entropy" | =~"^payload\\.[a-z_][a-z0-9_]*$")]
+
 // What a database guard names its refusal.
 #Reason: =~"^[a-z][a-z0-9_]{0,63}$"
 
@@ -126,11 +128,11 @@ package cluster
 	// implemented there is a list of relational effects run with the step.
 	// A database guard may instead list checks, tried in order, the first not
 	// true refusing the event with its own reason.
-	guards: [string]: *close({reads: #Reads}) | close({rules?: string, reads?: #Reads, sql: string, reason: #Reason}) | close({rules?: string, reads?: #Reads, checks: [_, ...] & [...close({sql: string, reason: #Reason})]})
+	guards: [string]:  *close({reads: #Reads}) | close({rules?: string, reads?: #Reads, sql: string, reason: #Reason}) | close({rules?: string, reads?: #Reads, checks: [_, ...] & [...close({sql: string, reason: #Reason})]})
 	actions: [string]: close({reads: #Reads, writes: [...string]}) | [...{...}]
 	version: int & >0
 	fuel:    *10000 | (int & >0 & <=1000000)
 	entropy: *0 | (int & >=0 & <=1024)
-	locks?: [...{...}]
-	ports?: {...}
+	locks?:  [...{...}]
+	ports?:  {...}
 }

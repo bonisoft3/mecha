@@ -201,8 +201,8 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
-      "do": "buf lint proto",
       "name": "builtin",
+      "do": "buf lint proto",
       "shell": "exec",
       "stop": false
     }

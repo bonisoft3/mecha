@@ -153,6 +153,13 @@ services:
     profiles:
     - database
     scale: 1
+  migrate:
+    extends:
+      file: ./compose.migrate.yaml
+      service: libraries_mecha-migrate
+    profiles:
+    - migrate
+    scale: 1
   crud:
     extends:
       file: ./compose.crud.yaml
@@ -243,11 +250,4 @@ services:
       service: libraries_mecha-launch
     profiles:
     - launch
-    scale: 1
-  migrate:
-    extends:
-      file: ./compose.migrate.yaml
-      service: libraries_mecha-migrate
-    profiles:
-    - migrate
     scale: 1

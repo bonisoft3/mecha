@@ -10,8 +10,8 @@
       {
         "url": "https://registry.npmjs.org/@electric-sql/pglite-icu-full/-/pglite-icu-full-0.0.2.tgz",
         "dest": "/src/",
-        "sha256": "683455259b053abbc8e31bfea7e2957c44aba4bb5d56c22d5f4e91d5d2680626",
-        "unpack": true
+        "unpack": true,
+        "sha256": "683455259b053abbc8e31bfea7e2957c44aba4bb5d56c22d5f4e91d5d2680626"
       }
     ],
     "mounts": [],
@@ -127,11 +127,11 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
+      "name": "builtin",
       "shell": "sh",
       "dockerfile": {
         "do": "mkdir -p /tmp/icu icu && tar -xzf /src/package/dist/icu.76.tgz -C /tmp/icu icudt76l/res_index.res icudt76l/keyTypeData.res icudt76l/timezoneTypes.res icudt76l/coll/ucadata.icu icudt76l/coll/root.res && tar -C /tmp/icu --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - icudt76l | gzip -n > icu/icu-root.tgz"
       },
-      "name": "builtin",
       "stop": false
     }
   ],

@@ -143,8 +143,8 @@
         "libraries/mecha/.bayt/compose.auth.yaml",
         "libraries/mecha/.bayt/compose.auth-image.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
       ]
     },
     "outs": {
@@ -175,8 +175,8 @@
         "libraries/mecha/.bayt/compose.auth.yaml",
         "libraries/mecha/.bayt/compose.auth-image.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
       ]
     },
     "srcs": {
@@ -233,8 +233,8 @@
         "libraries/mecha/.bayt/compose.auth.yaml",
         "libraries/mecha/.bayt/compose.auth-image.yaml",
         "libraries/mecha/.bayt/compose.database.yaml",
-        "libraries/mecha/.bayt/compose.database-image.yaml",
-        "libraries/mecha/.bayt/compose.migrate.yaml"
+        "libraries/mecha/.bayt/compose.migrate.yaml",
+        "libraries/mecha/.bayt/compose.database-image.yaml"
       ]
     }
   },
@@ -260,8 +260,8 @@
     "libraries/mecha/.bayt/compose.auth.yaml",
     "libraries/mecha/.bayt/compose.auth-image.yaml",
     "libraries/mecha/.bayt/compose.database.yaml",
-    "libraries/mecha/.bayt/compose.database-image.yaml",
-    "libraries/mecha/.bayt/compose.migrate.yaml"
+    "libraries/mecha/.bayt/compose.migrate.yaml",
+    "libraries/mecha/.bayt/compose.database-image.yaml"
   ],
   "chainedDeps": [
     {

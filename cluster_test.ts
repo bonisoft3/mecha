@@ -133,6 +133,7 @@ Deno.test("compute configuration carries only declared completion RPCs and refus
     const refused = await exported({ computations: [{ ...computation, onComplete }] }, field);
     assert.equal(refused.ok, false, onComplete);
     assert.match(refused.stderr, /onComplete: invalid value/);
+    assert.equal((await exported({ computations: [{ ...computation, onComplete }] }, "state.computations")).ok, false, onComplete);
   }
 });
 

@@ -403,6 +403,7 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
+      "name": "deno-cache",
       "dockerfile": {
         "do": "sh -c 'd=\"${DENO_DIR:-/root/.cache/deno}\"; s=/deno-store; k=\"$(sha256sum deno.lock */deno.lock */*/deno.lock deno.json */deno.json */*/deno.json package.json */package.json 2>/dev/null | sha256sum | cut -d'\\'' '\\'' -f1)\"; mkdir -p \"$d\" \"$s\"; for sub in remote npm jsr; do if [ -d \"$s/$k/$sub\" ]; then mkdir -p \"$d/$sub\" && cp -a \"$s/$k/$sub\"/. \"$d/$sub\"/ 2>/dev/null || true; fi; done; (deno cache main.ts cage.ts job.ts step-worker.ts) || exit; t=\"$s/.tmp.$$\"; rm -rf \"$t\"; mkdir -p \"$t\"; for sub in remote npm jsr; do if [ -d \"$d/$sub\" ]; then mkdir -p \"$t/$sub\" && cp -a \"$d/$sub\"/. \"$t/$sub\"/ 2>/dev/null || true; fi; done; rm -rf \"$s/$k\" && mv \"$t\" \"$s/$k\" 2>/dev/null || rm -rf \"$t\"; find \"$s\" -mindepth 1 -maxdepth 1 ! -name \"$k\" -exec rm -rf {} + 2>/dev/null || true'",
         "mounts": [
@@ -415,7 +416,6 @@
         ],
         "shell": "sh"
       },
-      "name": "deno-cache",
       "shell": "exec",
       "stop": false
     },
@@ -474,6 +474,7 @@
         "defaultGlobs": null,
         "defaultExclude": null
       },
+      "name": "duckdb",
       "dockerfile": {
         "do": "sh -c 'd=\"${DUCKDB_EXTENSIONS_DIR:-/app/extensions}\"; s=/duckdb-store; mkdir -p \"$d\" \"$s\"; cp -a \"$s\"/. \"$d\"/ 2>/dev/null || true; (deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts) || exit; cd \"$d\" && find . -type f | while IFS= read -r f; do rel=\"${f#./}\"; dst=\"$s/$rel\"; [ -e \"$dst\" ] && continue; mkdir -p \"$(dirname \"$dst\")\"; tmp=\"$dst.tmp.$$\"; cp -p \"$rel\" \"$tmp\" 2>/dev/null && mv -f \"$tmp\" \"$dst\" 2>/dev/null || rm -f \"$tmp\"; done'",
         "mounts": [
@@ -486,7 +487,6 @@
         ],
         "shell": "sh"
       },
-      "name": "duckdb",
       "shell": "exec",
       "stop": false
     }

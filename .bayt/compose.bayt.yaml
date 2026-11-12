@@ -46,6 +46,8 @@ include:
   required: false
 - path: ./compose.database.yaml
   required: false
+- path: ./compose.migrate.yaml
+  required: false
 - path: ./compose.crud.yaml
   required: false
 - path: ./compose.auth.yaml
@@ -71,6 +73,4 @@ include:
 - path: ./compose.clock.yaml
   required: false
 - path: ./compose.launch.yaml
-  required: false
-- path: ./compose.migrate.yaml
   required: false

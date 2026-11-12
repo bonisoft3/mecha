@@ -1509,6 +1509,7 @@ pgTest(
       releaseStage.resolve();
 
       await until(async () =>
+        tempTablesAfterClose >= 0 &&
         (await db.query("SELECT requested = completed AND completed = 1 AS done FROM compute.batch WHERE name = 'ratings'")).rows[0].done
       );
       assertEquals(stageCalls, 1);

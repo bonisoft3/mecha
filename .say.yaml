@@ -37,7 +37,7 @@ say:
         cmds:
           - do: "pnpm --dir packages/mecha-browser run dev"
       dapr:
-        platform: local
+        platform: host
         priority: -1
         stop: true
         cmds:

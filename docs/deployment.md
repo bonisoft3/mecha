@@ -15,7 +15,7 @@ substrate, and with it what the change path can promise.
 | tier | the cluster runs as | in this tree |
 |---|---|---|
 | Browser | PGlite and a JavaScript stand-in per service, in one tab | Built: [`packages/mecha-browser`](browser.md). The change path is best-effort |
-| CLI | Native processes, no containers | `sayt launch@local` runs `dapr run -f dapr.yaml` against a PostgreSQL on `:5432` and a Redis on `:6379`. That file names `services/crud/postgrest-local.conf` and `services/cdc/conduit.yaml`, and neither is in the tree, so its crud and conduit do not start. The Caddyfile and the pipeline it runs address compose names (`crud:3000`, `redis:6379`) |
+| CLI | Native processes, no containers | `sayt launch@host` runs `dapr run -f dapr.yaml` against a PostgreSQL on `:5432` and a Redis on `:6379`. That file names `services/crud/postgrest-local.conf` and `services/cdc/conduit.yaml`, and neither is in the tree, so its crud and conduit do not start. The Caddyfile and the pipeline it runs address compose names (`crud:3000`, `redis:6379`) |
 | Single machine | Docker Compose: [`cluster.cue`](../cluster.cue), lowered by bayt | Built. Every consumer develops here |
 | k8s | A Deployment per service, scaling from zero, with a CronJob as the clock | Not built |
 | Cloud | Managed services that scale to zero | Runs on GCP through a consumer's overlay ([as built](#clouds-as-built)); mecha emits no cloud artifact of its own |

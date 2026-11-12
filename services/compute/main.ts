@@ -757,7 +757,7 @@ export function serve(
   port: number,
 ) {
   return Deno.serve({
-    hostname: ["local", "host"].includes(Deno.env.get("SAYT_PLATFORM") ?? "") ? "127.0.0.1" : "0.0.0.0",
+    hostname: Deno.env.get("SAYT_PLATFORM") === "host" ? "127.0.0.1" : "0.0.0.0",
     port,
     onError(error) {
       console.error(error);

@@ -22,7 +22,7 @@ task buf:generate              # proto → JSON Schema
 
 task launch                    # generate, then the whole stack with --watch
 sayt launch                    # `compose up launch --wait`: the stack, detached once healthy
-sayt launch@local              # native, no Docker (docs/deployment.md#the-tiers)
+sayt launch@host              # native, no Docker (docs/deployment.md#the-tiers)
 
 task test                      # cue vet + buf lint + the ticker's, pgroll's and the cluster's Deno tests; no Docker
 sayt integrate                 # the migrate step against volumes of every age, and what each plane puts in the database

@@ -190,7 +190,7 @@ Deno.test("tsbifrost normalizes chat completions and image generations across pr
   // 4. Local target via SAYT_PLATFORM + AI_LOCAL_OLLAMA_HOST + json_schema forwarding
   const localGateway = createTsBifrost({
     env: {
-      SAYT_PLATFORM: "local",
+      SAYT_PLATFORM: "host",
       AI_LOCAL_OLLAMA_HOST: "http://host.docker.internal:11434",
       AI_LOCAL_SDCPP_HOST: "http://host.docker.internal:8000",
     },
@@ -225,6 +225,13 @@ Deno.test("tsbifrost normalizes chat completions and image generations across pr
   const daprBody = await daprBindingRes.json();
   assert.equal(daprBody.model, "imagen-4.0-ultra-generate-001");
   assert.equal(daprBody.data[0].b64_json, "R0lGODlhAQABAAAAACw=");
+});
+
+Deno.test("sayt's host and compose platforms run on the local and docker targets", async () => {
+  for (const [platform, target] of [["host", "local"], ["compose", "docker"]]) {
+    const res = await createTsBifrost({ env: { SAYT_PLATFORM: platform } })(new Request("http://tsbifrost:8090/healthz"));
+    assert.deepEqual(await res.json(), { status: "ok", target });
+  }
 });
 
 Deno.test("Cloudflare heavy images use Phoenix parameters and decode its binary stream", async () => {

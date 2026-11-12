@@ -96,10 +96,13 @@ export function mergeExtra(base: Extra, extra: Extra): Extra {
   return out;
 }
 
+// The sayt platforms whose name differs from the AI target they run on.
+const SAYT_PLATFORM_TARGETS: Record<string, AiTarget> = { host: "local", compose: "docker" };
+
 export function createTsBifrost(opts: TsBifrostOptions = {}): (req: Request) => Promise<Response> {
   const env = opts.env ?? (typeof Deno !== "undefined" ? Deno.env.toObject() : {});
   const rawPlatform = opts.target ?? env.AI_TARGET ?? env.SAYT_PLATFORM ?? "docker";
-  const rawTarget = (rawPlatform === "host" ? "local" : rawPlatform) as AiTarget;
+  const rawTarget = (SAYT_PLATFORM_TARGETS[rawPlatform] ?? rawPlatform) as AiTarget;
   const target: AiTarget = rawTarget in DEFAULT_AI_MODELS ? rawTarget : "docker";
   const config: AiCapabilitiesConfig = opts.config ?? (env.AI_MODELS ? JSON.parse(env.AI_MODELS) : {});
   const fetcher = opts.fetcher ?? fetch;
@@ -661,5 +664,5 @@ async function dispatchImage(
 if (import.meta.main) {
   const port = Number(Deno.env.get("TSBIFROST_PORT") ?? TSBIFROST_PORT);
   const plat = Deno.env.get("SAYT_PLATFORM");
-  Deno.serve({ hostname: plat === "local" || plat === "host" ? "127.0.0.1" : "0.0.0.0", port }, createTsBifrost());
+  Deno.serve({ hostname: plat === "host" ? "127.0.0.1" : "0.0.0.0", port }, createTsBifrost());
 }

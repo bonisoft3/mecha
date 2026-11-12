@@ -49,7 +49,7 @@ if (import.meta.main) {
   // A release with no origin yet runs every effect that does not link back.
   const origin = Deno.env.get("ORIGIN");
   const runner = await start({ connectionString, db, effects, handlers, transport: meshTransport(mesh), secrets, headers, blobs, origin, target }, key);
-  Deno.serve({ hostname: ["local", "host"].includes(Deno.env.get("SAYT_PLATFORM") ?? "") ? "127.0.0.1" : "0.0.0.0", port: Number(Deno.env.get("PORT") || 9997), onListen() {} }, (req) => new Response(null, { status: new URL(req.url).pathname === "/healthz" ? 204 : 404 }));
+  Deno.serve({ hostname: Deno.env.get("SAYT_PLATFORM") === "host" ? "127.0.0.1" : "0.0.0.0", port: Number(Deno.env.get("PORT") || 9997), onListen() {} }, (req) => new Response(null, { status: new URL(req.url).pathname === "/healthz" ? 204 : 404 }));
   await runner.promise;
   // On a signal Graphile returns its jobs and ends the process itself; a
   // worker that stops otherwise has nothing left to run.

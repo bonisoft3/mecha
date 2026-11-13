@@ -237,7 +237,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 // language, each only where its declaration names it, as pronto endows an
 // omnishell module with Intl. services/compute/language.ts holds the same
 // list (ENDOWABLE), and cluster_test.ts holds them to each other.
-#CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio", "Pdf"]
+#CageEndowments: ["Crypto", "TextEncoder", "TextDecoder", "URL", "URLSearchParams", "Cheerio", "Pdf", "Xlsx"]
 #CageEndowment:  or(#CageEndowments)
 
 // An environment variable's name: where a secret reaches the airlock.

@@ -117,11 +117,15 @@ list a reviewer reads. The derivations in use:
 | public | `GENERATED ALWAYS AS ('public:') STORED`, a scope every subject holds | yes |
 | the identity table | `'user:' \|\| id`, so a person reads their own row | exempt; its self-select policy alone admits a reader |
 | shared per object | the owner's, carried for the shape predicate and for a child's trigger | exempt: the floor is restrictive, so it ANDs, and a sharee holds no scope the owner's row carries; the share policies govern CRUD |
+| a membership list | `'user:' \|\| member`, so a subject reads the groups they are in | yes; no policy admits a write, so the service alone writes one |
 | service only | none | exempt; no policy admits `app_user` or `anon`, and `service` reads by `BYPASSRLS` |
 
 The share policies are the one place a row reaches a subject whose scopes do not
 include it, so their bugs are breaches rather than outages, and they are the
-policies most in need of tests of their own.
+policies most in need of tests of their own. A row shared with a group is
+among them: its shape is keyed on a column naming the group, and
+`mecha.shape_reach` admits it to whoever reads a membership row for that
+value, which the list's own floor makes its members.
 
 The sync path reads the same scopes. A shape token's `where` is
 `scope_id IN (<the subject's scopes>)`, built from `subject_scopes` by

@@ -3,11 +3,12 @@
 // after realm.ts has locked the realm down.
 
 import { Pdf } from "../airlock/pdf.ts";
+import { Xlsx } from "../airlock/xlsx.ts";
 import { Cheerio } from "./cheerio.ts";
 import { Crypto } from "./crypto.ts";
 import { endowable, ENDOWABLE } from "./language.ts";
 
-const VALUES: Record<string, unknown> = { Crypto, TextEncoder, TextDecoder, URL, URLSearchParams, Cheerio, Pdf };
+const VALUES: Record<string, unknown> = { Crypto, TextEncoder, TextDecoder, URL, URLSearchParams, Cheerio, Pdf, Xlsx };
 
 /** A compartment's globals for a module declaring `names`: each declared
  * endowment, hardened, and a throwing getter for every endowable name it did

@@ -990,16 +990,19 @@ pgTest("bootstrap initializes under source fences then schedules retained invali
   }
 });
 
+// What tells the engine whose rules are XState's one argument from those before it.
+const ONE_ARGUMENT = "context: state, event: handed";
 for (const legacy of [
-  { guard: "read committed", hash: "dd7b02748a65c9c6fe5e56e4220b85e317e2fe56347eac3c725a2ea775079b53" },
-  { guard: "serializable", hash: "57057ef2d61cf7f7615f134b81822ae725a9b688ccd3bb7c6978ce3b568844e3" },
-]) pgTest(`the known ${legacy.guard} compiler upgrade preserves retained work`, async () => {
+  { name: "read committed", guard: "read committed", file: "hybrid-batch-machine.sql", engine: "hybrid fuel exhausted", hash: "dd7b02748a65c9c6fe5e56e4220b85e317e2fe56347eac3c725a2ea775079b53" },
+  { name: "serializable", guard: "serializable", file: "hybrid-batch-machine.sql", engine: "hybrid fuel exhausted", hash: "57057ef2d61cf7f7615f134b81822ae725a9b688ccd3bb7c6978ce3b568844e3" },
+  { name: "positional rules", guard: "serializable", file: "positional-rules-batch-machine.sql", engine: "mecha fuel exhausted", hash: "a71706b579d917082c9384ff022500ee5b36994bffd336895834f414df2f7154" },
+]) pgTest(`the known ${legacy.name} compiler upgrade preserves retained work`, async () => {
   await using server = await postgres();
   const db = new pg.Pool({ connectionString: server.url });
   const isolation = (await Deno.readTextFile(new URL("./testdata/read-committed-machine.sql", import.meta.url))).trimEnd();
   const source = await Deno.readTextFile(new URL("./batch-machine.sql", import.meta.url));
-  const previous = await Deno.readTextFile(new URL("./testdata/hybrid-batch-machine.sql", import.meta.url));
-  const legacySql = legacy.guard === "read committed"
+  const previous = await Deno.readTextFile(new URL(`./testdata/${legacy.file}`, import.meta.url));
+  const legacySql = legacy.name === "read committed"
     ? previous.replace(/^-- Durable publication[\s\S]*?^\$serial\$;/m, isolation)
     : previous;
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(legacySql)));
@@ -1033,7 +1036,8 @@ for (const legacy of [
     })], options), Error, "initializer failed after repair");
     assertEquals((await db.query("SELECT fingerprint FROM compute.machine_version")).rows[0].fingerprint, fingerprint);
     assert((await db.query("SELECT prosrc FROM pg_proc WHERE oid='hybrid_compute_batch.serial()'::regprocedure")).rows[0].prosrc.includes(`<> '${legacy.guard}'`));
-    assert((await db.query("SELECT prosrc FROM pg_proc WHERE oid='hybrid_compute_batch.engine(jsonb)'::regprocedure")).rows[0].prosrc.includes("hybrid fuel exhausted"));
+    const before = (await db.query("SELECT prosrc FROM pg_proc WHERE oid='hybrid_compute_batch.engine(jsonb)'::regprocedure")).rows[0].prosrc;
+    assert(before.includes(legacy.engine) && !before.includes(ONE_ARGUMENT));
     assertEquals(await snapshot(db), retained);
     const published: unknown[] = [];
     batches = await openBatches(server.url, [spec({
@@ -1044,6 +1048,7 @@ for (const legacy of [
     await until(async () => (await db.query("SELECT requested = completed AS done FROM compute.batch")).rows[0].done);
     assertEquals(published, [7]);
     assert((await db.query("SELECT prosrc FROM pg_proc WHERE oid='hybrid_compute_batch.engine(jsonb)'::regprocedure")).rows[0].prosrc.includes("mecha fuel exhausted"));
+    assert((await db.query("SELECT prosrc FROM pg_proc WHERE oid='hybrid_compute_batch.engine(jsonb)'::regprocedure")).rows[0].prosrc.includes(ONE_ARGUMENT));
     assertEquals((await db.query("SELECT fingerprint FROM compute.machine_version")).rows[0].fingerprint,
       Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source))), (byte) => byte.toString(16).padStart(2, "0")).join(""));
     await batches.close();

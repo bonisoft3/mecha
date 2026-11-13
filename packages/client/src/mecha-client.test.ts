@@ -598,6 +598,141 @@ describe("a shared table's family", () => {
   })
 })
 
+// A group is a grantee as a user is: the subject's memberships are the list,
+// and each opens the row its group belongs to, or, where a row names its
+// group by another column, one shape per member over that column.
+describe("a table shared with a group", () => {
+  const text = { type: "text" }
+  const tables = [
+    { id: "group_member", table: "group_member", access: { scope: "group" as const, group: "group_id", user: "user_id" } },
+    { id: "company", table: "company", access: { scope: "private" as const, owner: "owner_id", groups: [
+      { group: "everyone", of: "id", role: "reader" as const, members: { table: "group_member", group: "group_id", user: "user_id" } },
+      { group: "admins", of: "id", role: "writer" as const, members: { table: "group_member", group: "group_id", user: "user_id" } },
+    ] } },
+    { id: "expense_type", table: "expense_type", access: { scope: "folder" as const, parent: "company", on: "company_id" } },
+    { id: "advance", table: "advance", access: { scope: "private" as const, owner: "owner_id", groups: [
+      { group: "finance", of: "company_id", role: "reader" as const, column: "group_finance", members: { table: "group_member", group: "group_id", user: "user_id" } },
+    ] } },
+    { id: "advance_item", table: "advance_item", access: { scope: "folder" as const, parent: "advance", on: "advance_id" } },
+  ]
+  const settle = () => new Promise((r) => setTimeout(r, 60))
+
+  it("opens a row per membership, once however many groups reach it, and one shape per column group", async () => {
+    const electric = fakeElectric({
+      schema: { group_member: { id: text, group_id: text, user_id: text }, company: { id: text }, expense_type: { id: text }, advance: { id: text }, advance_item: { id: text } },
+      rows: { group_member: [
+        { id: "m1", group_id: "c1:everyone", user_id: "u1" },
+        { id: "m2", group_id: "c1:admins", user_id: "u1" },
+        { id: "m3", group_id: "c1:finance", user_id: "u1" },
+        { id: "m4", group_id: "c2:auditors", user_id: "u1" },
+      ] },
+    })
+    const asked: string[] = []
+    const client = createMechaClient({
+      tables,
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+      subject: () => "u1",
+      fetcher: (async (input: any, init: any) => {
+        if (String(input).endsWith("/auth/shape")) {
+          const body = JSON.parse(init.body)
+          asked.push(body.key ? `${body.table} ${body.key.column}=${body.key.value}` : body.table)
+        }
+        return electric.fetcher(input, init)
+      }) as any,
+    })
+    // A member's shapes sync once something reads the member.
+    const readers = ["company", "expense_type", "advance", "advance_item"].map((id) => client.collections[id].subscribeChanges(() => {}))
+    await settle()
+    // Two groups reach company c1, which is one row's worth of shapes.
+    expect(asked.filter((a) => a === "company id=c1")).toEqual(["company id=c1"])
+    expect(asked).toContain("expense_type company_id=c1")
+    // A group the row names by a column is one shape over it, compositions too.
+    expect(asked).toContain("advance group_finance=c1:finance")
+    expect(asked).toContain("advance_item group_finance=c1:finance")
+    // A membership of a group no table is shared with opens nothing.
+    expect(asked.some((a) => a.includes("c2"))).toBe(false)
+    expect(asked.some((a) => a.startsWith("advance id="))).toBe(false)
+    for (const reader of readers) reader.unsubscribe()
+  })
+
+  // A grant row names a user or a group. The subject's own grants are one
+  // list; each group they are in is another, a shape over the grant table
+  // keyed by the group, and a row of either opens the row it names.
+  it("follows the grant table's rows for each group the subject is in, while they are in it", async () => {
+    const shared = { via: "memo_grant", on: "memo_id", user: "user_id", group: "group_id", members: { table: "group_member", group: "group_id", user: "user_id" } }
+    const granted = [
+      { id: "group_member", table: "group_member", access: { scope: "group" as const, group: "group_id", user: "user_id" } },
+      { id: "memo", table: "memo", access: { scope: "private" as const, owner: "owner_id", shared } },
+      { id: "memo_grant", table: "memo_grant", access: { scope: "folder" as const, parent: "memo", on: "memo_id" } },
+    ]
+    const electric = fakeElectric({
+      schema: { group_member: { id: text, group_id: text, user_id: text }, memo: { id: text }, memo_grant: { id: text, memo_id: text, user_id: text, group_id: text } },
+      rows: {
+        group_member: [{ id: "m1", group_id: "approvers@acme", user_id: "u1" }],
+        memo_grant: [{ id: "g1", memo_id: "a1", user_id: null, group_id: "approvers@acme" }],
+      },
+    })
+    const asked: string[] = []
+    const client = createMechaClient({
+      tables: granted,
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+      subject: () => "u1",
+      fetcher: (async (input: any, init: any) => {
+        if (String(input).endsWith("/auth/shape")) {
+          const body = JSON.parse(init.body)
+          asked.push(body.key ? `${body.table} ${body.key.column}=${body.key.value}` : body.table)
+        }
+        return electric.fetcher(input, init)
+      }) as any,
+    })
+    const readers = ["memo", "memo_grant"].map((id) => client.collections[id].subscribeChanges(() => {}))
+    await settle()
+    // A shape's token is asked once; each time it opens, its stream starts over.
+    const streams = () => electric.requests.filter((u) => u.searchParams.get("table") === "memo_grant" && u.searchParams.get("offset") === "-1").length
+    expect(asked).toContain("memo_grant user_id=u1")
+    expect(asked).toContain("memo_grant group_id=approvers@acme")
+    expect(asked).toContain("memo id=a1")
+    expect(asked).toContain("memo_grant memo_id=a1")
+    // A second membership of the same group is the same list.
+    const before = streams()
+    electric.push("group_member", { operation: "insert", value: { id: "m2", group_id: "approvers@acme", user_id: "u1" }, txid: 2 })
+    await settle()
+    expect(streams()).toBe(before)
+    // Leaving the group closes its list, so joining again opens one.
+    electric.push("group_member",
+      { operation: "delete", value: { id: "m1", group_id: "approvers@acme", user_id: "u1" }, txid: 3 },
+      { operation: "delete", value: { id: "m2", group_id: "approvers@acme", user_id: "u1" }, txid: 3 })
+    await settle()
+    electric.push("group_member", { operation: "insert", value: { id: "m3", group_id: "approvers@acme", user_id: "u1" }, txid: 4 })
+    await settle()
+    expect(streams()).toBe(before + 1)
+    for (const reader of readers) reader.unsubscribe()
+  })
+
+  it("refuses a grant table whose groups' membership list is not a table of this client", () => {
+    expect(() => createMechaClient({
+      tables: [{ id: "memo", table: "memo", access: { scope: "private" as const, owner: "owner_id", shared: { via: "memo_grant", on: "memo_id", user: "user_id", group: "group_id", members: { table: "group_member", group: "group_id", user: "user_id" } } } },
+        { id: "memo_grant", table: "memo_grant", access: { scope: "folder" as const, parent: "memo", on: "memo_id" } }],
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+    })).toThrow(/grants name groups of group_member, which is not a table of this client/)
+  })
+
+  it("refuses a group whose membership list is not a table of this client", () => {
+    expect(() => createMechaClient({
+      tables: tables.filter((t) => t.id !== "group_member"),
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+    })).toThrow(/not a table of this client/)
+  })
+})
+
 // A collection on demand loads each live query's rows as a subset of its one
 // shape. What reaches Electric, and what the collection does with the answer,
 // is driven here through a real ShapeStream against fakeElectric.

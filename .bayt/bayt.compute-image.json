@@ -58,7 +58,8 @@
       {
         "from": null,
         "srcs": [
-          "services/airlock/pdf.ts"
+          "services/airlock/pdf.ts",
+          "services/airlock/xlsx.ts"
         ],
         "dst": "/airlock/",
         "link": true,
@@ -177,6 +178,7 @@
       "services/compute/install.ts",
       "services/compute/events.yaml",
       "services/airlock/pdf.ts",
+      "services/airlock/xlsx.ts",
       "services/durex/work.ts",
       "services/durex/work.sql",
       "services/durex/migrate.ts",
@@ -310,6 +312,7 @@
           "services/compute/install.ts",
           "services/compute/events.yaml",
           "services/airlock/pdf.ts",
+          "services/airlock/xlsx.ts",
           "services/durex/work.ts",
           "services/durex/work.sql",
           "services/durex/migrate.ts",
@@ -390,6 +393,7 @@
           "services/compute/install.ts",
           "services/compute/events.yaml",
           "services/airlock/pdf.ts",
+          "services/airlock/xlsx.ts",
           "services/durex/work.ts",
           "services/durex/work.sql",
           "services/durex/migrate.ts",
@@ -461,6 +465,7 @@
           "services/compute/install.ts",
           "services/compute/events.yaml",
           "services/airlock/pdf.ts",
+          "services/airlock/xlsx.ts",
           "services/durex/work.ts",
           "services/durex/work.sql",
           "services/durex/migrate.ts",

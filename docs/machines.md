@@ -136,6 +136,17 @@ The persisted `hybrid_<name>` PostgreSQL schemas and their protocol markers are
 storage identifiers retained for existing databases. They do not name another
 kind of machine; changing them requires a database migration.
 
+A rule is XState's one argument, `({context, event}) => …`: the event holds
+its `type`, its payload's fields, and what the runtime states on it, each
+under the underscore SCXML reserves for the platform: who sent it (`_origin`,
+absent on an event the machine's own tier sends), the step's `_time` and its
+`_entropy`. A rule's contract lists the fields it reads, and the runtime hands
+it no other. A guard answers a boolean, as XState's does, and anything else is
+a program error; a transition names one guard or several, tried in order, and
+the first to answer false refuses the event with the `reason` its declaration
+in `setup` states. The initializer is XState's context factory, `({input})`,
+and the runtime adds the step's `_time` to the input.
+
 A transition's `requires: {sql, reason}` checks its relational precondition
 under the declared locks. A false or null result records a refusal without
 applying its reduction or actions. Actions run after a successful pure

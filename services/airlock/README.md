@@ -119,8 +119,8 @@ export async function reconcile(input, sink) {
   (`../compute/language.ts`'s `ENDOWABLE`), as an omnishell module declares `Intl`: a
   handler that signs declares `Crypto`, WebCrypto's operations that are deterministic by
   their specification (`../compute/crypto.ts`), and `TextEncoder`; one that writes a PDF
-  declares `Pdf` ([pdf.ts](pdf.ts)). An endowment it uses without declaring throws where
-  it is used.
+  declares `Pdf` ([pdf.ts](pdf.ts)), and one that writes a spreadsheet `Xlsx`
+  ([xlsx.ts](xlsx.ts)). An endowment it uses without declaring throws where it is used.
 - A throw, or no answer within 60 seconds, is no answer.
 - Bytes are answered as `{"$blob": {base64, type}}` anywhere in the answer (`blobs.ts`),
   or as `{"$blob": {bytes, type}}` with a `Uint8Array` a handler made itself, since the

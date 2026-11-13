@@ -49,10 +49,12 @@ package cluster
 	onError?: #XStateTransitions
 })
 
+// A transition's guard is one name or several, tried in order: XState's
+// `and([...])`, which its JSON form has no spelling for.
 #XStateTransition: close({
 	reenter?:     bool
 	target?:      string
-	guard?:       string
+	guard?:       string | [_, ...string]
 	actions?:     string | [...string]
 	description?: string
 })
@@ -98,10 +100,11 @@ package cluster
 	}
 }
 
-// What a rule may read beside the context it steps: who sent the event, the
-// step's time and draw, and the event's payload fields. The event's kind and
-// tier are every rule's.
-#Reads: [...("actor" | "now" | "entropy" | =~"^payload\\.[a-z_][a-z0-9_]*$")]
+// The event fields a rule reads beside the context it steps: the payload's
+// own, and the three the runtime states on the event, each under the
+// underscore SCXML reserves for the platform: who sent it (`_origin`), the
+// step's `_time` and its `_entropy`. The event's type is every rule's.
+#Reads: [...=~"^[a-z_][a-z0-9_]*$"]
 
 // What a database guard names its refusal.
 #Reason: =~"^[a-z][a-z0-9_]{0,63}$"
@@ -120,15 +123,16 @@ package cluster
 	}
 	initialize?: string
 	// Each guard and action the configuration names. One the rules implement
-	// states its contract: the step's inputs it reads beside the context, and,
+	// states its contract: the event fields it reads beside the context, and,
 	// for an action, the context fields it writes. The runtime hands it only
-	// those inputs and refuses a write outside them. A guard implemented in
-	// the database is a precondition over the declared locks, naming the
-	// rules' guard it runs with, if any, and that guard's reads; an action
-	// implemented there is a list of relational effects run with the step.
-	// A database guard may instead list checks, tried in order, the first not
-	// true refusing the event with its own reason.
-	guards: [string]:  *close({reads: #Reads}) | close({rules?: string, reads?: #Reads, sql: string, reason: #Reason}) | close({rules?: string, reads?: #Reads, checks: [_, ...] & [...close({sql: string, reason: #Reason})]})
+	// those inputs and refuses a write outside them. A guard answers a
+	// boolean, as XState's does, and its `reason` is what a refusal by it is
+	// called. A guard implemented in the database is a precondition over the
+	// declared locks, naming the rules' guards it runs after, if any; an
+	// action implemented there is a list of relational effects run with the
+	// step. A database guard may instead list checks, tried in order, the
+	// first not true refusing the event with its own reason.
+	guards: [string]:  *close({reads: #Reads, reason?: #Reason}) | close({rules?: [...string], sql: string, reason: #Reason}) | close({rules?: [...string], checks: [_, ...] & [...close({sql: string, reason: #Reason})]})
 	actions: [string]: close({reads: #Reads, writes: [...string]}) | [...{...}]
 	version: int & >0
 	fuel:    *10000 | (int & >0 & <=1000000)

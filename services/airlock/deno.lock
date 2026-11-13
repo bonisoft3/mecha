@@ -3,6 +3,7 @@
   "specifiers": {
     "jsr:@std/assert@1.0.8": "1.0.8",
     "jsr:@std/internal@^1.0.5": "1.0.14",
+    "npm:@e965/xlsx@0.20.3": "0.20.3",
     "npm:@endo/module-source@1.4.0": "1.4.0",
     "npm:@pdfme/pdf-lib@6.2.8": "6.2.8",
     "npm:@types/node@*": "22.20.5",
@@ -99,6 +100,10 @@
         "@babel/helper-string-parser",
         "@babel/helper-validator-identifier"
       ]
+    },
+    "@e965/xlsx@0.20.3": {
+      "integrity": "sha512-703RN/3OdsRD5mtse2HBX7Um7xwaP9tlswEG6svOtjqokXoX7rJdQj7DyabD2I+xk22RgaIIU+R6BHgkpZGB/w==",
+      "bin": true
     },
     "@endo/cache-map@1.1.0": {
       "integrity": "sha512-owFGshs/97PDw9oguZqU/px8Lv1d0KjAUtDUiPwKHNXRVUE/jyettEbRoTbNJR1OaI8biMn6bHr9kVJsOh6dXw=="
@@ -703,6 +708,7 @@
   "workspace": {
     "dependencies": [
       "jsr:@std/assert@1.0.8",
+      "npm:@e965/xlsx@0.20.3",
       "npm:@endo/module-source@1.4.0",
       "npm:@pdfme/pdf-lib@6.2.8",
       "npm:graphile-worker@0.18.0",

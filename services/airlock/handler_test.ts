@@ -334,6 +334,25 @@ Deno.test("a handler reads its input's blobs by content key, sends a PDF of them
   }
 });
 
+Deno.test("a handler sends a workbook of its input's rows as base64", async () => {
+  const path = await file(`export async function issue(input, sink) {
+    const xlsx = Xlsx.fromRows({ sheets: [{ name: "Report", rows: input.rows }] });
+    const r = await sink.fetch("/send", { method: "POST", body: { attachments: [{ content: xlsx, type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }] } });
+    return { done: r.body };
+  }`);
+  try {
+    const handler = await Handler.admit("mail", path, { ...idempotent, endowments: ["Xlsx"] });
+    const { transport, calls } = recording(() => ({ status: 200, body: "sent" }));
+    assertEquals(await handler.call("issue", { rows: [["id", "total"], [1, 12.5]] }, "mail:1", transport, {}, {}), { done: "sent" });
+    const sent = JSON.parse(encodedBody(undefined, calls[0].init.body));
+    const xlsx = Uint8Array.from(atob(sent.attachments[0].content), (c) => c.charCodeAt(0));
+    // A workbook is a zip archive.
+    assertEquals([...xlsx.subarray(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
 Deno.test("a handler sets its own headers on a sink call, never one the host or HTTP sets", async () => {
   const asking = (headers: unknown) => file(`export const issue = async (input, sink) => {
     await sink.fetch("/v1/images/generations", { method: "POST", body: {}, headers: ${JSON.stringify(headers)} });

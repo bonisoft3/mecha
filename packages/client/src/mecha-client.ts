@@ -64,11 +64,39 @@ export interface MechaTable {
   sync?: "eager" | "on-demand"
 }
 
+/**
+ * A group a row is shared with: the group `<row[of]>:<group>`, read against
+ * the membership list `members`. `column` is the column a shape over the
+ * table is keyed on, present where `of` is not the row's key.
+ */
+export type GroupGrant = {
+  group: string
+  of: string
+  role: "reader" | "writer"
+  column?: string
+  members: { table: string; group: string; user: string }
+}
+
+/**
+ * A table's grant table: each row names the row it grants (`on`) and its
+ * grantee, a user (`user`) or, where the table has the column, a group
+ * (`group`), the group id as the membership list `members` writes it.
+ */
+export type GrantTable = {
+  via: string
+  on: string
+  user: string
+  role?: string
+  group?: string
+  members?: { table: string; group: string; user: string }
+}
+
 export type TableAccess =
-  | { scope: "private"; owner: string; shared?: { via: string; on: string; user: string } }
+  | { scope: "private"; owner: string; shared?: GrantTable; groups?: GroupGrant[] }
   | { scope: "folder"; parent: string; on: string }
   | { scope: "public" }
   | { scope: "internal" }
+  | { scope: "group"; group: string; user: string }
 
 export interface MechaClientConfig {
   tables: MechaTable[]
@@ -675,28 +703,47 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   // the one shape its scope names.
   const byTable = new Map<string, Table>()
   for (const t of byId.values()) byTable.set(t.table, t)
-  type Family = { owner: Table; shared: { via: string; on: string; user: string }; via: Table; members: Table[] }
+  type Family = {
+    owner: Table
+    shared?: GrantTable
+    via?: Table
+    // The membership list a grant table's group column is read against.
+    list?: Table
+    groups: (GroupGrant & { list: Table })[]
+    members: Table[]
+  }
   const families: Family[] = []
   for (const owner of byId.values()) {
     const a = owner.access
-    if (a?.scope !== "private" || a.shared === undefined) continue
-    const via = byTable.get(a.shared.via)
-    if (via === undefined) {
+    if (a?.scope !== "private" || (a.shared === undefined && a.groups === undefined)) continue
+    const via = a.shared === undefined ? undefined : byTable.get(a.shared.via)
+    if (a.shared !== undefined && via === undefined) {
       throw new Error(`${owner.table} is shared via ${a.shared.via}, which is not a table of this client`)
     }
+    const list = a.shared?.group === undefined ? undefined : byTable.get(a.shared.members?.table ?? "")
+    if (a.shared?.group !== undefined && list === undefined) {
+      throw new Error(`${owner.table}'s grants name groups of ${a.shared.members?.table}, which is not a table of this client`)
+    }
+    const groups = (a.groups ?? []).map((g) => {
+      const list = byTable.get(g.members.table)
+      if (list === undefined) {
+        throw new Error(`${owner.table} is shared with the group ${g.group} of ${g.members.table}, which is not a table of this client`)
+      }
+      return { ...g, list }
+    })
     // A grant opens one shape per row on the shared table and each
     // composition under it, the edges the emit declares; the grant table
     // takes the grant list, and a per-row shape only if it is a composition.
     const children = [...byId.values()].filter((c) => c.access?.scope === "folder" && c.access.parent === owner.table)
     const members = [owner, ...children]
     // A grant reaches a member through a shape, and a local tier has none.
-    for (const m of [...members, via]) {
+    for (const m of [...members, ...(via ? [via] : []), ...(list ? [list] : []), ...groups.map((g) => g.list)]) {
       if (m.durability !== "crud") throw new Error(`${m.table} is reached by a grant and cannot be a ${m.durability} tier`)
     }
-    families.push({ owner, shared: a.shared, via, members })
+    families.push({ owner, shared: a.shared, via, list, groups, members })
   }
   const reachable = new Set<string>()
-  for (const f of families) for (const m of [...f.members, f.via]) reachable.add(m.id)
+  for (const f of families) for (const m of [...f.members, ...(f.via ? [f.via] : [])]) reachable.add(m.id)
   for (const id of reachable) {
     const t = byId.get(id)!
     if (t.sync === "on-demand") throw new Error(`${t.table} is reached by a grant, a union of per-row shapes; it cannot sync on demand`)
@@ -721,76 +768,170 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     } as any)
   }
 
-  // A family's reach opens with its first reader and closes with its last:
-  // the grant list is a shape over the grant table addressed to the subject,
-  // and each grant opens one shape per member, keyed by the row it names.
-  // Whichever member a screen reads first opens the whole family, so a
-  // composition read alone still arrives.
-  for (const { owner, shared, via, members } of families) {
+  // A family's reach opens with its first reader and closes with its last.
+  // Three lists say which shapes it is made of: the grant list, a shape over
+  // the grant table addressed to the subject, each grant opening one shape
+  // per member keyed by the row it names; and, per group the family is shared
+  // with, the subject's memberships, each opening the row its group belongs
+  // to or, where the row names its group by a column, one shape per member
+  // over that column. Where the grant table names groups, each membership
+  // also opens a second grant list, the shape over the grant table addressed
+  // to that group. Whichever member a screen reads first opens the whole
+  // family, so a composition read alone still arrives.
+  for (const { owner, shared, via, list, groups, members } of families) {
     let readers = 0
     let grants: Collection<any, any, any> | null = null
-    let grantSub: { unsubscribe(): void } | null = null
-    const opened = new Map<string, Collection<any, any, any>[]>()
+    let subs: { unsubscribe(): void }[] = []
+    // What is open, by the column and value its shapes are keyed on, counted
+    // because a row two grants reach is one set of shapes.
+    const opened = new Map<string, { count: number; shapes: Collection<any, any, any>[] }>()
 
     // The column a member's per-row shape is keyed on: the shared table by
     // its key, its grant table by the column naming the row, a composition
     // by its edge to the parent.
     const keyed = (m: Table) => (m === owner ? m.key : (m.access as { on: string }).on)
-    const open = (row: string) => {
-      if (opened.has(row)) return
+    type Target = { column?: string; value: string }
+    const at = (t: Target) => `${t.column ?? ""}=${t.value}`
+    const open = (t: Target) => {
+      const held = opened.get(at(t))
+      if (held) {
+        held.count++
+        return
+      }
       const shapes = members.map((m) => {
-        const c = shape(m, { column: keyed(m), value: row })
+        const c = shape(m, { column: t.column ?? keyed(m), value: t.value })
         ;(collections[m.id].utils as any).add(c)
         return c
       })
-      opened.set(row, shapes)
+      opened.set(at(t), { count: 1, shapes })
     }
-    const close = (row: string) => {
-      const shapes = opened.get(row)
-      if (!shapes) return
-      opened.delete(row)
+    const close = (t: Target, all = false) => {
+      const held = opened.get(at(t))
+      if (!held) return
+      if (!all && --held.count > 0) return
+      opened.delete(at(t))
       members.forEach((m, i) => {
-        ;(collections[m.id].utils as any).drop(shapes[i])
-        void shapes[i].cleanup()
+        ;(collections[m.id].utils as any).drop(held.shapes[i])
+        void held.shapes[i].cleanup()
       })
     }
-    // Opened by the first reader that has a subject.
-    const acquire = () => {
-      checkFamilyAccount(config.subject?.() != null)
-      readers++
-      if (grants !== null) return
-      const me = config.subject?.()
-      if (!me) return
-      grants = shape(via, { column: shared.user, value: me })
-      ;(collections[via.id].utils as any).add(grants)
-      // A grant names one row; re-pointed, it is a close and an open.
-      grantSub = grants.subscribeChanges(
+    // One list's rows, each opening the target it names: a row re-pointed is
+    // a close and an open, and one that names none opens nothing.
+    const follow = (list: Collection<any, any, any>, key: string, target: (row: any) => Target | undefined) => {
+      const held = new Map<string, Target>()
+      const sub = list.subscribeChanges(
         (changes) => {
           for (const c of changes) {
-            const row = String(c.value[shared.on])
-            const was = c.previousValue === undefined ? undefined : String(c.previousValue[shared.on])
-            if (c.type === "delete") close(row)
-            else {
-              if (was !== undefined && was !== row) close(was)
-              open(row)
+            const id = String(c.value[key])
+            const was = held.get(id)
+            const now = c.type === "delete" ? undefined : target(c.value)
+            if (was !== undefined && now !== undefined && at(was) === at(now)) continue
+            if (was !== undefined) {
+              held.delete(id)
+              close(was)
+            }
+            if (now !== undefined) {
+              held.set(id, now)
+              open(now)
             }
           }
         },
         { includeInitialState: true },
       )
+      // `end` is for a list that goes while the family stays open: what its
+      // rows opened closes with it.
+      return {
+        unsubscribe: () => sub.unsubscribe(),
+        end: () => {
+          sub.unsubscribe()
+          for (const t of held.values()) close(t)
+          held.clear()
+        },
+      }
+    }
+    // A group's grant list: the shape over the grant table keyed by the group,
+    // counted because two membership rows may name one group, and followed as
+    // the subject's own grant list is.
+    const lists = new Map<string, { count: number; rows: Collection<any, any, any>; sub: { end(): void } }>()
+    const enter = (group: string) => {
+      const held = lists.get(group)
+      if (held) {
+        held.count++
+        return
+      }
+      const rows = shape(via!, { column: shared!.group!, value: group })
+      ;(collections[via!.id].utils as any).add(rows)
+      lists.set(group, { count: 1, rows, sub: follow(rows, via!.key, (row) => ({ value: String(row[shared!.on]) })) })
+    }
+    const leave = (group: string, all = false) => {
+      const held = lists.get(group)
+      if (!held) return
+      if (!all && --held.count > 0) return
+      lists.delete(group)
+      held.sub.end()
+      ;(collections[via!.id].utils as any).drop(held.rows)
+      void held.rows.cleanup()
+    }
+    // Opened by the first reader that has a subject.
+    const acquire = () => {
+      checkFamilyAccount(config.subject?.() != null)
+      readers++
+      if (subs.length > 0) return
+      const me = config.subject?.()
+      if (!me) return
+      if (shared !== undefined && via !== undefined) {
+        grants = shape(via, { column: shared.user, value: me })
+        ;(collections[via.id].utils as any).add(grants)
+        subs.push(follow(grants, via.key, (row) => ({ value: String(row[shared.on]) })))
+      }
+      if (shared?.group !== undefined && shared.members !== undefined && list !== undefined) {
+        const column = shared.members.group
+        const joined = new Map<string, string>()
+        subs.push(collections[list.id].subscribeChanges(
+          (changes) => {
+            for (const c of changes) {
+              const id = String(c.value[list.key])
+              const was = joined.get(id)
+              const now = c.type === "delete" ? undefined : String(c.value[column])
+              if (was === now) continue
+              if (was !== undefined) {
+                joined.delete(id)
+                leave(was)
+              }
+              if (now !== undefined) {
+                joined.set(id, now)
+                enter(now)
+              }
+            }
+          },
+          { includeInitialState: true },
+        ))
+      }
+      for (const g of groups) {
+        const suffix = `:${g.group}`
+        subs.push(follow(collections[g.list.id], g.list.key, (row) => {
+          const group = String(row[g.members.group])
+          if (!group.endsWith(suffix)) return undefined
+          return g.column === undefined ? { value: group.slice(0, -suffix.length) } : { column: g.column, value: group }
+        }))
+      }
     }
     const release = () => {
       if (--readers > 0) return
-      grantSub?.unsubscribe()
-      grantSub = null
-      for (const row of [...opened.keys()]) close(row)
-      if (grants) {
+      for (const sub of subs) sub.unsubscribe()
+      subs = []
+      for (const group of [...lists.keys()]) leave(group, true)
+      for (const held of [...opened.keys()]) {
+        const cut = held.indexOf("=")
+        close({ column: held.slice(0, cut) || undefined, value: held.slice(cut + 1) }, true)
+      }
+      if (grants && via) {
         ;(collections[via.id].utils as any).drop(grants)
         void grants.cleanup()
         grants = null
       }
     }
-    for (const m of new Set([...members, via])) {
+    for (const m of new Set([...members, ...(via ? [via] : [])])) {
       const c = collections[m.id] as any
       const inner = c.config.sync.sync
       c.config.sync.sync = (params: any) => {

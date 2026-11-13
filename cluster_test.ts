@@ -951,6 +951,12 @@ Deno.test("the tenancy floor for other schemas renames its functions and lists, 
   assert.equal(got.ok, true, got.stderr);
   const sql: string = got.value.out;
   assert.ok(sql.startsWith("CREATE SCHEMA IF NOT EXISTS floor;\nGRANT USAGE ON SCHEMA floor TO PUBLIC;\n"));
+  // The lists' schema is made before anything is granted on it or made in it.
+  const made = sql.indexOf("CREATE SCHEMA IF NOT EXISTS lists;");
+  assert.ok(made >= 0, "the lists' schema is made");
+  assert.ok(made < sql.indexOf("GRANT USAGE ON SCHEMA lists TO PUBLIC;"));
+  assert.ok(made < sql.indexOf("lists.rls_exempt"));
+  assert.equal(/SCHEMA (IF NOT EXISTS )?mecha\b/.test(sql), false);
   assert.match(sql, /CREATE OR REPLACE FUNCTION floor\.app_pre_request\(/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS lists\.rls_exempt/);
   assert.match(sql, /current_setting\('mecha\.traceparent', true\)/);

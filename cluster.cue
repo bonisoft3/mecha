@@ -118,7 +118,7 @@ _airlockLock:       _ @embed(file="services/airlock/deno.lock", type=text)
 	// again as a list. The drops of the audit's legacy objects name where an older file made them,
 	// `public`, whatever the cluster's schemas are now.
 	let kept = strings.Replace(strings.Replace(strings.Replace(strings.Replace(_rlsSql, "'mecha.traceparent'", "'@@mecha-guc@@'", -1), "LOCAL mecha.traceparent", "LOCAL @@mecha-guc@@", -1), "DROP VIEW IF EXISTS public.rls_unprotected;", "DROP VIEW IF EXISTS @@legacy@@.rls_unprotected;", -1), "DROP FUNCTION IF EXISTS public.rls_audit();", "DROP FUNCTION IF EXISTS @@legacy@@.rls_audit();", -1)
-	let marked = strings.Replace(strings.Replace(strings.Replace(strings.Replace(kept, "public.", "@@floor@@.", -1), "search_path = pg_catalog, public", "search_path = pg_catalog, @@floor@@", -1), "mecha.", "@@mecha@@.", -1), "SCHEMA mecha", "SCHEMA @@mecha@@", -1)
+	let marked = strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(kept, "public.", "@@floor@@.", -1), "search_path = pg_catalog, public", "search_path = pg_catalog, @@floor@@", -1), "mecha.", "@@mecha@@.", -1), "SCHEMA mecha", "SCHEMA @@mecha@@", -1), "SCHEMA IF NOT EXISTS mecha;", "SCHEMA IF NOT EXISTS @@mecha@@;", -1)
 	let listed = strings.Replace(strings.Replace(strings.Replace(marked, "@@floor@@", T.schema.floor, -1), "@@mecha@@", T.schema.mecha, -1), "@@legacy@@", "public", -1)
 
 	// A floor in a schema of its own, neither the app's (which the caller makes) nor

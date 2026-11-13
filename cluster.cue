@@ -101,8 +101,11 @@ _airlockLock:       _ @embed(file="services/airlock/deno.lock", type=text)
 // A schema's name, as a cluster states one (meta.schema). Every reader writes it
 // unquoted, so it is a plain lowercase identifier, no keyword PostgreSQL
 // reserves (its SQL Key Words appendix, "reserved"), and no pg_ name, which the
-// server keeps for its own schemas.
-#SchemaName: =~"^[a-z_][a-z0-9_]{0,62}$" & !~"^pg_" & !~"^(all|analyse|analyze|and|any|array|as|asc|asymmetric|authorization|binary|both|case|cast|check|collate|collation|column|concurrently|constraint|create|cross|current_catalog|current_date|current_role|current_schema|current_time|current_timestamp|current_user|default|deferrable|desc|distinct|do|else|end|except|false|fetch|for|foreign|freeze|from|full|grant|group|having|ilike|in|initially|inner|intersect|into|is|isnull|join|lateral|leading|left|like|limit|localtime|localtimestamp|natural|not|notnull|null|offset|on|only|or|order|outer|overlaps|placing|primary|references|returning|right|select|session_user|similar|some|symmetric|system_user|table|tablesample|then|to|trailing|true|union|unique|user|using|variadic|verbose|when|where|window|with)$"
+// server keeps for its own schemas, nor one mecha keeps private to a service
+// (auth's mecha_auth, the airlock's, durex's, compute's, the job queue's,
+// pgroll's): an app's tables, floor or lists there would meet that service's
+// sealing and grants.
+#SchemaName: =~"^[a-z_][a-z0-9_]{0,62}$" & !~"^pg_" & !~"^(mecha_auth|airlock|durex|compute|graphile_worker|pgroll)$" & !~"^(all|analyse|analyze|and|any|array|as|asc|asymmetric|authorization|binary|both|case|cast|check|collate|collation|column|concurrently|constraint|create|cross|current_catalog|current_date|current_role|current_schema|current_time|current_timestamp|current_user|default|deferrable|desc|distinct|do|else|end|except|false|fetch|for|foreign|freeze|from|full|grant|group|having|ilike|in|initially|inner|intersect|into|is|isnull|join|lateral|leading|left|like|limit|localtime|localtimestamp|natural|not|notnull|null|offset|on|only|or|order|outer|overlaps|placing|primary|references|returning|right|select|session_user|similar|some|symmetric|system_user|table|tablesample|then|to|trailing|true|union|unique|user|using|variadic|verbose|when|where|window|with)$"
 
 // The tenancy floor (services/database/rls/rls.sql) for a cluster's schemas: the
 // file spells the floor's functions in `public` and its lists in `mecha`, and

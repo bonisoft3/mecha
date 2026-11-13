@@ -935,7 +935,7 @@ Deno.test("a cluster's own schemas reach PostgREST, auth and the runner", async 
 });
 
 Deno.test("a schema name that is no plain identifier, or lists the served schema reaches, is refused", async () => {
-  for (const schema of [{ app: "Shop" }, { app: "select" }, { floor: "pg_floor" }, { mecha: "public" }, { app: "shop", mecha: "shop" }]) {
+  for (const schema of [{ app: "Shop" }, { app: "select" }, { floor: "pg_floor" }, { mecha: "public" }, { app: "shop", mecha: "shop" }, { app: "mecha_auth" }, { floor: "mecha_auth" }, { mecha: "mecha_auth" }, { app: "airlock" }, { app: "pgroll" }]) {
     assert.equal((await schemaTargets(schema)).ok, false, JSON.stringify(schema));
   }
 });
@@ -965,4 +965,33 @@ Deno.test("the tenancy floor for other schemas renames its functions and lists, 
   assert.equal(/\bmecha\.(?!traceparent\b)[a-z_]+/.test(sql), false);
   assert.ok(got.value.names.floor.includes("app_pre_request"));
   assert.ok(got.value.names.mecha.includes("rls_exempt"));
+});
+
+// Every schema the rendered floor grants on or makes an object in is one it
+// made first, or the app's (the caller makes it) or public, for every layout a
+// cluster may state: the floor apart, the floor with the lists, the floor with
+// the app's tables.
+Deno.test("the tenancy floor makes each schema before it grants on or creates in it", async () => {
+  for (const schema of [
+    { app: "shop", floor: "floor", mecha: "lists" },
+    { app: "shop", floor: "lists", mecha: "lists" },
+    { app: "shop", floor: "shop", mecha: "lists" },
+    { app: "shop", floor: "public", mecha: "mecha" },
+    { app: "public", floor: "public", mecha: "mecha" },
+  ]) {
+    const got = await evaluated(`(#Tenancy & {schema: ${JSON.stringify(schema)}}).out`);
+    assert.equal(got.ok, true, got.stderr);
+    // Comments name schemas loosely; only statements count.
+    const sql = (got.value as string).replace(/--[^\n]*/g, "");
+    const made = (s: string) => sql.indexOf(`CREATE SCHEMA IF NOT EXISTS ${s};`);
+    const uses = [
+      ...sql.matchAll(/ON SCHEMA ([a-z_]+)/g),
+      ...sql.matchAll(/CREATE (?:OR REPLACE )?(?:FUNCTION|PROCEDURE|TABLE IF NOT EXISTS|VIEW) ([a-z_]+)\./g),
+    ];
+    for (const use of uses) {
+      const s = use[1];
+      if (s === schema.app || s === "public") continue;
+      assert.ok(made(s) >= 0 && made(s) < use.index!, `${JSON.stringify(schema)}: ${s} used at ${use.index} before it is made`);
+    }
+  }
 });

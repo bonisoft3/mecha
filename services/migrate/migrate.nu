@@ -26,7 +26,7 @@ def main [dir: string, baseline: string] {
 		exit 1
 	}
 	for table in ($env.REQUIRED_TABLES? | default "" | split row "," | where ($it | is-not-empty)) {
-		if (ask "SELECT to_regclass(format('%I.%I', :'schema', :'table')) IS NOT NULL;" -v $"table=($table)" -v $"schema=(schema)") != "t" {
+		if (ask "SELECT to_regclass(format('public.%I', :'table')) IS NOT NULL;" -v $"table=($table)") != "t" {
 			print -e $"migrate: this cluster needs table ($table), which only initdb creates and this volume predates; recreate the volume"
 			exit 1
 		}

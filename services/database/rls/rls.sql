@@ -263,16 +263,21 @@ GRANT SELECT ON mecha.token_role TO PUBLIC;
 -- would otherwise answer before the key does. Where it is not -- a sink a
 -- pipeline writes for a row that may since be gone -- the row is derived
 -- data of nothing and is not stored, so the batch it came in lands. A parent
--- named without a schema is the child's schema's, wherever the database keeps
--- its tables.
+-- is the table its name resolves to on this function's search path, as it
+-- always was; one named without a schema that resolves to none there is the
+-- child's schema's, which is where it is when a cluster keeps its tables
+-- outside `public` (cluster.cue, meta.schema).
 CREATE OR REPLACE FUNCTION mecha.scope_from_parent() RETURNS trigger
   LANGUAGE plpgsql
   SET search_path = pg_catalog, public
   AS $$
 DECLARE
   ty text;
-  parent regclass := CASE WHEN strpos(TG_ARGV[0], '.') > 0 THEN TG_ARGV[0]::regclass
-                          ELSE format('%I.%I', TG_TABLE_SCHEMA, TG_ARGV[0])::regclass END;
+  -- The last cast raises the error a name resolving to nothing always raised.
+  parent regclass := coalesce(
+    to_regclass(TG_ARGV[0]),
+    CASE WHEN strpos(TG_ARGV[0], '.') = 0 THEN to_regclass(format('%I.%I', TG_TABLE_SCHEMA, TG_ARGV[0])) END,
+    TG_ARGV[0]::regclass);
 BEGIN
   SELECT format_type(a.atttypid, a.atttypmod) INTO ty FROM pg_attribute a
     WHERE a.attrelid = parent AND a.attname = TG_ARGV[1] AND NOT a.attisdropped;

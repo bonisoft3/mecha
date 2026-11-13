@@ -14,7 +14,9 @@ set -euo pipefail
 dir=$1
 baseline=$2
 : "${DATABASE_URL:?names the database to migrate}"
-# Comma-separated; empty where the cluster places no step a service needs.
+# Comma-separated; empty where the cluster places no step a service needs. These
+# are the framework's tables, which its initdb steps keep in `public` (the
+# ticker's machine timers name public.schedule) whatever PGROLL_SCHEMA is.
 : "${REQUIRED_TABLES:=}"
 # The schema the app's tables are in, which pgroll reads too; `public` unless the cluster keeps its
 # own (cluster.cue, meta.schema).
@@ -35,7 +37,7 @@ applied() {
 # initdb built. Over an older one the service that reads it would run against
 # nothing, so the volume is refused here instead.
 for table in ${REQUIRED_TABLES//,/ }; do
-	if [ "$(ask -v table="$table" -v schema="$PGROLL_SCHEMA" <<< "SELECT to_regclass(format('%I.%I', :'schema', :'table')) IS NOT NULL;")" != t ]; then
+	if [ "$(ask -v table="$table" <<< "SELECT to_regclass(format('public.%I', :'table')) IS NOT NULL;")" != t ]; then
 		echo "migrate: this cluster needs table $table, which only initdb creates and this volume predates; recreate the volume" >&2
 		exit 1
 	fi

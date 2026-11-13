@@ -89,6 +89,28 @@ pending JSON migrations first, then each SQL file in a transaction on every
 release, retaining the same pgroll baseline and history across restatements. This is native release
 reconciliation, not an exception to the edge tier's immutable script ledger.
 
+## The schemas an app's tables live in
+
+`meta.schema` in [`cluster.cue`](../cluster.cue) names three, each a plain
+lowercase identifier PostgreSQL does not reserve: `app`, the caller's tables
+and the one PostgREST serves; `floor`, the tenancy floor's functions
+(`current_scopes`, `auth_uid`, `rls_protect`, `app_pre_request`); and `mecha`,
+the floor's lists (`rls_exempt`, `shape_key`). The defaults, `public`,
+`public` and `mecha`, change nothing. A database whose `public` the caller may
+not use, a shared managed one say, names its own, and keeps the floor out of
+the served schema (in `mecha`, say) so no request reaches its functions over
+`/rpc`. `mecha` is never `public` nor the app's, where a caller's grants on
+every table would reach the lists.
+
+PostgREST serves `app` and calls the floor's pre-request where it is, with
+the floor on its extra search path; auth reads `MECHA_DB_SCHEMA`,
+`MECHA_FLOOR_SCHEMA` and `MECHA_SCHEMA`; the migrate runner keeps pgroll's
+ledger under `PGROLL_SCHEMA`. Each is stated only where it is not the
+default. The image's `003_rls.sql` spells the defaults, so a caller on other
+schemas places its own step of that name, `#Tenancy`'s `out` for its schemas,
+which takes the image's place; `#Tenancy`'s `names` lists the objects the
+floor makes in each, for a caller that renames its own SQL to match.
+
 ## mecha's own tables, from protobuf
 
 ```

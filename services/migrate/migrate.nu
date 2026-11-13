@@ -9,8 +9,15 @@ def ask --wrapped [sql: string, ...args: string] {
 	$sql | ^psql $env.DATABASE_URL -X -v ON_ERROR_STOP=1 -qtA ...$args | str trim
 }
 
+# The schema the app's tables are in, which pgroll reads too; `public` unless the cluster keeps its
+# own (cluster.cue, meta.schema).
+def schema [] {
+	let s = ($env.PGROLL_SCHEMA? | default "")
+	if ($s | is-empty) { "public" } else { $s }
+}
+
 def applied [name: string] {
-	(ask "SELECT count(*) FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'pgroll' AND done AND name = :'name';" -v $"name=($name)") == "1"
+	(ask "SELECT count(*) FROM pgroll.migrations WHERE schema = :'schema' AND migration_type = 'pgroll' AND done AND name = :'name';" -v $"name=($name)" -v $"schema=(schema)") == "1"
 }
 
 def main [dir: string, baseline: string] {
@@ -19,7 +26,7 @@ def main [dir: string, baseline: string] {
 		exit 1
 	}
 	for table in ($env.REQUIRED_TABLES? | default "" | split row "," | where ($it | is-not-empty)) {
-		if (ask "SELECT to_regclass(format('public.%I', :'table')) IS NOT NULL;" -v $"table=($table)") != "t" {
+		if (ask "SELECT to_regclass(format('%I.%I', :'schema', :'table')) IS NOT NULL;" -v $"table=($table)" -v $"schema=(schema)") != "t" {
 			print -e $"migrate: this cluster needs table ($table), which only initdb creates and this volume predates; recreate the volume"
 			exit 1
 		}
@@ -33,9 +40,9 @@ def main [dir: string, baseline: string] {
 			exit 1
 		}
 	}
-	with-env {PGROLL_PG_URL: $env.DATABASE_URL, LC_ALL: "C"} {
+	with-env {PGROLL_PG_URL: $env.DATABASE_URL, PGROLL_SCHEMA: (schema), LC_ALL: "C"} {
 		^pgroll init
-		if (ask "SELECT count(*) FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'baseline';") == "0" {
+		if (ask "SELECT count(*) FROM pgroll.migrations WHERE schema = :'schema' AND migration_type = 'baseline';" -v $"schema=(schema)") == "0" {
 			let scratch = ($nu.temp-dir | path join $"pgroll-baseline-($nu.pid)-(random int 100000..999999)")
 			mkdir $scratch
 			try {
@@ -46,7 +53,7 @@ def main [dir: string, baseline: string] {
 			}
 			rm -rf $scratch
 		}
-		mut latest = (ask "SELECT coalesce(max(name COLLATE \"C\"), '') FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'pgroll';")
+		mut latest = (ask "SELECT coalesce(max(name COLLATE \"C\"), '') FROM pgroll.migrations WHERE schema = :'schema' AND migration_type = 'pgroll';" -v $"schema=(schema)")
 		let files = (if ($dir | path exists) { glob ($dir | path join "*.json" | str replace -a (char -u 5c) "/") | sort } else { [] })
 		for file in $files {
 			let name = ($file | path parse | get stem)

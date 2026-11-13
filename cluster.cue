@@ -40,6 +40,7 @@ _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 _cdcTrace:      _ @embed(file="services/transform/cdc-trace.yaml", type=text)
 _redisStreams:  _ @embed(file="services/mesh/dapr/components/redis-streams.yaml", type=text)
 _tsbifrostTs:   _ @embed(file="services/airlock/tsbifrost.ts", type=text)
+_rlsSql:        _ @embed(file="services/database/rls/rls.sql", type=text)
 _envSecretStore: """
 	apiVersion: dapr.io/v1alpha1
 	kind: Component
@@ -88,12 +89,56 @@ _airlockLock:       _ @embed(file="services/airlock/deno.lock", type=text)
 #ConduitSlot: {app: string, name: "\(strings.Replace(app, "-", "_", -1))_conduit_slot"}
 
 // The tenancy floor's migration, which ships with the image whatever emitted
-// the tables above it. It need not follow a caller's grants: it grants only to
-// PUBLIC and makes no table in `public`, which is all theirs reach. It must
-// precede the tables whose defaults call auth_uid() and the policies that call
-// rls_protect, so it takes the slot after the extensions, roles and grants a
-// caller opens with.
+// the tables above it, unless the caller places its own step of this name
+// (#Tenancy, rendered for the caller's schemas). It need not follow a caller's
+// grants: it grants only to PUBLIC, and its tables are in mecha's own schema,
+// which no caller's grants ON ALL TABLES reach (meta.schema keeps it apart from
+// the caller's). It must precede the tables whose defaults call auth_uid() and
+// the policies that call rls_protect, so it takes the slot after the
+// extensions, roles and grants a caller opens with.
 #TenancyMigration: "003_rls.sql"
+
+// A schema's name, as a cluster states one (meta.schema). Every reader writes it
+// unquoted, so it is a plain lowercase identifier, no keyword PostgreSQL
+// reserves (its SQL Key Words appendix, "reserved"), and no pg_ name, which the
+// server keeps for its own schemas.
+#SchemaName: =~"^[a-z_][a-z0-9_]{0,62}$" & !~"^pg_" & !~"^(all|analyse|analyze|and|any|array|as|asc|asymmetric|authorization|binary|both|case|cast|check|collate|collation|column|concurrently|constraint|create|cross|current_catalog|current_date|current_role|current_schema|current_time|current_timestamp|current_user|default|deferrable|desc|distinct|do|else|end|except|false|fetch|for|foreign|freeze|from|full|grant|group|having|ilike|in|initially|inner|intersect|into|is|isnull|join|lateral|leading|left|like|limit|localtime|localtimestamp|natural|not|notnull|null|offset|on|only|or|order|outer|overlaps|placing|primary|references|returning|right|select|session_user|similar|some|symmetric|system_user|table|tablesample|then|to|trailing|true|union|unique|user|using|variadic|verbose|when|where|window|with)$"
+
+// The tenancy floor (services/database/rls/rls.sql) for a cluster's schemas: the
+// file spells the floor's functions in `public` and its lists in `mecha`, and
+// each spelling becomes the schema the cluster names for it. The `mecha.`
+// setting the trace marker reads is a setting, not a schema, and keeps its
+// name. With the defaults it is the file itself. A caller that keeps its tables
+// outside `public` places `out` at #TenancyMigration among its own steps, which
+// takes the image's place (_initdb), so the image's floor never runs against
+// its schemas.
+#Tenancy: T={
+	schema: {app: #SchemaName, floor: #SchemaName, mecha: #SchemaName}
+	// Each spelling is set aside before any is renamed, so a floor kept in `mecha` is not renamed
+	// again as a list. The drops of the audit's legacy objects name where an older file made them,
+	// `public`, whatever the cluster's schemas are now.
+	let kept = strings.Replace(strings.Replace(strings.Replace(strings.Replace(_rlsSql, "'mecha.traceparent'", "'@@mecha-guc@@'", -1), "LOCAL mecha.traceparent", "LOCAL @@mecha-guc@@", -1), "DROP VIEW IF EXISTS public.rls_unprotected;", "DROP VIEW IF EXISTS @@legacy@@.rls_unprotected;", -1), "DROP FUNCTION IF EXISTS public.rls_audit();", "DROP FUNCTION IF EXISTS @@legacy@@.rls_audit();", -1)
+	let marked = strings.Replace(strings.Replace(strings.Replace(strings.Replace(kept, "public.", "@@floor@@.", -1), "search_path = pg_catalog, public", "search_path = pg_catalog, @@floor@@", -1), "mecha.", "@@mecha@@.", -1), "SCHEMA mecha", "SCHEMA @@mecha@@", -1)
+	let listed = strings.Replace(strings.Replace(strings.Replace(marked, "@@floor@@", T.schema.floor, -1), "@@mecha@@", T.schema.mecha, -1), "@@legacy@@", "public", -1)
+
+	// A floor in a schema of its own, neither the app's (which the caller makes) nor
+	// the lists' (which the file makes), is made here, before its functions.
+	let own = [
+		if T.schema.floor != "public" && T.schema.floor != T.schema.app && T.schema.floor != T.schema.mecha {
+			"CREATE SCHEMA IF NOT EXISTS \(T.schema.floor);\nGRANT USAGE ON SCHEMA \(T.schema.floor) TO PUBLIC;\n\n"
+		},
+		"",
+	][0]
+	out: own + strings.Replace(listed, "@@mecha-guc@@", "mecha.traceparent", -1)
+	// The names the file gives its objects, by the schema each is spelled in: a
+	// caller that spells the same schemas renames them with these.
+	names: {
+		let floorMade = {for m in regexp.FindAllSubmatch(#"CREATE OR REPLACE (?:FUNCTION|PROCEDURE) public\.([a-z_]+)\("#, _rlsSql, -1) {(m[1]): true}}
+		let mechaMade = {for m in regexp.FindAllSubmatch(#"CREATE (?:OR REPLACE )?(?:FUNCTION|PROCEDURE|TABLE IF NOT EXISTS|VIEW) mecha\.([a-z_]+)\b"#, _rlsSql, -1) {(m[1]): true}}
+		floor: list.SortStrings([for n, _ in floorMade {n}])
+		mecha: list.SortStrings([for n, _ in mechaMade {n}])
+	}
+}
 
 // Where the database image keeps a step that a cluster places in #InitdbDir
 // only when it turns on what the step serves.
@@ -1030,6 +1075,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								// The schedule step is initdb's alone, so a volume older
 								// than the cluster's first schedule lacks its table.
 								if len(X.state.schedules) > 0 {REQUIRED_TABLES: "schedule"}
+								if X.meta.schema.app != "public" {PGROLL_SCHEMA: X.meta.schema.app}
 							}
 							after: {
 								database: "healthy"
@@ -1146,13 +1192,16 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// Not postgres: PostgREST applies a token role's settings (its
 							// statement_timeout among them) only to roles granted to its login.
 							PGRST_DB_URI:       ["postgres://authenticator:\(authenticatorPassword)@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}"]
-							PGRST_DB_SCHEMA:    "public"
+							PGRST_DB_SCHEMA:    X.meta.schema.app
 							PGRST_DB_ANON_ROLE: "anon"
 							// Called once per request, in the request's transaction, after the
 							// role switch: it sets app.scopes, which the tenancy floor reads.
 							// Without it current_scopes() is empty and every floored table is
 							// invisible -- the floor fails closed, so this is not optional.
-							PGRST_DB_PRE_REQUEST:    "public.app_pre_request"
+							PGRST_DB_PRE_REQUEST:    "\(X.meta.schema.floor).app_pre_request"
+							// A function's body PostgREST calls finds the floor's functions
+							// where the cluster keeps them outside the schema it serves.
+							if X.meta.schema.floor != "public" {PGRST_DB_EXTRA_SEARCH_PATH: X.meta.schema.floor}
 							PGRST_SERVER_HOST:       "*"
 							PGRST_SERVER_PORT:       {port: "http", part: "port"}
 							PGRST_ADMIN_SERVER_PORT: {port: "admin", part: "port"}
@@ -1195,6 +1244,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						env: {
 							DATABASE_URL:              databaseUrlEnv
 							AUTH_STATEMENT_TIMEOUT_MS: "\(X.meta.bounds.authStatementMs)"
+							// Where the tables, the floor's functions and its lists are,
+							// stated only where one is not where mecha keeps it by default.
+							if X.meta.schema.app != "public" {MECHA_DB_SCHEMA: X.meta.schema.app}
+							if X.meta.schema.floor != "public" {MECHA_FLOOR_SCHEMA: X.meta.schema.floor}
+							if X.meta.schema.mecha != "mecha" {MECHA_SCHEMA: X.meta.schema.mecha}
 							PGRST_JWT_SECRET:          jwtSecret
 							WEBAUTHN_RP_ID:            "${WEBAUTHN_RP_ID:-localhost}"
 							// The door's port is the host's pick; auth reads this
@@ -2299,6 +2353,20 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			ref:     string
 			tree:    string
 			scripts: string
+		}
+		// The database's schemas: `app` holds the caller's tables and is the one
+		// PostgREST serves; `floor` the tenancy floor's functions (rls.sql's
+		// current_scopes, auth_uid, rls_protect, app_pre_request); `mecha` its
+		// lists. A database whose `public` the caller may not use names its own,
+		// and keeps the floor out of the served schema, in `mecha` say, so no
+		// request reaches its functions over /rpc.
+		// `mecha` is never `public` nor the app's: a caller's grants ON ALL
+		// TABLES of the served schema would reach the lists, and a session could
+		// exempt a table or widen a shape.
+		schema: S={
+			app:   *"public" | #SchemaName
+			floor: *"public" | #SchemaName
+			mecha: *"mecha" | #SchemaName & !="public" & !=S.app
 		}
 		// The workspace root and the runtime's directory, as paths from the
 		// app dir: the monorepo's unless the app states its own layout.

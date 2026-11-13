@@ -196,9 +196,11 @@ _mecha: bayt.#project & _where & {
 				// The data directory lives on the container's writable layer.
 				preamble: ["ENV PGDATA=/postgresql-data"]
 				// The tenancy floor ships with the image, whatever emitted the
-				// tables above it. The ticker's table and the airlock's steps
-				// are staged outside the initdb directory, for a cluster that
-				// declares a schedule or an effect to place.
+				// tables above it; a cluster whose caller places its own step of
+				// its name (cluster.cue #Tenancy) runs that one instead. The
+				// ticker's table and the airlock's steps are staged outside the
+				// initdb directory, for a cluster that declares a schedule or an
+				// effect to place.
 				// The migration runner runs this image too, with its own
 				// entrypoint: pgroll, and the psql its ledger checks and the
 				// schema reload go through.

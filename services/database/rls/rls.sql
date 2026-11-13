@@ -10,6 +10,12 @@
 -- `CALL rls_protect('<table>')`, never the policy itself, so it cannot emit a
 -- subtly wrong one and a correction reaches every app by migration.
 
+-- mecha's own schema, first: a cluster that keeps the floor's functions below
+-- out of the schema PostgREST serves (cluster.cue, meta.schema) keeps them here,
+-- beside the lists, and every role reaches what it is granted in it.
+CREATE SCHEMA IF NOT EXISTS mecha;
+GRANT USAGE ON SCHEMA mecha TO PUBLIC;
+
 -- The one thing that grants breadth, so its failure modes are the ones that
 -- matter: it fails closed on an unset GUC, and drops empty elements rather than
 -- minting a '' scope that would match everything. Assertions 6 and 19 say why.
@@ -111,8 +117,6 @@ END $$;
 
 -- A generated runtime can replace this transaction-entry hook to acquire its
 -- write locks before table triggers (including IVM) acquire theirs.
-CREATE SCHEMA IF NOT EXISTS mecha;
-GRANT USAGE ON SCHEMA mecha TO PUBLIC;
 DO $init$ BEGIN
   IF to_regprocedure('mecha.request_write_gate()') IS NULL THEN
     EXECUTE 'CREATE FUNCTION mecha.request_write_gate() RETURNS void LANGUAGE plpgsql AS $body$ BEGIN END $body$';
@@ -258,18 +262,22 @@ GRANT SELECT ON mecha.token_role TO PUBLIC;
 -- key refuses it, and this raises the same violation first, since NOT NULL
 -- would otherwise answer before the key does. Where it is not -- a sink a
 -- pipeline writes for a row that may since be gone -- the row is derived
--- data of nothing and is not stored, so the batch it came in lands.
+-- data of nothing and is not stored, so the batch it came in lands. A parent
+-- named without a schema is the child's schema's, wherever the database keeps
+-- its tables.
 CREATE OR REPLACE FUNCTION mecha.scope_from_parent() RETURNS trigger
   LANGUAGE plpgsql
   SET search_path = pg_catalog, public
   AS $$
 DECLARE
   ty text;
+  parent regclass := CASE WHEN strpos(TG_ARGV[0], '.') > 0 THEN TG_ARGV[0]::regclass
+                          ELSE format('%I.%I', TG_TABLE_SCHEMA, TG_ARGV[0])::regclass END;
 BEGIN
   SELECT format_type(a.atttypid, a.atttypmod) INTO ty FROM pg_attribute a
-    WHERE a.attrelid = TG_ARGV[0]::regclass AND a.attname = TG_ARGV[1] AND NOT a.attisdropped;
+    WHERE a.attrelid = parent AND a.attname = TG_ARGV[1] AND NOT a.attisdropped;
   EXECUTE format('SELECT p.scope_id FROM %s p WHERE p.%I = ($1).%I::%s',
-                 TG_ARGV[0]::regclass, TG_ARGV[1], TG_ARGV[2], ty)
+                 parent, TG_ARGV[1], TG_ARGV[2], ty)
     INTO NEW.scope_id USING NEW;
   IF NEW.scope_id IS NULL THEN
     IF EXISTS (SELECT 1 FROM pg_constraint c
@@ -345,8 +353,14 @@ GRANT EXECUTE ON FUNCTION mecha.shape_reach(text, text, text) TO PUBLIC;
 -- the objects from `public` in a database created while they lived there; the
 -- qualified one is what lets the file be applied to a database that already has
 -- it, which is how a correction to the floor reaches one.
-DROP VIEW IF EXISTS public.rls_unprotected;
-DROP FUNCTION IF EXISTS public.rls_audit();
+-- Only where the role may look in `public`: a database that lends it none has
+-- no legacy there to clear, and naming a schema one may not use is an error.
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM pg_namespace WHERE nspname = 'public' AND has_schema_privilege(oid, 'USAGE')) THEN
+    DROP VIEW IF EXISTS public.rls_unprotected;
+    DROP FUNCTION IF EXISTS public.rls_audit();
+  END IF;
+END $$;
 DROP VIEW IF EXISTS mecha.rls_unprotected;
 CREATE OR REPLACE FUNCTION mecha.rls_audit()
   RETURNS TABLE (table_name text, reason text)
@@ -362,7 +376,7 @@ AS $$
              WHEN NOT c.relforcerowsecurity THEN 'RLS not forced: the owner is exempt'
              WHEN EXISTS (SELECT 1 FROM pg_policy p
                            WHERE p.polrelid = c.oid AND p.polpermissive
-                             AND p.polroles = '{0}'::oid[])
+                             AND 0 = ANY(p.polroles))
                THEN 'a permissive policy granted to PUBLIC: every role holds public:, so anon reaches what it admits'
              ELSE 'no tenancy policy: restrictive, PUBLIC, FOR ALL, both sides the scope test'
            END
@@ -385,7 +399,7 @@ AS $$
                    OR NOT c.relforcerowsecurity
                    OR EXISTS (SELECT 1 FROM pg_policy p
                                WHERE p.polrelid = c.oid AND p.polpermissive
-                                 AND p.polroles = '{0}'::oid[])
+                                 AND 0 = ANY(p.polroles))
                    OR NOT EXISTS (
                         SELECT 1 FROM pg_policy p
                          WHERE p.polrelid = c.oid

@@ -902,3 +902,61 @@ Deno.test("a bridge's appliance build keeps its own dependencies, without the st
   assert.deepEqual(got.value["crawler-appliance"].deps, [":support:outs"]);
   assert.equal(got.value["crawler-appliance"].compose.manual, true);
 });
+
+// The database's schemas (meta.schema): the defaults leave every service as it
+// was, and a cluster naming its own tells PostgREST, auth and the runner.
+const schemaTargets = async (schema: { app?: string; floor?: string; mecha?: string }) =>
+  await evaluated(`(#Cluster & {meta: {app: "t", images: [string]: name: "img", bounds: {authStatementMs: 5000, tickerCallMs: 35000}, schema: ${JSON.stringify(schema)}}, state: {migrations: [], pipelines: [], schedules: [], computations: [], pgroll: {"01_a": {operations: []}}}, capabilities: {auth: true}}).surface.targets`);
+
+Deno.test("the default schemas leave PostgREST, auth and the runner as they were", async () => {
+  const got = await schemaTargets({});
+  assert.equal(got.ok, true, got.stderr);
+  const crud = got.value.crud.compose.environment;
+  assert.equal(crud.PGRST_DB_SCHEMA, "public");
+  assert.equal(crud.PGRST_DB_PRE_REQUEST, "public.app_pre_request");
+  assert.equal(crud.PGRST_DB_EXTRA_SEARCH_PATH, undefined);
+  const auth = got.value.auth.compose.environment;
+  for (const k of ["MECHA_DB_SCHEMA", "MECHA_FLOOR_SCHEMA", "MECHA_SCHEMA"]) assert.equal(auth[k], undefined, k);
+  assert.equal(got.value.migrate.compose.environment.PGROLL_SCHEMA, undefined);
+});
+
+Deno.test("a cluster's own schemas reach PostgREST, auth and the runner", async () => {
+  const got = await schemaTargets({ app: "shop", floor: "mecha", mecha: "mecha" });
+  assert.equal(got.ok, true, got.stderr);
+  const crud = got.value.crud.compose.environment;
+  assert.equal(crud.PGRST_DB_SCHEMA, "shop");
+  assert.equal(crud.PGRST_DB_PRE_REQUEST, "mecha.app_pre_request");
+  assert.equal(crud.PGRST_DB_EXTRA_SEARCH_PATH, "mecha");
+  const auth = got.value.auth.compose.environment;
+  assert.equal(auth.MECHA_DB_SCHEMA, "shop");
+  assert.equal(auth.MECHA_FLOOR_SCHEMA, "mecha");
+  assert.equal(auth.MECHA_SCHEMA, undefined);
+  assert.equal(got.value.migrate.compose.environment.PGROLL_SCHEMA, "shop");
+});
+
+Deno.test("a schema name that is no plain identifier, or lists the served schema reaches, is refused", async () => {
+  for (const schema of [{ app: "Shop" }, { app: "select" }, { floor: "pg_floor" }, { mecha: "public" }, { app: "shop", mecha: "shop" }]) {
+    assert.equal((await schemaTargets(schema)).ok, false, JSON.stringify(schema));
+  }
+});
+
+Deno.test("the tenancy floor on the default schemas is the file itself", async () => {
+  const got = await evaluated(`(#Tenancy & {schema: {app: "public", floor: "public", mecha: "mecha"}}).out`);
+  assert.equal(got.ok, true, got.stderr);
+  assert.equal(got.value, await Deno.readTextFile(`${MECHA}services/database/rls/rls.sql`));
+});
+
+Deno.test("the tenancy floor for other schemas renames its functions and lists, not its setting nor its legacy drops", async () => {
+  const got = await evaluated(`#Tenancy & {schema: {app: "shop", floor: "floor", mecha: "lists"}}`);
+  assert.equal(got.ok, true, got.stderr);
+  const sql: string = got.value.out;
+  assert.ok(sql.startsWith("CREATE SCHEMA IF NOT EXISTS floor;\nGRANT USAGE ON SCHEMA floor TO PUBLIC;\n"));
+  assert.match(sql, /CREATE OR REPLACE FUNCTION floor\.app_pre_request\(/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS lists\.rls_exempt/);
+  assert.match(sql, /current_setting\('mecha\.traceparent', true\)/);
+  assert.match(sql, /DROP VIEW IF EXISTS public\.rls_unprotected;/);
+  assert.match(sql, /DROP FUNCTION IF EXISTS public\.rls_audit\(\);/);
+  assert.equal(/\bmecha\.(?!traceparent\b)[a-z_]+/.test(sql), false);
+  assert.ok(got.value.names.floor.includes("app_pre_request"));
+  assert.ok(got.value.names.mecha.includes("rls_exempt"));
+});

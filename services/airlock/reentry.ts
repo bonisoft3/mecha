@@ -160,6 +160,15 @@ export function ledgerKeySql(name: string, effect: Effect): string {
   return fields.length === 1 ? `('${name}:' || ${fields[0]})` : `('${name}:' || jsonb_build_array(${fields.join(", ")})::text)`;
 }
 
+/** The Graphile job key of a ledger key: its SHA-256 as hex, since Graphile
+ * caps a key at 512 bytes and a ledger key carries the effect's key fields
+ * whole, a translation's every card among them. The guard's enqueue (pronto's
+ * emit.cue #invokeEnterSql) and every lease, claim and removal of a key's job
+ * spell it this way; the job's payload names the ledger key as it is. */
+export function jobKeySql(key: string): string {
+  return `encode(sha256(convert_to(${key}, 'UTF8')), 'hex')`;
+}
+
 /** effects.json, checked: the airlock dies on a manifest it would misread. */
 export function parseManifest(text: string): Record<string, Effect> {
   const doc = JSON.parse(text);

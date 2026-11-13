@@ -139,14 +139,15 @@ async function settle(a: Airlock, key: string, l: { row: Record<string, unknown>
  * queue's last error as the outcome's data; the second are moved again. Each
  * key is its own attempt: one that fails is reported and tried at the next
  * sweep, since one bad row is no reason to run no effect at all. Graphile's
- * row stays as the record. Answers the keys it settled. */
+ * row stays as the record. A job Graphile stripped of its key when a lease
+ * replaced it is superseded, not the key's. Answers the keys it settled. */
 export async function settleDead(a: Airlock): Promise<string[]> {
   const { rows } = await a.db.query(`
-    SELECT j.key, j.last_error, l.effect, l.row, l.outcome
+    SELECT l.key, j.last_error, l.effect, l.row, l.outcome
       FROM graphile_worker._private_jobs j
       JOIN graphile_worker._private_tasks t ON t.id = j.task_id
-      JOIN airlock.external_effect_ledger l ON l.key = j.key
-     WHERE t.identifier = 'external_effect' AND j.attempts >= j.max_attempts AND j.locked_at IS NULL`);
+      JOIN airlock.external_effect_ledger l ON l.key = j.payload->>'key'
+     WHERE t.identifier = 'external_effect' AND j.key IS NOT NULL AND j.attempts >= j.max_attempts AND j.locked_at IS NULL`);
   const settled: string[] = [];
   for (const r of rows) {
     try {

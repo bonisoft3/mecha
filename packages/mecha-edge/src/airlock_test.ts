@@ -63,7 +63,7 @@ const status = async (db: PGlite, table: string, id: string) =>
 const entered = async (db: PGlite, key: string) =>
   (await db.query<{ entered: number }>('SELECT entered FROM airlock.external_effect_ledger WHERE key = $1', [key])).rows[0].entered
 const job = async (db: PGlite, key: string) =>
-  (await db.query<{ attempts: number; later: boolean }>(`SELECT attempts, run_at > now() AS later FROM graphile_worker._private_jobs WHERE key = $1`, [key])).rows[0]
+  (await db.query<{ attempts: number; later: boolean }>(`SELECT attempts, run_at > now() AS later FROM graphile_worker._private_jobs WHERE payload->>'key' = $1`, [key])).rows[0]
 
 const draft = (attempts: number, issue: EdgeEffects[string]['issue'], extra: Partial<EdgeEffects[string]['declaration']> = {}): EdgeEffects[string] => ({
   declaration: {
@@ -77,7 +77,7 @@ const ONE_DRAFT = `
   CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
   INSERT INTO generation_draft (id) VALUES ('d1');
   INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}');
-  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => 'e:d1');
+  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'));
 `
 
 Deno.test('the object hands each run to the dispatcher and settles its answer: Workers AI through tsbifrost', async () => {
@@ -87,8 +87,8 @@ Deno.test('the object hands each run to the dispatcher and settles its answer: W
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES
       ('smollm3-draft:draft-cheap', 'smollm3-draft', '{"id":"draft-cheap"}', '{"topic":"animais"}'),
       ('sdcpp-illustrate:draft-heavy', 'sdcpp-illustrate', '{"id":"draft-heavy"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'smollm3-draft:draft-cheap'), job_key => 'smollm3-draft:draft-cheap');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'sdcpp-illustrate:draft-heavy'), job_key => 'sdcpp-illustrate:draft-heavy');
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'smollm3-draft:draft-cheap'), job_key => encode(sha256(convert_to('smollm3-draft:draft-cheap', 'UTF8')), 'hex'));
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'sdcpp-illustrate:draft-heavy'), job_key => encode(sha256(convert_to('sdcpp-illustrate:draft-heavy', 'UTF8')), 'hex'));
   `)
   try {
     const aiCalls: string[] = []
@@ -143,12 +143,43 @@ Deno.test('a run\'s error schedules the next run after a backoff, which the drai
     assert.ok(lines.some(l => l.includes('run 1 failed') && l.includes('temporary upstream 503')), JSON.stringify(lines))
     assert.deepEqual(await job(db, 'e:d1'), { attempts: 0, later: true })
     assert.equal(await status(db, 'generation_draft', 'd1'), 'drafting')
-    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'e:d1'`)
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = 'e:d1'`)
     await airlock.drain()
     assert.deepEqual(queued.map(r => r.key), ['e:d1'])
     await deliver()
     assert.equal(await entered(db, 'e:d1'), 2)
     assert.equal(await status(db, 'generation_draft', 'd1'), 'done')
+  } finally {
+    await db.close()
+  }
+})
+
+// A translation's key carries the deck's every card, past Graphile's 512-byte
+// cap on a job key: the lease's add_job threw inside the task, which Graphile
+// retried for days while the row stayed drafting and the slot stayed taken.
+Deno.test('a key longer than a Graphile job key allows is leased, retried and settled under its digest', async () => {
+  const topic = 'x'.repeat(600)
+  const key = `e:["d1", "${topic}"]`
+  const db = await ledger(`
+    CREATE TABLE generation_draft (id text PRIMARY KEY, topic text NOT NULL, status text NOT NULL DEFAULT 'drafting');
+    INSERT INTO generation_draft (id, topic) VALUES ('d1', '${topic}');
+    INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('${key}', 'e', '{"id":"d1"}', '{}');
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', '${key}'), job_key => encode(sha256(convert_to('${key}', 'UTF8')), 'hex'));
+  `)
+  try {
+    let calls = 0
+    const { airlock, queued, deliver, lines } = harness(db, { e: draft(2, () => ++calls === 1 ? { retry: 'temporary upstream 503' } : { done: { ok: true } }, { key: ['id', 'topic'] }) })
+    await airlock.drain()
+    assert.deepEqual(queued.map(r => r.key), [key])
+    assert.deepEqual(await job(db, key), { attempts: 0, later: true })
+    await deliver()
+    assert.ok(lines.some(l => l.includes('run 1 failed')), JSON.stringify(lines))
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = $1`, [key])
+    await airlock.drain()
+    await deliver()
+    assert.equal(await entered(db, key), 2)
+    assert.equal(await status(db, 'generation_draft', 'd1'), 'done')
+    assert.equal((await db.query(`SELECT 1 FROM graphile_worker._private_jobs`)).rows.length, 0)
   } finally {
     await db.close()
   }
@@ -194,7 +225,7 @@ Deno.test('a lease that runs out dispatches the next run, and late or repeated a
     await airlock.drain()
     const [first] = queued.splice(0)
     assert.deepEqual(counted(await airlock.claim('e:d1', first.token, crypto.randomUUID())), { effect: 'e', input: {}, entered: 1 })
-    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'e:d1'`)
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = 'e:d1'`)
     await airlock.drain()
     const [second] = queued.splice(0)
     assert.notEqual(second.token, first.token)
@@ -223,7 +254,7 @@ Deno.test('a run the reentry policy settles unknown is settled in the object wit
     await airlock.drain()
     // The first run was claimed, so it may have reached the sink; it never answered.
     assert.ok(await airlock.claim('e:d1', queued.splice(0)[0].token, crypto.randomUUID()))
-    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'e:d1'`)
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = 'e:d1'`)
     assert.equal(await airlock.drain(), 1)
     assert.deepEqual(queued, [])
     assert.equal(await status(db, 'generation_draft', 'd1'), 'failed')
@@ -237,8 +268,8 @@ Deno.test('a job Graphile gave up on settles unknown without dispatch', async ()
     CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
     INSERT INTO generation_draft (id) VALUES ('d1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => 'e:d1', max_attempts => 1);
-    UPDATE graphile_worker._private_jobs SET attempts = 1, last_error = 'the database went away' WHERE key = 'e:d1';
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'), max_attempts => 1);
+    UPDATE graphile_worker._private_jobs SET attempts = 1, last_error = 'the database went away' WHERE payload->>'key' = 'e:d1';
   `)
   try {
     const { airlock, queued } = harness(db, { e: draft(3, () => { throw new Error('a job past its attempts is never run') }) })
@@ -265,8 +296,8 @@ Deno.test('Graphile announces each insert on "jobs:insert", and drains asked for
       CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
       INSERT INTO generation_draft (id) VALUES ('d1'), ('d2');
       INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}'), ('e:d2', 'e', '{"id":"d2"}', '{}');
-      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => 'e:d1');
-      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d2'), job_key => 'e:d2');
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'));
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d2'), job_key => encode(sha256(convert_to('e:d2', 'UTF8')), 'hex'));
     `)
     await new Promise((r) => setTimeout(r, 10))
     assert.deepEqual(heard, ['insert', 'insert'])
@@ -295,7 +326,7 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
     CREATE TABLE card (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drawing');
     INSERT INTO card (id) VALUES ('c1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('draw:c1', 'draw', '{"id":"c1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'draw:c1'), job_key => 'draw:c1');
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'draw:c1'), job_key => encode(sha256(convert_to('draw:c1', 'UTF8')), 'hex'));
   `)
   try {
     const objects = new Map<string, Uint8Array>()
@@ -334,7 +365,7 @@ Deno.test('a declared content type goes out with the handler\'s own encoded body
     CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
     INSERT INTO generation_draft (id) VALUES ('d1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => 'e:d1');
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'));
   `)
   try {
     const sent: { type: string | null; body: string }[] = []
@@ -363,7 +394,7 @@ Deno.test('a handler reads a blob by content key, and bytes that do not hash to 
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES
       ('mail:good', 'mail', '{"id":"good"}', '{"art":"${hex}.jpg"}'),
       ('mail:bad', 'mail', '{"id":"bad"}', '{"art":"${'0'.repeat(64)}.jpg"}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', k), job_key => k) FROM unnest(ARRAY['mail:good', 'mail:bad']) k;
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', k), job_key => encode(sha256(convert_to(k, 'UTF8')), 'hex')) FROM unnest(ARRAY['mail:good', 'mail:bad']) k;
   `)
   try {
     const mail = draft(1, async (input, sink) => ({ done: { size: (await sink.blob((input as { art: string }).art)).length } }), { table: 'card', state: 'mailing', onDone: 'mailed', handler: 'effects/mail.js' })
@@ -387,7 +418,7 @@ Deno.test('sink.origin is the release\'s, and a release without one fails the ru
       CREATE TABLE card (id text PRIMARY KEY, status text NOT NULL DEFAULT 'mailing');
       INSERT INTO card (id) VALUES ('c');
       INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('mail:c', 'mail', '{"id":"c"}', '{}');
-      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'mail:c'), job_key => 'mail:c');
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'mail:c'), job_key => encode(sha256(convert_to('mail:c', 'UTF8')), 'hex'));
     `)
     try {
       const mail = draft(1, (_input, sink) => Promise.resolve({ done: { link: `${sink.origin}/orders/c` } }), { table: 'card', state: 'mailing', onDone: 'mailed', handler: 'effects/mail.js' })
@@ -410,7 +441,7 @@ Deno.test('a bridge not deployed on cloudflare settles onError without dispatch'
     CREATE TABLE sofa_request (id text PRIMARY KEY, status text NOT NULL DEFAULT 'acquiring');
     INSERT INTO sofa_request (id) VALUES ('r1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('acquire:r1', 'acquire', '{"id":"r1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => 'acquire:r1');
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => encode(sha256(convert_to('acquire:r1', 'UTF8')), 'hex'));
   `)
   try {
     const effects: EdgeEffects = {
@@ -443,7 +474,7 @@ const SOFA_REQUEST = `
   CREATE TABLE sofa_request (id text PRIMARY KEY, status text NOT NULL DEFAULT 'acquiring');
   INSERT INTO sofa_request (id) VALUES ('r1');
   INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('acquire:r1', 'acquire', '{"id":"r1"}', '{}');
-  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => 'acquire:r1');
+  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => encode(sha256(convert_to('acquire:r1', 'UTF8')), 'hex'));
 `
 const acquire = (attempts: number, issue: EdgeEffects[string]['issue']): EdgeEffects => ({
   acquire: {
@@ -499,7 +530,7 @@ Deno.test("a container the infrastructure cannot provide is the run's error, ret
     assert.ok(lines.some(l => l.includes('run 1 failed') && l.includes('no container instance that can be provided')), JSON.stringify(lines))
     assert.deepEqual(await job(db, 'acquire:r1'), { attempts: 0, later: true })
     assert.equal(await status(db, 'sofa_request', 'r1'), 'acquiring')
-    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'acquire:r1'`)
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = 'acquire:r1'`)
     await airlock.drain()
     await deliver()
     assert.equal(calls, 2)
@@ -530,7 +561,7 @@ Deno.test("a container's own 500 is the handler's to judge", async () => {
 })
 
 const secondsLeft = async (db: PGlite, key: string) =>
-  (await db.query<{ s: number }>(`SELECT extract(epoch FROM run_at - now())::float AS s FROM graphile_worker._private_jobs WHERE key = $1`, [key])).rows[0].s
+  (await db.query<{ s: number }>(`SELECT extract(epoch FROM run_at - now())::float AS s FROM graphile_worker._private_jobs WHERE payload->>'key' = $1`, [key])).rows[0].s
 
 // The lease used to run out at the handler's bound and a minute from the
 // send, while a claimed run could still be reconciling, issuing and storing
@@ -586,7 +617,7 @@ Deno.test('a send that fails counts no run, and its lease sends it again under a
     assert.equal(queued.length, 0)
     assert.equal(await entered(db, 'e:d1'), 0)
     assert.deepEqual(await job(db, 'e:d1'), { attempts: 0, later: true }, 'the committed lease holds the key')
-    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'e:d1'`)
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = 'e:d1'`)
     await airlock.drain()
     assert.equal(queued.length, 1)
     assert.deepEqual(counted(await airlock.claim('e:d1', queued[0].token, crypto.randomUUID())), { effect: 'e', input: {}, entered: 1 }, 'a one-attempt effect still runs')
@@ -603,7 +634,7 @@ Deno.test('a commit whose send never happened is sent again by its lease', async
     const { airlock, queued } = harness(db, { e: draft(3, () => ({ done: {} })) })
     await airlock.drain()
     const [lost] = queued.splice(0)
-    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'e:d1'`)
+    await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = 'e:d1'`)
     await airlock.drain()
     const [resent] = queued.splice(0)
     assert.equal(await airlock.claim('e:d1', lost.token, crypto.randomUUID()), null, 'the lost send names a stale dispatch')
@@ -762,7 +793,7 @@ Deno.test('an unclaimed run is sent again after a lease that doubles each time, 
     for (let send = 0; send < 3; send++) {
       await airlock.drain()
       leases.push(Math.round(await secondsLeft(db, 'e:d1')))
-      await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE key = 'e:d1'`)
+      await db.query(`UPDATE graphile_worker._private_jobs SET run_at = now() WHERE payload->>'key' = 'e:d1'`)
     }
     assert.deepEqual(leases, [10, 20, 30])
     assert.equal(queued.length, 3)

@@ -35,7 +35,7 @@ export const PRESETS: Record<string, Preset> = {
     issuer: "https://accounts.google.com",
     // Google's ID tokens name it either way.
     issuers: ["https://accounts.google.com", "accounts.google.com"],
-    scope: "openid profile",
+    scope: "openid profile email",
     params: { prompt: "select_account" },
   },
 };
@@ -138,16 +138,19 @@ export function keySource(fetcher: typeof fetch = fetch): (jwks: string, kid: st
   };
 }
 
-export type Profile = { provider: string; issuer: string; sub: string; name: string | null; picture: string | null };
-export type User = { id: string; handle: string };
+export type Profile = { provider: string; issuer: string; sub: string; name: string | null; picture: string | null; email: string | null };
+/** The person as the app shows them: the handle always, the link's name and
+ * email while a provider vouches for them. */
+export type User = { id: string; handle: string; name?: string | null; email?: string | null };
 
 /** What the service needs of Postgres. */
 export interface Links {
   /** The user linked to this subject, made with its link when there is none;
    * the link's name and picture refreshed either way. */
   userFor(p: Profile): Promise<User>;
-  /** The user's handle while a link of `provider` still names them. */
-  handleOf(provider: string, issuer: string, id: string): Promise<string | null>;
+  /** The user, with the link's name and email, while a link of `provider`
+   * still names them. */
+  handleOf(provider: string, issuer: string, id: string): Promise<Omit<User, "id"> | null>;
 }
 
 export type Config = {
@@ -213,7 +216,9 @@ export async function verifyIdToken(
   if (typeof c.sub !== "string" || c.sub === "" || c.sub.length > 255) return null;
   const name = typeof c.name === "string" && c.name.trim() !== "" ? c.name.trim().slice(0, 120) : null;
   const picture = typeof c.picture === "string" && c.picture.startsWith("https://") ? c.picture : null;
-  return { provider, issuer: p.issuer, sub: c.sub, name, picture };
+  // An address the provider has not verified is nobody's to prefill.
+  const email = typeof c.email === "string" && c.email_verified === true && c.email.includes("@") ? c.email.trim().toLowerCase().slice(0, 254) : null;
+  return { provider, issuer: p.issuer, sub: c.sub, name, picture, email };
 }
 
 /** A same-origin path to come back to, or the root: never another origin, and
@@ -335,9 +340,9 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     // An issuer replacement cannot inherit the previous issuer's sessions.
     if (!Object.hasOwn(cfg.providers, c.provider) || cfg.providers[c.provider].issuer !== c.issuer) return refuse(401, "not signed in");
     // A link removed since is a sign-in revoked.
-    const handle = await cfg.links.handleOf(c.provider, c.issuer, c.sub);
-    if (handle === null) return refuse(401, "not signed in");
-    const user = { id: c.sub, handle };
+    const who = await cfg.links.handleOf(c.provider, c.issuer, c.sub);
+    if (who === null) return refuse(401, "not signed in");
+    const user: User = { id: c.sub, ...who };
     return new Response(JSON.stringify({ token: await cfg.issue(user), user }), {
       status: 200,
       headers: { "content-type": "application/json", "cache-control": "no-store" },

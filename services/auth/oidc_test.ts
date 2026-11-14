@@ -72,7 +72,7 @@ async function provider(p: { issuer: string; reachedAt?: string; alg: Alg; clien
         form.get("redirect_uri") !== grant.redirect || (await sha256url(form.get("code_verifier") ?? "")) !== grant.challenge ||
         form.get("client_secret") !== (p.secret ?? null)
       ) return Response.json({ error: "invalid_grant" }, { status: 400 });
-      const claims = { iss: p.iss ?? p.issuer, aud: grant.client, sub: "alice-sub", name: "Alice", picture: "https://pics.test/a", nonce: grant.nonce, exp: now() + 300, ...bend };
+      const claims = { iss: p.iss ?? p.issuer, aud: grant.client, sub: "alice-sub", name: "Alice", picture: "https://pics.test/a", email: "Alice@Example.test", email_verified: true, nonce: grant.nonce, exp: now() + 300, ...bend };
       return Response.json({ id_token: await sign(p.alg, signer.key, signer.kid, claims) });
     }
     throw new Error(`the test's provider was asked ${url}`);
@@ -96,20 +96,21 @@ async function provider(p: { issuer: string; reachedAt?: string; alg: Alg; clien
   };
 }
 
-function memory(): Links & { users: Map<string, User & { name: string | null }> } {
-  const users = new Map<string, User & { name: string | null }>();
+function memory(): Links & { users: Map<string, User & { name: string | null; email: string | null }> } {
+  const users = new Map<string, User & { name: string | null; email: string | null }>();
   return {
     users,
     userFor(p) {
       const key = `${p.provider}:${p.issuer}:${p.sub}`;
-      const u = users.get(key) ?? { id: crypto.randomUUID(), handle: `h-${users.size}`, name: p.name };
+      const u = users.get(key) ?? { id: crypto.randomUUID(), handle: `h-${users.size}`, name: p.name, email: p.email };
       u.name = p.name;
+      u.email = p.email;
       users.set(key, u);
-      return Promise.resolve({ id: u.id, handle: u.handle });
+      return Promise.resolve({ id: u.id, handle: u.handle, name: u.name, email: u.email });
     },
     handleOf(provider, issuer, id) {
       const hit = [...users.entries()].find(([k, u]) => u.id === id && k.startsWith(`${provider}:${issuer}:`));
-      return Promise.resolve(hit?.[1].handle ?? null);
+      return Promise.resolve(hit ? { handle: hit[1].handle, name: hit[1].name, email: hit[1].email } : null);
     },
   };
 }
@@ -183,7 +184,7 @@ Deno.test("Google signs a person in by code and PKCE, and the cookie becomes a n
   assertEquals(to.searchParams.get("client_id"), "client-123");
   assertEquals(to.searchParams.get("redirect_uri"), `${ORIGIN}/auth/oidc/google/callback`);
   assertEquals(to.searchParams.get("response_type"), "code");
-  assertEquals(to.searchParams.get("scope"), "openid profile");
+  assertEquals(to.searchParams.get("scope"), "openid profile email");
   assertEquals(to.searchParams.get("prompt"), "select_account");
   assertEquals(to.searchParams.get("code_challenge_method"), "S256");
   assertEquals(to.searchParams.get("code_challenge"), await sha256url(verifier));
@@ -198,10 +199,14 @@ Deno.test("Google signs a person in by code and PKCE, and the cookie becomes a n
   assertEquals(back[HINT_COOKIE], "google");
   assertEquals(back[STATE_COOKIE], "");
   assertEquals(s.links.users.get("google:https://accounts.google.com:alice-sub")?.name, "Alice");
+  // The address as the provider vouched for it, folded for the checkout to start from.
+  assertEquals(s.links.users.get("google:https://accounts.google.com:alice-sub")?.email, "alice@example.test");
 
   const session = await s.serve(exchange(back[SESSION_COOKIE]));
   assertEquals(session.status, 200);
-  assertEquals((await session.json()).user, { id: s.links.users.get("google:https://accounts.google.com:alice-sub")!.id, handle: "h-0" });
+  // The session the terminal adopts names the person as the provider vouched: the chrome
+  // shows the name over the handle, and a checkout starts from the email.
+  assertEquals((await session.json()).user, { id: s.links.users.get("google:https://accounts.google.com:alice-sub")!.id, handle: "h-0", name: "Alice", email: "alice@example.test" });
 });
 
 Deno.test("an issuer in Google's place is a public client named by the door, reached inside the cluster", async () => {

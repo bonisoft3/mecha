@@ -160,7 +160,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   const createAuthTables = async () => {
     await db.transaction(async (tx) => {
       await tx.exec(prepareAuthTables(['webauthn_credential', 'identity_link']))
-      await tx.exec(`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text`)
+      await tx.exec(`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text, ADD COLUMN IF NOT EXISTS email text`)
       await tx.exec(sealAuthTables(['webauthn_credential', 'identity_link']))
     })
   }
@@ -235,7 +235,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   async function whoami(req: Request): Promise<Response> {
     const claims = await session(req)
     if (!claims) return json(401, { error: 'invalid token' })
-    return json(200, { id: claims.sub, handle: claims.handle })
+    return json(200, { id: claims.sub, handle: claims.handle, ...(typeof claims.name === 'string' ? { name: claims.name } : {}), ...(typeof claims.email === 'string' ? { email: claims.email } : {}) })
   }
 
   async function readState(body: Record<string, unknown>, purpose: string): Promise<Record<string, unknown> | null> {
@@ -417,14 +417,14 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         await db.query('BEGIN')
         try {
           const { rows: [link] } = await db.query<{ user_id: string }>(
-            `UPDATE mecha_auth.identity_link SET name = $1, picture = $2
-             WHERE provider = $3 AND issuer = $4 AND sub = $5 RETURNING user_id`,
-            [p.name, p.picture, p.provider, p.issuer, p.sub],
+            `UPDATE mecha_auth.identity_link SET name = $1, picture = $2, email = $3
+             WHERE provider = $4 AND issuer = $5 AND sub = $6 RETURNING user_id`,
+            [p.name, p.picture, p.email, p.provider, p.issuer, p.sub],
           )
           if (link) {
             const { rows: [u] } = await db.query<{ handle: string }>('SELECT handle FROM app_user WHERE id = $1', [link.user_id])
             await db.query('COMMIT')
-            return { id: link.user_id, handle: u.handle }
+            return { id: link.user_id, handle: u.handle, name: p.name, email: p.email }
           }
           const id = crypto.randomUUID()
           for (let attempt = 0; attempt < 3; attempt++) {
@@ -439,12 +439,12 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
               throw e
             }
             await db.query(
-              `INSERT INTO mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture)
-               VALUES ($1, $2, $3, $4, $5, $6)`,
-              [p.provider, p.issuer, p.sub, id, p.name, p.picture],
+              `INSERT INTO mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture, email)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [p.provider, p.issuer, p.sub, id, p.name, p.picture, p.email],
             )
             await db.query('COMMIT')
-            return { id, handle }
+            return { id, handle, name: p.name, email: p.email }
           }
           throw new Error('could not allocate identity')
         } catch (e) {
@@ -456,15 +456,14 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     async handleOf(provider: string, issuer: string, id: string) {
       await ensureAuthTables()
       const { rows: [u] } = await serialize(() =>
-        db.query<{ handle: string }>(
-          `SELECT u.handle FROM app_user u
-           WHERE u.id = $1 AND EXISTS (
-             SELECT 1 FROM mecha_auth.identity_link l WHERE l.user_id = u.id AND l.provider = $2 AND l.issuer = $3
-           )`,
+        db.query<{ handle: string; name: string | null; email: string | null }>(
+          `SELECT u.handle, l.name, l.email FROM app_user u
+           JOIN mecha_auth.identity_link l ON l.user_id = u.id AND l.provider = $2 AND l.issuer = $3
+           WHERE u.id = $1`,
           [id, provider, issuer],
         ),
       )
-      return u ? u.handle : null
+      return u ? { handle: u.handle, name: u.name, email: u.email } : null
     },
   }
 
@@ -473,7 +472,9 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     origin: (req) => cfg.origin ?? new URL(req.url).origin,
     providers: cfg.providers ?? {},
     links,
-    issue: (user) => signJwt(secret, { role: 'app_user', sub: user.id, handle: user.handle, exp: now() + USER_TOKEN_TTL_S }),
+    // The link's name and email ride in the token: the chrome shows the name
+    // over the handle, and a checkout starts from the email.
+    issue: (user) => signJwt(secret, { role: 'app_user', sub: user.id, handle: user.handle, ...(user.name ? { name: user.name } : {}), ...(user.email ? { email: user.email } : {}), exp: now() + USER_TOKEN_TTL_S }),
     fetcher: cfg.fetcher,
   })
 

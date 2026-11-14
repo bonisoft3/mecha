@@ -420,6 +420,8 @@ Deno.test({
           sub: 'google-sub-1',
           name: profileName,
           picture: 'https://pics.test/alice.png',
+          email: 'alice@example.test',
+          email_verified: true,
           nonce: grant.nonce,
           exp: Math.floor(Date.now() / 1000) + 300,
         }))
@@ -507,8 +509,12 @@ Deno.test({
       const sessionCookie2 = cb2.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
       const session2 = (await (await cluster.handle(new Request(`${origin}/auth/oidc/session`, { method: 'POST', headers: { cookie: sessionCookie2 } }))).json()) as { user: { id: string } }
       assert.equal(session2.user.id, session.user.id)
-      const stored = await db.query<{ name: string }>('SELECT name FROM mecha_auth.identity_link WHERE user_id = $1', [session.user.id])
+      const stored = await db.query<{ name: string; email: string }>('SELECT name, email FROM mecha_auth.identity_link WHERE user_id = $1', [session.user.id])
       assert.equal(stored.rows[0].name, 'Alice Updated')
+      assert.equal(stored.rows[0].email, 'alice@example.test')
+      // The session the terminal adopts carries both, for the chrome and the checkout.
+      assert.equal((session2.user as { name?: string }).name, 'Alice Updated')
+      assert.equal((session2.user as { email?: string }).email, 'alice@example.test')
 
       // mecha_auth.identity_link is sealed from app_user in DB privileges and exempt from RLS audit
       const privs = await db.query<{ schema_ok: boolean; table_ok: boolean; exempt: boolean }>(

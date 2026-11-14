@@ -101,6 +101,13 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         // container tier's default, which this one connection states for
         // every request.
         await db.exec(`SET default_transaction_isolation TO 'read committed'`)
+        // The one connection serves requests and the service's own lanes, the
+        // airlock's moves among them. A request sets its claims LOCAL, and a
+        // setting once set LOCAL reads back as '' after its transaction, not
+        // NULL, which ''::json refuses wherever a policy or trigger reads the
+        // role: between requests the session holds the service's claims, as
+        // the drains state theirs.
+        await db.exec(`SELECT set_config('request.jwt.claims', '{"role":"service"}', false)`)
         await installEngines(db, Object.keys(machines), Object.keys(functions))
         const ticks = clockMode === 'ticker' && await hasSchedules(db)
         const env = (name: string) => {

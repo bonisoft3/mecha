@@ -297,7 +297,9 @@ Reads the object answered are answered again from the colo's Cache API, with
   each `/crud` request sets its role, scopes and claims inside its own
   transaction, and a shape's reach is `subject_scopes` of the token's subject,
   read when the request is served. Row policy is Postgres's own, as on a
-  single machine.
+  single machine. Between requests the session holds the service's claims,
+  set once at boot: a setting a transaction set LOCAL reads back as `''`
+  afterwards, not NULL, and the airlock's moves run between requests.
 - **Nothing migrates here.** The object boots over the data directory a
   release loaded, rls.sql and the app's migrations already applied; it adds
   the shape triggers ([`shapes.ts`](../mecha-browser/shapes.ts)) on every

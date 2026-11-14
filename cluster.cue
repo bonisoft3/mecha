@@ -312,9 +312,24 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 // installed them, so a later start installs none.
 #DuckdbExtensionsMarker: ".installed-v1.5.6"
 
-// The PostgreSQL the docker appliance runs, and the server headers its
-// extensions are compiled against: one version, so they cannot part.
-#AppliancePostgres: "18.6-160000.1.1"
+// The PostgreSQL the database image runs.
+#PostgresImage: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
+
+// The PostgreSQL major the docker appliance runs, and the server headers its
+// extensions are compiled against: PGDG names its packages by it and keeps
+// only its latest minor, which is why the pin stops at the major, and an
+// extension built against one minor loads in every other.
+#AppliancePostgres: "18"
+
+// PGDG's apt source for that major, which Debian's own archive does not
+// carry, as #PostgresImage configures it, so its digest pins the signing
+// key. A server install would otherwise create a default cluster the
+// appliance never starts; it initdbs its own.
+#AppliancePgdg: """
+	COPY --from=\(#PostgresImage) /usr/local/share/keyrings/postgres.gpg.asc /usr/local/share/keyrings/
+	COPY --from=\(#PostgresImage) /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/
+	RUN mkdir -p /etc/postgresql-common/createcluster.d && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/appliance.conf
+	"""
 
 // Container bridge HTTP port.
 #BridgePort: 8080

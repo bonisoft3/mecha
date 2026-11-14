@@ -854,13 +854,13 @@ Deno.test("an explicit tenancy baseline replaces the image floor once", async ()
 
 // Every docker app's appliance compiled the same toolchain in a stage of its
 // own, its server headers pinned apart from the server it ran: one image now,
-// against the appliance's one PostgreSQL version.
+// against the appliance's one PostgreSQL major.
 Deno.test("the appliance's extensions build once, against the appliance's own PostgreSQL", async () => {
   const out = await new Deno.Command("cue", { args: ["export", ".:cluster", "-e", "#AppliancePostgres"], cwd: MECHA, stdout: "piped" }).output();
   assert.equal(out.success, true);
-  const version: string = JSON.parse(new TextDecoder().decode(out.stdout));
+  const major: string = JSON.parse(new TextDecoder().decode(out.stdout));
   const build = await Deno.readTextFile(`${MECHA}.bayt/Dockerfile.extensions-build`);
-  for (const s of [`postgresql18-server-devel=${version}`, "github.com/plv8/pljs.git", "plv8.control", "sha256sum -c", "/pg-extensions/lib/"]) {
+  for (const s of [`postgresql-server-dev-${major}`, `/usr/lib/postgresql/${major}/bin/pg_config`, "github.com/plv8/pljs.git", "plv8.control", "sha256sum -c", "/pg-extensions/lib/"]) {
     assert.ok(build.includes(s), `${s} missing from the extensions build`);
   }
   assert.ok(!build.includes("zig"), "a second toolchain");
@@ -873,7 +873,7 @@ Deno.test("the published extensions image holds the extensions alone", async () 
   const stage = dockerfile.split(/\n(?=FROM )/)[1];
   assert.match(stage, /^FROM scratch AS extensions-image\n/);
   assert.ok(stage.includes("COPY --link --from=libraries_mecha-extensions-build /pg-extensions /pg-extensions"), stage);
-  assert.ok(!/zypper|gcc|postgresql18-server-devel/.test(stage), `the toolchain ships: ${stage}`);
+  assert.ok(!/apt-get|gcc|postgresql-server-dev/.test(stage), `the toolchain ships: ${stage}`);
 });
 
 // A bridge's container built for the appliance lost its build dependencies

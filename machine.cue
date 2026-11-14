@@ -54,7 +54,7 @@ package cluster
 #XStateTransition: close({
 	reenter?:     bool
 	target?:      string
-	guard?:       string | [_, ...string]
+	guard?:       string | [string, ...string]
 	actions?:     string | [...string]
 	description?: string
 })

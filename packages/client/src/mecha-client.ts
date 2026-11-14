@@ -69,11 +69,15 @@ export interface MechaTable {
  * the membership list `members`. `column` is the column a shape over the
  * table is keyed on, present where `of` is not the row's key.
  */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export type GroupGrant = {
   group: string
   of: string
   role: "reader" | "writer"
   column?: string
+  /** The type of the row's key, where the group is named over it. */
+  key?: "uuid" | "string"
   members: { table: string; group: string; user: string }
 }
 
@@ -912,7 +916,12 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         subs.push(follow(collections[g.list.id], g.list.key, (row) => {
           const group = String(row[g.members.group])
           if (!group.endsWith(suffix)) return undefined
-          return g.column === undefined ? { value: group.slice(0, -suffix.length) } : { column: g.column, value: group }
+          if (g.column !== undefined) return { column: g.column, value: group }
+          // A group granted row by row may end as this one does and name no
+          // row of this table: where the key is a uuid, what is not one opens
+          // no shape, which the cluster would refuse and the stream die of.
+          const value = group.slice(0, -suffix.length)
+          return g.key === "uuid" && !UUID.test(value) ? undefined : { value }
         }))
       }
     }

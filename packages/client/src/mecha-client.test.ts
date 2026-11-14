@@ -657,6 +657,41 @@ describe("a table shared with a group", () => {
     for (const reader of readers) reader.unsubscribe()
   })
 
+  // A group granted row by row is the service's to name, and one that ends as
+  // a declared group does asked the cluster for a row that is none, which it
+  // refused and the stream died of.
+  it("opens no shape for a membership that names no row, where the key is a uuid", async () => {
+    const c1 = "00000000-0000-4000-8000-0000000000c1"
+    const keyed = tables.map((t) => t.id !== "company" ? t : { ...t, access: { ...t.access, groups: (t.access as any).groups.map((g: any) => ({ ...g, key: "uuid" as const })) } })
+    const electric = fakeElectric({
+      schema: { group_member: { id: text, group_id: text, user_id: text }, company: { id: text }, expense_type: { id: text }, advance: { id: text }, advance_item: { id: text } },
+      rows: { group_member: [
+        { id: "m1", group_id: `${c1}:admins`, user_id: "u1" },
+        { id: "m2", group_id: "billing:admins", user_id: "u1" },
+      ] },
+    })
+    const asked: string[] = []
+    const client = createMechaClient({
+      tables: keyed as any,
+      electricUrl: "http://fake/electric",
+      crudUrl: "http://fake/crud",
+      authUrl: "http://fake/auth",
+      subject: () => "u1",
+      fetcher: (async (input: any, init: any) => {
+        if (String(input).endsWith("/auth/shape")) {
+          const body = JSON.parse(init.body)
+          asked.push(body.key ? `${body.table} ${body.key.column}=${body.key.value}` : body.table)
+        }
+        return electric.fetcher(input, init)
+      }) as any,
+    })
+    const reader = client.collections.company.subscribeChanges(() => {})
+    await settle()
+    expect(asked).toContain(`company id=${c1}`)
+    expect(asked.some((a) => a.includes("billing"))).toBe(false)
+    reader.unsubscribe()
+  })
+
   // A grant row names a user or a group. The subject's own grants are one
   // list; each group they are in is another, a shape over the grant table
   // keyed by the group, and a row of either opens the row it names.

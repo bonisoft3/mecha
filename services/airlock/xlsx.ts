@@ -11,7 +11,8 @@ type Sheet = { name: string; rows: Cell[][] };
 type Spec = { sheets: Sheet[] };
 
 // Excel's own limits: a sheet's name, a cell's text and a sheet's extent.
-const NAME = /^(?!')[^\\/?*[\]:]{1,31}(?<!')$/;
+// "History" is the one name Excel keeps for itself.
+const NAME = /^(?!')(?!history$)[^\\/?*[\]:\x00-\x1f\x7f]{1,31}(?<!')$/i;
 const TEXT = 32767;
 const ROWS = 1048576;
 const COLUMNS = 16384;
@@ -31,7 +32,7 @@ function fromRows(spec: Spec): Uint8Array {
   for (const [i, sheet] of sheets.entries()) {
     const { name, rows } = sheet ?? ({} as Sheet);
     if (typeof name !== "string" || !NAME.test(name)) {
-      throw new TypeError(`Xlsx.fromRows: sheet ${i}'s name is 1 to 31 characters, none of \\ / ? * [ ] : and no leading or trailing apostrophe`);
+      throw new TypeError(`Xlsx.fromRows: sheet ${i}'s name is 1 to 31 characters, none of \\ / ? * [ ] : or a control character, no leading or trailing apostrophe, and not History`);
     }
     if (names.has(name.toLowerCase())) throw new TypeError(`Xlsx.fromRows: sheet ${i} repeats the name ${JSON.stringify(name)}`);
     names.add(name.toLowerCase());

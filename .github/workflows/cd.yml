@@ -71,7 +71,7 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@v2
         with:
-          version: '2026.8.11'
+          version: '2026.11.8'
           install: false
 
       - name: Verify HTTP, SMTP and TLS contract

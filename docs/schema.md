@@ -29,16 +29,16 @@ put both in one order. These steps are mecha's own, and their digits are taken:
   extensions, roles and grants a caller opens with and before its tables,
   whose column defaults may call it, and its policies, which call
   `rls_protect`.
-- **`011_graphile_worker.sql` and `012_airlock.sql`, the airlock's queue and
-  ledger**, where the cluster declares an effect
+- **`011_graphile_worker.sql`, `012_airlock.sql` and `013_airlock_job_key.sql`,
+  the airlock's queue, ledger and job key**, where the cluster declares an effect
   ([the airlock](../services/airlock/README.md#in-a-cluster)). The image
   stages them outside the initdb directory and the `database` target places
   them there, by default on the first digits after the steps a caller opens
   with (pronto's 000-010, the machines last). A caller whose own steps hold
-  those digits names others in `state.steps`, the queue's before the ledger's;
-  the names keep their suffixes, and a page or edge release places them where
+  those digits names others in `state.steps`, the queue's before the ledger's
+  and the ledger's before the job key's; the names keep their suffixes, and a page or edge release places them where
   `.pronto/cluster.json` says. An interpreter resolves
-  `graphile_worker.add_job` and the ledger only when it runs, and every
+  `graphile_worker.add_job`, the ledger and `airlock.job_key` only when it runs, and every
   caller step that can write a row into an invoking state is numbered above
   them, so such a row, held seed included, finds both. A caller step on their
   digits is refused where an effect is declared, as two steps sharing digits

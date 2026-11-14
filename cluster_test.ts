@@ -273,6 +273,7 @@ Deno.test("an effect places the airlock and its daprd, and the ticker and clock 
     [["/usr/share/mecha/initdb/899_role_passwords.sh"], "/docker-entrypoint-initdb.d/899_role_passwords.sh"],
     [["/usr/share/mecha/initdb/011_graphile_worker.sql"], "/docker-entrypoint-initdb.d/011_graphile_worker.sql"],
     [["/usr/share/mecha/initdb/012_airlock.sql"], "/docker-entrypoint-initdb.d/012_airlock.sql"],
+    [["/usr/share/mecha/initdb/013_airlock_job_key.sql"], "/docker-entrypoint-initdb.d/013_airlock_job_key.sql"],
   ]);
   const networks = await exported({ effects: [PROBE] }, "surface.networks");
   assert.deepEqual(networks.value, { airlock: { internal: true }, "airlock-out": { internal: true }, "airlock-wake": { internal: true }, "airlock-egress": {} });

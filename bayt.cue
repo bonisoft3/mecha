@@ -186,7 +186,7 @@ _mecha: bayt.#project & _where & {
 			}
 		}
 		"database-image": _image & {
-			srcs: globs: ["services/database/rls/rls.sql", "services/database/role_passwords.sh", "services/ticker/schedule.sql", "services/durex/graphile.sql", "services/airlock/airlock.sql", "services/migrate/migrate.sh"]
+			srcs: globs: ["services/database/rls/rls.sql", "services/database/role_passwords.sh", "services/ticker/schedule.sql", "services/durex/graphile.sql", "services/airlock/airlock.sql", "services/airlock/job_key.sql", "services/migrate/migrate.sh"]
 			dockerfile: {
 				from: name: _postgres
 				// QuickJS's pljs hosts the database's Jessie as the `plv8` language
@@ -212,6 +212,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: ["services/ticker/schedule.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#ScheduleMigration)"},
 					{srcs: ["services/durex/graphile.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#GraphileMigration)"},
 					{srcs: ["services/airlock/airlock.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#AirlockMigration)"},
+					{srcs: ["services/airlock/job_key.sql"], dst: "\(cluster.#StagedDir)/\(cluster.#JobKeyMigration)"},
 					{srcs: ["services/database/role_passwords.sh"], dst: "\(cluster.#StagedDir)/\(cluster.#RolePasswordsStep)"},
 					{from: {name: _pgroll}, srcs: ["/usr/bin/pgroll"], dst: "/usr/local/bin/pgroll"},
 					{srcs: ["services/migrate/migrate.sh"], dst: "/migrate.sh", chmod: "755"},

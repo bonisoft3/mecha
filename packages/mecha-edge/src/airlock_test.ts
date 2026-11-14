@@ -10,6 +10,7 @@ async function ledger(setup: string): Promise<PGlite> {
   const db = await createDatabase({})
   await db.exec(await sql('durex/graphile.sql'))
   await db.exec(`${await sql('ticker/schedule.sql')}\n${await sql('airlock/airlock.sql')}`)
+  await db.exec(await sql('airlock/job_key.sql'))
   await db.exec(setup)
   return db
 }
@@ -77,7 +78,7 @@ const ONE_DRAFT = `
   CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
   INSERT INTO generation_draft (id) VALUES ('d1');
   INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}');
-  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'));
+  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => airlock.job_key('e:d1'));
 `
 
 Deno.test('the object hands each run to the dispatcher and settles its answer: Workers AI through tsbifrost', async () => {
@@ -87,8 +88,8 @@ Deno.test('the object hands each run to the dispatcher and settles its answer: W
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES
       ('smollm3-draft:draft-cheap', 'smollm3-draft', '{"id":"draft-cheap"}', '{"topic":"animais"}'),
       ('sdcpp-illustrate:draft-heavy', 'sdcpp-illustrate', '{"id":"draft-heavy"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'smollm3-draft:draft-cheap'), job_key => encode(sha256(convert_to('smollm3-draft:draft-cheap', 'UTF8')), 'hex'));
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'sdcpp-illustrate:draft-heavy'), job_key => encode(sha256(convert_to('sdcpp-illustrate:draft-heavy', 'UTF8')), 'hex'));
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'smollm3-draft:draft-cheap'), job_key => airlock.job_key('smollm3-draft:draft-cheap'));
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'sdcpp-illustrate:draft-heavy'), job_key => airlock.job_key('sdcpp-illustrate:draft-heavy'));
   `)
   try {
     const aiCalls: string[] = []
@@ -164,7 +165,7 @@ Deno.test('a key longer than a Graphile job key allows is leased, retried and se
     CREATE TABLE generation_draft (id text PRIMARY KEY, topic text NOT NULL, status text NOT NULL DEFAULT 'drafting');
     INSERT INTO generation_draft (id, topic) VALUES ('d1', '${topic}');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('${key}', 'e', '{"id":"d1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', '${key}'), job_key => encode(sha256(convert_to('${key}', 'UTF8')), 'hex'));
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', '${key}'), job_key => airlock.job_key('${key}'));
   `)
   try {
     let calls = 0
@@ -268,7 +269,7 @@ Deno.test('a job Graphile gave up on settles unknown without dispatch', async ()
     CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
     INSERT INTO generation_draft (id) VALUES ('d1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'), max_attempts => 1);
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => airlock.job_key('e:d1'), max_attempts => 1);
     UPDATE graphile_worker._private_jobs SET attempts = 1, last_error = 'the database went away' WHERE payload->>'key' = 'e:d1';
   `)
   try {
@@ -296,8 +297,8 @@ Deno.test('Graphile announces each insert on "jobs:insert", and drains asked for
       CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
       INSERT INTO generation_draft (id) VALUES ('d1'), ('d2');
       INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}'), ('e:d2', 'e', '{"id":"d2"}', '{}');
-      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'));
-      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d2'), job_key => encode(sha256(convert_to('e:d2', 'UTF8')), 'hex'));
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => airlock.job_key('e:d1'));
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d2'), job_key => airlock.job_key('e:d2'));
     `)
     await new Promise((r) => setTimeout(r, 10))
     assert.deepEqual(heard, ['insert', 'insert'])
@@ -326,7 +327,7 @@ Deno.test('an answer\'s bytes go to the blob plane, and the ledger and the row h
     CREATE TABLE card (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drawing');
     INSERT INTO card (id) VALUES ('c1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('draw:c1', 'draw', '{"id":"c1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'draw:c1'), job_key => encode(sha256(convert_to('draw:c1', 'UTF8')), 'hex'));
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'draw:c1'), job_key => airlock.job_key('draw:c1'));
   `)
   try {
     const objects = new Map<string, Uint8Array>()
@@ -365,7 +366,7 @@ Deno.test('a declared content type goes out with the handler\'s own encoded body
     CREATE TABLE generation_draft (id text PRIMARY KEY, status text NOT NULL DEFAULT 'drafting');
     INSERT INTO generation_draft (id) VALUES ('d1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('e:d1', 'e', '{"id":"d1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => encode(sha256(convert_to('e:d1', 'UTF8')), 'hex'));
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'e:d1'), job_key => airlock.job_key('e:d1'));
   `)
   try {
     const sent: { type: string | null; body: string }[] = []
@@ -394,7 +395,7 @@ Deno.test('a handler reads a blob by content key, and bytes that do not hash to 
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES
       ('mail:good', 'mail', '{"id":"good"}', '{"art":"${hex}.jpg"}'),
       ('mail:bad', 'mail', '{"id":"bad"}', '{"art":"${'0'.repeat(64)}.jpg"}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', k), job_key => encode(sha256(convert_to(k, 'UTF8')), 'hex')) FROM unnest(ARRAY['mail:good', 'mail:bad']) k;
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', k), job_key => airlock.job_key(k)) FROM unnest(ARRAY['mail:good', 'mail:bad']) k;
   `)
   try {
     const mail = draft(1, async (input, sink) => ({ done: { size: (await sink.blob((input as { art: string }).art)).length } }), { table: 'card', state: 'mailing', onDone: 'mailed', handler: 'effects/mail.js' })
@@ -418,7 +419,7 @@ Deno.test('sink.origin is the release\'s, and a release without one fails the ru
       CREATE TABLE card (id text PRIMARY KEY, status text NOT NULL DEFAULT 'mailing');
       INSERT INTO card (id) VALUES ('c');
       INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('mail:c', 'mail', '{"id":"c"}', '{}');
-      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'mail:c'), job_key => encode(sha256(convert_to('mail:c', 'UTF8')), 'hex'));
+      SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'mail:c'), job_key => airlock.job_key('mail:c'));
     `)
     try {
       const mail = draft(1, (_input, sink) => Promise.resolve({ done: { link: `${sink.origin}/orders/c` } }), { table: 'card', state: 'mailing', onDone: 'mailed', handler: 'effects/mail.js' })
@@ -441,7 +442,7 @@ Deno.test('a bridge not deployed on cloudflare settles onError without dispatch'
     CREATE TABLE sofa_request (id text PRIMARY KEY, status text NOT NULL DEFAULT 'acquiring');
     INSERT INTO sofa_request (id) VALUES ('r1');
     INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('acquire:r1', 'acquire', '{"id":"r1"}', '{}');
-    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => encode(sha256(convert_to('acquire:r1', 'UTF8')), 'hex'));
+    SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => airlock.job_key('acquire:r1'));
   `)
   try {
     const effects: EdgeEffects = {
@@ -474,7 +475,7 @@ const SOFA_REQUEST = `
   CREATE TABLE sofa_request (id text PRIMARY KEY, status text NOT NULL DEFAULT 'acquiring');
   INSERT INTO sofa_request (id) VALUES ('r1');
   INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('acquire:r1', 'acquire', '{"id":"r1"}', '{}');
-  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => encode(sha256(convert_to('acquire:r1', 'UTF8')), 'hex'));
+  SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'acquire:r1'), job_key => airlock.job_key('acquire:r1'));
 `
 const acquire = (attempts: number, issue: EdgeEffects[string]['issue']): EdgeEffects => ({
   acquire: {

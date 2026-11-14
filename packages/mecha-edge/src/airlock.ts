@@ -8,7 +8,7 @@
 // machine here, in the object's database
 // ([[../../../docs/archive/2026-11-06-edge-airlock-dispatcher]]).
 import type { PGlite } from '@electric-sql/pglite'
-import { type Effect, jobKeySql, ledgerKeySql, outcome, type Outcome, step, undeployed } from '../../../services/airlock/reentry.ts'
+import { type Effect, ledgerKeySql, outcome, type Outcome, step, undeployed } from '../../../services/airlock/reentry.ts'
 import { Logger, runOnce } from 'graphile-worker'
 import type { EventEmitter } from 'node:events'
 import { GraphilePool } from './graphile-pool.ts'
@@ -91,7 +91,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
   type Lease = { sends?: number; claimed?: string; claimant?: string; entered?: number }
   const schedule = async (key: string, ms: number, lease: Lease = {}, on: Pick<PGlite, 'query'> = db): Promise<{ token: string; until: number }> => {
     const { rows: [j] } = await on.query<{ id: string; revision: number; run_at: Date }>(
-      `SELECT id, revision, run_at FROM graphile_worker.add_job('external_effect', (jsonb_build_object('key', $1::text) || $3::jsonb)::json, run_at => now() + make_interval(secs => $2), job_key => ${jobKeySql('$1::text')})`,
+      `SELECT id, revision, run_at FROM graphile_worker.add_job('external_effect', (jsonb_build_object('key', $1::text) || $3::jsonb)::json, run_at => now() + make_interval(secs => $2), job_key => airlock.job_key($1::text))`,
       [key, ms / 1000, JSON.stringify(lease)])
     return { token: `${j.id}:${j.revision}`, until: new Date(j.run_at).getTime() }
   }
@@ -233,7 +233,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
           // lease is committed before the message, so no answer can precede it.
           const leased = await serialize(() => db.transaction(async (tx) => {
             const { rows: [held] } = await tx.query<{ held: boolean }>(
-              `SELECT EXISTS (SELECT 1 FROM graphile_worker._private_jobs WHERE key = ${jobKeySql('$1::text')} AND run_at > now()) AS held`, [key])
+              `SELECT EXISTS (SELECT 1 FROM graphile_worker._private_jobs WHERE key = airlock.job_key($1::text) AND run_at > now()) AS held`, [key])
             return held.held ? null : await schedule(key, Math.min(leaseMs * 2 ** sends, leaseCapMs), { sends: sends + 1 }, tx)
           }), 'low')
           if (leased === null) return
@@ -271,7 +271,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
   async function claim(key: string, token: string, claimant: string): Promise<ClaimedRun | null> {
     const claimed = await serialize(() => db.transaction(async (tx) => {
       const { rows: [current] } = await tx.query<{ token: string; payload: Lease; run_at: Date }>(
-        `SELECT id || ':' || revision AS token, payload, run_at FROM graphile_worker._private_jobs WHERE key = ${jobKeySql('$1::text')} AND locked_at IS NULL`, [key])
+        `SELECT id || ':' || revision AS token, payload, run_at FROM graphile_worker._private_jobs WHERE key = airlock.job_key($1::text) AND locked_at IS NULL`, [key])
       if (current === undefined) return null
       // The same dispatch asked again, as after a reply lost on the way back:
       // the run it counted, counted once.
@@ -296,7 +296,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
     if (claimed.kind === 'run') return claimed.run
     await serialize(async () => {
       await settle(key, claimed.row, claimed.declaration, claimed.settles)
-      await db.query(`SELECT graphile_worker.remove_job(${jobKeySql('$1::text')})`, [key])
+      await db.query(`SELECT graphile_worker.remove_job(airlock.job_key($1::text))`, [key])
     }, 'low')
     // A settle may arm a machine's deadline; the removal's own wake would
     // find nothing changed.
@@ -315,7 +315,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
       const declaration = spec(key, l.effect).declaration
       if ('outcome' in given) {
         await settle(key, l.row, declaration, given.outcome)
-        await db.query(`SELECT graphile_worker.remove_job(${jobKeySql('$1::text')})`, [key])
+        await db.query(`SELECT graphile_worker.remove_job(airlock.job_key($1::text))`, [key])
         return true
       }
       // An error from a run the object has moved past, or after the key
@@ -324,7 +324,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
       if (entered >= declaration.attempts) {
         log(`${key}: no answer after ${entered} runs, so unknown: ${given.error}`)
         await settle(key, l.row, declaration, outcome(declaration, 'unknown', false))
-        await db.query(`SELECT graphile_worker.remove_job(${jobKeySql('$1::text')})`, [key])
+        await db.query(`SELECT graphile_worker.remove_job(airlock.job_key($1::text))`, [key])
         return true
       }
       log(`${key}: run ${entered} failed: ${given.error}`)

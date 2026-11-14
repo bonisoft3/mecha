@@ -118,9 +118,9 @@ an eviction does not lose it.
 An app's effects run in two Workers. The object claims each due run through
 Graphile, settles in place what needs no call — an outcome already recorded, a
 bridge not deployed on `cloudflare`, a run the reentry policy settles `unknown`
-— and leases the rest with a Graphile job keyed by the ledger key's SHA-256
-(Graphile caps a job key at 512 bytes; `services/airlock/reentry.ts`
-`jobKeySql`), then, after that commit and outside any transaction, enqueues it
+— and leases the rest with a Graphile job keyed by the ledger key's digest
+(`airlock.job_key`, `services/airlock/job_key.sql`: Graphile caps a job key at
+512 bytes), then, after that commit and outside any transaction, enqueues it
 on `AIRLOCK_QUEUE` as `{key, token}`. The token is the lease job's id and revision, which Graphile
 bumps each time the key is scheduled again, so a later lease, renewal or
 backoff makes it stale ([`airlock.ts`](src/airlock.ts)). An object whose

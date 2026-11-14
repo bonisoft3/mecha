@@ -1,7 +1,7 @@
 // The airlock end to end: postgres with Graphile's schema as the initdb step
 // writes it (graphile.sql), airlock.sql after roles granted the way mecha's
-// and a caller's migrations grant them, a
-// guard of the shape pronto emits, the cluster's daprd holding one HTTPEndpoint
+// and a caller's migrations grant them, the job key's function (job_key.sql),
+// a guard of the shape pronto emits, the cluster's daprd holding one HTTPEndpoint
 // per effect behind its wall (dapr.yaml, #AirlockWall), and a sink served from
 // this process, so every call that crossed the mesh is counted. The airlock's worker runs throughout, as
 // it does in a cluster. A crash is reproduced as the state it leaves, written
@@ -96,7 +96,7 @@ BEGIN
     VALUES (k, TG_ARGV[0], jsonb_build_object('id', NEW.id), jsonb_build_object('amount', NEW.amount))
     ON CONFLICT (key) DO NOTHING;
     IF NOT FOUND THEN RAISE EXCEPTION 'external effect % was already performed', k; END IF;
-    PERFORM graphile_worker.add_job('external_effect', json_build_object('key', k), job_key => k, max_attempts => TG_ARGV[1]::int + 25);
+    PERFORM graphile_worker.add_job('external_effect', json_build_object('key', k), job_key => airlock.job_key(k), max_attempts => TG_ARGV[1]::int + 25);
   ELSIF OLD.status = 'charging' THEN
     SELECT l.outcome INTO outcome FROM airlock.external_effect_ledger l WHERE l.key = k;
     IF outcome IS NULL OR outcome->>'target' IS DISTINCT FROM NEW.status THEN
@@ -189,6 +189,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
     // (bayt.cue); here the two run in that order.
     await db.query(await Deno.readTextFile(new URL("../ticker/schedule.sql", import.meta.url)));
     await db.query(await Deno.readTextFile(new URL("./airlock.sql", import.meta.url)));
+    await db.query(await Deno.readTextFile(new URL("./job_key.sql", import.meta.url)));
     await db.query(GUARD);
     const effects: Record<string, Effect> = {};
     const handlers: Record<string, Handler> = {};
@@ -232,7 +233,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
         await client.query(`INSERT INTO pay_${effect} VALUES ($1, 'pending', $2)`, [id, amount]);
         await client.query(`UPDATE pay_${effect} SET status = 'charging' WHERE id = $1`, [id]);
         await client.query("UPDATE airlock.external_effect_ledger SET entered = 1 WHERE key = $1", [key]);
-        await client.query("UPDATE graphile_worker._private_jobs SET locked_by = $2, locked_at = now(), attempts = 1 WHERE key = $1", [key, `pool-${id}`]);
+        await client.query("UPDATE graphile_worker._private_jobs SET locked_by = $2, locked_at = now(), attempts = 1 WHERE key = airlock.job_key($1)", [key, `pool-${id}`]);
         await client.query("INSERT INTO airlock.pool VALUES ($1, $2::bigint)", [`pool-${id}`, lock]);
         await client.query("COMMIT");
       } finally {
@@ -321,7 +322,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
         await listener.end();
       }
       // Removed before the worker starts, which knows no effect by that name.
-      await db!.query("DELETE FROM graphile_worker._private_jobs WHERE key = 'notified:w2'");
+      await db!.query("DELETE FROM graphile_worker._private_jobs WHERE key = airlock.job_key('notified:w2')");
     });
 
     await t.step("the worker starts once every dead pool is swept, and records its own", async () => {
@@ -390,7 +391,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
         await client.query("BEGIN");
         await client.query("INSERT INTO pay_dead VALUES ('d1', 'pending', 1)");
         await client.query("UPDATE pay_dead SET status = 'charging' WHERE id = 'd1'");
-        await client.query("UPDATE graphile_worker._private_jobs SET attempts = max_attempts, last_error = 'the database went away' WHERE key = 'dead:d1'");
+        await client.query("UPDATE graphile_worker._private_jobs SET attempts = max_attempts, last_error = 'the database went away' WHERE key = airlock.job_key('dead:d1')");
         await client.query("COMMIT");
       } finally {
         client.release();
@@ -508,8 +509,8 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
     });
 
     await t.step("the job delivered again after its outcome calls nothing and moves nothing", async () => {
-      await db!.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'charge:p1'), job_key => 'charge:p1')");
-      await until("the redelivery done", async () => (await db!.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE key = 'charge:p1'")).rows[0].n === 0);
+      await db!.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'charge:p1'), job_key => airlock.job_key('charge:p1'))");
+      await until("the redelivery done", async () => (await db!.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE key = airlock.job_key('charge:p1')")).rows[0].n === 0);
       assertEquals(await state("charge", "p1"), { status: "settled", entered: 1, kind: "done", reconciled: false });
       assertEquals(calls("charge:p1"), 1);
     });
@@ -518,8 +519,8 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       // Past the outcome's move the row is the program's: it goes where the
       // program takes it, and a delivery that finds it there is done.
       const redelivered = async () => {
-        await db!.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'charge:p1'), job_key => 'charge:p1')");
-        await until("the redelivery done", async () => (await db!.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE key = 'charge:p1'")).rows[0].n === 0);
+        await db!.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'charge:p1'), job_key => airlock.job_key('charge:p1'))");
+        await until("the redelivery done", async () => (await db!.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE key = airlock.job_key('charge:p1')")).rows[0].n === 0);
       };
       await db!.query("ALTER TABLE pay_charge DISABLE TRIGGER guard; UPDATE pay_charge SET status = 'refunded' WHERE id = 'p1'; ALTER TABLE pay_charge ENABLE TRIGGER guard");
       await redelivered();
@@ -538,8 +539,8 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       await db!.query("ALTER TABLE pay_charge DISABLE TRIGGER guard; INSERT INTO pay_charge (id, amount, status) VALUES ('pz', 1, 'charging'); ALTER TABLE pay_charge ENABLE TRIGGER guard");
       await db!.query(`INSERT INTO airlock.external_effect_ledger (key, effect, row, input, entered, outcome)
         VALUES ('charge:earlier', 'charge', '{"id":"pz"}', '{}', 1, '{"target":"settled","kind":"done","data":{},"reconciled":false}')`);
-      await db!.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'charge:earlier'), job_key => 'charge:earlier')");
-      await until("the late delivery done", async () => (await db!.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE key = 'charge:earlier'")).rows[0].n === 0);
+      await db!.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', 'charge:earlier'), job_key => airlock.job_key('charge:earlier'))");
+      await until("the late delivery done", async () => (await db!.query("SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE key = airlock.job_key('charge:earlier')")).rows[0].n === 0);
       assertEquals((await db!.query("SELECT status FROM pay_charge WHERE id = 'pz'")).rows[0].status, "charging");
     });
 
@@ -555,16 +556,16 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
           VALUES ('dead:d2', 'dead', '{"id": "d2"}', '{}', 1, '{"target": "settled", "kind": "done", "reconciled": false}'),
                  ('ghost:g1', 'ghost', '{"id": "g1"}', '{}', 0, NULL)`);
         for (const key of ["dead:d2", "ghost:g1"]) {
-          await client.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', $1::text), job_key => $1::text)", [key]);
+          await client.query("SELECT graphile_worker.add_job('external_effect', json_build_object('key', $1::text), job_key => airlock.job_key($1::text))", [key]);
         }
-        await client.query("UPDATE graphile_worker._private_jobs SET attempts = max_attempts, last_error = 'gone' WHERE key IN ('dead:d2', 'ghost:g1')");
+        await client.query("UPDATE graphile_worker._private_jobs SET attempts = max_attempts, last_error = 'gone' WHERE key IN (airlock.job_key('dead:d2'), airlock.job_key('ghost:g1'))");
         await client.query("COMMIT");
       } finally {
         client.release();
       }
       assertEquals(await settled("dead", "d2"), { status: "settled", entered: 1, kind: "done", reconciled: false });
       assertEquals((await db!.query("SELECT outcome FROM airlock.external_effect_ledger WHERE key = 'ghost:g1'")).rows[0].outcome, null);
-      await db!.query("DELETE FROM graphile_worker._private_jobs WHERE key = 'ghost:g1'; DELETE FROM airlock.external_effect_ledger WHERE key = 'ghost:g1'");
+      await db!.query("DELETE FROM graphile_worker._private_jobs WHERE key = airlock.job_key('ghost:g1'); DELETE FROM airlock.external_effect_ledger WHERE key = 'ghost:g1'");
     });
   } finally {
     await worker?.stop();

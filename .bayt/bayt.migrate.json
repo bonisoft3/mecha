@@ -173,6 +173,7 @@
           "services/ticker/schedule.sql",
           "services/durex/graphile.sql",
           "services/airlock/airlock.sql",
+          "services/airlock/job_key.sql",
           "services/migrate/migrate.sh"
         ],
         "exclude": []
@@ -195,6 +196,7 @@
               "services/ticker/schedule.sql",
               "services/durex/graphile.sql",
               "services/airlock/airlock.sql",
+              "services/airlock/job_key.sql",
               "services/migrate/migrate.sh"
             ],
             "exclude": []

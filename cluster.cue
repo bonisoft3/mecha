@@ -132,13 +132,14 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	"-c", "max_connections=200",
 ]
 
-// Graphile Worker's schema and the airlock's tables, placed where an effect
-// is declared, by default on the first digits after the steps a caller opens
-// with (pronto's 000-010: extensions, roles, grants, types, tables, policies,
-// publication, validations, and the machines, whose guards are plpgsql and
-// resolve add_job and the ledger only when they run). A caller whose own steps
-// hold those digits places both elsewhere (state.steps), keeping the ledger
-// before the airlock. Every caller step that can write a row into an invoking
+// Graphile Worker's schema, the airlock's tables and the job key's function,
+// placed where an effect is declared, by default on the first digits after the
+// steps a caller opens with (pronto's 000-010: extensions, roles, grants,
+// types, tables, policies, publication, validations, and the machines, whose
+// guards are plpgsql and resolve add_job, the ledger and the job key only when
+// they run). A caller whose own steps hold those digits places them elsewhere
+// (state.steps), keeping the ledger before the airlock and the airlock before
+// the job key. Every caller step that can write a row into an invoking
 // state, a held seed included, is numbered above them, since such a row claims
 // the ledger and enqueues as it is written; a caller step on their digits is
 // refused where effects are declared, as any two steps sharing digits are.
@@ -150,11 +151,21 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 #GraphileStep:      =~"^[0-7][0-9]{2}_graphile_worker\\.sql$"
 #AirlockStep:       =~"^[0-7][0-9]{2}_airlock\\.sql$"
 
+// The job key of a ledger key (services/airlock/job_key.sql), placed after the
+// airlock's tables whose schema holds it. A step of its own because a live
+// data directory applies a step it lacks and refuses one whose text changed.
+#JobKeyMigration: "013_airlock_job_key.sql"
+#JobKeyStep:      =~"^[0-7][0-9]{2}_airlock_job_key\\.sql$"
+
 #PostgresLiteral: {
 	text: string
 	sql:  "E'\(strings.Replace(strings.Replace(text, "\\", "\\\\", -1), "'", "''", -1))'"
 }
 
+// What every start of an effect's cluster brings a retained database up to:
+// the ledger's current column and interpreters, and the job key's function,
+// which initdb places only on a fresh volume (#JobKeyMigration).
+_jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 #AirlockUpgradeSql: {
 	interpreters: string
 	_body: """
@@ -171,6 +182,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 		SET LOCAL statement_timeout = '60s';
 		LOCK TABLE airlock.external_effect_ledger IN ACCESS EXCLUSIVE MODE;
 		DO \((#PostgresLiteral & {text: _body}).sql);
+		\(_jobKeySql)
 		"""
 }
 
@@ -492,7 +504,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// (#GraphileMigration, #AirlockMigration, the schedule table inside
 		// the latter).
 		effects: [...#Effect]
-		// Current claim triggers are refreshed with the ledger in one transaction.
+		// Current claim triggers are refreshed with the ledger in one transaction,
+		// and the job key's function with them (#AirlockUpgradeSql).
 		if len(effects) > 0 {effectInterpreters: string & !=""}
 
 		// The container endpoints those effects reach through (#Bridge).
@@ -500,9 +513,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 
 		// Where the effect steps run (#GraphileMigration), the ledger first.
 		steps: {
-			graphile:     *#GraphileMigration | #GraphileStep
-			airlock:      *#AirlockMigration | #AirlockStep
-			_ledgerFirst: true & (graphile < airlock)
+			graphile:      *#GraphileMigration | #GraphileStep
+			airlock:       *#AirlockMigration | #AirlockStep
+			jobKey:        *#JobKeyMigration | #JobKeyStep
+			_ledgerFirst:  true & (graphile < airlock)
+			_airlockFirst: true & (airlock < jobKey)
 		}
 	}
 
@@ -602,6 +617,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		if len(X.state.effects) > 0 {
 			(strings.SliceRunes(X.state.steps.graphile, 0, 3)): X.state.steps.graphile
 			(strings.SliceRunes(X.state.steps.airlock, 0, 3)):  X.state.steps.airlock
+			(strings.SliceRunes(X.state.steps.jobKey, 0, 3)):   X.state.steps.jobKey
 		}
 		for m in X.state.migrations {(strings.SliceRunes(path.Base(m, path.Unix), 0, 3)): m}
 		if len(tenancy) > 1 {
@@ -736,6 +752,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		[if len(X.state.schedules) > 0 {{src: #ScheduleStaged, dst: #ScheduleMigration}}],
 		[if len(X.state.effects) > 0 {{src: #GraphileMigration, dst: X.state.steps.graphile}}],
 		[if len(X.state.effects) > 0 {{src: #AirlockMigration, dst: X.state.steps.airlock}}],
+		[if len(X.state.effects) > 0 {{src: #JobKeyMigration, dst: X.state.steps.jobKey}}],
 	])
 
 	let databaseUrl = "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-\(X.meta.app)}"
@@ -841,6 +858,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							}],
 							[if len(X.state.effects) > 0 {
 								"[(open --raw ($mecha | path join 'services/ticker/schedule.sql')) (open --raw ($mecha | path join 'services/airlock/airlock.sql'))] | str join '' | save --raw -f ($initdb | path join '\(X.state.steps.airlock)')"
+							}],
+							[if len(X.state.effects) > 0 {
+								"cp -f ($mecha | path join 'services/airlock/job_key.sql') ($initdb | path join '\(X.state.steps.jobKey)')"
 							}],
 							[if len(X.state.migrations) > 0 {
 								"open .bayt/bayt.database.json | get dockerfile.copy.0.srcs | each {|s| cp -f $s ($initdb | path join ($s | path basename)) } | ignore"

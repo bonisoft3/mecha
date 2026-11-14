@@ -37,6 +37,7 @@ Deno.test({ name: 'edge effects run in the dispatcher Worker and settle in the o
   try {
     await db.exec(await sql('durex/graphile.sql'))
     await db.exec(`${await sql('ticker/schedule.sql')}\n${await sql('airlock/airlock.sql')}`)
+    await db.exec(await sql('airlock/job_key.sql'))
     await db.exec(`CREATE TABLE effect_row (id text PRIMARY KEY, status text NOT NULL);
       CREATE ROLE service NOLOGIN BYPASSRLS; GRANT USAGE ON SCHEMA public TO service;
       CREATE TABLE settled_seen (settled int NOT NULL);

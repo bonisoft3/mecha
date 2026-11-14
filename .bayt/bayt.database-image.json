@@ -63,6 +63,16 @@
       {
         "from": null,
         "srcs": [
+          "services/airlock/job_key.sql"
+        ],
+        "dst": "/usr/share/mecha/initdb/013_airlock_job_key.sql",
+        "link": true,
+        "parents": false,
+        "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
           "services/database/role_passwords.sh"
         ],
         "dst": "/usr/share/mecha/initdb/899_role_passwords.sh",
@@ -140,6 +150,7 @@
       "services/ticker/schedule.sql",
       "services/durex/graphile.sql",
       "services/airlock/airlock.sql",
+      "services/airlock/job_key.sql",
       "services/migrate/migrate.sh"
     ],
     "exclude": []
@@ -232,6 +243,7 @@
           "services/ticker/schedule.sql",
           "services/durex/graphile.sql",
           "services/airlock/airlock.sql",
+          "services/airlock/job_key.sql",
           "services/migrate/migrate.sh"
         ],
         "exclude": []

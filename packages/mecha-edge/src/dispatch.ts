@@ -9,7 +9,7 @@ import {
   type CloudflareAiBinding,
   createTsBifrost,
 } from '../../../services/airlock/tsbifrost.ts'
-import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
+import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, ORIGIN, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
 import { type BlobStore, contentBlob, stowed } from '../../../services/airlock/blobs.ts'
 
 export interface EdgeSink {
@@ -32,10 +32,12 @@ export interface EdgeEffect {
   declaration: Effect
   /** A `container` is a bridge deployed here, called through its binding; a
    * `bridge` is one deployed elsewhere, whose effect the object settles failed
-   * without dispatching it. */
+   * without dispatching it. An `origin` named by `secret` is this
+   * deployment's, read from the dispatcher's environment at each run. */
   target:
     | { kind: 'tsbifrost'; url?: string }
-    | { kind: 'origin'; url?: string }
+    | { kind: 'origin'; url: string }
+    | { kind: 'origin'; secret: string }
     | { kind: 'bridge'; bridge: string }
     | { kind: 'container'; bridge: string; binding: string }
   issue(input: unknown, sink: EdgeSink, secrets: Record<string, string>): Promise<unknown> | unknown
@@ -163,6 +165,16 @@ function containerStub(env: Record<string, unknown> | undefined, binding: string
   return namespace.getByName(bridge)
 }
 
+// Read before the handler runs, so a deployment missing its origin, or holding
+// something else there, fails the run without calling anywhere. The value is
+// never echoed: a key put in the wrong secret would land in the log.
+function sinkOrigin(target: { url: string } | { secret: string }, strings: Record<string, string | undefined>, handler: string): string {
+  if ('url' in target) return target.url
+  const value = strings[target.secret] || die(`effect ${handler}: origin secret ${target.secret} is not set on this deployment`)
+  if (!ORIGIN.test(value)) throw new Error(`effect ${handler}: origin secret ${target.secret} is not an https origin without a path`)
+  return value
+}
+
 function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, aiBinding }: ReturnType<typeof extractEnv>): EdgeSink {
   const { fetcher = fetch, callTimeoutMs = CALL_TIMEOUT_MS } = cfg
   const tsbifrost = createTsBifrost({ target: 'cloudflare', config: cfg.ai, env: strings, aiBinding, fetcher })
@@ -174,6 +186,7 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
     if (!val) throw new Error(`effect ${spec.declaration.handler}: secret ${secret} is not set on this deployment`)
     credHeader[header] = scheme ? `${scheme} ${val}` : val
   }
+  const base = spec.target.kind === 'origin' ? sinkOrigin(spec.target, strings, spec.declaration.handler) : undefined
   return {
     key,
     blob: (blobKey: unknown) => contentBlob(cfg.blobs, blobKey),
@@ -204,7 +217,7 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
         if (spec.target.kind === 'tsbifrost') {
           res = await tsbifrost(new Request(`http://tsbifrost:${TSBIFROST_PORT}${path}`, { method, headers, ...(payload !== undefined ? { body: payload } : {}) }))
         } else if (spec.target.kind === 'origin') {
-          res = await fetcher(new URL(path, spec.target.url).href, { method, headers, ...(payload !== undefined ? { body: payload } : {}) })
+          res = await fetcher(new URL(path, base).href, { method, headers, ...(payload !== undefined ? { body: payload } : {}) })
         } else if (spec.target.kind === 'container') {
           // The stub dials the class's own port, so the URL names only the
           // bridge. What the container answers is the sink's answer; what the

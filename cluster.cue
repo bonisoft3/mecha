@@ -365,11 +365,35 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 	image?: {for t in ["browser", "cheap", "heavy"] {(t)?: #AiModelSpec | (string & !="")}}
 }
 
+// A deployment's choice among declared models: the edge's dispatcher reads
+// `secret` from its environment before each call and calls the route it
+// names, refusing an unset or undeclared one (services/airlock/ai-models.ts).
+// Only the edge's airlock reads its environment per call, so only cloudflare
+// routes; a stack's environment is fixed when it starts.
+#AiRouted: close({
+	secret: =~"^[A-Z][A-Z0-9_]*$"
+	routes: {[=~"^[a-z][a-z0-9-]*$"]: #AiModelSpec | (string & !="")}
+})
+
+#AiEdgeOverrides: {
+	text?: {
+		browser?: #AiModelSpec | (string & !="")
+		for t in ["cheap", "heavy"] {(t)?: #AiModelSpec | (string & !="") | #AiRouted}
+	}
+	image?: {
+		browser?: #AiModelSpec | (string & !="")
+		for t in ["cheap", "heavy"] {(t)?: #AiModelSpec | (string & !="") | #AiRouted}
+	}
+}
+
 #AiCapability: {
-	text?:    [...#AiTier]
-	image?:   [...#AiTier]
-	models?:  #AiTierOverrides
-	targets?: {for t in ["browser", "pages", "docker", "local", "cloudflare", "gcp", "k8s", "aws"] {(t)?: #AiTierOverrides}}
+	text?:   [...#AiTier]
+	image?:  [...#AiTier]
+	models?: #AiTierOverrides
+	targets?: {
+		for t in ["browser", "pages", "docker", "local", "gcp", "k8s", "aws"] {(t)?: #AiTierOverrides}
+		cloudflare?: #AiEdgeOverrides
+	}
 }
 
 // An external effect as the cluster places it: its name, the one origin it

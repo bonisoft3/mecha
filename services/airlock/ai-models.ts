@@ -36,8 +36,13 @@ export type AiCapabilitiesConfig = {
   text?: AiTier[];
   image?: AiTier[];
   models?: AiModalityMap<AiModelOverride>;
-  targets?: Partial<Record<AiTarget, AiModalityMap<AiModelOverride>>>;
+  targets?: Partial<Record<AiTarget, AiModalityMap<AiModelOverride | AiRoutedOverride>>>;
 };
+
+/** A deployment's choice among declared models: `env[secret]` names one of
+ * `routes` at each call, so one release calls Gemini from production and
+ * Workers AI from staging. */
+export type AiRoutedOverride = { secret: string; routes: Record<string, AiModelOverride> };
 
 const GEMMA_4_NO_THINKING = { chat_template_kwargs: { enable_thinking: false } };
 
@@ -162,9 +167,24 @@ function applyOverride(base: AiModelSpec, override?: AiModelOverride): AiModelSp
   };
 }
 
+function isRouted(override: AiModelOverride | AiRoutedOverride | undefined): override is AiRoutedOverride {
+  return typeof override === "object" && "routes" in override;
+}
+
+// The value is never echoed: a key put in the wrong secret would land in the log.
+function routed(override: AiModelOverride | AiRoutedOverride | undefined, env: Record<string, string | undefined>): AiModelOverride | undefined {
+  if (!isRouted(override)) return override;
+  const names = Object.keys(override.routes).join(", ");
+  const value = env[override.secret];
+  if (!value) throw new Error(`AI setting ${override.secret} is not set on this deployment: it names one of ${names}`);
+  if (!Object.hasOwn(override.routes, value)) throw new Error(`AI setting ${override.secret} is not one of ${names}`);
+  return override.routes[value];
+}
+
 /** Resolves the concrete model specification for `(target, modality, tier)`
  * after layering global tier overrides (`config.models`), release-target
- * overrides (`config.targets[target]`), and environment overrides. */
+ * overrides (`config.targets[target]`, a routed one by the deployment's
+ * setting in `env`), and environment overrides. */
 export function resolveModelSpec(
   config: AiCapabilitiesConfig | undefined,
   target: AiTarget,
@@ -175,7 +195,7 @@ export function resolveModelSpec(
   const targetTable = DEFAULT_AI_MODELS[target] ?? DEFAULT_AI_MODELS.docker;
   const base = targetTable[modality][tier];
   const withGlobal = applyOverride(base, config?.models?.[modality]?.[tier]);
-  const withTarget = applyOverride(withGlobal, config?.targets?.[target]?.[modality]?.[tier]);
+  const withTarget = applyOverride(withGlobal, routed(config?.targets?.[target]?.[modality]?.[tier], env));
 
   const envPrefix = `AI_${modality.toUpperCase()}_${tier.toUpperCase()}`;
   const envModel = env[`${envPrefix}_MODEL`];
@@ -206,18 +226,65 @@ export function providerKey(provider: AiProvider, env: Record<string, string | u
   return "";
 }
 
-/** The keys a target's calls can read, as resolveModelSpec resolves every
- * backend tier the config declares: one group per provider, any of whose
- * names serves. */
-export function providerKeyGroups(config: AiCapabilitiesConfig | undefined, target: AiTarget): string[][] {
+function backendTiers(config: AiCapabilitiesConfig | undefined): [AiModality, AiBackendTier][] {
+  return (["text", "image"] as const).flatMap((modality) =>
+    (config?.[modality] ?? []).flatMap((tier): [AiModality, AiBackendTier][] => tier === "browser" ? [] : [[modality, tier]])
+  );
+}
+
+function keyGroups(specs: AiModelSpec[]): string[][] {
   const groups = new Map<AiProvider, string[]>();
-  for (const modality of ["text", "image"] as const) {
-    for (const tier of config?.[modality] ?? []) {
-      if (tier === "browser") continue;
-      const { provider } = resolveModelSpec(config, target, modality, tier);
-      const keys = PROVIDER_KEYS[provider];
-      if (keys) groups.set(provider, [...keys]);
-    }
-  }
+  for (const { provider } of specs) if (PROVIDER_KEYS[provider]) groups.set(provider, [...PROVIDER_KEYS[provider]!]);
   return [...groups.values()];
+}
+
+/** The keys a target's calls read whatever its deployment selects, as
+ * resolveModelSpec resolves every backend tier the config declares and no
+ * setting routes: one group per provider, any of whose names serves. */
+export function providerKeyGroups(config: AiCapabilitiesConfig | undefined, target: AiTarget): string[][] {
+  return keyGroups(
+    backendTiers(config)
+      .filter(([modality, tier]) => !isRouted(config?.targets?.[target]?.[modality]?.[tier]))
+      .map(([modality, tier]) => resolveModelSpec(config, target, modality, tier)),
+  );
+}
+
+/** Each setting a target's routed tiers read, and the key groups each of its
+ * routes needs. A setting shared by tiers declares the same routes in each,
+ * or a value one accepts the other refuses. */
+export function routedSettings(config: AiCapabilitiesConfig | undefined, target: AiTarget): Record<string, Record<string, string[][]>> {
+  const settings = new Map<string, Map<string, AiModelSpec[]>>();
+  for (const [modality, tier] of backendTiers(config)) {
+    const override = config?.targets?.[target]?.[modality]?.[tier];
+    if (!isRouted(override)) continue;
+    const names = Object.keys(override.routes).sort();
+    if (names.length === 0) throw new Error(`AI setting ${override.secret} routes ${modality} ${tier} nowhere`);
+    const known = settings.get(override.secret);
+    if (known && [...known.keys()].join() !== names.join()) {
+      throw new Error(`AI setting ${override.secret} routes ${modality} ${tier} by ${names.join(", ")} and another tier by ${[...known.keys()].join(", ")}`);
+    }
+    const routes = known ?? new Map(names.map((name) => [name, [] as AiModelSpec[]]));
+    for (const name of names) routes.get(name)!.push(resolveModelSpec(config, target, modality, tier, { [override.secret]: name }));
+    settings.set(override.secret, routes);
+  }
+  return Object.fromEntries([...settings].map(([secret, routes]) => [secret, Object.fromEntries([...routes].map(([name, specs]) => [name, keyGroups(specs)]))]));
+}
+
+/** The model a call to `(modality, tier)` runs, refused when the deployment's
+ * setting routes that tier to a provider whose key it does not hold: read for
+ * the call alone, so an unkeyed route blocks only the work that takes it. */
+export function resolveCallSpec(
+  config: AiCapabilitiesConfig | undefined,
+  target: AiTarget,
+  modality: AiModality,
+  tier: AiTier,
+  env: Record<string, string | undefined>,
+): AiModelSpec {
+  const spec = resolveModelSpec(config, target, modality, tier, env);
+  const override = tier === "browser" ? undefined : config?.targets?.[target]?.[modality]?.[tier];
+  const keys = PROVIDER_KEYS[spec.provider];
+  if (isRouted(override) && keys && !keys.some((name) => env[name])) {
+    throw new Error(`AI setting ${override.secret} routes ${modality} ${tier} to ${spec.provider}, which reads ${keys.join(" or ")}, and this deployment holds none`);
+  }
+  return spec;
 }

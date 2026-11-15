@@ -146,7 +146,10 @@ gets null and counts nothing.
 The dispatcher runs the handler with the container's sink and cage, stows
 answered bytes in `BLOB_OBJECTS`, and calls `effectAnswer` with the outcome or
 the error, fenced by the run's number ([`dispatch.ts`](src/dispatch.ts)). A
-sink is tsbifrost, a declared origin, or a bridge deployed on `cloudflare`: a
+sink is tsbifrost, a declared origin, an origin this deployment holds in the
+dispatcher secret the effect names (`edgeOrigin: {secret}`, read at each run
+and refused unless an https origin without a path, so staging and production
+reach a vendor's sandbox and its live API from one release), or a bridge deployed on `cloudflare`: a
 Cloudflare Container the dispatcher owns as a Durable Object class, `Bridge<Name>`
 bound as `BRIDGE_<NAME>` ([`bridge.ts`](src/bridge.ts)), whose stub the sink's
 call goes to under the bridge's name, on the port the class holds. The

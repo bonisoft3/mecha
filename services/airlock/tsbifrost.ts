@@ -8,6 +8,7 @@ import {
   type AiTier,
   DEFAULT_AI_MODELS,
   providerKey,
+  resolveCallSpec,
   resolveModelSpec,
 } from "./ai-models.ts";
 
@@ -155,7 +156,7 @@ export function createTsBifrost(opts: TsBifrostOptions = {}): (req: Request) => 
       if (!Array.isArray(messages) || messages.length === 0) {
         return json(400, { error: "messages array is required" });
       }
-      const spec = resolveModelSpec(config, target, "text", tier, env);
+      const spec = resolveCallSpec(config, target, "text", tier, env);
       const model = typeof body.model === "string" && body.model !== "" && body.model !== "auto"
         ? body.model
         : spec.model;
@@ -212,7 +213,7 @@ export function createTsBifrost(opts: TsBifrostOptions = {}): (req: Request) => 
       if (typeof prompt !== "string" || prompt.trim() === "") {
         return json(400, { error: "prompt string is required" });
       }
-      const spec = resolveModelSpec(config, target, "image", tier, env);
+      const spec = resolveCallSpec(config, target, "image", tier, env);
       const model = typeof body.model === "string" && body.model !== "" && body.model !== "auto"
         ? body.model
         : spec.model;

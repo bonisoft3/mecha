@@ -102,6 +102,19 @@ A field only one provider knows goes one of two ways, and the head of
 A field either one names wins over the one tsbifrost builds, and
 `extra_params` win over `params`.
 
+On Cloudflare a backend tier may be **routed**: `targets: cloudflare: image:
+heavy: {secret: "AI_IMAGE_HEAVY", routes: {google: {...}, cloudflare: {...}}}`.
+One release then serves deployments that differ by a setting, not a build:
+the dispatcher reads `AI_IMAGE_HEAVY` from its environment before each AI run
+and calls the route it names, refusing the run when it is unset, names no
+route, or selects one whose provider key the deployment does not hold. The
+setting is a dispatcher secret, as a named origin is: a release's `vars` are
+rewritten at each deploy, a secret is the deployment's. The publish requires
+it carried or held and `sayt verify@cloudflare` asks for it by name; a route's
+key is required only by a publish that carries the setting selecting it, since
+a value held on the Worker alone cannot be read back. Only cloudflare routes:
+a stack's environment is fixed when it starts.
+
 [Maxim's Bifrost](https://github.com/maximhq/bifrost), the Go gateway, is the
 alternative: more providers, but one more image and its configuration store,
 and nothing for the Durable Object that mecha-edge runs tsbifrost in as a

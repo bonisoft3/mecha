@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   type AiCapabilitiesConfig,
+  resolveCallSpec,
   createTsBifrost,
   DEFAULT_AI_MODELS,
   mergeExtra,
@@ -8,6 +9,7 @@ import {
   providerKey,
   providerKeyGroups,
   resolveModelSpec,
+  routedSettings,
 } from "./tsbifrost.ts";
 
 Deno.test("default 3-tier model lineup resolves per release target", () => {
@@ -503,6 +505,58 @@ Deno.test("providerKeyGroups names the keys every declared tier's resolved provi
   assert.deepEqual(providerKeyGroups({ text: ["cheap", "heavy"], targets: { cloudflare: { text: { cheap: { provider: "openai", model: "gpt" } } } } }, "cloudflare"), [["OPENAI_API_KEY"]]);
   assert.deepEqual(providerKeyGroups({ text: ["browser"] }, "cloudflare"), [], "a browser tier calls no backend");
   assert.deepEqual(providerKey("google", { GOOGLE_API_KEY: "g" }), "g");
+});
+
+const routedConfig: AiCapabilitiesConfig = {
+  image: ["cheap", "heavy"],
+  targets: {
+    cloudflare: {
+      image: {
+        heavy: {
+          secret: "AI_IMAGE_HEAVY",
+          routes: {
+            google: { provider: "google", model: "gemini-3.1-flash-lite-image" },
+            cloudflare: { provider: "cloudflare", model: "@cf/black-forest-labs/flux-1-schnell", steps: 4 },
+          },
+        },
+      },
+    },
+  },
+};
+
+// Staging and production are one release: level 3 was compiled to Gemini,
+// so staging could only call Gemini or be built apart. The route is each
+// deployment's setting, and an unset or undeclared one is refused rather
+// than read as a default.
+Deno.test("a routed tier calls the route its deployment's setting names, and no other", () => {
+  assert.equal(resolveModelSpec(routedConfig, "cloudflare", "image", "heavy", { AI_IMAGE_HEAVY: "google" }).provider, "google");
+  const staging = resolveModelSpec(routedConfig, "cloudflare", "image", "heavy", { AI_IMAGE_HEAVY: "cloudflare" });
+  assert.deepEqual([staging.provider, staging.model, staging.steps], ["cloudflare", "@cf/black-forest-labs/flux-1-schnell", 4]);
+  assert.throws(() => resolveModelSpec(routedConfig, "cloudflare", "image", "heavy", {}), /AI setting AI_IMAGE_HEAVY is not set on this deployment: it names one of google, cloudflare/);
+  assert.throws(
+    () => resolveModelSpec(routedConfig, "cloudflare", "image", "heavy", { AI_IMAGE_HEAVY: "sk-secret-value" }),
+    (e: Error) => /is not one of google, cloudflare/.test(e.message) && !e.message.includes("sk-secret-value"),
+  );
+  assert.equal(resolveModelSpec(routedConfig, "local", "image", "heavy", {}).model, DEFAULT_AI_MODELS.local.image.heavy.model, "a compiled target is not routed");
+});
+
+// A Gemini key required of every deployment would put production's key on
+// staging; the key of a route belongs to the deployments selecting it.
+Deno.test("a routed tier's keys are its routes', and a deployment is refused only the key its route reads", () => {
+  assert.deepEqual(providerKeyGroups(routedConfig, "cloudflare"), []);
+  assert.deepEqual(routedSettings(routedConfig, "cloudflare"), { AI_IMAGE_HEAVY: { cloudflare: [], google: [["GEMINI_API_KEY", "GOOGLE_API_KEY"]] } });
+  assert.deepEqual(routedSettings(routedConfig, "docker"), {});
+  const call = (env: Record<string, string>) => resolveCallSpec(routedConfig, "cloudflare", "image", "heavy", env);
+  call({ AI_IMAGE_HEAVY: "cloudflare" });
+  call({ AI_IMAGE_HEAVY: "google", GEMINI_API_KEY: "k" });
+  assert.throws(() => call({ AI_IMAGE_HEAVY: "google" }), /routes image heavy to google, which reads GEMINI_API_KEY or GOOGLE_API_KEY, and this deployment holds none/);
+  assert.throws(() => call({}), /AI_IMAGE_HEAVY is not set/);
+  const split: AiCapabilitiesConfig = {
+    text: ["heavy"],
+    image: ["heavy"],
+    targets: { cloudflare: { text: { heavy: { secret: "AI_IMAGE_HEAVY", routes: { google: "gemini-2.5-flash" } } }, image: routedConfig.targets!.cloudflare!.image } },
+  };
+  assert.throws(() => routedSettings(split, "cloudflare"), /routes image heavy by cloudflare, google and another tier by google/);
 });
 
 // Vision scans send OpenAI multimodal `messages[].content` arrays (`text` + `image_url`);

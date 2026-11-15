@@ -94,6 +94,15 @@ Deno.test("a credential is a header name daprd forwards and neither the host nor
   }
 });
 
+Deno.test("the edge's origin is an https origin without a path, or the environment variable naming one", () => {
+  const manifest = (edgeOrigin: unknown) => JSON.stringify({ effects: { charge: { ...effect(), edgeOrigin } } });
+  assertEquals(parseManifest(manifest("https://api.acquirer.example")).charge.edgeOrigin, "https://api.acquirer.example");
+  assertEquals(parseManifest(manifest({ secret: "ACQUIRER_ORIGIN" })).charge.edgeOrigin, { secret: "ACQUIRER_ORIGIN" });
+  for (const bad of ["http://api.acquirer.example", "https://api.acquirer.example/v1", { secret: "acquirer-origin" }, { secret: "A", url: "https://a.example" }, {}, null]) {
+    assertThrows(() => parseManifest(manifest(bad)), Error, "edgeOrigin");
+  }
+});
+
 Deno.test("an effect's endowments are drawn from what the cage can endow", () => {
   const manifest = (endowments: unknown) => JSON.stringify({ effects: { charge: { ...effect(), endowments } } });
   assertEquals(parseManifest(manifest(["Crypto", "TextEncoder"])).charge.endowments, ["Crypto", "TextEncoder"]);

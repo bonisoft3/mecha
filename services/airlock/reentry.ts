@@ -38,8 +38,10 @@ export type Effect = {
   /** The media type of a sink that takes no JSON, whose handler sends its
    * body already encoded, as a string. */
   contentType?: string;
-  /** The origin the edge's airlock calls; the compose airlock's daprd holds its own. */
-  edgeOrigin?: string;
+  /** The origin the edge's airlock calls, or the dispatcher's secret that
+   * holds it, for a sink each deployment points elsewhere; the compose
+   * airlock's daprd holds its own. */
+  edgeOrigin?: string | { secret: string };
   /** The bridge the sink is: the release targets its container runs on, and
    * whether the local stack runs a simulator in its place. Anywhere else no
    * call is made and the effect fails. */
@@ -105,6 +107,9 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9-]*$/;
 const HEADER = /^[A-Z][A-Za-z0-9-]*$/;
 const RESERVED_HEADERS = new Set(["idempotency-key", "content-type", "content-length", "accept", "host", "transfer-encoding", "traceparent", "tracestate", "baggage", "dapr-app-id"]);
 const SECRET = /^[A-Z][A-Z0-9_]*$/;
+/** An https origin as mecha's cluster.cue spells it (#OriginPattern): a DNS
+ * name of two labels or more, a port at most, no path. */
+export const ORIGIN = /^https:\/\/([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?(:[0-9]{1,5})?$/;
 const MEDIA_TYPE = /^[a-z]+\/[a-z0-9][a-z0-9.+-]*$/;
 const HEADER_VALUE = /^[\x21-\x7e]([\x20-\x7e]*[\x21-\x7e])?$/;
 
@@ -198,6 +203,12 @@ export function parseManifest(text: string): Record<string, Effect> {
     }
     if (e.contentType !== undefined && (typeof e.contentType !== "string" || !MEDIA_TYPE.test(e.contentType) || e.contentType === "application/json")) {
       bad("contentType is not a media type other than JSON, which is the default");
+    }
+    if (e.edgeOrigin !== undefined) {
+      const o = e.edgeOrigin;
+      if (typeof o === "string" ? !ORIGIN.test(o) : typeof o !== "object" || o === null || Object.keys(o).length !== 1 || typeof o.secret !== "string" || !SECRET.test(o.secret)) {
+        bad("edgeOrigin is neither an https origin nor {secret}, an environment variable's name");
+      }
     }
     if (e.credential !== undefined) {
       const c = e.credential;

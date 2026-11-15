@@ -244,6 +244,12 @@ const redirect = (to: string, cookies: string[]) => {
 };
 const refuse = (status: number, error: string) =>
   new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+// Speculative GETs (an inherited Service-Worker-Navigation-Preload or link prefetch)
+// are discarded when /auth/* bypasses the worker; answering them would spend a
+// single-use OAuth code or overwrite the browser's PKCE state cookie.
+const speculative = (req: Request) =>
+  req.headers.has("service-worker-navigation-preload") ||
+  /\b(prefetch|preview)\b/i.test(`${req.headers.get("sec-purpose") ?? ""},${req.headers.get("purpose") ?? ""}`);
 
 /** The routes under PREFIX, or null for a path that is not one of them. */
 export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
@@ -365,6 +371,7 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     if (req.method === "POST" && path === `${PREFIX}/signout`) return Promise.resolve(signout(req));
     const m = /^\/auth\/oidc\/([a-z][a-z0-9]*)\/(start|callback)$/.exec(path);
     if (m === null || !Object.hasOwn(cfg.providers, m[1]) || req.method !== "GET") return null;
+    if (speculative(req)) return Promise.resolve(refuse(400, "not a navigation"));
     return m[2] === "start" ? start(req, m[1]) : callback(req, m[1]);
   };
 }

@@ -504,3 +504,102 @@ Deno.test("providerKeyGroups names the keys every declared tier's resolved provi
   assert.deepEqual(providerKeyGroups({ text: ["browser"] }, "cloudflare"), [], "a browser tier calls no backend");
   assert.deepEqual(providerKey("google", { GOOGLE_API_KEY: "g" }), "g");
 });
+
+// Vision scans send OpenAI multimodal `messages[].content` arrays (`text` + `image_url`);
+// Gemini 2.5 Flash rejects `{ text: Array }` and prepends `{ thought: true }` parts when thinking runs.
+Deno.test("Google provider translates multimodal image_url parts and skips thought parts", async () => {
+  const seen: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const gateway = createTsBifrost({
+    target: "cloudflare",
+    config: {
+      targets: {
+        cloudflare: {
+          text: {
+            heavy: {
+              provider: "google",
+              model: "gemini-2.5-flash",
+              params: { generationConfig: { thinkingConfig: { thinkingBudget: 0 } } },
+            },
+          },
+        },
+      },
+    },
+    env: { GEMINI_API_KEY: "gem-key" },
+    fetcher: async (input, init) => {
+      seen.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+      return Response.json({
+        candidates: [{
+          content: {
+            parts: [
+              { thought: true, text: "thinking about bottle" },
+              { text: '{"caption":"PET bottle"}' },
+            ],
+          },
+        }],
+      });
+    },
+  });
+
+  const res = await gateway(new Request("http://tsbifrost/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      tier: "heavy",
+      format: "json",
+      messages: [
+        { role: "system", content: "Return JSON." },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Classify this specimen." },
+            { type: "image_url", image_url: { url: "data:image/jpeg;base64,AQIDBA==" } },
+            { type: "image_url", image_url: { url: "https://example.com/item.jpg" } },
+          ],
+        },
+      ],
+    }),
+  }));
+  assert.equal(res.status, 200);
+  const out = await res.json();
+  assert.equal(out.model, "gemini-2.5-flash");
+  assert.equal(out.choices[0].message.content, '{"caption":"PET bottle"}');
+  assert.equal(seen[0].url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+  assert.deepEqual(seen[0].body.contents, [{
+    role: "user",
+    parts: [
+      { text: "Classify this specimen." },
+      { inlineData: { mimeType: "image/jpeg", data: "AQIDBA==" } },
+      { fileData: { fileUri: "https://example.com/item.jpg" } },
+    ],
+  }]);
+  assert.deepEqual(
+    (seen[0].body.generationConfig as Record<string, unknown>).thinkingConfig,
+    { thinkingBudget: 0 },
+  );
+
+  const thoughtOnly = createTsBifrost({
+    target: "cloudflare",
+    config: {
+      targets: {
+        cloudflare: {
+          text: {
+            heavy: { provider: "google", model: "gemini-2.5-flash" },
+          },
+        },
+      },
+    },
+    env: { GEMINI_API_KEY: "gem-key" },
+    fetcher: async () =>
+      Response.json({
+        candidates: [{
+          content: { parts: [{ thought: true, text: "internal reasoning truncated at maxOutputTokens" }] },
+        }],
+      }),
+  });
+  const thoughtRes = await thoughtOnly(new Request("http://tsbifrost/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tier: "heavy", messages: [{ role: "user", content: "Classify." }] }),
+  }));
+  assert.equal(thoughtRes.status, 502);
+});

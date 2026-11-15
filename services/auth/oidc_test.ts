@@ -413,3 +413,25 @@ Deno.test("disabling a provider also refuses its browser session", async () => {
   const disabled = oidc({ secret: SECRET, origin: () => ORIGIN, providers: {}, links: s.links, issue: () => Promise.resolve("unused") });
   assertEquals((await disabled(exchange(cookie))!).status, 401);
 });
+
+Deno.test("Service-Worker-Navigation-Preload and prefetch GETs neither overwrite PKCE state nor spend a single-use code", async () => {
+  const s = await setup();
+  const { to, state, verifier } = await begin(s.serve);
+  const code = s.idp.authorize(to);
+  for (const headers of [
+    { "service-worker-navigation-preload": "true" },
+    { "sec-purpose": "prefetch;prerender" },
+  ] as Record<string, string>[]) {
+    const preloadStart = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start`, { headers }));
+    assertEquals(preloadStart.status, 400);
+    assertEquals(preloadStart.headers.getSetCookie(), []);
+    const preloadCb = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/callback?${new URLSearchParams({ code, state })}`, {
+      headers: { ...headers, cookie: `${STATE_COOKIE}=${verifier}` },
+    }));
+    assertEquals(preloadCb.status, 400);
+    assertEquals(preloadCb.headers.getSetCookie(), []);
+  }
+  const done = await s.serve(callback({ code, state }, verifier));
+  assertEquals(done.status, 303);
+  assertEquals(s.links.users.size, 1);
+});

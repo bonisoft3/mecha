@@ -82,9 +82,17 @@ export async function nativeProvenance() {
   }
 }
 
+async function checkedOneOf(bytes: Uint8Array<ArrayBuffer>, expected: readonly string[]) {
+  const actual = await sha256(bytes)
+  if (!expected.includes(actual)) throw new Error(`Native DuckDB checksum mismatch: expected ${expected.join(' or ')}, got ${actual}`)
+  return { bytes, sha256: actual }
+}
+
 async function readArtifact(root: string) {
+  const wasm = await checkedOneOf(await Deno.readFile(path.join(root, 'duckdb.wasm')), [manifest.wasmSha256, manifest.rosettaWasmSha256])
   return {
-    wasm: await checked(await Deno.readFile(path.join(root, 'duckdb.wasm')), manifest.wasmSha256),
+    wasm: wasm.bytes,
+    wasmSha256: wasm.sha256,
     loader: new TextDecoder('utf-8', { fatal: true }).decode(await checked(await Deno.readFile(path.join(root, 'native-glue.js')), manifest.loaderSha256)),
   }
 }
@@ -107,9 +115,10 @@ async function dockerBuild(root: string, log: string) {
     'run', '--no-config', '-A', '/native/build.ts', '/cache', '/output/duckdb.wasm'], root, env, log)
 }
 
-export async function buildNative(cache: string): Promise<{ wasm: Uint8Array<ArrayBuffer>; loader: string }> {
+export async function buildNative(cache: string): Promise<{ wasm: Uint8Array<ArrayBuffer>; wasmSha256: string; loader: string }> {
   const inputs: Record<string, unknown> = await nativeProvenance()
   delete inputs.wasmSha256
+  delete inputs.rosettaWasmSha256
   delete inputs.loaderSha256
   const key = await sha256(new TextEncoder().encode(JSON.stringify(inputs)))
   const root = path.join(cache, 'duckdb-workerd-native', key)
@@ -184,16 +193,19 @@ export async function buildNative(cache: string): Promise<{ wasm: Uint8Array<Arr
     for (const prefix of new Set([root, canonical])) {
       if (Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes(prefix)) throw new Error('Native DuckDB artifact embeds its build directory')
     }
+    // Apple Silicon Rosetta 2 translates linux/amd64 x87 80-bit floats at 64-bit IEEE precision (CPU implementer 0x61).
+    const rosetta = (await Deno.readTextFile('/proc/cpuinfo')).includes('0x61')
+    const expectedWasm = rosetta ? manifest.rosettaWasmSha256 : manifest.wasmSha256
     const loader = await Deno.readFile(path.join(build, 'duckdb_wasm.js'))
     const wasmHash = await sha256(bytes), loaderHash = await sha256(loader)
-    if (wasmHash !== manifest.wasmSha256 || loaderHash !== manifest.loaderSha256) {
-      throw new Error(`Native artifact hashes differ: wasm=${wasmHash} loader=${loaderHash}`)
+    if (wasmHash !== expectedWasm || loaderHash !== manifest.loaderSha256) {
+      throw new Error(`Native artifact hashes differ (rosetta=${rosetta}): wasm=${wasmHash} loader=${loaderHash}`)
     }
     await Deno.writeFile(loaderArtifact + '.partial', loader)
     await Deno.rename(loaderArtifact + '.partial', loaderArtifact)
     await Deno.writeFile(artifact + '.partial', bytes)
     await Deno.rename(artifact + '.partial', artifact)
-    return { wasm: bytes, loader: new TextDecoder('utf-8', { fatal: true }).decode(loader) }
+    return { wasm: bytes, wasmSha256: wasmHash, loader: new TextDecoder('utf-8', { fatal: true }).decode(loader) }
   } finally { await lock.unlock(); lock.close() }
 }
 

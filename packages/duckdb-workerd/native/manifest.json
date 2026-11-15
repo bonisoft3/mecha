@@ -1,7 +1,8 @@
 {
   "engineVersion": "1.5.4",
   "wasmVersion": "1.33.1-dev57.0",
-  "wasmSha256": "6b9531fbaf8f846c01c619370607c81ae4f9d4dc3abaecb392936766e8cdf9c9",
+  "wasmSha256": "d02148c83edf396f89adbacdf872df724288b57106c5a879e5167cd400c2b4ea",
+  "rosettaWasmSha256": "6b9531fbaf8f846c01c619370607c81ae4f9d4dc3abaecb392936766e8cdf9c9",
   "sdkVersion": "3.1.71",
   "sources": [
     {

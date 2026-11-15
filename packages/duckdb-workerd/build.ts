@@ -101,7 +101,7 @@ export async function packageDuckDB(out: string): Promise<{ fingerprint: string;
     await Deno.writeTextFile(path.join(out, 'duckdb.mjs'), `function unsupportedArrowCodeGeneration(){throw Error('Arrow JavaScript code generation is unsupported by DuckDB workerd');}\n` + bundle)
   } finally { await Deno.remove(temporary, { recursive: true }) }
   await Deno.writeFile(path.join(out, 'duckdb.wasm'), native.wasm)
-  await Deno.writeTextFile(path.join(out, 'native-build.json'), JSON.stringify(await nativeProvenance(), null, 2) + '\n')
+  await Deno.writeTextFile(path.join(out, 'native-build.json'), JSON.stringify({ ...await nativeProvenance(), wasmSha256: native.wasmSha256 }, null, 2) + '\n')
   for (const [i, name] of Object.keys(extensions).entries()) {
     await Deno.writeFile(path.join(out, `${name}.wasm`), extensionBytes[i])
     await Deno.writeFile(path.join(out, 'assets', `${name}.bin`), extensionBytes[i])

@@ -170,7 +170,9 @@ compiler or Python installation. The Linux build cache lives in the
 of the host filesystem. Verified WASM and matching glue are cached under Deno's
 cache directory. Runtime execution needs none of these build tools.
 
-The builder verifies source/tool downloads and both generated artifact hashes,
+The builder verifies source/tool downloads and both generated artifact hashes
+(`wasmSha256` on native `x86_64` Linux and `rosettaWasmSha256` under Apple
+Silicon Rosetta's 64-bit x87 translation),
 serializes concurrent builds, uses four compiler workers, and stops below
 15 GiB free disk headroom on the host or build volume. Source paths are mapped
 to `/duckdb-native`, build time uses the pinned source commit epoch, and

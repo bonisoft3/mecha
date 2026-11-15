@@ -2,7 +2,7 @@ import { assertEquals, assertRejects } from "@std/assert";
 import pg from "npm:pg@8.16.3";
 import { pgTest, postgres } from "./pg-test.ts";
 import { table as types } from "./portable-fixture.ts";
-import { type Publication, publish, publishDelta, publishPages } from "./publication.ts";
+import { dropStagedPages, type Publication, publish, publishDelta, publishPages, publishStagedPages, stagePages } from "./publication.ts";
 
 const CRUD = `CREATE ROLE anon NOLOGIN; CREATE ROLE service NOLOGIN;
   CREATE FUNCTION public.app_pre_request() RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$;`;
@@ -645,6 +645,7 @@ pgTest("paged publication stages bounded pages atomically", async () => {
     INSERT INTO b VALUES ('old', 5);
     CREATE FUNCTION complete() RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ INSERT INTO history VALUES (1) $$;
     CREATE FUNCTION fail_complete() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'hook failed'; END $$;
+    CREATE FUNCTION fail_serializable() RETURNS void LANGUAGE plpgsql AS $$ BEGIN RAISE SQLSTATE '40001'; END $$;
     GRANT ALL ON a, b TO service;`);
   const one = '00000000-0000-0000-0000-000000000001';
   const two = '00000000-0000-0000-0000-000000000002';
@@ -666,10 +667,33 @@ pgTest("paged publication stages bounded pages atomically", async () => {
   assertEquals(await run({ a: [[{ id: one, value: 1 }], [{ id: two, value: 2 }]], b: [] }), {
     a: { rows: 2, upserted: 1, deleted: 0 }, b: { rows: 0, upserted: 0, deleted: 0 },
   });
-  await assertRejects(() => run({ a: [[{ id: one, value: 3 }], [{ id: `{${one}}`, value: 4 }]], b: [] }), Error);
+  // batches.ts branches on `error instanceof pg.DatabaseError` + `error.code`
+  // (40001/40P01 retry, 23503 supersede); aborted-tx 25P02 during cleanup must
+  // not wrap the DatabaseError in an AggregateError.
+  await assertRejects(() => run({ a: [[{ id: one, value: 3 }], [{ id: `{${one}}`, value: 4 }]], b: [] }), pg.DatabaseError);
   await assertRejects(() => run({ a: [[{ id: one, value: 1 }], [{ id: two }]], b: [] }), Error, 'rows differ in columns');
   await assertRejects(() => run({ a: [Array.from({ length: 129 }, (_, i) => ({ id: String(i), value: i }))], b: [] }), Error, 'exceeds its bound');
-  await assertRejects(() => run({ a: [[{ id: one, value: 9 }]], b: [[{ id: 'new', value: 3 }]] }, { ...spec, onComplete: 'fail_complete' }), Error, 'hook failed');
+  await assertRejects(() => run({ a: [[{ id: one, value: 9 }]], b: [[{ id: 'new', value: 3 }]] }, { ...spec, onComplete: 'fail_complete' }), pg.DatabaseError, 'hook failed');
+  const staged = await stagePages(db.client, spec, async function* (sink) {
+    if (sink === 'a') yield [{ id: one, value: 9 }];
+  });
+  try {
+    await db.client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+    const err = await assertRejects(
+      () => publishStagedPages(db.client, { ...spec, onComplete: 'fail_serializable' }, staged, { role: 'service' }),
+      pg.DatabaseError,
+    );
+    assertEquals(err.code, '40001');
+    await db.client.query('ROLLBACK');
+    assertEquals(await (async () => {
+      await db.client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+      const out = await publishStagedPages(db.client, { ...spec, onComplete: undefined }, staged, { role: 'service' });
+      await db.client.query('ROLLBACK');
+      return out;
+    })(), { a: { rows: 1, upserted: 1, deleted: 1 }, b: { rows: 0, upserted: 0, deleted: 0 } });
+  } finally {
+    await dropStagedPages(db.client, staged);
+  }
   assertEquals((await db.client.query('SELECT id::text,value FROM a ORDER BY id')).rows, [{ id: one, value: 1 }, { id: two, value: 2 }]);
   assertEquals((await db.client.query('SELECT * FROM b')).rows, [{ id: 'old', value: 5 }]);
   assertEquals((await db.client.query('SELECT count(*)::int AS n FROM history')).rows[0].n, 1);

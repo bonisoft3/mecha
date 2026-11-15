@@ -1,4 +1,4 @@
-import type pg from "npm:pg@8.16.3";
+import pg from "npm:pg@8.16.3";
 import type { TypeTable } from "./portable-contract.ts";
 import { postgresRows, type TypeSchemas, validateSchemas } from "./portable.ts";
 import {
@@ -222,6 +222,13 @@ export async function publishDelta(
   );
 }
 
+// Once a statement aborts an explicit transaction block, PostgreSQL refuses
+// cleanup SQL with 25P02 until the caller's ROLLBACK — which itself reverts
+// transaction-local GUC settings and drops temp tables created in that block.
+function isAbortedTransaction(error: unknown): boolean {
+  return error instanceof pg.DatabaseError && error.code === "25P02";
+}
+
 export async function dropStagedPages(
   client: pg.PoolClient,
   staged: StagedPages,
@@ -289,6 +296,7 @@ export async function stagePages(
     return { stages, rows };
   } catch (error) {
     await dropStagedPages(client, { stages, rows }).catch((cleanupError) => {
+      if (isAbortedTransaction(cleanupError)) return;
       throw new AggregateError(
         [error, cleanupError],
         "staging and cleanup failed",
@@ -364,6 +372,7 @@ export async function publishStagedPages(
   } finally {
     await leaveAuthority(client, previous).catch((cleanupError) => {
       if (applyError !== undefined) {
+        if (isAbortedTransaction(cleanupError)) return;
         throw new AggregateError(
           [applyError, cleanupError],
           "publication and authority cleanup failed",
@@ -392,10 +401,14 @@ export async function publishPages(
     throw error;
   } finally {
     const errors: unknown[] = mainError !== undefined ? [mainError] : [];
+    const recordCleanup = (err: unknown) => {
+      if (mainError !== undefined && isAbortedTransaction(err)) return;
+      errors.push(err);
+    };
     if (staged) {
-      await dropStagedPages(client, staged).catch((err) => errors.push(err));
+      await dropStagedPages(client, staged).catch(recordCleanup);
     }
-    await leaveAuthority(client, previous).catch((err) => errors.push(err));
+    await leaveAuthority(client, previous).catch(recordCleanup);
     if (mainError !== undefined && errors.length > 1) {
       throw new AggregateError(errors, "publication and cleanup failed");
     }

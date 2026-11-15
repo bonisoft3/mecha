@@ -64,6 +64,7 @@ tasks:
     desc: "OIDC authorization, issuer isolation and browser sessions"
     dir: services/auth
     cmds:
+      - mise x -- deno check --frozen main.ts main_test.ts
       - mise x -- deno test --frozen oidc_test.ts
 
   test:browser:

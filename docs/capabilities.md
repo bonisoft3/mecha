@@ -76,11 +76,13 @@ At browser tier, `rclone-js` answers the same S3 subset over IndexedDB
 An AI effect or capability turns on **tsbifrost**
 ([`services/airlock/tsbifrost.ts`](../services/airlock/tsbifrost.ts)), mecha's
 own TypeScript gateway, on `airlock-out` at port 8090. Handlers speak one
-OpenAI-shaped contract to it (`/v1/chat/completions`, `/v1/images/generations`
+OpenAI-shaped contract to it (`/v1/chat/completions` — plain string or
+multimodal `text` + `image_url` content parts — and `/v1/images/generations`
 with a `tier`), and it resolves `(target, modality, tier)` to a provider and
-model: Ollama and sd.cpp in docker and local, Workers AI on Cloudflare (the
-binding inside mecha-edge, REST elsewhere), Gemini and Imagen on GCP, any
-OpenAI-compatible endpoint by override.
+model: Ollama and sd.cpp in compose and host, Workers AI on Cloudflare (the
+binding inside mecha-edge, REST elsewhere), Gemini (translating multimodal
+`image_url` parts to `inlineData`/`fileData` and filtering `thought` parts) and
+Imagen on GCP, any OpenAI-compatible endpoint by override.
 
 A field only one provider knows goes one of two ways, and the head of
 `tsbifrost.ts` gives the order they merge in:

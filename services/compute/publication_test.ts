@@ -701,3 +701,22 @@ pgTest("paged publication stages bounded pages atomically", async () => {
     a: { rows: 0, upserted: 0, deleted: 2 }, b: { rows: 0, upserted: 0, deleted: 0 },
   });
 });
+
+// Regression: a capture naming a deleted parent must fail as the bare 23503 the
+// coordinator supersedes on; wrapped, it was retried until exhausted and the
+// sink stayed empty (golaberto standings after a test deleted its group).
+pgTest("staged publication surfaces a foreign-key violation as the database error", async () => {
+  await using db = await fixture(`
+    CREATE TABLE parent (id text PRIMARY KEY);
+    CREATE TABLE child (id text PRIMARY KEY, parent_id text NOT NULL REFERENCES parent);
+    GRANT ALL ON parent, child TO service;`);
+  const spec: Publication = { name: "child", to: ["child"] };
+  const staged = await stagePages(db.client, spec, async function* () {
+    yield [{ id: "orphan", parent_id: "deleted" }];
+  });
+  await db.client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  const error = await assertRejects(() => publishStagedPages(db.client, spec, staged, { role: "service" }), pg.DatabaseError);
+  await db.client.query("ROLLBACK");
+  assertEquals([error.code, error.constraint], ["23503", "child_parent_id_fkey"]);
+  assertEquals((await db.client.query("SELECT current_user = session_user AS restored")).rows[0].restored, true);
+});

@@ -255,6 +255,8 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 // An environment variable's name: where a secret reaches the airlock.
 #SecretName: "^[A-Z][A-Z0-9_]*$"
 
+#BridgeInstanceType: "lite" | "basic" | "standard-1" | "standard-2" | "standard-3" | "standard-4"
+
 // An Airlock endpoint supplied by a container hatch. The role grants no
 // database credential or protocol-specific confinement.
 #Bridge: {
@@ -270,6 +272,8 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 	// a Cloudflare Container the airlock's dispatcher Worker owns; a container
 	// pulled rather than built is refused there.
 	targets: *[] | [...=~#EffectName]
+	// Cloudflare Containers instance tier; unset keeps Wrangler's default.
+	instance_type?: #BridgeInstanceType
 	// What the compose cluster, the local stack launch and the checks bring up,
 	// runs in the container's place: its fields replace the container target's
 	// of the same name, so it serves under the container's name, port and
@@ -2294,7 +2298,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare") if R._live[b.container].dockerfile.from == null {
 			("\(b.container)-appliance"): error("bridge \(b.name) names cloudflare but its container \(b.container) builds no image from a Dockerfile: Cloudflare Containers ships what the publish builds")
 		}
-
+		for b in R.cluster.state.bridges if b.instance_type != _|_ if !list.Contains(b.targets, "cloudflare") {
+			("\(b.container)-appliance"): error("bridge \(b.name) sets instance_type, which sizes a Cloudflare Container, without naming cloudflare in targets")
+		}
 		// Bridges share a container on its one port; on cloudflare a container
 		// is one bridge's, since each bridge is a class with a container of its
 		// own, and two would build two containers from one image.

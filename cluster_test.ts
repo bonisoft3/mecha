@@ -10,7 +10,7 @@ import { ENDOWABLE } from "./services/compute/language.ts";
 const MECHA = fileURLToPath(new URL(".", import.meta.url));
 
 type Effect = { name: string; origin?: string; bridge?: string; ai?: "text" | "image"; tier?: "cheap" | "heavy"; handler?: string; endpoint?: string; secrets?: string[]; simulated?: true };
-type Bridge = { name: string; container: string; port?: number; action?: string; targets?: string[]; simulator?: Record<string, unknown>; appliance?: Record<string, unknown> };
+type Bridge = { name: string; container: string; port?: number; action?: string; targets?: string[]; instance_type?: string; simulator?: Record<string, unknown>; appliance?: Record<string, unknown> };
 type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
@@ -465,6 +465,23 @@ Deno.test("a bridge on cloudflare builds its real container and needs a Dockerfi
   const pulled = await runtimeWith(state, `{crawler: {dockerfile: from: null, compose: image: "ghcr.io/example/crawler:1"}}`);
   assert.equal(pulled.ok, false);
   assert.match(pulled.stderr, /builds no image from a Dockerfile/);
+  const crawler = `{crawler: {dockerfile: {from: name: "crawler@sha256:fixture", cmd: ["crawl"]}, compose: {}}}`;
+  const sized = await runtimeWith(
+    {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", targets: ["cloudflare"], instance_type: "standard-1", simulator: {}}]},
+    crawler,
+  );
+  assert.equal(sized.ok, true, sized.stderr);
+  const unsized = await runtimeWith(
+    {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", instance_type: "standard-1", simulator: {}}]},
+    crawler,
+  );
+  assert.equal(unsized.ok, false);
+  assert.match(unsized.stderr, /sets instance_type.*without naming cloudflare/);
+  const unknownTier = await runtimeWith(
+    {effects: [{name: "fetch", bridge: "crawl"}], bridges: [{name: "crawl", container: "crawler", targets: ["cloudflare"], instance_type: "jumbo", simulator: {}}]},
+    crawler,
+  );
+  assert.equal(unknownTier.ok, false);
 });
 
 // The appliance target kept the container's `entrypoint.after` without the

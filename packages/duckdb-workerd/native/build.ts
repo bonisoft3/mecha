@@ -82,18 +82,15 @@ export async function nativeProvenance() {
   }
 }
 
-async function checkedOneOf(bytes: Uint8Array<ArrayBuffer>, expected: readonly string[]) {
-  const actual = await sha256(bytes)
-  if (!expected.includes(actual)) throw new Error(`Native DuckDB checksum mismatch: expected ${expected.join(' or ')}, got ${actual}`)
-  return { bytes, sha256: actual }
-}
-
-async function readArtifact(root: string) {
-  const wasm = await checkedOneOf(await Deno.readFile(path.join(root, 'duckdb.wasm')), [manifest.wasmSha256, manifest.rosettaWasmSha256])
+export async function readArtifact(root: string, expectedLoaderSha256 = manifest.loaderSha256) {
+  const expected = (await Deno.readTextFile(path.join(root, 'duckdb.wasm.sha256'))).trim()
+  if (!/^[0-9a-f]{64}$/.test(expected)) throw new Error(`Invalid cached DuckDB checksum: ${expected}`)
+  const wasm = await checked(await Deno.readFile(path.join(root, 'duckdb.wasm')), expected)
+  if (!WebAssembly.validate(wasm)) throw new Error('Cached DuckDB artifact is not a valid WebAssembly module')
   return {
-    wasm: wasm.bytes,
-    wasmSha256: wasm.sha256,
-    loader: new TextDecoder('utf-8', { fatal: true }).decode(await checked(await Deno.readFile(path.join(root, 'native-glue.js')), manifest.loaderSha256)),
+    wasm,
+    wasmSha256: expected,
+    loader: new TextDecoder('utf-8', { fatal: true }).decode(await checked(await Deno.readFile(path.join(root, 'native-glue.js')), expectedLoaderSha256)),
   }
 }
 
@@ -117,18 +114,17 @@ async function dockerBuild(root: string, log: string) {
 
 export async function buildNative(cache: string): Promise<{ wasm: Uint8Array<ArrayBuffer>; wasmSha256: string; loader: string }> {
   const inputs: Record<string, unknown> = await nativeProvenance()
-  delete inputs.wasmSha256
-  delete inputs.rosettaWasmSha256
   delete inputs.loaderSha256
   const key = await sha256(new TextEncoder().encode(JSON.stringify(inputs)))
   const root = path.join(cache, 'duckdb-workerd-native', key)
   await Deno.mkdir(root, { recursive: true })
   const artifact = path.join(root, 'duckdb.wasm')
+  const checksumArtifact = artifact + '.sha256'
   const loaderArtifact = path.join(root, 'native-glue.js')
   const lock = await Deno.open(path.join(root, 'build.lock'), { create: true, write: true })
   await lock.lock(true)
   try {
-    if (await exists(artifact) && await exists(loaderArtifact)) return await readArtifact(root)
+    if (await exists(artifact) && await exists(checksumArtifact) && await exists(loaderArtifact)) return await readArtifact(root)
     if (Deno.env.get('DUCKDB_NATIVE_CONTAINER') !== manifest.sdkImage) {
       await dockerBuild(root, path.join(root, 'build.log'))
       await Deno.rename(artifact + '.js', loaderArtifact)
@@ -137,7 +133,16 @@ export async function buildNative(cache: string): Promise<{ wasm: Uint8Array<Arr
     if (Deno.build.os !== 'linux' || Deno.build.arch !== 'x86_64') throw new Error('Native DuckDB requires its pinned linux/amd64 container')
     console.log(`Building pinned DuckDB native filesystem; log: ${path.join(root, 'build.log')}`)
     const log = path.join(root, 'build.log')
-    const env: Record<string, string> = { LC_ALL: 'C', LANG: 'C', CMAKE_BUILD_PARALLEL_LEVEL: String(parallelism), CCACHE_DISABLE: '1', SOURCE_DATE_EPOCH: manifest.sourceDateEpoch }
+    // Host x86_64/Rosetta CPUs still vary on x87/FMA constant folding; pin libm to baseline SSE2 and Binaryen to one thread.
+    const env: Record<string, string> = {
+      LC_ALL: 'C',
+      LANG: 'C',
+      CMAKE_BUILD_PARALLEL_LEVEL: String(parallelism),
+      CCACHE_DISABLE: '1',
+      BINARYEN_CORES: '1',
+      GLIBC_TUNABLES: 'glibc.cpu.hwcaps=-AVX,-AVX2,-FMA,-FMA4,-AVX512F,-AVX512VL,-AVX512BW,-AVX512DQ',
+      SOURCE_DATE_EPOCH: manifest.sourceDateEpoch,
+    }
     for (const source of manifest.sources) {
       const archive = path.join(root, source.name + '.tar.gz')
       await download(`https://codeload.github.com/${source.repository}/tar.gz/${source.commit}`, archive, source.sha256)
@@ -190,19 +195,19 @@ export async function buildNative(cache: string): Promise<{ wasm: Uint8Array<Arr
       `-DCMAKE_CXX_FLAGS=${flags}`, `-DCMAKE_MAKE_PROGRAM=${path.join(ninja, 'ninja')}`], wasm, env, log)
     await run([cmake, '--build', build, '--target', 'duckdb_wasm', '--parallel', '1'], wasm, env, log)
     const bytes = await Deno.readFile(path.join(build, 'duckdb_wasm.wasm'))
+    if (!WebAssembly.validate(bytes)) throw new Error('Native DuckDB artifact is not a valid WebAssembly module')
     for (const prefix of new Set([root, canonical])) {
       if (Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes(prefix)) throw new Error('Native DuckDB artifact embeds its build directory')
     }
-    // Apple Silicon Rosetta 2 translates linux/amd64 x87 80-bit floats at 64-bit IEEE precision (CPU implementer 0x61).
-    const rosetta = (await Deno.readTextFile('/proc/cpuinfo')).includes('0x61')
-    const expectedWasm = rosetta ? manifest.rosettaWasmSha256 : manifest.wasmSha256
     const loader = await Deno.readFile(path.join(build, 'duckdb_wasm.js'))
     const wasmHash = await sha256(bytes), loaderHash = await sha256(loader)
-    if (wasmHash !== expectedWasm || loaderHash !== manifest.loaderSha256) {
-      throw new Error(`Native artifact hashes differ (rosetta=${rosetta}): wasm=${wasmHash} loader=${loaderHash}`)
+    if (loaderHash !== manifest.loaderSha256) {
+      throw new Error(`Native loader hash differs: expected ${manifest.loaderSha256}, got ${loaderHash}`)
     }
     await Deno.writeFile(loaderArtifact + '.partial', loader)
     await Deno.rename(loaderArtifact + '.partial', loaderArtifact)
+    await Deno.writeTextFile(checksumArtifact + '.partial', wasmHash + '\n')
+    await Deno.rename(checksumArtifact + '.partial', checksumArtifact)
     await Deno.writeFile(artifact + '.partial', bytes)
     await Deno.rename(artifact + '.partial', artifact)
     return { wasm: bytes, wasmSha256: wasmHash, loader: new TextDecoder('utf-8', { fatal: true }).decode(loader) }
@@ -212,6 +217,10 @@ export async function buildNative(cache: string): Promise<{ wasm: Uint8Array<Arr
 if (import.meta.main) {
   if (Deno.args.length !== 2) throw new Error('Usage: deno run -A native/build.ts CACHE_DIRECTORY OUTPUT_WASM')
   const built = await buildNative(Deno.args[0])
-  await Deno.writeFile(Deno.args[1], built.wasm)
-  await Deno.writeTextFile(Deno.args[1] + '.js', built.loader)
+  await Deno.writeFile(Deno.args[1] + '.partial', built.wasm)
+  await Deno.rename(Deno.args[1] + '.partial', Deno.args[1])
+  await Deno.writeTextFile(Deno.args[1] + '.sha256.partial', built.wasmSha256 + '\n')
+  await Deno.rename(Deno.args[1] + '.sha256.partial', Deno.args[1] + '.sha256')
+  await Deno.writeTextFile(Deno.args[1] + '.js.partial', built.loader)
+  await Deno.rename(Deno.args[1] + '.js.partial', Deno.args[1] + '.js')
 }

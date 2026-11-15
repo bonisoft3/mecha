@@ -79,6 +79,7 @@ export class DiskFixture extends DurableObject {
       equal(closeRejected, true)
       const stale = connection
       connection.close()
+      connection = undefined
       db.close()
       let rejected = false
       try { db.connect() } catch (error) { if (!String(error).includes('database is closed')) throw error; rejected = true }
@@ -91,7 +92,7 @@ export class DiskFixture extends DurableObject {
       equal(reopenedPaged.read('total').rows[0].total, 5)
       equal(reopenedPaged.read('total').done, true)
       let identityRejected = false
-      try { reopenedPaged.initialize({ ...manifest, id: 'two' }) }
+      try { reopenedPaged.initialize({ ...manifest, revision: 2 }) }
       catch (error) { if (!String(error).includes('another capture')) throw error; identityRejected = true }
       equal(identityRejected, true)
       connection = db.connect()
@@ -106,6 +107,6 @@ export class DiskFixture extends DurableObject {
       heaps.push(db.memoryBytes)
       if (Math.max(...heaps) >= 128 * 1024 * 1024) throw new Error('WASM heap exceeded 128MiB')
       return Response.json({ passed: true, databaseBytes: file.size, payloadBytes: persisted.bytes, pagedCapture: true, heaps, evidence })
-    } finally { connection.close(); db.close() }
+    } finally { connection?.close(); db.close() }
   }
 }

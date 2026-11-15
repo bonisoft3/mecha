@@ -1,4 +1,4 @@
-const DATABASE = "bonitao/mecha-database:0.8.0@sha256:ccb59fdc18217eb679456c62b0f5aa05d79138bcc8c431087984a6ff1e2b552b";
+const DATABASE = "bonitao/mecha-database:0.23.0@sha256:75648c03a4b177ef768a8c541721685ef67d45135838808f67b8260261aa0cac";
 
 async function docker(args: string[]) {
   const result = await new Deno.Command("docker", { args, stdout: "piped", stderr: "piped" }).output();

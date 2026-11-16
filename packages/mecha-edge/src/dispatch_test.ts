@@ -64,6 +64,41 @@ Deno.test('a container target whose binding the dispatcher lacks is the run\'s e
   )
 })
 
+const render = (issue: EdgeEffect['issue']): EdgeEffect => ({
+  declaration: {
+    table: 'receipt', field: 'status', state: 'rendering', onDone: 'rendered', onError: 'failed',
+    row: ['id'], key: ['id'], idempotent: false, reentry: 'repeat', attempts: 3, handler: 'effects/render.js',
+    bridge: { name: 'pdf', targets: ['cloudflare'], simulated: false },
+  },
+  target: { kind: 'isolate', bridge: 'pdf', binding: 'BRIDGE_PDF' },
+  issue,
+})
+
+// An isolate on cloudflare is a Worker of its own: the sink's call goes to its
+// service binding under the bridge's name, with the headers every sink gets;
+// what it answers is the sink's answer, and what the binding rejects, as a
+// Worker past its limits is, is the run's error.
+Deno.test('an isolate target is called through its service binding, as the container it stands for', async () => {
+  const seen: Request[] = []
+  const answering = (answer: () => Promise<Response>) => ({ fetch: (request: Request) => { seen.push(request); return answer() } })
+  const ok = await performEffect(render(judge), { key: 'render:r1', entered: 1 }, { id: 'r1' }, { env: { BRIDGE_PDF: answering(() => Promise.resolve(Response.json({ pages: 1 }))) }, log: () => {} })
+  assert.deepEqual(ok, { target: 'rendered', kind: 'done', data: { pages: 1 }, reconciled: false })
+  assert.equal(seen[0].url, 'http://pdf/acquire')
+  assert.equal(seen[0].method, 'POST')
+  assert.equal(seen[0].headers.get('Idempotency-Key'), encodeURIComponent('render:r1'))
+  assert.deepEqual(await seen[0].json(), { id: 'r1' })
+  const refused = await performEffect(render(judge), { key: 'render:r1', entered: 1 }, { id: 'r1' }, { env: { BRIDGE_PDF: answering(() => Promise.resolve(new Response('bad definition', { status: 400 }))) }, log: () => {} })
+  assert.deepEqual(refused, { target: 'failed', kind: 'failed', data: { status: 400, reason: 'bad definition' }, reconciled: false })
+  await assert.rejects(
+    performEffect(render(judge), { key: 'render:r1', entered: 1 }, { id: 'r1' }, { env: { BRIDGE_PDF: answering(() => Promise.reject(new Error('Worker exceeded memory limit'))) }, log: () => {} }),
+    /exceeded memory limit/,
+  )
+  await assert.rejects(
+    performEffect(render(judge), { key: 'render:r1', entered: 1 }, { id: 'r1' }, { env: {}, log: () => {} }),
+    /BRIDGE_PDF is not a service binding of this dispatcher/,
+  )
+})
+
 const quote = (secret: string): EdgeEffect => ({
   declaration: {
     table: 'print_order', field: 'status', state: 'quoting', onDone: 'quoted', onError: 'failed',

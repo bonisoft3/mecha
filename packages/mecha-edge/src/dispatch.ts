@@ -28,18 +28,26 @@ export interface ContainerBinding {
   getByName(name: string): { fetch(request: Request): Promise<Response> }
 }
 
+/** An isolate hatch's Worker, as the dispatcher's service binding holds it. */
+export interface IsolateBinding {
+  fetch(request: Request): Promise<Response>
+}
+
 export interface EdgeEffect {
   declaration: Effect
-  /** A `container` is a bridge deployed here, called through its binding; a
-   * `bridge` is one deployed elsewhere, whose effect the object settles failed
-   * without dispatching it. An `origin` named by `secret` is this
-   * deployment's, read from the dispatcher's environment at each run. */
+  /** A `container` is a bridge deployed here, called through its binding; an
+   * `isolate` is one deployed here as a Worker of its own, called through its
+   * service binding; a `bridge` is one deployed elsewhere, whose effect the
+   * object settles failed without dispatching it. An `origin` named by
+   * `secret` is this deployment's, read from the dispatcher's environment at
+   * each run. */
   target:
     | { kind: 'tsbifrost'; url?: string }
     | { kind: 'origin'; url: string }
     | { kind: 'origin'; secret: string }
     | { kind: 'bridge'; bridge: string }
     | { kind: 'container'; bridge: string; binding: string }
+    | { kind: 'isolate'; bridge: string; binding: string }
   issue(input: unknown, sink: EdgeSink, secrets: Record<string, string>): Promise<unknown> | unknown
   reconcile?(input: unknown, sink: EdgeSink, secrets: Record<string, string>): Promise<unknown> | unknown
 }
@@ -165,6 +173,14 @@ function containerStub(env: Record<string, unknown> | undefined, binding: string
   return namespace.getByName(bridge)
 }
 
+function isolateService(env: Record<string, unknown> | undefined, binding: string, bridge: string): IsolateBinding {
+  const service = env?.[binding] as IsolateBinding | undefined
+  if (typeof service?.fetch !== 'function') {
+    throw new Error(`${binding} is not a service binding of this dispatcher: the bridge ${bridge} is an isolate on cloudflare and its Worker is not bound`)
+  }
+  return service
+}
+
 // Read before the handler runs, so a deployment missing its origin, or holding
 // something else there, fails the run without calling anywhere. The value is
 // never echoed: a key put in the wrong secret would land in the log.
@@ -212,20 +228,23 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
         'Idempotency-Key': encodeURIComponent(key),
         ...credHeader,
       })
+      const request = { method, headers, ...(payload !== undefined ? { body: payload } : {}) }
       const answered = await within(callTimeoutMs, `${key}: ${method} ${path}`, (async () => {
         let res: Response
         if (spec.target.kind === 'tsbifrost') {
-          res = await tsbifrost(new Request(`http://tsbifrost:${TSBIFROST_PORT}${path}`, { method, headers, ...(payload !== undefined ? { body: payload } : {}) }))
+          res = await tsbifrost(new Request(`http://tsbifrost:${TSBIFROST_PORT}${path}`, request))
         } else if (spec.target.kind === 'origin') {
-          res = await fetcher(new URL(path, base).href, { method, headers, ...(payload !== undefined ? { body: payload } : {}) })
-        } else if (spec.target.kind === 'container') {
-          // The stub dials the class's own port, so the URL names only the
-          // bridge. What the container answers is the sink's answer; what the
-          // infrastructure fails at (no instance while a first deploy
-          // provisions, a port never ready, a connection lost mid-flight) the
-          // stub rejects, and the run errs as on an origin's transport.
+          res = await fetcher(new URL(path, base).href, request)
+        } else if (spec.target.kind === 'container' || spec.target.kind === 'isolate') {
+          // A container's stub dials the class's own port, and an isolate's
+          // service binding its Worker, so the URL names only the bridge. What
+          // either answers is the sink's answer; what the infrastructure fails
+          // at (no instance while a first deploy provisions, a port never
+          // ready, a connection lost mid-flight, an isolate that threw) the
+          // binding rejects, and the run errs as on an origin's transport.
           const { bridge, binding } = spec.target
-          res = await containerStub(cfg.env, binding, bridge).fetch(new Request(`http://${bridge}${path}`, { method, headers, ...(payload !== undefined ? { body: payload } : {}) }))
+          const bound = spec.target.kind === 'container' ? containerStub(cfg.env, binding, bridge) : isolateService(cfg.env, binding, bridge)
+          res = await bound.fetch(new Request(`http://${bridge}${path}`, request))
         } else {
           throw new Error(`${key}: bridge ${spec.target.bridge} is not deployed on cloudflare and has no sink here`)
         }

@@ -265,6 +265,15 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 	container: =~#EffectName
 	action?:   =~"^[a-zA-Z][a-zA-Z0-9_]*$"
 	port:      *8080 | int & >=1 & <=65535
+	// An isolate hatch's bridge: its container is the one #IsolateContainer
+	// generates under the hatch's name, serving #BridgePort, and on cloudflare
+	// it is a Worker of its own that the dispatcher reaches by a service
+	// binding rather than a Cloudflare Container.
+	isolate?: =~#EffectName
+	if BR.isolate != _|_ {
+		container: BR.isolate
+		port:      #BridgePort
+	}
 	// The release targets the container is deployed on. On any other, the
 	// airlock settles the effect failed without calling it
 	// (services/airlock/README.md#a-bridge-not-deployed). `cloudflare` ships
@@ -2324,6 +2333,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		}
 		for b in R.cluster.state.bridges if b.instance_type != _|_ if !list.Contains(b.targets, "cloudflare") {
 			("\(b.container)-appliance"): error("bridge \(b.name) sets instance_type, which sizes a Cloudflare Container, without naming cloudflare in targets")
+		}
+		for b in R.cluster.state.bridges if b.instance_type != _|_ if b.isolate != _|_ {
+			("\(b.container)-appliance"): error("bridge \(b.name) sets instance_type, which sizes a Cloudflare Container, but an isolate runs as a Worker there")
 		}
 		// Bridges share a container on its one port; on cloudflare a container
 		// is one bridge's, since each bridge is a class with a container of its

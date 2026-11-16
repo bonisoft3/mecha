@@ -58,6 +58,7 @@ tasks:
       - task: test:auth
       - task: test:pgroll
       - task: test:cluster
+      - task: test:isolate
       - task: test:browser
 
   test:auth:
@@ -78,6 +79,11 @@ tasks:
     cmds:
       # mise x puts the real tool bin dir on PATH — see cue:generate.
       - mise x -- deno test --no-config --no-lock --allow-read --allow-run=cue cluster_test.ts
+
+  test:isolate:
+    desc: "the host an isolate hatch's build runs behind: its module's process, sandboxed, replaced when a call outlives its deadline"
+    cmds:
+      - mise x -- deno test --no-config --no-lock --allow-read --allow-write --allow-run --allow-net --allow-env isolate_test.ts
 
   test:pgroll:
     desc: "pgroll grammar against the pinned image, and what the cluster's field refuses"

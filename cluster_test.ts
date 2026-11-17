@@ -373,6 +373,15 @@ Deno.test("a secret reaches the airlock as a required variable, with no default,
   }
 });
 
+// A release tells a secret from the airlock's wiring by name, so one named as
+// the wiring would be written into a manifest as wiring.
+Deno.test("an effect's secret is never named as the airlock's own environment", async () => {
+  for (const secret of ["BLOB_URL", "PORT", "ORIGIN", "AIRLOCK_TARGET", "AIRLOCK_DIR", "MESH_URL", "DATABASE_URL", "PGPASSWORD", "PGOPTIONS", "AIRLOCK_APP_DIR", "BAYT_LOCAL_WORK_DIR", "SAYT_PLATFORM", "HTTPS_PROXY", "DENO_DIR", "LD_PRELOAD", "PATH"]) {
+    const got = await exported({ effects: [{ ...PROBE, secrets: [secret] }] }, "surface.targets");
+    assert.equal(got.ok, false, secret);
+  }
+});
+
 // `{}`: the container itself is the local stand-in, as for a runner whose
 // SMTP server a test points inside the stack.
 const MAIL: Bridge = { name: "mail", container: "smtp", simulator: {} };

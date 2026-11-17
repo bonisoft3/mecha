@@ -263,15 +263,20 @@ the dispatcher's key (pronto's `bundle/edge-seal.ts`).
 
 ## A bridge not deployed
 
-An effect whose sink is a bridge carries where the bridge runs in `effects.json`
-(`bridge: {name, targets, simulated}`): the release targets its container is
-deployed on, and whether the local stack runs a simulator in its place. The
+An effect whose sink is a bridge, its own or the one it names for
+cloudflare or k8s, carries where it can be called in `effects.json`
+(`bridge: {name, targets, simulated}`): the release targets where its sink
+is reachable, which are those the bridge's container is deployed on and
+those where the effect names an origin or another deployed bridge in its
+place, and whether the local stack calls it, an origin or a bridge it runs a
+simulator of. The
 airlock knows its own target: `AIRLOCK_TARGET` in a cluster, which compose sets to
 `local`, and `cloudflare` at the edge. An airlock told none refuses to start
 where any bridge names its targets. Locally a bridge is deployed as its
 simulator; on a release target, where it names that target: as a process of
-the docker appliance, or as a Cloudflare Container of the edge's dispatcher
-Worker, called through its binding
+the docker appliance, as a Deployment the airlock's daprd calls on k8s, or as
+a Cloudflare Container of the edge's dispatcher Worker, called through its
+binding
 ([container bridges](../../../../plugins/pronto/docs/container-bridges.md#targets)).
 Where it is not, a claimed effect settles at once, before its run is counted:
 outcome `failed`, data `{bridge, target, reason: "not deployed"}`, target

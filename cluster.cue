@@ -269,6 +269,16 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 // An environment variable's name: where a secret reaches the airlock.
 #SecretName: "^[A-Z][A-Z0-9_]*$"
 
+// The airlock's own environment, which no effect's secret may be named: a
+// release tells a secret from the airlock's wiring by these names, so a
+// secret named as one would be written into its manifest as wiring; and what
+// its process and its launcher read besides, where it listens and runs
+// from, its Postgres client's settings, Deno's own, proxies, and the
+// system's loader, path and certificates, which a secret's value would
+// change or print; and the trusted issuer's settings crud's are interpolated
+// from (PGRST_JWKS among PG*), which the same environment would set.
+#ReservedSecretName: "^(DATABASE_URL|PG[A-Z0-9_]*|MESH_URL|AIRLOCK_[A-Z0-9_]*|TRUSTED_[A-Z0-9_]*|BLOB_URL|ORIGIN|PORT|SAYT_PLATFORM|BAYT_[A-Z0-9_]*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|DENO_[A-Z0-9_]*|LD_[A-Z0-9_]*|PATH|HOME|TMPDIR|SSL_CERT_FILE|SSL_CERT_DIR)$"
+
 #BridgeInstanceType: "lite" | "basic" | "standard-1" | "standard-2" | "standard-3" | "standard-4"
 
 // An Airlock endpoint supplied by a container hatch. The role grants no
@@ -292,8 +302,9 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 	// airlock settles the effect failed without calling it
 	// (services/airlock/README.md#a-bridge-not-deployed). `cloudflare` ships
 	// the container's own image, built from its Dockerfile by the publish, as
-	// a Cloudflare Container the airlock's dispatcher Worker owns; a container
-	// pulled rather than built is refused there.
+	// a Cloudflare Container the airlock's dispatcher Worker owns, and `k8s`
+	// as a Deployment the airlock's daprd reaches by the container's name; a
+	// container pulled rather than built is refused on both.
 	targets: *[] | [...=~#EffectName]
 	// Cloudflare Containers instance tier; unset keeps Wrangler's default.
 	instance_type?: #BridgeInstanceType
@@ -435,7 +446,7 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 	if !read {handler: *"effects/\(E.name).js" | string}
 	endpoint: *"services/airlock/dapr/\(E.name).yaml" | string
 	// The environment variables whose values the handler is handed.
-	secrets?: [...=~#SecretName]
+	secrets?: [...=~#SecretName & !~#ReservedSecretName]
 	// Its handler is also handed a value a reader typed, which the airlock
 	// opens with its seal key (services/airlock/seal.ts).
 	secretFields?: true
@@ -821,7 +832,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// The secrets, each matched like the fields above. Read from the
 	// declaration, so a refused name fails the export instead of silently
 	// leaving the airlock without it.
-	_secrets:          [for e in X.state.effects if e.secrets != _|_ for s in e.secrets {[if regexp.Match(#SecretName, s) {s}][0]}]
+	_secrets:          [for e in X.state.effects if e.secrets != _|_ for s in e.secrets {[if regexp.Match(#SecretName, s) if !regexp.Match(#ReservedSecretName, s) {s}][0]}]
 	_simulatedSecrets: {for e in X.state.effects if e.secrets != _|_ if e.simulated != _|_ for s in e.secrets {(s): true}}
 	_onComplete: {
 		in:  string
@@ -2389,6 +2400,12 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare") if R._live[b.container].dockerfile.from == null {
 			("\(b.container)-appliance"): error("bridge \(b.name) names cloudflare but its container \(b.container) builds no image from a Dockerfile: Cloudflare Containers ships what the publish builds")
 		}
+
+		// k8s runs the image its release bakes and pushes from the same target,
+		// as a Deployment of the image's own process.
+		for b in R.cluster.state.bridges if list.Contains(b.targets, "k8s") if R._live[b.container].dockerfile.from == null {
+			("\(b.container)-appliance"): error("bridge \(b.name) names k8s but its container \(b.container) builds no image from a Dockerfile: the k8s release pushes what it bakes")
+		}
 		for b in R.cluster.state.bridges if b.instance_type != _|_ if !list.Contains(b.targets, "cloudflare") {
 			("\(b.container)-appliance"): error("bridge \(b.name) sets instance_type, which sizes a Cloudflare Container, without naming cloudflare in targets")
 		}
@@ -2407,18 +2424,28 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 			(b.container): error("bridges \(b.name) and \(o.name) both name container \(b.container), which cloudflare runs as one bridge's container")
 		}
 
-		// Cloudflare runs the image's ENTRYPOINT and CMD: a command only the
-		// compose service would run is not what ships.
-		for b in R.cluster.state.bridges if list.Contains(b.targets, "cloudflare") if R._live[b.container].compose != _|_ if R._live[b.container].compose.command != _|_ || R._live[b.container].compose.entrypoint != _|_ {
-			("\(b.container)-appliance"): error("bridge \(b.name) names cloudflare but its container \(b.container) sets compose.command or compose.entrypoint, which only compose runs: state the process in dockerfile.entrypoint or dockerfile.cmd")
+		// Cloudflare and k8s run the image's ENTRYPOINT and CMD: a command only
+		// the compose service would run is not what ships.
+		for b in R.cluster.state.bridges for t in ["cloudflare", "k8s"] if list.Contains(b.targets, t) if R._live[b.container].compose != _|_ if R._live[b.container].compose.command != _|_ || R._live[b.container].compose.entrypoint != _|_ {
+			("\(b.container)-appliance"): error("bridge \(b.name) names \(t) but its container \(b.container) sets compose.command or compose.entrypoint, which only compose runs: state the process in dockerfile.entrypoint or dockerfile.cmd")
+		}
+		// Nor do they give the process what else only the compose service
+		// states: its directory, user, files, mounts, privileges, devices,
+		// GPUs and resources, or kernel settings; one stated empty or false
+		// asks nothing.
+		for b in R.cluster.state.bridges for t in ["cloudflare", "k8s"] if list.Contains(b.targets, t) if R._live[b.container].compose != _|_
+		for f in ["working_dir", "user", "volumes", "env_file", "tmpfs", "configs", "secrets", "cap_add", "cap_drop", "privileged", "devices", "device_cgroup_rules", "security_opt", "sysctls", "ulimits", "shm_size", "read_only", "init", "ipc", "pid", "runtime", "extra_hosts", "dns", "dns_search", "group_add", "userns_mode", "gpus", "deploy"] if R._live[b.container].compose[f] != _|_
+		let v = R._live[b.container].compose[f]
+		if [if (v & bool) != _|_ {v}, if (v & [...]) != _|_ {len(v) > 0}, if (v & {...}) != _|_ {len(v) > 0}, if (v & string) != _|_ {v != ""}, true][0] {
+			("\(b.container)-appliance"): error("bridge \(b.name) names \(t) but its container \(b.container) sets compose.\(f), which only compose runs: state it in the Dockerfile or the environment")
 		}
 
 		// The real container, built and never started here: the docker appliance
-		// copies from it and the cloudflare publish ships it. The local stack
-		// runs only a bridge's simulator. It keeps its own build's dependencies
-		// and its environment, which bayt resolves into its compose file for
-		// the publish to read, and none of the stack's waits.
-		for b in R.cluster.state.bridges if b.appliance != _|_ || list.Contains(b.targets, "cloudflare") {
+		// copies from it, and the cloudflare publish and the k8s release ship
+		// it. The local stack runs only a bridge's simulator. It keeps its own
+		// build's dependencies and its environment, which bayt resolves into its
+		// compose file for a release to read, and none of the stack's waits.
+		for b in R.cluster.state.bridges if b.appliance != _|_ || list.Contains(b.targets, "cloudflare") || list.Contains(b.targets, "k8s") {
 			let live = R._live[b.container]
 			("\(b.container)-appliance"): {
 				for f, v in live if f != "compose" && f != "deps" && f != "entrypoint" {(f): v}

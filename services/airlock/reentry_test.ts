@@ -111,6 +111,18 @@ Deno.test("the edge's origin is an https origin without a path, or the environme
   }
 });
 
+Deno.test("the edge's bridge, where it is not the default's, is a bridge's name", () => {
+  const manifest = (edgeBridge: unknown) => JSON.stringify({ effects: { charge: { ...effect(), edgeBridge } } });
+  assertEquals(parseManifest(manifest("relay")).charge.edgeBridge, "relay");
+  for (const bad of ["Relay", "", 1, null]) {
+    assertThrows(() => parseManifest(manifest(bad)), Error, "edgeBridge");
+  }
+  const ai = (edgeAi: unknown, extra = {}) => JSON.stringify({ effects: { charge: { ...effect(), edgeAi, ...extra } } });
+  assertEquals(parseManifest(ai(true)).charge.edgeAi, true);
+  assertThrows(() => parseManifest(ai(false)), Error, "edgeAi");
+  assertThrows(() => parseManifest(ai(true, { edgeBridge: "relay" })), Error, "edgeAi");
+});
+
 Deno.test("an effect's endowments are drawn from what the cage can endow", () => {
   const manifest = (endowments: unknown) => JSON.stringify({ effects: { charge: { ...effect(), endowments } } });
   assertEquals(parseManifest(manifest(["Crypto", "TextEncoder"])).charge.endowments, ["Crypto", "TextEncoder"]);

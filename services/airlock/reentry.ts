@@ -45,9 +45,16 @@ export type Effect = {
    * holds it, for a sink each deployment points elsewhere; the compose
    * airlock's daprd holds its own. */
   edgeOrigin?: string | { secret: string };
-  /** The bridge the sink is: the release targets its container runs on, and
-   * whether the local stack runs a simulator in its place. Anywhere else no
-   * call is made and the effect fails. */
+  /** The bridge the edge's airlock calls where the sink there is a bridge
+   * other than `bridge`'s. */
+  edgeBridge?: string;
+  /** The edge's airlock calls the AI gateway, where `bridge` is another
+   * target's sink. */
+  edgeAi?: true;
+  /** The sink's default bridge, the release targets where the effect's sink
+   * is reachable (an origin, or a bridge that target runs), and whether the
+   * local stack runs a simulator in its place. Anywhere else no call is made
+   * and the effect fails. */
   bridge?: { name: string; targets: string[]; simulated: boolean };
 };
 
@@ -209,6 +216,12 @@ export function parseManifest(text: string): Record<string, Effect> {
     }
     if (e.contentType !== undefined && (typeof e.contentType !== "string" || !MEDIA_TYPE.test(e.contentType) || e.contentType === "application/json")) {
       bad("contentType is not a media type other than JSON, which is the default");
+    }
+    if (e.edgeBridge !== undefined && (typeof e.edgeBridge !== "string" || !ENDPOINT.test(e.edgeBridge))) {
+      bad("edgeBridge is not a bridge's name, a DNS label");
+    }
+    if (e.edgeAi !== undefined && (e.edgeAi !== true || e.edgeBridge !== undefined || e.edgeOrigin !== undefined)) {
+      bad("edgeAi is not true alone");
     }
     if (e.edgeOrigin !== undefined) {
       const o = e.edgeOrigin;

@@ -126,7 +126,9 @@ tasks:
     desc: "airlock service: re-entry, the manifest, the handler's cage and its one door out, the poke, Graphile's initdb step"
     dir: services/airlock
     cmds:
-      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-run reentry_test.ts handler_test.ts admit_test.ts tsbifrost_test.ts white-background_test.ts blobs_test.ts
+      - mise x -- deno test --frozen --unstable-worker-options --allow-read --allow-write --allow-env --allow-sys --allow-run reentry_test.ts handler_test.ts admit_test.ts tsbifrost_test.ts white-background_test.ts blobs_test.ts seal_test.ts
+      # A read's sink is served from the test, on loopback.
+      - mise x -- deno test --frozen --allow-net=127.0.0.1 --allow-read --allow-env --allow-sys read_test.ts
     sources:
       - "*.ts"
       - "*.sql"

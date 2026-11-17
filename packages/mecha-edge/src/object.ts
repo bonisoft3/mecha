@@ -11,7 +11,10 @@
 // The environment: CLUSTER, the object's namespace; JWT_SECRET, the tokens'
 // secret; IMPORT_TOKEN, the bearer /import/* takes; CF_VERSION_METADATA, the
 // Worker's version; ASSETS, the static files, where it has any; AIRLOCK_QUEUE,
-// the queue an effect's run is handed to the dispatcher Worker on (dispatch.ts).
+// the queue an effect's run is handed to the dispatcher Worker on (dispatch.ts);
+// AIRLOCK_SEAL_PUBLIC, where an effect reads a secret field, the public half
+// of the dispatcher's seal key, `{kid, key}`, which the object publishes for
+// the screen to seal to.
 import { DurableObject } from 'cloudflare:workers'
 import type { PGlite } from '@electric-sql/pglite'
 import { type Assets, DataDirectory } from '../../pglite-workerd/src/data-directory.ts'
@@ -32,6 +35,8 @@ import type { BatchMachine, Computation, Output } from '../../compute-snapshot/s
 import type { ComputeCapture } from './compute-coordinator.ts'
 import { physicalSnapshotId, readerName, type computeReader } from './compute-reader.ts'
 import { ComputeReaderOwners } from './compute-reader-owners.ts'
+import { SEAL_TTL_SECONDS, SEALED, sealKid } from '../../../services/airlock/seal.ts'
+import { PUBLISH_SEAL_SQL, SEAL_TABLES_SQL } from '../../../services/airlock/seal-tables.ts'
 
 export interface EdgeEnv {
   CLUSTER: DurableObjectNamespace
@@ -46,6 +51,7 @@ export interface EdgeEnv {
   BLOB_OBJECTS?: { put(key: string, bytes: Uint8Array | ReadableStream, options: { httpMetadata: { contentType: string } }): Promise<unknown>; head(key: string): Promise<unknown>; get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null> }
   BLOB_URL?: string
   AIRLOCK_QUEUE?: { send(body: DispatchedRun): Promise<unknown> }
+  AIRLOCK_SEAL_PUBLIC?: string
 }
 
 export interface EdgeOptions {
@@ -73,6 +79,15 @@ export class DataDirectoryLoading extends Error {
   constructor() { super('the data directory is loading') }
 }
 
+// A key as a uuid column would spell it back, lowercase: what tells two
+// offers of one row apart however they spelled it. A sealed value is kept
+// under the key as the database answered it (seal.ts sealLabel binds it so),
+// which for a text key is exactly what the write named.
+const canonicalKey = (v: unknown) => {
+  const text = String(v)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text) ? text.toLowerCase() : text
+}
+
 const earliest = (a: number | null, b: number | null): number | null =>
   a === null ? b : b === null ? a : Math.min(a, b)
 
@@ -81,7 +96,22 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
   // pgl_step reaches the step through the isolate: one set of machines per Worker.
   installHostStep(machines, functions)
   const hasAirlock = Object.keys(effects).length > 0
+  // The tables whose writes carry a secret field (pronto's #Field.secret), by
+  // the fields and the key a sealed value is bound by.
+  const secretTables = new Map<string, { pk: string; fields: Set<string> }>()
+  for (const { declaration: d } of Object.values(effects)) {
+    if (!d.secretFields?.length) continue
+    const t = secretTables.get(d.table) ?? { pk: d.row[0], fields: new Set<string>() }
+    for (const f of d.secretFields) t.fields.add(f)
+    secretTables.set(d.table, t)
+  }
   return class Cluster extends DurableObject<EdgeEnv> {
+    // A secret field's sealed value, from the write that named it until the
+    // last effect naming it on its row settles or five minutes pass: in this
+    // instance's memory and nowhere else, never its storage, the queue or the
+    // database, so an eviction loses it, which its effect meets as a value
+    // never written. `keys` are the invocations that claimed it.
+    readonly #sealed = new Map<string, { value: string; expires: number; keys: Set<string> }>()
     readonly #dir = new DataDirectory(this.ctx.storage, storageFormat, error => { this.ctx.abort(error instanceof Error ? error.message : String(error)); throw error })
     readonly #readers = new ComputeReaderOwners(this.ctx.storage.sql)
     #resetting = false
@@ -172,6 +202,14 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         // A job a drain or a settle enqueued, with no write after it, waited for
         // the next write or the hourly cron: a deck's text sat queued for minutes.
         // Graphile's add_job announces each insert, as its own workers hear it.
+        if (secretTables.size > 0) {
+          const published = JSON.parse(this.env.AIRLOCK_SEAL_PUBLIC ?? die('an effect reads a secret field, and AIRLOCK_SEAL_PUBLIC, its seal key\'s public half, is not set')) as { kid: string; key: JsonWebKey }
+          if (await sealKid(published.key) !== published.kid) die('AIRLOCK_SEAL_PUBLIC names a key its id is not')
+          await cluster.serialize(() => db.transaction(async (tx) => {
+            await tx.exec(SEAL_TABLES_SQL)
+            await tx.query(PUBLISH_SEAL_SQL, [published.kid, JSON.stringify(published.key)])
+          }))
+        }
         if (hasAirlock) await db.listen('"jobs:insert"', () => this.ctx.waitUntil(airlock.drain()))
         await clock.arm()
         this.#signalCompute()
@@ -416,7 +454,94 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
      * loaded directory's own lease dispatches what it still owes. */
     async effectClaim(key: string, token: string, claimant: string): Promise<ClaimedRun | null> {
       if (this.#resetting || !this.#dir.complete || !this.#dir.storageReady) return null
-      return await this.#effects((airlock) => airlock.claim(key, token, claimant))
+      const run = await this.#effects((airlock) => airlock.claim(key, token, claimant))
+      const d = run && effects[run.effect]?.declaration
+      if (!run || !d?.secretFields?.length) return run
+      // The sealed values travel with the claim alone, to the one Worker that
+      // can open them, and leave memory once the key's outcome lands.
+      const sealed: Record<string, string> = {}
+      for (const f of d.secretFields) {
+        const held = this.#heldSecret(d.table, String(run.row[d.row[0]]), f)
+        if (held) {
+          held.keys.add(key)
+          sealed[f] = held.value
+        }
+      }
+      return { ...run, sealed }
+    }
+
+    #secretKey = (table: string, pk: string, field: string) => JSON.stringify([table, pk, field])
+
+    #heldSecret(table: string, pk: string, field: string) {
+      const now = Date.now()
+      for (const [k, v] of this.#sealed) if (v.expires <= now) this.#sealed.delete(k)
+      return this.#sealed.get(this.#secretKey(table, pk, field))
+    }
+
+    /** A write naming a secret field: the sealed values taken out of its body,
+     * which reaches the database without them, and kept here once the write
+     * lands, for the rows it returned. What is not sealed is refused, and not
+     * repeated. A PATCH names its one row by its key, the row a seal binds
+     * to. */
+    async #withoutSecrets(req: Request, write: (req: Request) => Promise<Response>): Promise<Response> {
+      const url = new URL(req.url)
+      // The table as crud's router reads it (cluster.ts): the first segment past /crud.
+      const table = /^\/crud(\/|$)/.test(url.pathname) ? url.pathname.replace(/^\/crud/, '').split('/').filter(Boolean)[0] : undefined
+      const spec = table === undefined ? undefined : secretTables.get(table)
+      if (!spec || !['POST', 'PATCH', 'PUT'].includes(req.method)) return await write(req)
+      // Only a JSON body is read for its secret fields; crud's other bodies
+      // (a form, CSV) would carry one past this to the database.
+      if (!/^application\/json\b/i.test(req.headers.get('content-type') ?? '')) return json({ error: `a write to ${table} is JSON, which its secret fields are read from` }, 415)
+      const text = await req.text()
+      let body: unknown
+      try {
+        body = JSON.parse(text)
+      } catch {
+        return json({ error: `a write to ${table} is JSON, which its secret fields are read from` }, 400)
+      }
+      const rows = (Array.isArray(body) ? body : [body]) as Record<string, unknown>[]
+      const named = req.method === 'PATCH' ? /^eq\.(.+)$/.exec(url.searchParams.get(spec.pk) ?? '')?.[1] : undefined
+      const patched = named
+      const taken: { pk: string; field: string; value: string }[] = []
+      for (const row of rows) {
+        if (row === null || typeof row !== 'object') continue
+        for (const field of spec.fields) {
+          if (!(field in row)) continue
+          const value = row[field]
+          delete row[field]
+          if (value === null) continue
+          if (typeof value !== 'string' || !SEALED.test(value)) return json({ error: `${table}.${field} takes a value sealed to the airlock's key, and this one is not` }, 400)
+          const pk = req.method === 'PATCH' ? patched : row[spec.pk] === undefined ? undefined : String(row[spec.pk])
+          if (pk === undefined) return json({ error: `${table}.${field} is written to one row named by its ${spec.pk}` }, 400)
+          if (req.method === 'PATCH' && Object.keys(row).length === 0) row[spec.pk] = pk
+          taken.push({ pk, field, value })
+        }
+      }
+      if (taken.length === 0) return await write(new Request(req, { body: text }))
+      // A row offered twice in one write, a value or not, would keep one
+      // offer's value for the other's row once a conflict turns one away.
+      const offered = rows.flatMap((r) => r !== null && typeof r === 'object' && r[spec.pk] !== undefined ? [canonicalKey(r[spec.pk])] : [])
+      if (new Set(offered).size !== offered.length) return json({ error: `${table} is offered one row twice in one write, which a secret field cannot tell apart` }, 400)
+      const headers = new Headers(req.headers)
+      headers.delete('content-length')
+      // The rows the write landed on, which the caller may write, are the
+      // ones a sealed value is kept for; a filter that matched none keeps none.
+      const prefer = (headers.get('prefer') ?? '').split(',').map((p) => p.trim()).filter((p) => p !== '' && !p.startsWith('return='))
+      headers.set('prefer', [...prefer, 'return=representation'].join(','))
+      const res = await write(new Request(req.url, { method: req.method, headers, body: JSON.stringify(body) }))
+      if (!res.ok) return res
+      const answered = await res.text()
+      // Each offered key as the database answered it: exactly, or, where the
+      // column lowercased a uuid, its lowercase.
+      const landed = (JSON.parse(answered || '[]') as Record<string, unknown>[]).map((r) => String(r[spec.pk]))
+      const answeredAs = (pk: string) => landed.includes(pk) ? pk : landed.find((l) => l === canonicalKey(l) && l === canonicalKey(pk) && l !== pk)
+      const now = Date.now()
+      for (const [k, v] of this.#sealed) if (v.expires <= now) this.#sealed.delete(k)
+      for (const { pk, field, value } of taken) {
+        const at = answeredAs(pk)
+        if (at !== undefined) this.#sealed.set(this.#secretKey(table!, at, field), { value, expires: now + SEAL_TTL_SECONDS * 1000, keys: new Set() })
+      }
+      return new Response(answered, { status: res.status, headers: res.headers })
     }
 
     /** The dispatcher's answer for a run, settled here in the object's
@@ -425,6 +550,18 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     async effectAnswer(key: string, entered: number, answer: RunAnswer): Promise<void> {
       if (this.#resetting || !this.#dir.complete || !this.#dir.storageReady) throw new DataDirectoryLoading()
       await this.#effects((airlock) => airlock.answer(key, entered, answer))
+      // Settled, or settled unknown on its last error: no run asks again.
+      // A value another effect naming its field still awaits on the row
+      // (claimed, unsettled) is kept for that one.
+      if ('outcome' in answer || entered >= (effects[key.slice(0, key.indexOf(':'))]?.declaration.attempts ?? Infinity)) {
+        for (const [k, v] of this.#sealed) {
+          if (!v.keys.delete(key)) continue
+          const [table, pk, field] = JSON.parse(k) as [string, string, string]
+          const naming = Object.entries(effects).filter(([, e]) => e.declaration.table === table && e.declaration.secretFields?.includes(field))
+          const awaited = await this.#effects((airlock) => airlock.awaiting(naming.map(([n]) => n), naming[0]?.[1].declaration.row[0] ?? '', pk, key))
+          if (!awaited) this.#sealed.delete(k)
+        }
+      }
     }
 
     override async alarm(): Promise<void> {
@@ -639,7 +776,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       }
       if (CLUSTER_ROUTES.test(path)) {
         const { cluster, clock, airlock, ticks } = await this.#boot()
-        const res = await cluster.handle(req)
+        const res = secretTables.size > 0 ? await this.#withoutSecrets(req, (r) => cluster.handle(r)) : await cluster.handle(req)
         // A write may have armed a deadline (a machine's settle) or enqueued an effect.
         if (res.ok && /^\/crud(\/|$)/.test(path) && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
           if (ticks) await clock.arm()

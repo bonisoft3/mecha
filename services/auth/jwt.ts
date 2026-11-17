@@ -6,6 +6,15 @@
 
 const enc = new TextEncoder();
 
+/** The `iss` every token the stack itself signs carries: the auth service's
+ * people and guests, the edge's, and the service token. The tenancy floor
+ * (rls.sql's mecha.stack_issuer(), which states the same value) admits the
+ * cluster's own roles only from a token naming it, and a declared token role
+ * only from one naming another issuer. One value for every app: the secret
+ * already tells one app's tokens from another's, and the claim only tells the
+ * stack's tokens from an outside issuer's. */
+export const STACK_ISSUER = "mecha:stack";
+
 // JWS's unpadded base64url over the btoa and atob every runtime that runs this
 // file has: the auth service's Deno, the page, and workerd, whose bundler
 // resolves no jsr: specifier.

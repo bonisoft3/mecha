@@ -30,6 +30,9 @@ export type Effect = {
   handler: string;
   /** The environment variables whose values the handler is handed. */
   secrets?: string[];
+  /** The secret fields of the invoking row whose values the handler is
+   * handed, read from airlock.secret at each call and kept nowhere else. */
+  secretFields?: string[];
   /** A header the airlock adds to every call of the sink, its value the
    * named variable's (prefixed by `scheme`), which the handler never holds. */
   credential?: { header: string; scheme?: string; secret: string };
@@ -201,6 +204,9 @@ export function parseManifest(text: string): Record<string, Effect> {
     if (e.secrets !== undefined && (!Array.isArray(e.secrets) || !e.secrets.every((s) => typeof s === "string" && SECRET.test(s)))) {
       bad("secrets is not a list of environment variables' names");
     }
+    if (e.secretFields !== undefined && (!Array.isArray(e.secretFields) || !e.secretFields.every((f) => IDENTIFIER.test(f)))) {
+      bad("secretFields is not a list of identifiers");
+    }
     if (e.contentType !== undefined && (typeof e.contentType !== "string" || !MEDIA_TYPE.test(e.contentType) || e.contentType === "application/json")) {
       bad("contentType is not a media type other than JSON, which is the default");
     }
@@ -210,14 +216,18 @@ export function parseManifest(text: string): Record<string, Effect> {
         bad("edgeOrigin is neither an https origin nor {secret}, an environment variable's name");
       }
     }
-    if (e.credential !== undefined) {
-      const c = e.credential;
-      const token = (v: unknown) => typeof v === "string" && TOKEN.test(v);
-      const header = (v: unknown) => typeof v === "string" && HEADER.test(v) && !RESERVED_HEADERS.has(v.toLowerCase());
-      if (typeof c !== "object" || c === null || !header(c.header) || typeof c.secret !== "string" || !SECRET.test(c.secret) || (c.scheme !== undefined && !token(c.scheme))) {
-        bad("credential is not {header, scheme?, secret}: a header name daprd forwards (uppercase first) that is neither the host's nor HTTP's own, a scheme word and an environment variable's name");
-      }
-    }
+    if (e.credential !== undefined && !credentialChecked(e.credential)) bad(CREDENTIAL);
   }
   return effects;
+}
+
+export const CREDENTIAL = "credential is not {header, scheme?, secret}: a header name daprd forwards (uppercase first) that is neither the host's nor HTTP's own, a scheme word and an environment variable's name";
+
+/** A sink's credential as the manifest spells it, for writes and reads alike. */
+export function credentialChecked(c: unknown): c is { header: string; scheme?: string; secret: string } {
+  const token = (v: unknown) => typeof v === "string" && TOKEN.test(v);
+  const header = (v: unknown) => typeof v === "string" && HEADER.test(v) && !RESERVED_HEADERS.has(v.toLowerCase());
+  if (typeof c !== "object" || c === null) return false;
+  const { header: h, scheme, secret } = c as Record<string, unknown>;
+  return header(h) && typeof secret === "string" && SECRET.test(secret) && (scheme === undefined || token(scheme));
 }

@@ -131,11 +131,51 @@ END $init$;
 -- moves past 0. Not for a read, nor for a function call, which may be one:
 -- naming a transaction assigns it an id, spent for nothing there. Added to
 -- whatever headers the request already set rather than replacing them.
+--
+-- Every token the stack itself signs names its issuer, `mecha.stack_issuer()`
+-- (services/auth/jwt.ts's STACK_ISSUER, the same value): the auth service's people and guests, the service token, the
+-- edge's. The cluster's own roles, anon, app_user, service and any other it
+-- holds, act only on such a token, and a role the app declared for another
+-- issuer's tokens (`mecha.token_role`) only on one naming another issuer and
+-- an audience (PostgREST checks an audience a token names against crud's, but
+-- lets one naming none through, which would let a token minted for another
+-- app sharing the issuer act here). A token naming no issuer is the stack's
+-- from before it named one, believed only where the app trusts no other
+-- issuer, so no outside key could have signed it; where it trusts one, such
+-- a token acts as nothing but anon. An outside issuer's key that signs a
+-- token naming the stack's issuer is beyond this: PostgREST does not say
+-- which key verified a token.
+CREATE OR REPLACE FUNCTION mecha.stack_issuer() RETURNS text
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE RETURN 'mecha:stack';
+GRANT EXECUTE ON FUNCTION mecha.stack_issuer() TO PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void
   LANGUAGE plpgsql AS $$
 DECLARE
-  sub text := nullif(current_setting('request.jwt.claims', true)::json->>'sub', '');
+  claims jsonb := coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb;
+  sub text := nullif(claims->>'sub', '');
+  named boolean := claims ? 'iss';
+  stack boolean := claims->>'iss' IS NOT DISTINCT FROM mecha.stack_issuer();
+  audience boolean := CASE jsonb_typeof(claims->'aud')
+    WHEN 'string' THEN claims->>'aud' <> ''
+    WHEN 'array' THEN jsonb_array_length(claims->'aud') > 0
+    ELSE false END;
 BEGIN
+  IF EXISTS (SELECT 1 FROM mecha.token_role WHERE role_name = current_user) THEN
+    IF NOT named OR stack THEN
+      RAISE EXCEPTION 'a token acts as %, a declared token role, only as another issuer signed it', current_user
+        USING ERRCODE = '42501';
+    END IF;
+    IF NOT audience THEN
+      RAISE EXCEPTION 'a token another issuer signed names no audience' USING ERRCODE = '42501';
+    END IF;
+  ELSIF named AND NOT stack THEN
+    RAISE EXCEPTION 'a token another issuer signed cannot act as %, which is no declared token role', current_user
+      USING ERRCODE = '42501';
+  ELSIF NOT named AND current_user <> 'anon' AND claims <> '{}'::jsonb AND EXISTS (SELECT 1 FROM mecha.token_role) THEN
+    RAISE EXCEPTION 'a token naming no issuer acts as anon alone where the app trusts another issuer, and this one names %', current_user
+      USING ERRCODE = '42501';
+  END IF;
   IF sub LIKE '%,%' THEN
     RAISE EXCEPTION 'jwt sub contains a comma, which would split into two scopes';
   END IF;
@@ -197,6 +237,15 @@ CREATE TABLE IF NOT EXISTS mecha.shape_key (
   PRIMARY KEY (table_name, column_name)
 );
 GRANT SELECT ON mecha.shape_key TO PUBLIC;
+
+-- The roles a token another issuer signed may act as, declared rather than
+-- discovered: the app's own, which its schema names here, and none of the
+-- cluster's. Outside `public` for the reason given at `rls_exempt`: a row here
+-- lets an outside issuer's token through `app_pre_request`.
+CREATE TABLE IF NOT EXISTS mecha.token_role (
+  role_name text PRIMARY KEY
+);
+GRANT SELECT ON mecha.token_role TO PUBLIC;
 
 -- A composition's scope is its parent's, and a generated column cannot reach
 -- another table, so this trigger writes it and overwrites anything supplied.
@@ -366,7 +415,8 @@ REVOKE EXECUTE ON FUNCTION mecha.rls_audit() FROM PUBLIC;
 -- predicate where nobody would find it.
 INSERT INTO mecha.rls_exempt VALUES
   ('mecha.rls_exempt', 'the exemption list: readable by all, writable by none'),
-  ('mecha.shape_key', 'the shape edges: readable by all, writable by none')
+  ('mecha.shape_key', 'the shape edges: readable by all, writable by none'),
+  ('mecha.token_role', 'the roles an outside issuer''s token may act as: readable by all, writable by none')
   ON CONFLICT DO NOTHING;
 
 -- The request a transaction serves, carried through CDC: the change feed's

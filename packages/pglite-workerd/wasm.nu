@@ -3,8 +3,9 @@
 # and writes pglite.{js,wasm,data} and initdb.{js,wasm} to <out>. Upstream's
 # build-pglite.sh configures, builds and installs Postgres (its steps 1-2,
 # unchanged); the backend is then linked again for workerd:
-#   - no dynamic linking: plpgsql and dict_snowball are linked in, found by
-#     pgl_dlopen() through a generated pgl_static_modules table, and the FS
+#   - no dynamic linking: plpgsql, dict_snowball, unaccent, pg_ivm and the
+#     package's own modules are linked in, found by pgl_dlopen() through a
+#     generated pgl_static_modules table, and the FS
 #     bundle carries an empty placeholder .so for each (dfmgr stat()s the file
 #     before dlopen) and no other module;
 #   - -sENVIRONMENT=web: no node or worker branches in the glue;
@@ -16,7 +17,7 @@
 
 const TREE = '/work/postgres-pglite'
 const STATIC = '/work/static'
-const MODULES = [[name dir]; [plpgsql src/pl/plpgsql/src] [dict_snowball src/backend/snowball] [pgl_step contrib/pgl_step] [pg_ivm contrib/pg_ivm]]
+const MODULES = [[name dir]; [plpgsql src/pl/plpgsql/src] [dict_snowball src/backend/snowball] [pgl_step contrib/pgl_step] [pg_ivm contrib/pg_ivm] [unaccent contrib/unaccent]]
 # What the TypeScript side calls; nothing else is kept alive.
 const EXPORTS = [
   _main _malloc _free _fopen _fclose _fflush _pclose ___errno_location _strerror
@@ -158,6 +159,9 @@ include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk' | save -f $ivmMake
   cp ...(glob ($TREE | path join contrib pg_ivm 'pg_ivm--*.sql')) ($built.prefix | path join share postgresql extension)
   cp ($TREE | path join contrib pg_ivm pg_ivm.control) ($built.prefix | path join share postgresql extension)
+  # unaccent's dictionary reads its rules from tsearch_data when first used.
+  cp ...(glob ($TREE | path join contrib unaccent 'unaccent--*.sql')) ($TREE | path join contrib unaccent unaccent.control) ($built.prefix | path join share postgresql extension)
+  cp ($TREE | path join contrib unaccent unaccent.rules) ($built.prefix | path join share postgresql tsearch_data)
   link (modules) $built.cflags $built.prefix
   mkdir $out
   cp src/backend/pglite.js src/backend/pglite.wasm src/backend/pglite.data ($built.prefix | path join bin initdb.js) ($built.prefix | path join bin initdb.wasm) $out

@@ -16,7 +16,8 @@ Stock PGlite does not load in workerd. It misdetects its environment, asks for
 128 MiB at instantiation, compiles WebAssembly at runtime for plpgsql and its
 callbacks (workerd: "Wasm code generation disallowed by embedder"), and re-arms
 an idle timer every 10 s that keeps an object awake. This build has none of
-those: plpgsql and dict_snowball linked in, host callbacks as imports,
+those: plpgsql, dict_snowball and unaccent (with its rules, for search that
+ignores accents, as the cluster's PostgreSQL offers) linked in, host callbacks as imports,
 `-sENVIRONMENT=web`, assets resolved against `import.meta.url` only when not
 passed, a 16 MiB memory minimum, 1 MiB linear heap growth, and no timer left
 pending between queries. Linear growth limits unused WASM allocation at the

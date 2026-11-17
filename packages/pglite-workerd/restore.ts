@@ -12,6 +12,7 @@
 //
 //   deno run -A restore.ts <dump.sql> <pgdata-dir> --scripts <migrations.json> [--roles <sql>]…
 import { PGlite } from '@electric-sql/pglite'
+import { unaccent } from '@electric-sql/pglite/contrib/unaccent'
 import { icuDataDir } from '@electric-sql/pglite-icu-full'
 import { recordArchive, type Script } from './scripts.ts'
 
@@ -36,7 +37,9 @@ export async function restore(dump: string, pgdata: string, roles: string[], rel
   Deno.mkdirSync(pgdata)
   const t0 = performance.now()
   const lap = (what: string) => log(`${((performance.now() - t0) / 1000).toFixed(1)}s ${what}`)
-  const db = await PGlite.create({ dataDir: pgdata, icuDataDir: await icuDataDir() })
+  // A dump creates every extension its database holds; this build links
+  // unaccent in (wasm.nu), so the directory may hold it too.
+  const db = await PGlite.create({ dataDir: pgdata, icuDataDir: await icuDataDir(), extensions: { unaccent } })
   for (const sql of roles) await db.exec(await Deno.readTextFile(sql))
   // The dump's index builds over millions of rows.
   await db.exec(`SET maintenance_work_mem = '256MB'`)

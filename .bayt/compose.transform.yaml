@@ -30,7 +30,7 @@ services:
       CRUD_URL: http://crud:3000
       REDIS_URL: redis://redis:6379
       SERVICE_JWT: >-
-        ${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}
+        ${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJtZWNoYTpzdGFjayIsInJvbGUiOiJzZXJ2aWNlIiwic3ViIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAwIiwiZXhwIjoxOTg4MTUwNDAwfQ.K4ZX9EDs-BwPIh3r_ZOKmO9XfrQrEx18rwlw3siXcxs}
     image: bayt-libraries_mecha-transform:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:
       default:

@@ -9,12 +9,12 @@ const EFFECT = {
 };
 const ISSUE = `export async function issue(request, sink) { return { done: (await sink.fetch("/c")).body }; }`;
 
-async function lint(handler: string, effect: Record<string, unknown> = EFFECT) {
+async function lint(handler: string, effect: Record<string, unknown> = EFFECT, reads: Record<string, unknown> = {}) {
   const dir = await Deno.makeTempDir();
   try {
     await Deno.mkdir(`${dir}/effects`);
     await Deno.writeTextFile(`${dir}/effects/charge.js`, handler);
-    await Deno.writeTextFile(`${dir}/effects.json`, JSON.stringify({ effects: { charge: effect } }));
+    await Deno.writeTextFile(`${dir}/effects.json`, JSON.stringify({ effects: { charge: effect }, reads }));
     const { code, stderr } = await new Deno.Command(Deno.execPath(), {
       args: ["run", "--config", fileURLToPath(new URL("deno.json", import.meta.url)), "--frozen", "--unstable-worker-options",
         "--allow-read", "--allow-env", fileURLToPath(new URL("admit.ts", import.meta.url)), `${dir}/effects.json`, dir],
@@ -46,4 +46,12 @@ Deno.test("an endowment the cages cannot grant fails lint", async () => {
   const { code, stderr } = await lint(ISSUE, { ...EFFECT, endowments: ["Intl"] });
   assertEquals(code, 1);
   assertStringIncludes(stderr, "endowments");
+});
+
+Deno.test("a read the airlock would misread fails lint, naming it", async () => {
+  const read = { request: { method: "GET", path: "/rates/{currency}" }, invoke: { table: "expense", field: "status", state: "pricing", onDone: "priced", onError: "unpriced", row: ["id"], count: "pricings", incarnation: "lineage" } };
+  assertEquals((await lint(ISSUE, EFFECT, { rate: read })).code, 0);
+  const { code, stderr } = await lint(ISSUE, EFFECT, { rate: { ...read, request: { method: "POST", path: "/rates" } } });
+  assert(code !== 0);
+  assertStringIncludes(stderr, "read rate: request is not {method: GET, path}");
 });

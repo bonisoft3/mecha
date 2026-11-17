@@ -82,6 +82,14 @@ Deno.test("secrets are named by environment variables", () => {
   }
 });
 
+Deno.test("secret fields are named by the invoking row's columns", () => {
+  const manifest = (secretFields: unknown) => JSON.stringify({ effects: { charge: { ...effect(), secretFields } } });
+  assertEquals(parseManifest(manifest(["pin"])).charge.secretFields, ["pin"]);
+  for (const bad of [["pin; drop"], [""], "pin", [1]]) {
+    assertThrows(() => parseManifest(manifest(bad)), Error, "secretFields");
+  }
+});
+
 Deno.test("a credential is a header name daprd forwards and neither the host nor HTTP sets, a scheme word and an environment variable's name", () => {
   const manifest = (credential: unknown) => JSON.stringify({ effects: { charge: { ...effect(), credential } } });
   assertEquals(parseManifest(manifest({ header: "Authorization", scheme: "Bearer", secret: "ACQUIRER_KEY" })).charge.credential, { header: "Authorization", scheme: "Bearer", secret: "ACQUIRER_KEY" });

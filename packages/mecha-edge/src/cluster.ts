@@ -14,7 +14,7 @@ import {
   verifyRegistrationResponse,
 } from '@simplewebauthn/server'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
-import { isSession, PUBLIC_WHERE, shapeWhere, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
+import { isSession, PUBLIC_WHERE, shapeWhere, signJwt, STACK_ISSUER, verifyJwt } from '../../../services/auth/jwt.ts'
 import { oidc, type Links, type Profile, type Provider } from '../../../services/auth/oidc.ts'
 import { prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
@@ -228,7 +228,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       db.query<{ handle: string }>('INSERT INTO app_user (id, handle) VALUES ($1, $2) RETURNING handle', [id, initHandle]),
     )
     const handle = rows[0]?.handle ?? initHandle
-    const token = await signJwt(secret, { role: 'app_user', sub: id, handle, guest: true, exp: now() + USER_TOKEN_TTL_S })
+    const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: id, handle, guest: true, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id, handle, guest: true } })
   }
 
@@ -310,7 +310,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         ),
       )
       if (added.affectedRows === 0) return json(409, { error: 'already an account' })
-      const token = await signJwt(secret, { role: 'app_user', sub: userId, handle: st.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
+      const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: userId, handle: st.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
       return json(200, { token, user: { id: userId, handle: st.handle } })
     }
     let handle = st.handle as string
@@ -341,7 +341,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       }
     }
     if (!inserted) return json(500, { error: 'could not allocate identity' })
-    const token = await signJwt(secret, { role: 'app_user', sub: userId, handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
+    const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: userId, handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id: userId, handle } })
   }
 
@@ -406,7 +406,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         cred.id,
       ]),
     )
-    const token = await signJwt(secret, { role: 'app_user', sub: cred.user_id, handle: cred.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
+    const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: cred.user_id, handle: cred.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
     return json(200, { token, user: { id: cred.user_id, handle: cred.handle } })
   }
 
@@ -474,7 +474,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     links,
     // The link's name and email ride in the token: the chrome shows the name
     // over the handle, and a checkout starts from the email.
-    issue: (user) => signJwt(secret, { role: 'app_user', sub: user.id, handle: user.handle, ...(user.name ? { name: user.name } : {}), ...(user.email ? { email: user.email } : {}), exp: now() + USER_TOKEN_TTL_S }),
+    issue: (user) => signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: user.id, handle: user.handle, ...(user.name ? { name: user.name } : {}), ...(user.email ? { email: user.email } : {}), exp: now() + USER_TOKEN_TTL_S }),
     fetcher: cfg.fetcher,
   })
 

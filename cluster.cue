@@ -31,6 +31,11 @@ import (
 )
 
 _electricPatch: _ @embed(file="services/electric/patch.exs", type=text)
+_tenancySql:    _ @embed(file="services/database/rls/rls.sql", type=text)
+
+// The tenancy floor's text, written to be restated: a caller whose database
+// predates a correction to it restates it ahead of what relies on it.
+#TenancySql:    _tenancySql
 _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 _cdcTrace:      _ @embed(file="services/transform/cdc-trace.yaml", type=text)
 _redisStreams:  _ @embed(file="services/mesh/dapr/components/redis-streams.yaml", type=text)
@@ -106,6 +111,15 @@ _airlockLock:       _ @embed(file="services/airlock/deno.lock", type=text)
 _scheduleSql:      _ @embed(file="services/ticker/schedule.sql", type=text)
 _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text)
 #MachineTimersSql: _scheduleSql + "\n" + _machineTimersSql
+
+// unaccent and its immutable wrapper, for a caller whose table declares a
+// generated column over it to run in the step that creates that table. A
+// caller's step, never one the image places: a database's floor carries no
+// extension a schema does not call, and every step a live database applied
+// keeps its bytes. Each database a release runs has it: PostgreSQL's
+// contrib, the PGlite a page or pgdata.ts boots (mecha-browser's
+// createDatabase) and the edge's, which links it in (pglite-workerd).
+#UnaccentSql: _ @embed(file="services/database/unaccent.sql", type=text)
 
 #ScheduleMigration: "800_schedule.sql"
 
@@ -415,10 +429,16 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 	// endpoint is written to.
 	name: =~#EffectName & !="blobs" & !="wall" & !="resiliency"
 	{origin: #Origin} | {bridge: =~#EffectName} | {ai: #AiModality, tier: *"cheap" | #AiBackendTier}
-	handler:  *"effects/\(E.name).js" | string
+	// A read is an HTTP GET whose answer is its outcome: no handler
+	// (services/airlock/read.ts).
+	read: *false | bool
+	if !read {handler: *"effects/\(E.name).js" | string}
 	endpoint: *"services/airlock/dapr/\(E.name).yaml" | string
 	// The environment variables whose values the handler is handed.
 	secrets?: [...=~#SecretName]
+	// Its handler is also handed a value a reader typed, which the airlock
+	// opens with its seal key (services/airlock/seal.ts).
+	secretFields?: true
 	// Its bridge stands in for a sink elsewhere, so the keys it takes are fakes
 	// with a default rather than a refusal to start.
 	simulated?: true
@@ -474,15 +494,24 @@ _from: {
 }
 
 // Pre-signed against the dev PGRST_JWT_SECRET: HS256, claims
-// {role: "service", sub: all-zeros uuid, exp: 2033-01-01}. Compose default
+// {iss: "mecha:stack", role: "service", sub: all-zeros uuid, exp: 2033-01-01}. Compose default
 // only — prod overrides both SERVICE_JWT and PGRST_JWT_SECRET together.
-_devServiceJwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4"
+_devServiceJwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJtZWNoYTpzdGFjayIsInJvbGUiOiJzZXJ2aWNlIiwic3ViIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAwIiwiZXhwIjoxOTg4MTUwNDAwfQ.K4ZX9EDs-BwPIh3r_ZOKmO9XfrQrEx18rwlw3siXcxs"
 
 // The pair a consumer that runs mecha's services outside compose defaults to,
 // the docker appliance among them.
 #DevServiceJwt: _devServiceJwt
 
 _devJwtSecret: "mecha-dev-secret-please-override-32ch"
+
+// The development seal key (services/airlock/seal.ts), as the JWT secret
+// above is the development signing key: public in this repository, so only
+// the local stack falls back to it. A release takes its own AIRLOCK_SEAL_KEY
+// from its environment or its target's secret store, never makes one, and
+// refuses this one.
+_devSealKeyFile: _ @embed(file="services/airlock/dev-seal.key", type=text)
+#DevSealKey:     strings.TrimSpace(_devSealKeyFile)
+
 // The query parameter caddy adds after the gate and electric checks; one
 // literal, so the two cannot be given different ones by a slip.
 _devElectricSecret:        "dev-electric-secret"
@@ -513,7 +542,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// fresh volume; these carry a volume that outlived a change forward, and
 		// a fresh one too, once initdb has run.
 		pgroll: [grammar.#Name]: grammar.#Migration
-		// Idempotent SQL restated after ledger migrations on every release.
+		// Idempotent SQL restated after ledger migrations on every release;
+		// `roles`, before them, so a migration may grant a role it creates.
 		reconcile: [=~"^[a-z][a-z0-9_]*$"]: string & !=""
 		// Materialized JSON, one <name>.json per vetted pgroll value, relative to the app.
 		pgrollDir?: string & !=""
@@ -638,6 +668,18 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// caddy /blobs and /img routes.
 		blobs: *false | bool
 
+		// Trusted issuers: crud verifies tokens an OAuth2 or OpenID issuer
+		// signed, beside the stack's own, for the roles a program declares
+		// besides anon, app_user and service. PostgREST fetches no key set, so
+		// the deployment gives crud the whole one as PGRST_JWKS (the stack's
+		// secret as an `oct` key beside the issuers' public keys) and may name
+		// crud's audience, TRUSTED_AUDIENCE, else the origin's /crud. Without
+		// PGRST_JWKS crud verifies the stack's own tokens alone.
+		issuers: *false | bool
+		if issuers {
+			server: true
+		}
+
 		// The AI plane: tiered model routing across browser worker, cheap
 		// backend, and heavy backend tiers via mecha's tsbifrost AI gateway.
 		ai?: #AiCapability
@@ -754,8 +796,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// is matched here; one refused leaves an index out of range in every
 	// command line and path built from it.
 	_effects: [for e in X.state.effects {
-		name:     [if regexp.Match(#EffectName, e.name) {e.name}][0]
-		handler:  e.handler
+		name: [if regexp.Match(#EffectName, e.name) {e.name}][0]
+		if e.handler != _|_ {handler: e.handler}
 		endpoint: e.endpoint
 	}]
 	// The origins and the bridges the effects reach, read from the
@@ -796,7 +838,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 	// crud verifies the service token wherever something wakes, with or without
 	// the auth plane. The token is a claim, not a peer identity, which is why no
 	// transport credential stands in for it: without it every call is anon's.
-	_serviceToken: X.capabilities.auth || X._wakes
+	_serviceToken: X.capabilities.auth || X._wakes || X.capabilities.issuers
 	// The schedule table reaches an effect's cluster inside the airlock's
 	// step (bayt.cue), ahead of any caller step.
 	_staged: list.Concat([
@@ -1114,8 +1156,14 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							PGRST_SERVER_HOST:       "*"
 							PGRST_SERVER_PORT:       {port: "http", part: "port"}
 							PGRST_ADMIN_SERVER_PORT: {port: "admin", part: "port"}
-							if X._serviceToken {
+							if X._serviceToken && !X.capabilities.issuers {
 								PGRST_JWT_SECRET: jwtSecret
+							}
+							// The key set, else the stack's own secret alone; and an
+							// audience, which PostgREST holds a token naming one to.
+							if X.capabilities.issuers {
+								PGRST_JWT_SECRET: "${PGRST_JWKS:-\(jwtSecret)}"
+								PGRST_JWT_AUD:    "${TRUSTED_AUDIENCE:-\(origin)/crud}"
 							}
 						}
 						after: X._schemaReady
@@ -1845,7 +1893,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						shell: "nu"
 						do: strings.Join(list.Concat([
 							["let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'airlock-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'effects'); cp -f '\(X.meta.airlock)' ($dir | path join 'effects.json');"],
-							[for e in X._effects {"cp -f '\(e.handler)' ($dir | path join 'effects/\(e.name).js');"}],
+							[for e in X._effects if e.handler != _|_ {"cp -f '\(e.handler)' ($dir | path join 'effects/\(e.name).js');"}],
 							["let app = (if (($env.AIRLOCK_APP_DIR? | default '') != '') { $env.AIRLOCK_APP_DIR } else if ('services/airlock/main.ts' | path exists) { 'services/airlock' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/airlock') }); with-env { AIRLOCK_DIR: $dir } { exec deno run --frozen --unstable-worker-options --allow-net --allow-read --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"],
 						]), " ")
 						env: {
@@ -1863,6 +1911,16 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// (services/airlock/blobs.ts).
 							if X.capabilities.blobs {BLOB_URL: "/img/insecure/plain/s3://mecha-objects/"}
 
+							// The key a secret field is sealed to, and the one a rotation
+							// replaced, kept for five minutes of what was sealed to it.
+							if len([for e in X.state.effects if e.secretFields != _|_ {e}]) > 0 {
+								AIRLOCK_SEAL_KEY:          "${AIRLOCK_SEAL_KEY:-\(#DevSealKey)}"
+								AIRLOCK_SEAL_KEY_PREVIOUS: "${AIRLOCK_SEAL_KEY_PREVIOUS:-}"
+								// The local stack, where the airlock takes the development
+								// key; every release's airlock refuses it (seal.ts refuseDevKey).
+								AIRLOCK_SEAL_DEV: "local"
+							}
+
 							// A secret has no default: compose refuses to start without
 							// it rather than hand a handler a guessable one.
 							for k in X._secrets {
@@ -1874,7 +1932,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						}
 						after: {X._schemaReady, "airlock-mesh": "healthy"}
 					}
-					srcs: globs: list.Concat([[X.meta.airlock], [for e in X._effects {e.handler}]])
+					srcs: globs: list.Concat([[X.meta.airlock], [for e in X._effects if e.handler != _|_ {e.handler}]])
 					dockerfile: {
 						from:    (_from & {in: X.meta.images.airlock}).out
 						workdir: "/app/airlock"
@@ -1882,7 +1940,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// effects.json, and effects/<name>.js beside it.
 						copy: list.Concat([
 							[{srcs: [X.meta.airlock], dst: "/airlock/effects.json"}],
-							[for e in X._effects {srcs: [e.handler], dst: "/airlock/effects/\(e.name).js"}],
+							[for e in X._effects if e.handler != _|_ {srcs: [e.handler], dst: "/airlock/effects/\(e.name).js"}],
 						])
 						// Its own reach, besides the network's: the database, its
 						// daprd and the health port. Reads are unscoped because Graphile's
@@ -1896,7 +1954,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						restart:  "on-failure"
 						develop: watch: list.Concat([
 							[{action: "sync+restart", path: "../\(X.meta.airlock)", target: "/airlock/effects.json"}],
-							[for e in X._effects {action: "sync+restart", path: "../\(e.handler)", target: "/airlock/effects/\(e.name).js"}],
+							[for e in X._effects if e.handler != _|_ {action: "sync+restart", path: "../\(e.handler)", target: "/airlock/effects/\(e.name).js"}],
 						])
 					}
 				}

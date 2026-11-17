@@ -24,6 +24,15 @@ def main [dir: string, baseline: string] {
 			exit 1
 		}
 	}
+	# Roles ahead of the ledger, which may grant one (the cluster's `roles`).
+	let roles = ($dir | path join roles.sql)
+	if ($roles | path exists) {
+		let r = (^psql $env.DATABASE_URL -X -v ON_ERROR_STOP=1 -qtA --single-transaction -c "SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '60s'; SET LOCAL pgroll.no_inferred_migrations = 'TRUE';" $"--file=($roles)" | complete)
+		if $r.exit_code != 0 {
+			print -e $"migrate: ($roles): ($r.stderr | str trim)"
+			exit 1
+		}
+	}
 	with-env {PGROLL_PG_URL: $env.DATABASE_URL, LC_ALL: "C"} {
 		^pgroll init
 		if (ask "SELECT count(*) FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'baseline';") == "0" {
@@ -53,9 +62,13 @@ def main [dir: string, baseline: string] {
 			}
 			$latest = $name
 		}
-		let sql_files = (if ($dir | path exists) { glob ($dir | path join "*.sql" | str replace -a (char -u 5c) "/") | sort } else { [] })
+		let sql_files = (if ($dir | path exists) { glob ($dir | path join "*.sql" | str replace -a (char -u 5c) "/") | sort | where {|f| ($f | path basename) != "roles.sql" } } else { [] })
 		for file in $sql_files {
-			^psql $env.DATABASE_URL -X -v ON_ERROR_STOP=1 -qtA --single-transaction -c "SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '60s'; SET LOCAL pgroll.no_inferred_migrations = 'TRUE';" $"--file=($file)" | ignore
+			let r = (^psql $env.DATABASE_URL -X -v ON_ERROR_STOP=1 -qtA --single-transaction -c "SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '60s'; SET LOCAL pgroll.no_inferred_migrations = 'TRUE';" $"--file=($file)" | complete)
+			if $r.exit_code != 0 {
+				print -e $"migrate: ($file): ($r.stderr | str trim)"
+				exit 1
+			}
 		}
 		ask "NOTIFY pgrst, 'reload schema';" | ignore
 	}

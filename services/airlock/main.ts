@@ -9,6 +9,8 @@ import pg from "pg";
 import { hold, start } from "./airlock.ts";
 import { daprBlobs } from "./blobs.ts";
 import { admitAll, meshTransport } from "./handler.ts";
+import { parseReads } from "./read.ts";
+import { refuseDevKey, sealKeys } from "./seal.ts";
 
 function required(name: string): string {
   const value = Deno.env.get(name);
@@ -21,6 +23,7 @@ if (import.meta.main) {
   const mesh = required("MESH_URL");
   const dir = required("AIRLOCK_DIR");
   const { effects, handlers } = await admitAll(`${dir}/effects.json`, dir);
+  const reads = parseReads(await Deno.readTextFile(`${dir}/effects.json`));
   // Where a bridge names its targets, the release names this one.
   const target = Object.values(effects).some((e) => e.bridge !== undefined) ? required("AIRLOCK_TARGET") : undefined;
   // Read once here and handed to the handler at each call; written nowhere, not
@@ -36,11 +39,16 @@ if (import.meta.main) {
     return value;
   };
   const headers = Object.fromEntries(
-    Object.entries(effects).map(([name, e]) => [
+    [...Object.entries(effects), ...Object.entries(reads)].map(([name, e]) => [
       name,
       e.credential === undefined ? {} : { [e.credential.header]: `${e.credential.scheme === undefined ? "" : e.credential.scheme + " "}${headerValue(e.credential.secret)}` },
     ]),
   );
+  // The key a secret field is sealed to, where an effect reads one, and the
+  // one a rotation replaced, kept for what was sealed to it (seal.ts).
+  const seal = Object.values(effects).some((e) => e.secretFields?.length)
+    ? refuseDevKey(await sealKeys(required("AIRLOCK_SEAL_KEY"), Deno.env.get("AIRLOCK_SEAL_KEY_PREVIOUS") || undefined), Deno.env.get("AIRLOCK_SEAL_DEV") === "local")
+    : undefined;
   const db = new pg.Pool({ connectionString });
   const { key } = await hold(connectionString);
   // Set where the cluster has a blob plane: the URL a stored key is served at.
@@ -48,7 +56,7 @@ if (import.meta.main) {
   const blobs = blobUrl === undefined ? undefined : daprBlobs(mesh, blobUrl);
   // A release with no origin yet runs every effect that does not link back.
   const origin = Deno.env.get("ORIGIN");
-  const runner = await start({ connectionString, db, effects, handlers, transport: meshTransport(mesh), secrets, headers, blobs, origin, target }, key);
+  const runner = await start({ connectionString, db, effects, handlers, transport: meshTransport(mesh), secrets, headers, blobs, origin, target, reads, mesh, seal }, key);
   Deno.serve({ hostname: Deno.env.get("SAYT_PLATFORM") === "host" ? "127.0.0.1" : "0.0.0.0", port: Number(Deno.env.get("PORT") || 9997), onListen() {} }, (req) => new Response(null, { status: new URL(req.url).pathname === "/healthz" ? 204 : 404 }));
   await runner.promise;
   // On a signal Graphile returns its jobs and ends the process itself; a

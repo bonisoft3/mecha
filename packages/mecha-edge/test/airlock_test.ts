@@ -4,6 +4,7 @@ import { startWorker } from '../../pglite-workerd/wrangler-dev.ts'
 import { load } from '../../pglite-workerd/load.ts'
 import { seed } from './seed.ts'
 import { STUB_PORT } from './airlock-effects.ts'
+import { seal, sealLabel } from '../../../services/airlock/seal.ts'
 
 const sql = (file: string) => Deno.readTextFile(new URL(`../../../services/${file}`, import.meta.url))
 
@@ -24,9 +25,15 @@ Deno.test({ name: 'edge effects run in the dispatcher Worker and settle in the o
   const hits = new Map<string, number>()
   let release!: () => void
   const held = new Promise<void>((r) => (release = r))
+  const pins = new Map<string, unknown>()
   const stub = Deno.serve({ port: STUB_PORT, hostname: '127.0.0.1', onListen: () => {} }, async (req) => {
     const [, , mode, id] = new URL(req.url).pathname.split('/')
     hits.set(id, (hits.get(id) ?? 0) + 1)
+    if (mode === 'pin') {
+      const { pin } = await req.json() as { pin: string }
+      pins.set(id, pin)
+      return Response.json({ accepted: true })
+    }
     if (mode === 'slow') await held
     if (mode === 'error') return new Response('upstream down', { status: 500 })
     return Response.json({ answered: id })
@@ -38,8 +45,9 @@ Deno.test({ name: 'edge effects run in the dispatcher Worker and settle in the o
     await db.exec(await sql('durex/graphile.sql'))
     await db.exec(`${await sql('ticker/schedule.sql')}\n${await sql('airlock/airlock.sql')}`)
     await db.exec(await sql('airlock/job_key.sql'))
-    await db.exec(`CREATE TABLE effect_row (id text PRIMARY KEY, status text NOT NULL);
+    await db.exec(`CREATE TABLE effect_row (id text PRIMARY KEY, status text NOT NULL, pin text CHECK (pin IS NULL));
       CREATE ROLE service NOLOGIN BYPASSRLS; GRANT USAGE ON SCHEMA public TO service;
+      GRANT SELECT, INSERT, UPDATE ON effect_row TO app_user;
       CREATE TABLE settled_seen (settled int NOT NULL);
       GRANT SELECT ON effect_row TO service; GRANT ALL ON settled_seen TO service;
       CREATE FUNCTION see_settled() RETURNS integer LANGUAGE sql AS $$
@@ -58,6 +66,11 @@ Deno.test({ name: 'edge effects run in the dispatcher Worker and settle in the o
     }
     type Row = { status: string; entered: number; kind: string | null; data: unknown } | null
     const row = async (id: string) => await (await fetch(at(`/effect/${id}`))).json() as Row
+    // A reader's session, as the page's: the edge's crud answers sessions alone.
+    const { token } = await (await fetch(at('/auth/guest'), { method: 'POST' })).json() as { token: string }
+    const crud = (method: string, path: string, body?: unknown) => fetch(at(path), {
+      method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', prefer: 'return=representation' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
 
     // The object returns at once and keeps answering while the run is held
     // in the dispatcher; the release settles it.
@@ -86,6 +99,60 @@ Deno.test({ name: 'edge effects run in the dispatcher Worker and settle in the o
       status: 'failed', entered: 0, kind: 'failed', data: { bridge: 'fixture', target: 'cloudflare', reason: 'not deployed' },
     })
     assert.equal(hits.get('d'), undefined)
+
+    // A secret field: the page's write carries it sealed, the object keeps it
+    // in memory alone, the dispatcher opens it for the handler, and the
+    // database never holds even its ciphertext.
+    const published = await (await crud('GET', '/crud/airlock_seal?select=kid,key')).json() as { kid: string; key: JsonWebKey }[]
+    assert.equal(published.length, 1)
+    const sealFor = (id: string, pin: string) => seal(published[0].key, pin, sealLabel('effect_row', 'pin', id))
+    const written = await crud('POST', '/crud/effect_row', { id: 's1', status: 'pending', pin: await sealFor('s1', '4321') })
+    assert.equal(written.status, 201, await written.clone().text())
+    assert.equal((await written.json() as { pin: unknown }[])[0].pin, null)
+    await claim('s1', 'pinned', 'pin')
+    assert.deepEqual(await until('s1 settles', () => row('s1'), (r) => r?.status !== 'running'), { status: 'done', entered: 1, kind: 'done', data: { accepted: true } })
+    assert.equal(pins.get('s1'), '4321')
+    const held = await (await fetch(at('/effect/held'))).json() as { held: string; pins: number }
+    assert.equal(held.pins, 0)
+    assert.equal(held.held.includes('4321') || held.held.includes('seal1.'), false, held.held)
+    // A value in the clear is refused at the door, and not repeated.
+    const clear = await crud('PATCH', '/crud/effect_row?id=eq.s1', { pin: '4321' })
+    assert.equal(clear.status, 400)
+    assert.equal((await clear.text()).includes('4321'), false)
+    // One write offering a row twice, a value or not, keeps neither.
+    for (const first of [null, await sealFor('s3', '1111')]) {
+      const twice = await crud('POST', '/crud/effect_row', [{ id: 's3', status: 'pending', pin: first }, { id: 's3', status: 'pending', pin: await sealFor('s3', '2222') }])
+      assert.equal(twice.status, 400)
+      await twice.body?.cancel()
+    }
+    // Two effects naming the field of one row both receive it, and it is
+    // gone once the second settles: a third, claimed after, finds none.
+    const both = await crud('POST', '/crud/effect_row', { id: 's4', status: 'pending', pin: await sealFor('s4', '8642') })
+    assert.equal(both.status, 201, await both.clone().text())
+    await both.body?.cancel()
+    await claim('s4', 'pinned', 'pin')
+    await claim('s4', 'repinned', 'pin')
+    type Settled = { kind: string | null; data: unknown } | null
+    const outcomeOf = (key: string) => until(`${key} settles`, async () => await (await fetch(at(`/effect/ledger?key=${key}`))).json() as Settled, (o) => o?.kind != null)
+    assert.equal((await outcomeOf('pinned:s4'))?.kind, 'done')
+    assert.equal((await outcomeOf('repinned:s4'))?.kind, 'done')
+    assert.equal(hits.get('s4'), 2, 'both effects reached the sink with the value')
+    assert.equal(pins.get('s4'), '8642')
+    await claim('s4', 'latepin', 'pin')
+    assert.deepEqual(await outcomeOf('latepin:s4'), { kind: 'failed', data: { secrets: ['pin'], reason: 'absent' } })
+    // A text key that looks like a uuid is kept as it was written, so its
+    // run finds its value.
+    const upper = 'ABCDEFAB-1234-1234-1234-ABCDEFABCDEF'
+    const shaped = await crud('POST', '/crud/effect_row', { id: upper, status: 'pending', pin: await sealFor(upper, '1357') })
+    assert.equal(shaped.status, 201, await shaped.clone().text())
+    await shaped.body?.cancel()
+    await claim(upper, 'pinned', 'pin')
+    assert.equal((await outcomeOf(`pinned:${upper}`))?.kind, 'done')
+    assert.equal(pins.get(upper), '1357')
+    // One the object does not hold, as after an eviction, fails the first run.
+    await claim('s2', 'pinned', 'pin')
+    assert.deepEqual(await until('s2 settles', () => row('s2'), (r) => r?.status !== 'running'), { status: 'failed', entered: 1, kind: 'failed', data: { secrets: ['pin'], reason: 'absent' } })
+    assert.equal(pins.has('s2'), false)
   } finally {
     await worker.stop()
     await stub.shutdown()

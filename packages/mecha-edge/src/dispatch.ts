@@ -11,6 +11,7 @@ import {
 } from '../../../services/airlock/tsbifrost.ts'
 import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, ORIGIN, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
 import { type BlobStore, contentBlob, stowed } from '../../../services/airlock/blobs.ts'
+import { openFields, type SealKeys, sealKeys } from '../../../services/airlock/seal.ts'
 
 export interface EdgeSink {
   key: string
@@ -67,8 +68,13 @@ export interface DispatchedRun {
 export interface ClaimedRun {
   effect: string
   input: unknown
+  /** The invoking row's primary key, as the ledger names it. */
+  row: Record<string, unknown>
   entered: number
   until: number
+  /** The row's secret fields, sealed, from the object's memory: what the
+   * dispatcher opens for the handler, absent where none was held. */
+  sealed?: Record<string, string>
 }
 
 /** What a dispatcher answers the object for one run. */
@@ -264,14 +270,24 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
 /** One run of a claimed effect: reconcile where its reentry policy asks, then
  * issue. A throw is the run's error, which the object retries or settles
  * `unknown` on the effect's last attempt. */
-export async function performEffect(spec: EdgeEffect, run: { key: string; entered: number }, input: unknown, cfg: PerformConfig = {}): Promise<Outcome> {
+export async function performEffect(spec: EdgeEffect, run: { key: string; entered: number; row?: Record<string, unknown>; sealed?: Record<string, string> }, input: unknown, cfg: PerformConfig = {}): Promise<Outcome> {
   const { log = console.error, handlerTimeoutMs = HANDLER_TIMEOUT_MS } = cfg
   const effect = spec.declaration
   const { key, entered } = run
   const env = extractEnv(cfg.env)
   const sink = makeSink(spec, key, cfg, env)
   const { strings } = env
-  const secrets = Object.fromEntries((effect.secrets ?? []).map(name => [name, strings[name] || die(`effect ${effect.handler}: secret ${name} is not set on this deployment`)]))
+  const typed: Record<string, string> = {}
+  if (effect.secretFields?.length) {
+    // The object held the sealed values in memory; this Worker alone holds
+    // the key that opens them. One the object lost, as to an eviction, is a
+    // value never written: the first run fails, a later one is unknown.
+    const keys = await sealKeysOf(strings)
+    const opened = await openFields(keys, effect.table, String(run.row?.[effect.row[0]]), effect.secretFields, run.sealed ?? {})
+    if (opened.missing) return entered > 1 ? outcome(effect, 'unknown', false) : outcome(effect, { failed: opened.missing }, false)
+    Object.assign(typed, opened.values)
+  }
+  const secrets = { ...Object.fromEntries((effect.secrets ?? []).map(name => [name, strings[name] || die(`effect ${effect.handler}: secret ${name} is not set on this deployment`)])), ...typed }
   const stow = async (call: 'issue' | 'reconcile', answer: Answer) =>
     jsonAnswer(call, await within(handlerTimeoutMs, `${key}: storing the answer's bytes`, stowed(answer, key, cfg.blobs)))
   if (step(effect, entered) === 'reconcile') {
@@ -282,6 +298,17 @@ export async function performEffect(spec: EdgeEffect, run: { key: string; entere
   const ans = await stow('issue', checkAnswer('issue', await within(handlerTimeoutMs, `effect ${effect.handler}: issue`, Promise.resolve(spec.issue(input, sink, secrets)))))
   if ('failed' in ans) log(`airlock effect ${key} returned failed on attempt ${entered}: ${JSON.stringify(ans.failed)}`)
   return outcome(effect, ans, false)
+}
+
+// The dispatcher's seal key and the one a rotation replaced, imported once
+// per isolate for as long as the deployment's secrets stay the same.
+let sealed: { from: string; keys: Promise<SealKeys> } | undefined
+function sealKeysOf(strings: Record<string, string | undefined>): Promise<SealKeys> {
+  const current = strings.AIRLOCK_SEAL_KEY || die('an effect reads a secret field, and AIRLOCK_SEAL_KEY is not set on this deployment')
+  const previous = strings.AIRLOCK_SEAL_KEY_PREVIOUS || undefined
+  const from = `${current}\n${previous ?? ''}`
+  if (sealed?.from !== from) sealed = { from, keys: sealKeys(current, previous) }
+  return sealed.keys
 }
 
 /** The cluster object's side of the protocol, as the dispatcher reaches it. */
@@ -334,7 +361,7 @@ export async function dispatchRun(cluster: ClusterRuns, effects: EdgeEffects, ru
   let answer: RunAnswer
   try {
     const spec = effects[claimed.effect] ?? die(`${run.key}: effect ${claimed.effect} is not in this dispatcher's effects.json`)
-    answer = { outcome: await performEffect(spec, { key: run.key, entered }, claimed.input, cfg) }
+    answer = { outcome: await performEffect(spec, { key: run.key, entered, row: claimed.row, sealed: claimed.sealed }, claimed.input, cfg) }
   } catch (e) {
     answer = { error: e instanceof Error ? e.message : String(e) }
   }

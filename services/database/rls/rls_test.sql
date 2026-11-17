@@ -330,6 +330,95 @@ BEGIN
     RAISE EXCEPTION '38 a subjectless request did not hold exactly public:';
   END IF;
 
+  -- A token another issuer signed acts only as a role declared for one,
+  -- whatever role it named; the stack's own tokens name the stack's issuer.
+  SET LOCAL ROLE _f_app;
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"https://id.example","role":"_f_app"}', true);
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '63 an outside issuer''s token acted as an undeclared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  -- An empty or null issuer is not the stack's either.
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"","role":"_f_app"}', true);
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '63 an outside token naming an empty issuer acted as an undeclared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":null,"role":"_f_app"}', true);
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '63 an outside token naming a null issuer acted as an undeclared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  PERFORM set_config('request.jwt.claims', '{"sub":"ana","iss":"mecha:stack","role":"_f_app"}', true);
+  PERFORM app_pre_request();
+  IF current_scopes() <> ARRAY['public:', 'user:ana'] THEN
+    RAISE EXCEPTION '64 the stack''s own token was refused a role';
+  END IF;
+  -- One naming no issuer is the stack's from before it named one, believed
+  -- while the app trusts no other issuer.
+  PERFORM set_config('request.jwt.claims', '{"sub":"ana","role":"_f_app"}', true);
+  PERFORM app_pre_request();
+  IF current_scopes() <> ARRAY['public:', 'user:ana'] THEN
+    RAISE EXCEPTION '64 a token naming no issuer was refused where the app trusts no other';
+  END IF;
+  RESET ROLE;
+  INSERT INTO mecha.token_role VALUES ('_f_bot');
+  SET LOCAL ROLE _f_app;
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '67 a token naming no issuer acted as a role where the app trusts another issuer';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  PERFORM set_config('request.jwt.claims', '{"sub":"ana","iss":"mecha:stack","role":"_f_app"}', true);
+  PERFORM app_pre_request();
+  IF current_scopes() <> ARRAY['public:', 'user:ana'] THEN
+    RAISE EXCEPTION '67 the stack''s own token was refused a role where the app trusts another issuer';
+  END IF;
+  RESET ROLE;
+  DELETE FROM mecha.token_role WHERE role_name = '_f_bot';
+  INSERT INTO mecha.token_role VALUES ('_f_app');
+  SET LOCAL ROLE _f_app;
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"https://id.example","aud":"https://app.example/crud","role":"_f_app"}', true);
+  PERFORM app_pre_request();
+  IF current_scopes() <> ARRAY['public:', 'user:bot'] THEN
+    RAISE EXCEPTION '65 an outside issuer''s token was refused a declared role';
+  END IF;
+  -- PostgREST lets a token naming no audience past crud's, so the floor
+  -- refuses an outside one that names none, even as a declared role.
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"https://id.example","role":"_f_app"}', true);
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '66 an outside token naming no audience acted as a declared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"https://id.example","aud":[],"role":"_f_app"}', true);
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '66 an outside token naming an empty audience acted as a declared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"https://id.example","aud":["https://app.example/crud"],"role":"_f_app"}', true);
+  PERFORM app_pre_request();
+  -- A declared role is another issuer's: the stack's issuer, or none, is refused it.
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"mecha:stack","aud":"https://app.example/crud","role":"_f_app"}', true);
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '68 a token naming the stack''s issuer acted as a declared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  PERFORM set_config('request.jwt.claims', '{"sub":"bot","aud":"https://app.example/crud","role":"_f_app"}', true);
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '68 a token naming no issuer acted as a declared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RESET ROLE;
+  DELETE FROM mecha.token_role WHERE role_name = '_f_app';
+  PERFORM set_config('request.jwt.claims', '{}', true);
+
   -- A write's response names its transaction, which is how the client
   -- confirms the write against its shape stream: as the 32-bit xid Electric
   -- reports, added to the headers already set. A read names none, nor does a
@@ -538,7 +627,7 @@ BEGIN
   IF n = 0 THEN RAISE EXCEPTION '58 the floor evaluates its scopes without an InitPlan'; END IF;
   RESET ROLE;
 
-  RAISE WARNING 'rls: 62/62 pass';
+  RAISE WARNING 'rls: 68/68 pass';
 END $$;
 
 DROP TABLE _f_posting, _f_note, _f_denied;

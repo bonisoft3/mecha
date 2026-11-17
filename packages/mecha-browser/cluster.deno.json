@@ -6,6 +6,7 @@
     "@tanstack/electric-db-collection": "npm:@tanstack/electric-db-collection@0.4.0",
     "@electric-sql/client": "npm:@electric-sql/client@1.5.27",
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
+    "@electric-sql/pglite/": "npm:/@electric-sql/pglite@0.5.8/",
     "@electric-sql/pglite-icu-full": "npm:@electric-sql/pglite-icu-full@0.0.2",
     "croner": "npm:croner@10.0.1",
     "@mecha/postgrest-js": "../postgrest-js/src/index.ts",

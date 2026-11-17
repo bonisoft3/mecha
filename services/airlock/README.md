@@ -33,6 +33,8 @@ This file is the contract.
   the process's liveness its crash recovery reads.
 - [main.ts](main.ts): the shell. It loads, admits, holds its liveness and runs
   the worker.
+- [read.ts](read.ts): a read, an effect that is an HTTP GET: its request,
+  got and its cache, and its outcome.
 - [admit.ts](admit.ts): the admission alone, as pronto's `lint` runs it, so a
   handler the airlock would refuse fails before it is deployed.
 - [dapr.yaml](dapr.yaml): the airlock daprd's configuration, the bindings API
@@ -114,7 +116,13 @@ export async function reconcile(input, sink) {
   reached the sink is a throw too.
 - The third argument holds the values of the environment variables the effect declares
   in `secrets`, read by the host at startup and written nowhere, not the manifest and
-  not the ledger; the cluster refuses to start the airlock without them.
+  not the ledger; the cluster refuses to start the airlock without them. It also holds,
+  under the field's name, the value of each `secretFields` entry: a secret field of the
+  invoking row, which its writer typed (a PIN), opened in memory just before the call
+  ([sealed values](#sealed-values)).
+- What a handler answers or throws is recorded as it is: its answer in the ledger, its
+  error in the queue and the log. A handler never puts a value of its third argument in
+  either, as itself or transformed; one that does has it recorded.
 - Past the language a handler reaches only what its effect declares in `endowments`
   (`../compute/language.ts`'s `ENDOWABLE`), as an omnishell module declares `Intl`: a
   handler that signs declares `Crypto`, WebCrypto's operations that are deterministic by
@@ -141,6 +149,118 @@ export async function reconcile(input, sink) {
   `ORIGIN` in a container cluster, `https://<domain>` at the edge. It never follows the host
   a request came by, so every run of a release names the same one; a release without one
   fails the run that reads it.
+
+## A read
+
+A read is an effect that is an HTTP GET, in effects.json's `reads` beside `effects`
+(`parseReads` in [read.ts](read.ts)). It has no handler and no ledger row: a GET is safe
+(RFC 9110 §9.2.1), so nothing is claimed before the call, no idempotency key is sent and
+no count of runs ends in `unknown`. Like every effect it is a machine's: a screen asks one
+by writing the row whose state invokes it, and sees the answer land in that row.
+
+```json
+"reads": {
+  "rate": {
+    "request": {"method": "GET", "path": "/rates/{currency}{?day}"},
+    "invoke": {"table": "expense", "field": "status", "state": "pricing", "onDone": "priced", "onError": "unpriced", "row": ["id"], "count": "pricings"},
+    "cacheControl": "max-age=3600",
+    "credential": {"header": "Authorization", "scheme": "Bearer", "secret": "RATES_KEY"}
+  }
+}
+```
+
+- The path is an RFC 6570 template over the input: `{var}` a path segment, its value
+  percent-encoded and refused where an octet would decode to `/`, `\`, `.` or `%`, and
+  `{?a,b}` and `{&a,b}` the query. It is sent as `GET /v1.0/invoke/<read>/method<path>` to
+  the airlock's daprd, the effect's `credential` added as a write's is.
+- got sends it, with a fresh connection per read: on a kept-alive socket Deno's
+  `node:http` sent a timed-out GET twice and got's timeout never fired. `got` in the
+  manifest is got's own `retry` and `timeout` options, as far as JSON spells them; absent,
+  two retries on 408, 429, 5xx and network errors, honouring `Retry-After` up to 5 s, and
+  5 s a request. `READ_TIMEOUT_MS`, 20 s, bounds a read whole. got follows no redirect.
+- The cache is RFC 9111's, in this process's memory, shared by every row's read: a
+  thousand answers, none over 1 MiB and none without a `Content-Length`, each exact path
+  in a partition of its own (got's key is the URL as normalize-url rewrites it, with no
+  `utm_` parameter and a space as `+`), so a credential is never part of a key. As a
+  shared cache it keeps no `private` answer and no answer to an authorized request unless
+  the answer says `public`, `s-maxage` or `must-revalidate` (RFC 9111 §3.5).
+  `cacheControl` is applied, in got's `beforeCache` hook, to an answer with neither
+  `Cache-Control` nor `Expires` whose status RFC 9110 §15.1 lets a cache give a freshness.
+- A row takes a new `incarnation` uuid at its insert, so one made again under a deleted
+  one's key is another row. Entering the invoking state, which a request's anonymous role
+  may not, adds one to the row's `count` column; no other write may change either column.
+  It enqueues an `external_read` job `{effect, row, incarnation, n, key, input, digest}`,
+  the input evaluated once: `n` the count, `key` `<effect>:<row's key>:<incarnation>:<n>`
+  (the row's key as the ledger's), `digest`
+  the MD5 of the input's text. Five runs at most. A 2xx is `{target: onDone, kind: done,
+  data: <body>}`; any other answer `{target: onError, kind: failed, data: {status, body}}`;
+  a run with no answer throws, and the last delivers `failed` with the error. A job
+  Graphile gave up on is delivered `failed` with its last error at the next sweep, and
+  completed.
+- Delivery (`deliverRead` in [airlock.ts](airlock.ts)) is one transaction: it sets
+  `airlock.read` to the outcome with the job's effect, row, incarnation and `n`, moves the
+  row where it still waits in the state on that `n` in that incarnation, and writes `{key,
+  effect, row, incarnation, n, digest, outcome}` to `airlock.read_journal`. The interpreter believes `airlock.read` only from
+  the owner of the `airlock` schema, for that row, and skips an answer to another entry.
+  An answer no row waits on any more, the job run twice or after its row was deleted and
+  made again, writes nothing; the row is not deleted while it waits.
+- The journal is replay's record of the world outside: a replay re-runs a row's
+  transitions, reaches the same `n` and so the same key, and is answered from `outcome`
+  (`replay: true` on the airlock: `journaled` in [airlock.ts](airlock.ts)), never asking
+  the sink. The digest is a check: a key the journal holds under another digest, or does
+  not hold, is a history that diverged, and the run stops there (`ReadDiverged`) rather
+  than hand back an answer to another request; a replay settles no dead job. A row made
+  again under a deleted one's key is another incarnation, so its keys are its own. The
+  housekeeping sweep drops the entries of incarnations that are gone, which have no
+  history left to re-run. The table is in
+  [job_key.sql](job_key.sql), which also runs at every release (#AirlockUpgradeSql), so a
+  database built before it takes it.
+
+## Sealed values
+
+A secret field (pronto's `#Field.secret`) is sealed by the page to the airlock's public key
+([seal.ts](seal.ts)): RSA-OAEP with SHA-256 over a 3072-bit key, labelled with the table,
+field and row it was typed for, as `seal1.<kid>.<ciphertext>`. Only that crosses the door,
+crud and the database. The write's first trigger refuses anything else and leaves the
+column NULL, and a trigger after the write keeps the sealed value in `airlock.secret`
+under the row's key for five minutes. The airlock brings that table and `airlock_seal` at
+its start ([seal-tables.ts](seal-tables.ts)), so a database that outlived a release needs
+no migration. At a run the airlock reads it while unexpired and opens it with its private key; it
+deletes it in the commit that records the outcome, unless another effect naming the field
+still awaits its outcome for the row (claimed in the ledger, unsettled): the last of them
+to settle deletes it, settles taking the value's row lock in turn. Housekeeping sweeps what
+expired. A run that
+finds none, or one that does not open (sealed to another row, to a key it does not hold),
+settles `failed`, `{secrets, reason: "absent" | "unsealable"}`, when nothing was asked of
+the sink before, and `unknown` when an earlier run may have reached it.
+
+| | |
+|---|---|
+| `AIRLOCK_SEAL_KEY` | Base64 PKCS#8, required where an effect reads a secret field. The airlock publishes its public half in `public.airlock_seal` at start, which every client role reads through crud and none writes. `deno run seal-key.ts` prints a new one. No release makes one: it comes from the release's environment, or the target's secret store, and the airlock does not start without it. The local stack alone falls back to the repository's development key (`dev-seal.key`), which every release refuses. |
+| `AIRLOCK_SEAL_KEY_PREVIOUS` | The key a rotation replaced, which still opens what was sealed to it. |
+
+Only ciphertext is stored, so the table is logged: an effect in flight keeps its value
+across a crash or a failover, and the WAL, a replica or a backup holds nothing that opens
+without the key, which no database or program holds.
+
+### Rotating the seal key
+
+Set the new key as `AIRLOCK_SEAL_KEY` and the old one as `AIRLOCK_SEAL_KEY_PREVIOUS`, and
+restart the airlock: it publishes the new public half, which a page reads at every seal,
+and what was sealed to the old one still opens. After five minutes nothing
+sealed to the old key is left, and `AIRLOCK_SEAL_KEY_PREVIOUS` is dropped. On gcp the old
+key is a secret mapped as `GCP.airlock.secrets.AIRLOCK_SEAL_KEY_PREVIOUS`, by hand; on
+cloudflare a publish whose environment carries both sets them on the dispatcher, beside
+the object's new public half.
+
+### At the edge
+
+The edge's object keeps a sealed value in its instance's memory alone, never its storage,
+the queue or its database: the write's crud request reaches the database without it, and
+the claim hands it to the dispatcher Worker, which holds `AIRLOCK_SEAL_KEY` and opens it.
+An eviction before the call loses it, which its effect meets as a value never written.
+The object publishes `AIRLOCK_SEAL_PUBLIC`, `{kid, key}`, which the release sets beside
+the dispatcher's key (pronto's `bundle/edge-seal.ts`).
 
 ## A bridge not deployed
 
@@ -207,7 +327,7 @@ the service token the ticker writes with:
 | `airlock` | This service, FROM mecha's `airlock-image`, with the program's `effects.json` and handlers copied to `/airlock` and watched. Its own `--allow-net` is the database, its daprd and port 9997, the healthcheck's and the ticker's wake (`GET /healthz`). |
 | `airlock-mesh` | Its daprd, holding one HTTPEndpoint per effect, the wall, and a breaker per endpoint (`#AirlockResiliency`). Declaring a policy turns off daprd's built-in retries, so a call is made once and `entered` counts every attempt; a sink's 4xx counts toward the trip, which no policy can filter. It runs under [dapr.yaml](dapr.yaml) and goes out on `airlock-egress`, a network nothing else joins. |
 | Bridge container | `state.bridges` names an existing container target and its HTTP port (default 8080). The daprd waits on that target and calls `http://<container>:<port>`. Runtime lowering attaches the target to `airlock-out` and `bridge-<name>-egress`; it grants no default network, database credential or callback permission. |
-| `011_graphile_worker.sql`, `012_airlock.sql`, `013_airlock_job_key.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`; then `airlock.job_key`, the ledger key's digest every enqueue keys its job by (Graphile caps a key at 512 bytes), staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its interpreter re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
+| `011_graphile_worker.sql`, `012_airlock.sql`, `013_airlock_job_key.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`; then `airlock.job_key`, the ledger key's digest every enqueue keys its job by (Graphile caps a key at 512 bytes), and the read journal, staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its interpreter re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
 
 **The wall keeps mistakes in.** Its purpose is that declared destinations are the
 only ones reached by accident; it guards against mistakes in trusted code and is

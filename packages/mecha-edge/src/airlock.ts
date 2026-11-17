@@ -55,6 +55,9 @@ export interface EdgeAirlock {
    * run produced it, once; an error of the current run schedules the next
    * run, or settles unknown on the effect's last attempt. */
   answer(key: string, entered: number, answer: RunAnswer): Promise<void>
+  /** Whether one of `effects` still awaits its outcome (claimed, unsettled)
+   * for the row whose `pk` column is `id`, beside `except`. */
+  awaiting(effects: string[], pk: string, id: string, except: string): Promise<boolean>
 }
 
 const CONCURRENCY = 8
@@ -277,10 +280,10 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
       // the run it counted, counted once.
       if (current.token !== token) {
         if (current.payload.claimed !== token || current.payload.claimant !== claimant) return null
-        const { rows: [l] } = await tx.query<{ effect: string; input: unknown }>(
-          'SELECT effect, input FROM airlock.external_effect_ledger WHERE key = $1 AND outcome IS NULL AND entered = $2', [key, current.payload.entered])
+        const { rows: [l] } = await tx.query<{ effect: string; input: unknown; row: Record<string, unknown> }>(
+          'SELECT effect, input, row FROM airlock.external_effect_ledger WHERE key = $1 AND outcome IS NULL AND entered = $2', [key, current.payload.entered])
         if (l === undefined) return null
-        return { kind: 'run' as const, run: { effect: l.effect, input: l.input, entered: current.payload.entered!, until: new Date(current.run_at).getTime() } }
+        return { kind: 'run' as const, run: { effect: l.effect, input: l.input, row: l.row, entered: current.payload.entered!, until: new Date(current.run_at).getTime() } }
       }
       const { rows: [l] } = await tx.query<{ effect: string; input: unknown; row: Record<string, unknown>; entered: number }>(
         `UPDATE airlock.external_effect_ledger SET entered = entered + 1 WHERE key = $1 AND outcome IS NULL
@@ -290,7 +293,7 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
       const settles = beyond(declaration, l.entered)
       if (settles !== null) return { kind: 'settles' as const, settles, row: l.row, declaration }
       const { until } = await schedule(key, runBoundMs(declaration, l.entered, handlerTimeoutMs) + ANSWER_MARGIN_MS, { claimed: token, claimant, entered: l.entered }, tx)
-      return { kind: 'run' as const, run: { effect: l.effect, input: l.input, entered: l.entered, until } }
+      return { kind: 'run' as const, run: { effect: l.effect, input: l.input, row: l.row, entered: l.entered, until } }
     }), 'low')
     if (claimed === null) return null
     if (claimed.kind === 'run') return claimed.run
@@ -338,5 +341,12 @@ export function createEdgeAirlock(cfg: EdgeAirlockConfig): EdgeAirlock {
     retry?.()
   }
 
-  return { drain, retryAt, claim, answer }
+  async function awaiting(names: string[], pk: string, id: string, except: string): Promise<boolean> {
+    if (names.length === 0) return false
+    return await serialize(async () => (await db.query<{ awaited: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM airlock.external_effect_ledger WHERE key <> $1 AND outcome IS NULL AND effect = ANY($2) AND row->>$3 = $4) AS awaited`,
+      [except, names, pk, id])).rows[0].awaited, 'low')
+  }
+
+  return { drain, retryAt, claim, answer, awaiting }
 }

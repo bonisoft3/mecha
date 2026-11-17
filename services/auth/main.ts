@@ -20,6 +20,7 @@ import {
   SHAPE_FIXED_PARAMS,
   shapeWhere,
   signJwt as sign,
+  STACK_ISSUER,
   SUBSET_LIMIT,
   SUBSET_ORDER,
   SUBSET_PARAMS,
@@ -143,6 +144,7 @@ export function issueUserToken(
   profile?: { name?: string | null; email?: string | null },
 ): Promise<string> {
   return signJwt({
+    iss: STACK_ISSUER,
     role: "app_user",
     sub: id,
     handle,
@@ -207,7 +209,7 @@ export function rowWhere(column: string, value: string): string {
 async function rowReach(uid: string, table: string, column: string, value: string): Promise<boolean> {
   return await sql.begin(async (tx) => {
     await tx`SET LOCAL ROLE app_user`;
-    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: uid, role: "app_user" })}, true)`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ iss: STACK_ISSUER, sub: uid, role: "app_user" })}, true)`;
     await tx`SELECT public.app_pre_request()`;
     const rows = await tx`SELECT mecha.shape_reach(${"public." + table}, ${column}, ${value}) AS ok`;
     return rows[0].ok as boolean;

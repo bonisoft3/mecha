@@ -53,10 +53,11 @@ function harness(db: PGlite, effects: EdgeEffects, cfg: PerformConfig = {}, gate
   return { airlock, queued, lines, priorities, deliver, retried: () => retried }
 }
 
-// A claim's run without the instant its lease ends, which moves with the clock.
+// A claim's run without the instant its lease ends, which moves with the
+// clock, and the row's key, which is the ledger's own.
 const counted = (claimed: ClaimedRun | null) => {
   if (claimed === null) return null
-  const { until: _until, ...run } = claimed
+  const { until: _until, row: _row, ...run } = claimed
   return run
 }
 const status = async (db: PGlite, table: string, id: string) =>
@@ -700,7 +701,7 @@ Deno.test("the dispatcher retries reaching the object on what Cloudflare marks r
   const cluster = {
     effectClaim: async () => {
       if (++claims < 3) throw transient()
-      return { effect: 'e', input: {}, entered: 1, until: Infinity }
+      return { effect: 'e', input: {}, row: {}, entered: 1, until: Infinity }
     },
     effectAnswer: async (_k: string, _n: number, a: unknown) => { answers.push(a) },
   }
@@ -719,7 +720,7 @@ Deno.test("the dispatcher retries reaching the object on what Cloudflare marks r
 Deno.test("an effect the dispatcher does not know is answered as the run's error", async () => {
   const answers: unknown[] = []
   const cluster = {
-    effectClaim: async () => ({ effect: 'new', input: {}, entered: 1, until: Infinity }),
+    effectClaim: async () => ({ effect: 'new', input: {}, row: {}, entered: 1, until: Infinity }),
     effectAnswer: async (_k: string, _n: number, a: unknown) => { answers.push(a) },
   }
   assert.equal(await dispatchRun(cluster, {}, { key: 'e:d1', token: '1:0' }), 'answered')
@@ -827,7 +828,7 @@ Deno.test('an answer refused while the directory loads is held until the run\'s 
   let refusals = 2
   const answers: unknown[] = []
   const cluster = {
-    effectClaim: async () => ({ effect: 'e', input: {}, entered: 1, until: 1_000 }),
+    effectClaim: async () => ({ effect: 'e', input: {}, row: {}, entered: 1, until: 1_000 }),
     effectAnswer: async (_k: string, _n: number, a: unknown) => {
       now += 100
       if (refusals-- > 0) throw loading()

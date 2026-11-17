@@ -30,7 +30,8 @@
   },
   "vars": {
     "JWT_SECRET": "test-secret",
-    "IMPORT_TOKEN": "test-import"
+    "IMPORT_TOKEN": "test-import",
+    "AIRLOCK_SEAL_PUBLIC": "{\"kid\":\"YFkxR9y1FZl6Huzl\",\"key\":{\"kty\":\"RSA\",\"n\":\"1GNn4UxjZzAAl0l_X13i67ZLmUugv9VQf4XYvziuiaje0j_C1qiqS6Dm4JpePclByBnt7q79aw79h6HGJJnwbpeHgG7g1P_hY1tPS3QIlXY2N7eiq7-5_xrXKHnY__wh7QRnk3g9dPMlhyddcoJSBkQu8u191jbsWhhsAStXcEBPAZ35Pty-rWPTcPDniu0EX4Inzmh1mS9cc9pUcVwQ1-eBbdit1-9YROQ70DZuH4Wd1aW7LbMCU89EIYInKHRDgeyBLxv3b9kx7HdA3n5qwdbqqI3FOqxTknyiRICoJ3whyk5MTDSp65QBWy-0pSjbcCM_QT_UsYdK-xNYPJ1-hDy3YlCjrFZ8VWOsdMdhOB5wesrNFNSQCtW4K-i9Jpo1-IaMOBDS2LhDGIk4JlzN2AmFw1PVTfDnoz7bl4sKXuZlAS_x2BgbscTWAgedF7WYo6kzEM1BNRBiPeBybf0yBBpWhGEoVgnMDVFuGShgc2nGm7mbC1RLwcYj0YLZKTXJ\",\"e\":\"AQAB\",\"alg\":\"RSA-OAEP-256\",\"ext\":true,\"key_ops\":[\"encrypt\"]}}"
   },
   "rules": [
     {

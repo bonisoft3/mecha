@@ -42,6 +42,7 @@ processes:
     environment:
     - AUTHENTICATOR_PASSWORD=${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}
     - ELECTRIC_PASSWORD=${ELECTRIC_PASSWORD:-dev-electric-password}
+    - PGOPTIONS=-c mecha.roles=${MECHA_ROLES:-framework}
     - PGPORT=${DATABASE_PG_PORT:-17726}
     - POSTGRES_DB=${POSTGRES_DB:-mecha}
     - >-
@@ -99,6 +100,7 @@ processes:
     environment:
     - >-
       DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@127.0.0.1:${DATABASE_PG_PORT:-17726}/${POSTGRES_DB:-mecha}?sslmode=disable
+    - PGOPTIONS=-c mecha.roles=${MECHA_ROLES:-framework}
     - REQUIRED_TABLES=schedule
   crud:
     depends_on:

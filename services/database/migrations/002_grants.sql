@@ -12,3 +12,14 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE O
 -- Grant usage on sequences (for auto-generated IDs)
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO anon;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO anon;
+
+-- The pipelines and the ticker write as `service` through crud, into any
+-- table, as a caller's grants let them.
+GRANT USAGE ON SCHEMA public TO service;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO service;
+
+-- Electric snapshots a shape's rows before it streams them.
+GRANT USAGE ON SCHEMA public TO electric;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO electric;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO electric;

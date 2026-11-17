@@ -115,7 +115,8 @@ _airlockLock:       _ @embed(file="services/airlock/deno.lock", type=text)
 // outside `public` places `out` at #TenancyMigration among its own steps, which
 // takes the image's place (_initdb), so the image's floor never runs against
 // its schemas.
-#Tenancy: T={
+#Tenancy: {
+	let T = self
 	schema: {app: #SchemaName, floor: #SchemaName, mecha: #SchemaName}
 	// Each spelling is set aside before any is renamed, so a floor kept in `mecha` is not renamed
 	// again as a list. The drops of the audit's legacy objects name where an older file made them,
@@ -2366,7 +2367,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// `mecha` is never `public` nor the app's: a caller's grants ON ALL
 		// TABLES of the served schema would reach the lists, and a session could
 		// exempt a table or widen a shape.
-		schema: S={
+		schema: {
+			let S = self
 			app:   *"public" | #SchemaName
 			floor: *"public" | #SchemaName
 			mecha: *"mecha" | #SchemaName & !="public" & !=S.app

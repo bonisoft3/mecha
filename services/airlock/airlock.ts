@@ -23,7 +23,7 @@ import pg from "pg";
 import { type Answer, type Effect, ledgerKeySql, outcome, type Outcome, step, undeployed } from "./reentry.ts";
 import { BreakerOpen, type Handler, type Transport } from "./handler.ts";
 import { type BlobStore, stowed } from "./blobs.ts";
-import { get, type Read, ReadCache, readOutcome } from "./read.ts";
+import { get, type Read, READ_JOURNAL_SQL, ReadCache, readOutcome } from "./read.ts";
 import { openFields, type Opened, type SealKeys } from "./seal.ts";
 import { PUBLISH_SEAL_SQL, SEAL_TABLES_SQL } from "./seal-tables.ts";
 
@@ -348,6 +348,7 @@ async function prune(a: Airlock): Promise<void> {
  * before the first fetch and whenever a fetch comes back empty; the dead jobs
  * and old wakes, which cost a scan of the queue, at start and once a minute. */
 export async function start(a: Airlock, key: string, opts: { noHandleSignals?: boolean; housekeepingMs?: number } = {}): Promise<Runner> {
+  await a.db.query(READ_JOURNAL_SQL);
   if (Object.values(a.effects).some((e) => e.secretFields?.length)) {
     if (a.seal === undefined) throw new Error("an effect reads a secret field, and the airlock holds no seal key (AIRLOCK_SEAL_KEY)");
     await publishSeal(a.db, a.seal);

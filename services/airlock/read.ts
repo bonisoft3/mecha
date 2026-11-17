@@ -280,3 +280,36 @@ export function readOutcome(invoke: Read["invoke"], answer: Answer): { target: s
     ? { target: invoke.onDone, kind: "done", data: body }
     : { target: invoke.onError, kind: "failed", data: { status: answer.status, body } };
 }
+
+// Replay's record of the answers rows took (`deliverRead`, `journaled`,
+// `pruneJournal` in airlock.ts). Brought at airlock startup like seal-tables.ts
+// rather than placed in `airlock.sql` or `job_key.sql`: retained edge databases
+// record the SHA-256 of every applied `.sql` step and refuse any byte change.
+export const READ_JOURNAL_SQL = `
+CREATE TABLE IF NOT EXISTS airlock.read_journal (
+  key         TEXT PRIMARY KEY,
+  effect      TEXT NOT NULL,
+  row         JSONB NOT NULL,
+  incarnation TEXT NOT NULL,
+  n           INT NOT NULL,
+  digest      TEXT NOT NULL,
+  outcome     JSONB NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+ALTER TABLE airlock.read_journal ADD COLUMN IF NOT EXISTS incarnation TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS read_journal_effect ON airlock.read_journal (effect);
+ALTER TABLE airlock.read_journal ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE g RECORD;
+BEGIN
+  FOR g IN
+    SELECT DISTINCT a.grantee
+      FROM pg_class c, aclexplode(c.relacl) a
+     WHERE c.oid = 'airlock.read_journal'::regclass AND a.grantee <> c.relowner
+  LOOP
+    EXECUTE format('REVOKE ALL ON airlock.read_journal FROM %s',
+      CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(g.grantee)) END);
+  END LOOP;
+END
+$$;
+`;

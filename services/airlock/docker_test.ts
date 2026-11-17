@@ -17,7 +17,7 @@ import pg from "pg";
 import { hold, start } from "./airlock.ts";
 import { BreakerOpen, Handler, meshTransport } from "./handler.ts";
 import type { Effect } from "./reentry.ts";
-import { get, type Read, ReadCache } from "./read.ts";
+import { get, type Read, READ_JOURNAL_SQL, ReadCache } from "./read.ts";
 import { generateSealKey, seal as sealValue, sealKeys, sealLabel } from "./seal.ts";
 import { SEAL_TABLES_SQL } from "./seal-tables.ts";
 
@@ -251,7 +251,7 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       await Deno.writeTextFile(file, source);
       handlers[name] = await Handler.admit(name, file, effects[name]);
     }
-    await db.query(SEAL_TABLES_SQL + STASH("pay_pinned"));
+    await db.query(SEAL_TABLES_SQL + READ_JOURNAL_SQL + STASH("pay_pinned"));
     const seal = await sealKeys(await generateSealKey());
     const sealedFor = (table: string, id: string, pin: string) => sealValue(seal.current.public, pin, sealLabel(table, "pin", id));
     // This airlock stands on the local stack, where the `absent` effect's

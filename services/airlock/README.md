@@ -212,9 +212,8 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   than hand back an answer to another request; a replay settles no dead job. A row made
   again under a deleted one's key is another incarnation, so its keys are its own. The
   housekeeping sweep drops the entries of incarnations that are gone, which have no
-  history left to re-run. The table is in
-  [job_key.sql](job_key.sql), which also runs at every release (#AirlockUpgradeSql), so a
-  database built before it takes it.
+  history left to re-run. The table (`READ_JOURNAL_SQL` in [read.ts](read.ts)) is brought
+  at every airlock start, so `job_key.sql` stays byte-for-byte for retained edge databases.
 
 ## Sealed values
 
@@ -327,7 +326,7 @@ the service token the ticker writes with:
 | `airlock` | This service, FROM mecha's `airlock-image`, with the program's `effects.json` and handlers copied to `/airlock` and watched. Its own `--allow-net` is the database, its daprd and port 9997, the healthcheck's and the ticker's wake (`GET /healthz`). |
 | `airlock-mesh` | Its daprd, holding one HTTPEndpoint per effect, the wall, and a breaker per endpoint (`#AirlockResiliency`). Declaring a policy turns off daprd's built-in retries, so a call is made once and `entered` counts every attempt; a sink's 4xx counts toward the trip, which no policy can filter. It runs under [dapr.yaml](dapr.yaml) and goes out on `airlock-egress`, a network nothing else joins. |
 | Bridge container | `state.bridges` names an existing container target and its HTTP port (default 8080). The daprd waits on that target and calls `http://<container>:<port>`. Runtime lowering attaches the target to `airlock-out` and `bridge-<name>-egress`; it grants no default network, database credential or callback permission. |
-| `011_graphile_worker.sql`, `012_airlock.sql`, `013_airlock_job_key.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`; then `airlock.job_key`, the ledger key's digest every enqueue keys its job by (Graphile caps a key at 512 bytes), and the read journal, staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its interpreter re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
+| `011_graphile_worker.sql`, `012_airlock.sql`, `013_airlock_job_key.sql` | Graphile's schema; then the ticker's schedule table with its `airlock` row, the tables above and `airlock_wake`; then `airlock.job_key`, the ledger key's digest every enqueue keys its job by (Graphile caps a key at 512 bytes), staged in the database image. They take the first digits after the steps a caller opens with, so every caller step that can write a row, held seed included, runs after them and finds the table its interpreter re-arms ([the order](../../docs/schema.md#how-a-schema-reaches-the-database)). A cluster that also declares a schedule runs the schedule table's text again at 020, where every statement holds. |
 
 **The wall keeps mistakes in.** Its purpose is that declared destinations are the
 only ones reached by accident; it guards against mistakes in trusted code and is

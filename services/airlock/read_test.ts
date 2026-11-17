@@ -314,3 +314,13 @@ Deno.test("in replay the journal answers, never the sink; a request it holds und
     await s.close();
   }
 });
+
+// Regression: appending `airlock.read_journal` to `job_key.sql` changed the
+// SHA-256 of `*_airlock_job_key.sql` on retained Cloudflare Edge databases,
+// which `_pronto_migrations` refused with HTTP 409 (`ChangedScript`).
+Deno.test("job_key.sql stays byte-for-byte unchanged so retained edge databases accept releases", async () => {
+  const bytes = await Deno.readFile(new URL("./job_key.sql", import.meta.url));
+  const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+    .map((b) => b.toString(16).padStart(2, "0")).join("");
+  assertEquals(sha, "b5ca762c49e95899420d00b6b643dcad0bb14a96422b792355a079c94d533708");
+});

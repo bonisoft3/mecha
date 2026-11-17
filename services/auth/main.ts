@@ -42,6 +42,18 @@ const DATABASE_URL = required("DATABASE_URL");
 const STATEMENT_TIMEOUT_MS = Number(required("AUTH_STATEMENT_TIMEOUT_MS"));
 if (!(STATEMENT_TIMEOUT_MS > 0)) throw new Error(`AUTH_STATEMENT_TIMEOUT_MS is ${STATEMENT_TIMEOUT_MS}, not milliseconds`);
 const JWT_SECRET = required("PGRST_JWT_SECRET");
+// The database's schemas, as the cluster states them (cluster.cue, meta.schema): the tables', the
+// tenancy floor's functions' and its lists'. Spliced into statements, so held to a plain name.
+function schema(name: string, fallback: string): string {
+  const value = Deno.env.get(name) || fallback;
+  // A schema's name is spelled as a table's (validTable): a plain lowercase identifier.
+  if (!validTable(value)) throw new Error(`${name} is ${value}, not a schema name`);
+  return value;
+}
+const DB_SCHEMA = schema("MECHA_DB_SCHEMA", "public");
+const FLOOR_SCHEMA = schema("MECHA_FLOOR_SCHEMA", "public");
+const MECHA_SCHEMA = schema("MECHA_SCHEMA", "mecha");
+const SCHEMAS = { app: DB_SCHEMA, mecha: MECHA_SCHEMA };
 /** The dev cluster's door: localhost, on whatever port the host published. */
 const DEV_DOOR = "https://localhost:*";
 
@@ -100,14 +112,17 @@ const USER_TOKEN_TTL_S = 7 * 24 * 3600;
 const SHAPE_TOKEN_TTL_S = 900;
 const STATE_TTL_S = 300;
 
-export const sql = postgres(DATABASE_URL, { connection: { statement_timeout: STATEMENT_TIMEOUT_MS } });
+// app_user, which it reads unqualified, is where the app's tables are.
+export const sql = postgres(DATABASE_URL, {
+  connection: { statement_timeout: STATEMENT_TIMEOUT_MS, ...(DB_SCHEMA === "public" ? {} : { search_path: DB_SCHEMA }) },
+});
 
 export async function migrate(): Promise<void> {
   // One instance at a time: replicas starting together (a rollout) would race
   // each step below. Where the tables live and why: schema.ts.
   await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtext('mecha auth: migrate'))`;
-    await tx.unsafe(prepareAuthTables(["webauthn_credential", "identity_link"]));
+    await tx.unsafe(prepareAuthTables(["webauthn_credential", "identity_link"], SCHEMAS));
     await tx`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS issuer text,
       ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text,
       ADD COLUMN IF NOT EXISTS email text`;
@@ -124,7 +139,7 @@ export async function migrate(): Promise<void> {
         ALTER TABLE mecha_auth.identity_link ADD PRIMARY KEY (provider, issuer, sub);
       END IF;
     END $$`;
-    await tx.unsafe(sealAuthTables(["webauthn_credential", "identity_link"]));
+    await tx.unsafe(sealAuthTables(["webauthn_credential", "identity_link"], SCHEMAS));
   });
 }
 
@@ -175,11 +190,11 @@ export function issueUserToken(
 async function tableScope(table: string): Promise<{ floored: boolean; publicOnly: boolean }> {
   // The floor's own precondition (has_scope in rls.sql); to_regclass is NULL
   // for a table that does not exist, and NULL has no scope.
-  const rows = await sql`SELECT public.has_scope(to_regclass(${"public." + table})) AS floored,
+  const rows = await sql`SELECT ${sql(FLOOR_SCHEMA)}.has_scope(to_regclass(${DB_SCHEMA + "." + table})) AS floored,
     EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
       JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
       JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-      WHERE a.attrelid = to_regclass(${"public." + table}) AND a.attname = 'scope_id'
+      WHERE a.attrelid = to_regclass(${DB_SCHEMA + "." + table}) AND a.attname = 'scope_id'
         AND a.attnotnull AND NOT a.attisdropped AND a.attgenerated = 's'
         AND c.relkind = 'r'
         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = a.attrelid)
@@ -188,7 +203,7 @@ async function tableScope(table: string): Promise<{ floored: boolean; publicOnly
 }
 
 async function subjectScopes(uid: string | null): Promise<string[]> {
-  const rows = await sql`SELECT public.subject_scopes(${uid}) AS scopes`;
+  const rows = await sql`SELECT ${sql(FLOOR_SCHEMA)}.subject_scopes(${uid}) AS scopes`;
   return rows[0].scopes as string[];
 }
 
@@ -210,8 +225,8 @@ async function rowReach(uid: string, table: string, column: string, value: strin
   return await sql.begin(async (tx) => {
     await tx`SET LOCAL ROLE app_user`;
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ iss: STACK_ISSUER, sub: uid, role: "app_user" })}, true)`;
-    await tx`SELECT public.app_pre_request()`;
-    const rows = await tx`SELECT mecha.shape_reach(${"public." + table}, ${column}, ${value}) AS ok`;
+    await tx`SELECT ${tx(FLOOR_SCHEMA)}.app_pre_request()`;
+    const rows = await tx`SELECT ${tx(MECHA_SCHEMA)}.shape_reach(${DB_SCHEMA + "." + table}, ${column}, ${value}) AS ok`;
     return rows[0].ok as boolean;
   });
 }

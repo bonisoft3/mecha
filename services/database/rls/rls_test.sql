@@ -599,6 +599,33 @@ BEGIN
   END;
   DROP TABLE _f_keyed, _f_child, _f_parent;
 
+  -- A parent named without a schema is the one the function's search path
+  -- finds, as it always was, even from a child in another schema; one found
+  -- nowhere there is the child's schema's.
+  CREATE SCHEMA _f_arch;
+  CREATE TABLE _f_parent(id int primary key, scope_id text not null);
+  CREATE TABLE _f_arch._f_parent(id int primary key, scope_id text not null);
+  CREATE TABLE _f_arch._f_lone(id int primary key, scope_id text not null);
+  INSERT INTO _f_parent VALUES (1, 'user:public');
+  INSERT INTO _f_arch._f_parent VALUES (1, 'user:arch');
+  INSERT INTO _f_arch._f_lone VALUES (1, 'user:lone');
+  CREATE TABLE _f_arch._f_child(id serial primary key, parent_id int not null, scope_id text not null);
+  CREATE TRIGGER _f_child_scope BEFORE INSERT ON _f_arch._f_child
+    FOR EACH ROW EXECUTE FUNCTION mecha.scope_from_parent('_f_parent', 'id', 'parent_id');
+  INSERT INTO _f_arch._f_child(parent_id) VALUES (1);
+  IF (SELECT scope_id FROM _f_arch._f_child) <> 'user:public' THEN
+    RAISE EXCEPTION '69 an unqualified parent no longer resolved on the search path';
+  END IF;
+  CREATE TABLE _f_arch._f_orphan(id serial primary key, parent_id int not null, scope_id text not null);
+  CREATE TRIGGER _f_orphan_scope BEFORE INSERT ON _f_arch._f_orphan
+    FOR EACH ROW EXECUTE FUNCTION mecha.scope_from_parent('_f_lone', 'id', 'parent_id');
+  INSERT INTO _f_arch._f_orphan(parent_id) VALUES (1);
+  IF (SELECT scope_id FROM _f_arch._f_orphan) <> 'user:lone' THEN
+    RAISE EXCEPTION '70 an unqualified parent outside the search path was not the child''s schema''s';
+  END IF;
+  DROP SCHEMA _f_arch CASCADE;
+  DROP TABLE _f_parent;
+
   -- Every role holds `public:`, so a permissive policy granted to PUBLIC on a
   -- floored public table hands anon whatever it admits, writes included: the
   -- floor's WITH CHECK is satisfied by a scope anon holds. The audit says so.
@@ -611,6 +638,10 @@ BEGIN
   CREATE POLICY narrow ON _f_open FOR ALL TO _f_app USING (true) WITH CHECK (true);
   SELECT count(*) INTO n FROM mecha.rls_unprotected WHERE table_name = 'public._f_open';
   IF n <> 0 THEN RAISE EXCEPTION '57 a permissive policy granted to a role was flagged'; END IF;
+  -- PUBLIC among other roles is PUBLIC still.
+  CREATE POLICY mixed ON _f_open FOR ALL TO _f_app, PUBLIC USING (true) WITH CHECK (true);
+  SELECT count(*) INTO n FROM mecha.rls_unprotected WHERE table_name = 'public._f_open';
+  IF n <> 1 THEN RAISE EXCEPTION '71 a permissive policy granted to PUBLIC and a role was not flagged'; END IF;
   DROP TABLE _f_open;
 
   -- The floor's scopes are a constant of the statement, evaluated once as an
@@ -627,7 +658,7 @@ BEGIN
   IF n = 0 THEN RAISE EXCEPTION '58 the floor evaluates its scopes without an InitPlan'; END IF;
   RESET ROLE;
 
-  RAISE WARNING 'rls: 68/68 pass';
+  RAISE WARNING 'rls: 71/71 pass';
 END $$;
 
 DROP TABLE _f_posting, _f_note, _f_denied;

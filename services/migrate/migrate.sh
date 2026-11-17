@@ -14,9 +14,14 @@ set -euo pipefail
 dir=$1
 baseline=$2
 : "${DATABASE_URL:?names the database to migrate}"
-# Comma-separated; empty where the cluster places no step a service needs.
+# Comma-separated; empty where the cluster places no step a service needs. These
+# are the framework's tables, which its initdb steps keep in `public` (the
+# ticker's machine timers name public.schedule) whatever PGROLL_SCHEMA is.
 : "${REQUIRED_TABLES:=}"
-export PGROLL_PG_URL=$DATABASE_URL
+# The schema the app's tables are in, which pgroll reads too; `public` unless the cluster keeps its
+# own (cluster.cue, meta.schema).
+: "${PGROLL_SCHEMA:=public}"
+export PGROLL_PG_URL=$DATABASE_URL PGROLL_SCHEMA
 # Byte order, which is the order a fresh volume replays them in.
 export LC_ALL=C
 shopt -s nullglob
@@ -25,7 +30,7 @@ shopt -s nullglob
 # variable and never as text spliced into the statement.
 ask() { psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -qtA "$@"; }
 applied() {
-	ask -v name="$1" <<< "SELECT count(*) FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'pgroll' AND done AND name = :'name';"
+	ask -v name="$1" -v schema="$PGROLL_SCHEMA" <<< "SELECT count(*) FROM pgroll.migrations WHERE schema = :'schema' AND migration_type = 'pgroll' AND done AND name = :'name';"
 }
 
 # A table an initdb step the cluster places creates exists only on a volume
@@ -53,7 +58,7 @@ fi
 
 pgroll init
 
-if [ "$(ask <<< "SELECT count(*) FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'baseline';")" = 0 ]; then
+if [ "$(ask -v schema="$PGROLL_SCHEMA" <<< "SELECT count(*) FROM pgroll.migrations WHERE schema = :'schema' AND migration_type = 'baseline';")" = 0 ]; then
 	scratch=$(mktemp -d)
 	pgroll baseline "$baseline" "$scratch" --yes
 	rm -rf "$scratch"
@@ -64,7 +69,7 @@ fi
 # into the schema initdb builds leaves it. Each is checked against the ledger
 # after pgroll returns, because pgroll exits 0 having applied nothing when it
 # finds a schema without a baseline.
-latest=$(ask <<< "SELECT coalesce(max(name COLLATE \"C\"), '') FROM pgroll.migrations WHERE schema = 'public' AND migration_type = 'pgroll';")
+latest=$(ask -v schema="$PGROLL_SCHEMA" <<< "SELECT coalesce(max(name COLLATE \"C\"), '') FROM pgroll.migrations WHERE schema = :'schema' AND migration_type = 'pgroll';")
 for file in "$dir"/*.json; do
 	name=$(basename "$file" .json)
 	if [ "$(applied "$name")" = 1 ]; then

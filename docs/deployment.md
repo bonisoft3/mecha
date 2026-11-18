@@ -10,6 +10,11 @@ A tier is what the cluster is made of in one place. The services, the schema
 and the door's routes are the same at every tier. What changes is the
 substrate, and with it what the change path can promise.
 
+The framework owns its database's schema, migrations, roles, grants and role
+passwords. Operators provide infrastructure and bootstrap credentials; other
+applications must not manage these objects or write around the framework's
+contracts. Externally managed roles and shared ownership are unsupported.
+
 ## The tiers
 
 | tier | the cluster runs as | in this tree |
@@ -228,37 +233,3 @@ reserves checkpoints for Enterprise; a persistent container disk alone does not
 provide the missing relational checkpoint. The adapter does not claim a managed
 CDC checkpoint/resume contract. Source snapshot cost, baseline duration and
 query state size still require capacity measurements for each application.
-
-## Role ownership
-
-Role ownership is explicit. `framework` (the default) runs the framework's
-role migrations. `external` only validates roles a database administrator
-has already provisioned: names, required attributes, timeouts, and the
-memberships used by PostgREST. It never creates or alters those roles or
-sets their passwords, even when the migration account could. A mismatch
-fails with the role and requirement; the administrator fixes it before
-rerunning initialization or release. An unknown mode also fails.
-
-For compose and host launch, set `MECHA_ROLES=external` in the deployment's
-environment. The database and migration processes carry that choice as
-`PGOPTIONS=-c mecha.roles=external`. A SQL runner connecting directly to an
-existing database uses the same `PGOPTIONS`, or sets `mecha.roles` on its
-migration session. The SQL and password steps both read that session
-setting, so they cannot disagree about ownership. This mode requires
-premade roles; it cannot initialize an empty database's roles by itself.
-
-PostgREST's `authenticator` must have LOGIN, NOINHERIT, and SET membership
-in each token role, with neither INHERIT nor ADMIN on any grant of those
-memberships. Full initialization also rejects additional memberships.
-Token roles must not gain administrative attributes; `service` retains
-its required BYPASSRLS, and `electric` requires LOGIN, REPLICATION and
-BYPASSRLS. Timeouts are compared as durations (`5000` milliseconds equals
-`5s`), including conflicting database overrides. A provider-specific
-replication membership does not substitute for PostgreSQL's REPLICATION
-attribute.
-
-Ownership covers roles and their credentials. Application migrations still
-own their tables, policies and object grants; those remain ordinary schema
-migrations. The standalone role migration is generated from `roles.cue`
-and the database's ownership template by `task generate`; the role tests
-check that the committed SQL matches it.

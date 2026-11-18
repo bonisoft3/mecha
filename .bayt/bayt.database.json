@@ -4,7 +4,6 @@
     "up": false,
     "manual": false,
     "environment": {
-      "PGOPTIONS": "-c mecha.roles=${MECHA_ROLES:-framework}",
       "POSTGRES_USER": "${POSTGRES_USER:-postgres}",
       "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-postgres}",
       "POSTGRES_DB": "${POSTGRES_DB:-mecha}",
@@ -182,7 +181,6 @@
     },
     "shell": "nu",
     "env": {
-      "PGOPTIONS": "-c mecha.roles=${MECHA_ROLES:-framework}",
       "POSTGRES_USER": "${POSTGRES_USER:-postgres}",
       "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-postgres}",
       "POSTGRES_DB": "${POSTGRES_DB:-mecha}",

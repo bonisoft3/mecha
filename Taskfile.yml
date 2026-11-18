@@ -25,7 +25,6 @@ tasks:
     desc: "Generate all artifacts from protobuf schemas"
     deps: [buf:generate]
     cmds:
-      - cue export .:cluster -e RolesMigration.out --out text > services/database/migrations/001_roles.sql
       - echo "Generated all artifacts"
 
   # ================================================================
@@ -58,15 +57,9 @@ tasks:
       - task: test:airlock
       - task: test:auth
       - task: test:pgroll
-      - task: test:roles
       - task: test:cluster
       - task: test:isolate
       - task: test:browser
-
-  test:roles:
-    desc: "role ownership and external validation"
-    cmds:
-      - mise x -- deno test --no-config --no-lock --allow-read --allow-write --allow-env --allow-net --allow-run services/database/roles_test.ts
 
   test:auth:
     desc: "OIDC authorization, issuer isolation and browser sessions"

@@ -44,9 +44,6 @@ def main --wrapped [initdb: string, ...args: string] {
 				if ($f | str ends-with ".sql") {
 					^$psql -h $host_arg -p $init_port -U $user -d $db -v ON_ERROR_STOP=1 -q -f $f out> (null-device)
 				} else if ($f | str ends-with "role_passwords.sh") {
-					let ownership = (^$psql -h $host_arg -p $init_port -U $user -d $db -v ON_ERROR_STOP=1 -Atqc "SELECT coalesce(nullif(current_setting('mecha.roles', true), ''), 'framework')" | str trim)
-					if $ownership == "external" { continue }
-					if $ownership != "framework" { error make {msg: $"mecha.roles must be framework or external, got ($ownership)"} }
 					let elec = ($env.ELECTRIC_PASSWORD? | default "")
 					let auth = ($env.AUTHENTICATOR_PASSWORD? | default "")
 					if ($elec | is-empty) or ($auth | is-empty) { error make { msg: "ELECTRIC_PASSWORD and AUTHENTICATOR_PASSWORD are required" } }

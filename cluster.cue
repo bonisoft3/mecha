@@ -983,7 +983,6 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							do:    "docker-entrypoint.sh postgres \(strings.Join(#PostgresArgs, " "))"
 						}
 						env: {
-							PGOPTIONS:             "-c mecha.roles=${MECHA_ROLES:-framework}"
 							POSTGRES_USER:          "${POSTGRES_USER:-postgres}"
 							POSTGRES_PASSWORD:      "${POSTGRES_PASSWORD:-postgres}"
 							POSTGRES_DB:            "${POSTGRES_DB:-\(X.meta.app)}"
@@ -1042,7 +1041,6 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							shell: "nu"
 							do:    #"let os = (match $nu.os-info.name { 'macos' => 'macos', 'windows' => 'windows', _ => 'linux' }); let dir = (if (($env.PRONTO_REPLAY_PGROLL_DIR? | default '') != '') { $env.PRONTO_REPLAY_PGROLL_DIR } else if ('\#(#PgRollDir)' | path exists) { '\#(#PgRollDir)' } else { let d = (($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir) | path join 'pgroll'); rm -rf $d; mkdir $d; let m = (open .bayt/bayt.migrate.json | get dockerfile); ($m | get -o copy | default []) | each {|c| cp ($c.srcs.0) ($d | path join ($c.dst | path basename)) } | ignore; ($m | get -o epilogue | default []) | each {|e| let lines = ($e | lines); if ($lines.0 | str starts-with "COPY <<'PGROLL' /tmp/") { let name = ($lines.0 | parse "COPY <<'PGROLL' /tmp/{name}.parts" | get 0.name); ($lines | skip 1 | take while {|l| $l != "PGROLL" } | str join "" | decode base64) | save --raw -f ($d | path join $name) } else if ($lines.0 | str starts-with "COPY <<'PGROLL' /pgroll/") { let name = ($lines.0 | parse "COPY <<'PGROLL' /pgroll/{name}" | get 0.name); $lines.1 | save --raw -f ($d | path join $name) } else if ($lines.0 | str starts-with "COPY <<'RECONCILE' /pgroll/") { let name = ($lines.0 | parse "COPY <<'RECONCILE' /pgroll/{name}" | get 0.name); ($lines | skip 1 | drop 1 | str join "\n") | save --raw -f ($d | path join $name) } } | ignore; $d }); let script = (if (($env.PRONTO_MIGRATE_SH? | default '') != '') { $env.PRONTO_MIGRATE_SH } else if ('services/migrate/migrate.nu' | path exists) { 'services/migrate/migrate.nu' } else if ('/migrate.sh' | path exists) and ($os != 'windows') { '/migrate.sh' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/migrate/migrate.nu') }); if ($script | str ends-with '.nu') { ^nu $script $dir \#(grammar.#Baseline) } else { ^bash $script $dir \#(grammar.#Baseline) }"#
 							env: {
-								PGOPTIONS: "-c mecha.roles=${MECHA_ROLES:-framework}"
 								DATABASE_URL: ["postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}?sslmode=disable"]
 								// The schedule step is initdb's alone, so a volume older
 								// than the cluster's first schedule lacks its table.

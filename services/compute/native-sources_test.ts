@@ -456,7 +456,7 @@ pgTest(
   },
 );
 
-Deno.test("native SQL wires CDC and bag-difference feedback without widening timestamp precision", () => {
+Deno.test("native SQL wires RisingWave shared transactional CDC and difference feedback", () => {
   const sql = nativeSql(
     program,
     schema,
@@ -464,51 +464,42 @@ Deno.test("native SQL wires CDC and bag-difference feedback without widening tim
   );
   const artifactSql = nativeSql(program);
   assertEquals(artifactSql, nativeSql(program));
-  assertEquals(artifactSql.includes("postgres_cdc_input"), false);
+  assertEquals(artifactSql.includes("postgres-cdc"), false);
   assertEquals(artifactSql.includes("source_publication"), false);
   assertEquals(sql.includes("CREATE TABLE source_item("), false);
   assertEquals(
-    sql.includes(
-      'CREATE TABLE cdc_source_item (__key VARCHAR NOT NULL PRIMARY KEY,"id" VARCHAR,"amount" BIGINT,"label" VARCHAR,"moment" TIMESTAMP(6))',
-    ),
+    sql.includes("CREATE SOURCE pg_shared_source WITH ("),
     true,
   );
-  const connector = /WITH \('connectors'='(.*)'\);/.exec(sql)![1].replaceAll(
-    "''",
-    "'",
+  assertEquals(
+    sql.includes("connector = 'postgres-cdc'"),
+    true,
   );
-  assertEquals(JSON.parse(connector), [{
-    name: "cdc",
-    transport: {
-      name: "postgres_cdc_input",
-      config: {
-        uri: "${env:FELDERA_DATABASE_URL}",
-        publication: "source_publication",
-        source_table: `${schema}.source_item`,
-      },
-    },
-  }]);
+  assertEquals(
+    sql.includes("transactional = 'true'"),
+    true,
+  );
   assertEquals(
     sql.includes(
-      'CREATE LOCAL VIEW source_item AS SELECT "id","amount","label","moment" FROM cdc_source_item;',
+      `CREATE TABLE cdc_source_item (__key VARCHAR PRIMARY KEY,"id" VARCHAR,"amount" BIGINT,"label" VARCHAR,"moment" TIMESTAMP) WITH (snapshot.interval = 100000, snapshot.batch_size = 10000) FROM pg_shared_source TABLE '${schema}.source_item';`,
     ),
     true,
   );
   assertEquals(
     sql.includes(
-      'CREATE TABLE captured_item (__partition VARCHAR NOT NULL,"id" VARCHAR,"amount" BIGINT,"label" VARCHAR,"moment" TIMESTAMP(6));',
+      'CREATE VIEW source_item AS SELECT "id","amount","label","moment" FROM cdc_source_item;',
     ),
     true,
   );
   assertEquals(
     sql.includes(
-      'FROM stream_item EXCEPT ALL SELECT "__partition","id","amount","label","moment" FROM captured_item',
+      'CREATE TABLE captured_item (__key VARCHAR PRIMARY KEY,__rw_mult BIGINT NOT NULL,__partition VARCHAR,"id" VARCHAR,"amount" BIGINT,"label" VARCHAR,"moment" TIMESTAMP);',
     ),
     true,
   );
   assertEquals(
     sql.includes(
-      'FROM captured_item EXCEPT ALL SELECT "__partition","id","amount","label","moment" FROM stream_item',
+      'CREATE MATERIALIZED VIEW pending_item AS SELECT "__partition","id","amount","label","moment",CAST(SUM(__rw_delta_weight) AS BIGINT) AS __rw_mult FROM (SELECT "__partition","id","amount","label","moment",CAST(1 AS BIGINT) AS __rw_delta_weight FROM stream_item UNION ALL SELECT "__partition","id","amount","label","moment",-__rw_mult AS __rw_delta_weight FROM captured_item) __rw_bag GROUP BY "__partition","id","amount","label","moment" HAVING SUM(__rw_delta_weight) <> 0;',
     ),
     true,
   );
@@ -518,6 +509,24 @@ Deno.test("native SQL wires CDC and bag-difference feedback without widening tim
     ),
     true,
   );
+  const staged = nativeSql({
+    ...program,
+    sql: [
+      "CREATE TABLE source_item (id VARCHAR, amount BIGINT);",
+      "CREATE LOCAL VIEW solo_proj AS SELECT id, amount FROM source_item;",
+      "CREATE LOCAL VIEW shared_proj AS SELECT id, amount FROM solo_proj;",
+      "CREATE LOCAL VIEW agg_stage AS SELECT id, SUM(amount) AS total FROM shared_proj GROUP BY id;",
+      "CREATE LOCAL VIEW join_agg_leaf AS SELECT a.id, SUM(s.amount) AS total FROM agg_stage a JOIN shared_proj s ON s.id = a.id GROUP BY a.id;",
+      "CREATE LOCAL VIEW const_stage (n) AS SELECT * FROM (VALUES (1), (2)) AS t(n);",
+      "CREATE MATERIALIZED VIEW result_item AS SELECT j.id, j.total FROM join_agg_leaf j CROSS JOIN const_stage;",
+    ].join("\n"),
+  });
+  assertEquals(staged.includes("CREATE VIEW solo_proj AS"), true);
+  assertEquals(staged.includes("CREATE MATERIALIZED VIEW shared_proj AS"), true);
+  assertEquals(staged.includes("CREATE MATERIALIZED VIEW agg_stage AS"), true);
+  assertEquals(staged.includes("CREATE VIEW join_agg_leaf AS"), true);
+  assertEquals(staged.includes("CREATE VIEW const_stage"), true);
+  assertEquals(staged.includes("CREATE VIEW stream_item AS"), true);
   assertThrows(() =>
     nativeSql(
       {

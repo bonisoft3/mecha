@@ -199,40 +199,217 @@ Deno.test("a computation declares portable query inputs explicitly and validates
   }
 });
 
-Deno.test("Feldera UUID carriers preserve canonical replay validation and refuse lossy typed carriers", async () => {
+Deno.test("RisingWave portable carriers preserve canonical replay validation for all 15 types and refuse lossy carriers", async () => {
   const file = await Deno.makeTempFile({ suffix: ".js" });
   try {
     await Deno.writeTextFile(file, `
       export const reads = [];
-      export const queries = { ids: "SELECT id FROM teams" };
+      export const queries = { q: "SELECT * FROM source" };
       export const plan = () => [];
-      export const finish = (inputs) => ({ sink: inputs.ids });
+      export const finish = (inputs) => ({ sink: inputs.q });
     `);
     const computation = await Computation.load({
-      name: "uuid_carrier", file, to: ["sink"], wasm: [], types: table,
-      queryTypes: { ids: [{ name: "id", type: "uuid", required: true }] },
+      name: "portable_carrier", file, to: ["sink"], wasm: [], types: table,
+      queryTypes: { q: fields },
+      sinkTypes: { sink: fields },
     }, {} as Runner);
+    const rwFields = fields.map((field) => ({
+      name: field.name,
+      type: field.type === "bool"
+        ? "BOOLEAN"
+        : field.type === "int32"
+        ? "INTEGER"
+        : field.type === "int64"
+        ? "BIGINT"
+        : field.type === "double"
+        ? "DOUBLE"
+        : field.type === "timestamp"
+        ? "TIMESTAMP"
+        : "VARCHAR",
+    }));
+    const cols = rwFields.map((f) => `${f.name} ${f.type}`).join(", ");
     const descriptor = {
-      sql: "CREATE TABLE teams(id VARCHAR); CREATE MATERIALIZED VIEW ids AS SELECT id FROM teams;",
-      inputs: { teams: { query: "SELECT id FROM teams", fields: [{ name: "id", type: "VARCHAR" }] } },
-      outputs: { ids: { view: "ids", fields: [{ name: "id", type: "VARCHAR" }] } },
+      sql: `CREATE TABLE source(${cols}); CREATE MATERIALIZED VIEW q AS SELECT * FROM source;`,
+      inputs: { source: { query: "SELECT * FROM source", fields: rwFields } },
+      outputs: { q: { view: "q", fields: rwFields } },
     };
-    computation.feldera("http://localhost:8080", descriptor);
-    const id = "12345678-1234-4234-8234-123456789abc";
-    assertEquals(await computation.calculate({ ids: [{ id }] }), { sink: [{ id }] });
-    await assertRejects(() => computation.calculate({ ids: [{ id: "invalid" }] }), Error);
-    await assertRejects(() => computation.calculate({ ids: [{ id: id.toUpperCase() }] }), Error, "not canonical");
-    assertThrows(() => computation.feldera("http://localhost:8080", {
-      ...descriptor, outputs: { ids: { view: "ids", fields: [{ name: "id", type: "BIGINT" }] } },
-    }), Error, "UUID string carrier");
-    assertThrows(() => computation.feldera("http://localhost:8080", {
-      ...descriptor, outputs: { ids: { view: "ids", fields: [] } },
-    }), Error, "columns differ");
-    const integer = await Computation.load({
-      name: "integer_carrier", file, to: ["sink"], wasm: [], types: table,
-      queryTypes: { ids: [{ name: "id", type: "int64" }] },
+    const carrierRow = {
+      string_value: row.string_value,
+      bool_value: row.bool_value,
+      int32_value: row.int32_value,
+      int64_value: "9223372036854775807",
+      double_value: row.double_value,
+      bytes_value: "\\x00ff8041",
+      id: row.id.toUpperCase(),
+      timestamp_value: "2026-09-21 11:00:00.123456",
+      date_value: row.date_value,
+      time_value: row.time_value,
+      timezone_value: row.timezone_value,
+      duration_value: "73:02:03.123456",
+      decimal_value: `${row.decimal_value}00`,
+      json_value: JSON.stringify(row.json_value),
+      geojson_value: JSON.stringify(row.geojson_value),
+    };
+    const rw = computation.risingwave(
+      "http://localhost:4566",
+      descriptor,
+      () =>
+        Promise.resolve({
+          query: <R>(sql: string) =>
+            Promise.resolve({
+              rows: (sql.startsWith("SELECT * FROM") ? [carrierRow] : []) as R[],
+            }),
+          end: () => Promise.resolve(),
+        }),
+    );
+    const captured = await rw.capture({
+      query: () => Promise.resolve([carrierRow]),
+    });
+    assertEquals(captured, { q: [row] });
+    assertEquals(await computation.calculate(captured), { sink: [row] });
+    assertEquals(
+      computation.normalizeRisingWaveInputs({ q: [carrierRow] }, descriptor),
+      { q: [row] },
+    );
+
+    const nullCarrierRow = Object.fromEntries(
+      fields.map((f) => [f.name, f.name === "id" ? row.id : null]),
+    );
+    const nullCanonicalRow = Object.fromEntries(
+      fields.map((f) => [f.name, f.name === "id" ? row.id : null]),
+    );
+    assertEquals(
+      computation.normalizeRisingWaveInputs(
+        { q: [nullCarrierRow] },
+        descriptor,
+      ),
+      { q: [nullCanonicalRow] },
+    );
+    assertEquals(
+      await computation.calculate({ q: [nullCanonicalRow] }),
+      { sink: [nullCanonicalRow] },
+    );
+    const requiredComp = await Computation.load({
+      name: "portable_required",
+      file,
+      to: ["sink"],
+      wasm: [],
+      types: table,
+      queryTypes: {
+        q: fields.map((f) => f.name === "id" ? { ...f, required: true } : f),
+      },
+      sinkTypes: { sink: fields },
     }, {} as Runner);
-    assertThrows(() => integer.feldera("http://localhost:8080", descriptor), Error, "UUID string carrier");
+    assertThrows(
+      () =>
+        requiredComp.normalizeRisingWaveInputs(
+          { q: [{ ...carrierRow, id: null }] },
+          descriptor,
+        ),
+      Error,
+      "required",
+    );
+
+    const boundaryCarrierRow = {
+      ...carrierRow,
+      int64_value: "-9223372036854775808",
+      double_value: -0,
+      bytes_value: "\\x",
+      timestamp_value: "2026-09-21 11:00:00",
+    };
+    const normalizedBoundary = computation.normalizeRisingWaveInputs(
+      { q: [boundaryCarrierRow] },
+      descriptor,
+    ).q[0];
+    assertEquals(normalizedBoundary.int64_value, "-9223372036854775808");
+    assertEquals(Object.is(normalizedBoundary.double_value, 0), true);
+    assertEquals(normalizedBoundary.bytes_value, "");
+    assertEquals(
+      normalizedBoundary.timestamp_value,
+      "2026-09-21T11:00:00.000000Z",
+    );
+
+    for (
+      const bad of [
+        { ...carrierRow, int64_value: "9223372036854775808" },
+        { ...carrierRow, double_value: Number.NaN },
+        {
+          ...carrierRow,
+          geojson_value: JSON.stringify({
+            type: "Polygon",
+            coordinates: [[[0, 0], [1, 0], [1, 1]]],
+          }),
+        },
+      ]
+    ) {
+      assertThrows(
+        () => computation.normalizeRisingWaveInputs({ q: [bad] }, descriptor),
+        Error,
+      );
+    }
+
+    await assertRejects(
+      () => computation.calculate({ q: [{ ...row, id: row.id.toUpperCase() }] }),
+      Error,
+      "not canonical",
+    );
+    assertThrows(
+      () =>
+        computation.risingwave("http://localhost:4566", {
+          ...descriptor,
+          outputs: {
+            q: {
+              view: "q",
+              fields: rwFields.map((f) =>
+                f.name === "id" ? { ...f, type: "BIGINT" } : f
+              ),
+            },
+          },
+        }),
+      Error,
+      "cannot use BIGINT carrier for uuid",
+    );
+    assertThrows(
+      () =>
+        computation.risingwave("http://localhost:4566", {
+          ...descriptor,
+          outputs: {
+            q: {
+              view: "q",
+              fields: rwFields.map((f) =>
+                f.name === "int64_value" ? { ...f, type: "DOUBLE" } : f
+              ),
+            },
+          },
+        }),
+      Error,
+      "cannot use DOUBLE carrier for int64",
+    );
+    assertThrows(
+      () =>
+        computation.risingwave("http://localhost:4566", {
+          ...descriptor,
+          outputs: {
+            q: {
+              view: "q",
+              fields: rwFields.map((f) =>
+                f.name === "decimal_value" ? { ...f, type: "DOUBLE" } : f
+              ),
+            },
+          },
+        }),
+      Error,
+      "cannot use DOUBLE carrier for decimal",
+    );
+    assertThrows(
+      () =>
+        computation.risingwave("http://localhost:4566", {
+          ...descriptor,
+          outputs: { q: { view: "q", fields: [] } },
+        }),
+      Error,
+      "columns differ",
+    );
   } finally {
     await Deno.remove(file);
   }

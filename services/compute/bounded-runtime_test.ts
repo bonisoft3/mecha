@@ -455,9 +455,13 @@ Deno.test("bounded collection retains active snapshots and release is idempotent
 		const result = await runtime.calculate(retained);
 		await runtime.release(retained, result);
 		await runtime.release(retained, result);
+		assertEquals(await runtime.hasCapture(retained), false);
+		await collectBoundedFiles(directory, [retained]);
+		await Deno.mkdir(`${directory}/capture-${retained.id}.duckdb`);
 		await assertRejects(
 			() => collectBoundedFiles(directory, [retained]),
-			Deno.errors.NotFound,
+			Error,
+			"retained bounded capture must be a regular file",
 		);
 	} finally {
 		await Deno.remove(directory, { recursive: true });

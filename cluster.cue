@@ -546,7 +546,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 #Cluster: {
 	let X = self
 	state: {
-		duckstreamEngine: *"duckdb-snapshot" | "feldera"
+		duckstreamEngine: *"risingwave" | "duckdb-snapshot"
 		migrations:       [...string] & list.UniqueItems()
 		// Changes to a schema that already exists, in pgroll's own grammar and
 		// keyed by the version each creates. `migrations` build the schema on a
@@ -563,11 +563,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
 		computations: [...{
-			name:     string
-			file:     string
-			feldera?: string & !=""
-			steps?:   string & !=""
-			to:       [...string] & [_, ...]
+			name:        string
+			file:        string
+			risingwave?: string & !=""
+			steps?:      string & !=""
+			to:          [...string] & [_, ...]
 			sinkWrites?: [string]: "replace" | "upsert"
 			wasm: [...string]
 			// Checked via #ComputationRpc rather than =~ on the optional field:
@@ -1670,7 +1670,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
 						epilogue: list.Concat([
 							["COPY <<'CDCTRACE' /cdc-trace.yaml\n\(_cdcTrace)\nCDCTRACE"],
-							[if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"}],
+							[if len(X.state.computations) > 0 {"COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"}],
 						])
 						cmd: list.Concat([["streams", "--no-api", "-r", "/cdc-trace.yaml"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"/compute-events.yaml"}]])
 					}
@@ -1694,20 +1694,21 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 				// Two computations may share a wasm module; it ships once.
 				let _wasm = [for w, _ in {for c in X.state.computations for w in c.wasm {(w): true}} {file: w, target: "/app/computations/\(path.Base(w, path.Unix))"}]
 				let _target = {for w in _wasm {(w.file): w.target}}
-				let _feldera = [for c in X.state.computations if c.feldera != _|_ {file: c.feldera, target: "/app/computations/\(c.name).feldera.json"}]
+				let _risingwave = [for c in X.state.computations if c.risingwave != _|_ {file: c.risingwave, target: "/app/computations/\(c.name).risingwave.json"}]
 				let _steps = [for c in X.state.computations if c.steps != _|_ {file: "\(c.steps).bundle.js", target: "/app/computations/\(c.name).steps.bundle.js"}]
-				if X.state.duckstreamEngine == "feldera" {
-					feldera: bayt.healthcheck.http & X._image & {
-						healthcheck: {url: "http://127.0.0.1:8080/healthz", start_period: "120s"}
+				if X.state.duckstreamEngine == "risingwave" {
+					risingwave: bayt.healthcheck.tcp & X._image & {
+						healthcheck: {port: 4566, start_period: "120s"}
 						dockerfile: {
-							from: name: "images.feldera.com/feldera/pipeline-manager:0.367.0@sha256:42819714d16f7d5d37c17c87812ce98fb23efd2b1bfbf95b4889877f14693272"
-							workdir: "/home/ubuntu"
-							// Feldera clears Cargo environment overrides before starting the compiler.
-							preamble: [#"RUN test ! -e /home/ubuntu/.cargo/config.toml && printf '%s\n' '[build]' 'jobs = 2' '[profile.unoptimized]' 'strip = "symbols"' > /home/ubuntu/.cargo/config.toml"#]
+							from: name: "risingwavelabs/risingwave:v3.1.1@sha256:b869358fa704250d25045d3575145ca59cfb67a558a08fa4f8fd375874c24d63"
+							epilogue: [
+								"COPY <<'RWCONFIG' /etc/risingwave/risingwave.toml\n[meta]\nmin_sst_retention_time_sec = 300\nfull_gc_interval_sec = 60\nvacuum_interval_sec = 15\ngc_history_retention_time_sec = 0\nclean_all_foreground_jobs_on_recovery = true\n\n[meta.developer]\nactor_cnt_per_worker_parallelism_soft_limit = 1000\nactor_cnt_per_worker_parallelism_hard_limit = 4000\n\n[streaming]\nin_flight_barrier_nums = 256\n\n[streaming.developer]\nenable_snapshot_backfill = false\n\n[storage]\nshared_buffer_min_batch_flush_size_mb = 32\nRWCONFIG",
+								"ENV RW_SINGLE_NODE_CONFIG_PATH=/etc/risingwave/risingwave.toml",
+							]
+							cmd: ["single_node"]
 						}
 						compose: {
 							restart: "on-failure"
-							environment: FELDERA_DATABASE_URL: X.surface.targets.compute.compose.environment.DATABASE_URL
 						}
 					}
 				}
@@ -1726,25 +1727,24 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						port:           9997
 						interval:       "5s"
 						start_interval: "1s"
-						// Native programs compile and bootstrap sequentially before the listener opens.
-						if X.state.duckstreamEngine == "feldera" {start_period: "\(30*len(X.state.computations))m"}
+						// Native programs bootstrap sequentially before the listener opens.
+						if X.state.duckstreamEngine == "risingwave" {start_period: "\(30*len(X.state.computations))m"}
 						if X.state.duckstreamEngine == "duckdb-snapshot" {start_period: "15m"}
 					}
 					expose: tcp: {port: 9997, env: "PORT"}
 					entrypoint: {
 						shell:      "nu"
-						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let lake = ($base | path join $'lake-($nu.pid)-(random int 1000..9999)'); mkdir $lake; let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '\(#DuckdbExtensionsMarker)'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts'); with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir, LAKE_DIR: $lake } { exec deno run --unstable-worker-options --allow-run=/opt/feldera/runtime/supervisor --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"
+						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let lake = ($base | path join $'lake-($nu.pid)-(random int 1000..9999)'); mkdir $lake; let state = (if (($env.COMPUTE_STATE_DIR? | default '') != '') { $env.COMPUTE_STATE_DIR } else { ($base | path join $'duckstream-($nu.pid)-(random int 1000..9999)') }); mkdir $state; let ext_dir = (if (($env.BAYT_LOCAL_DUCKDB_EXTENSIONS? | default '') != '') { $env.BAYT_LOCAL_DUCKDB_EXTENSIONS } else { ((^mise where http:duckdb | str trim) | path join 'extensions') }); let app = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else if ('services/compute/main.ts' | path exists) { 'services/compute' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/compute') }); let marker = ($ext_dir | path join '\(#DuckdbExtensionsMarker)'); if (not ($marker | path exists)) { mkdir $ext_dir; with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir } { ^deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir --config ($app | path join 'deno.json') ($app | path join 'install.ts') }; '' | save -f $marker }; ^deno cache --config ($app | path join 'deno.json') ($app | path join 'main.ts') ($app | path join 'cage.ts') ($app | path join 'job.ts'); with-env { DUCKDB_EXTENSIONS_DIR: $ext_dir, LAKE_DIR: $lake, COMPUTE_STATE_DIR: $state } { exec deno run --unstable-worker-options --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys --config ($app | path join 'deno.json') ($app | path join 'main.ts') }"
 						dockerfile: null
 						env: {
 							CRUD_URL:          {peer: "crud", port: "http", prefix: "http://"}
 							DATABASE_URL:      ["postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@", {peer: "database", port: "pg"}, "/${POSTGRES_DB:-\(X.meta.app)}"]
 							CDC_SLOT:          (#ConduitSlot & {app: X.meta.app}).name
-							COMPUTE_STATE_DIR: "${COMPUTE_STATE_DIR:-.pronto/live/duckstream}"
 							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-duckdb-snapshot}"
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
 								name: c.name
 								file: c.file
-								if c.feldera != _|_ {feldera: c.feldera}
+								if c.risingwave != _|_ {risingwave: c.risingwave}
 								if c.steps != _|_ {steps: c.steps}
 								to: c.to
 								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
@@ -1766,31 +1766,29 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							conduit: "healthy"
 						}
 					}
-					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}], [for f in _feldera {f.file}], [for f in _steps {f.file}]])
+					srcs: globs: list.Concat([[for c in X.state.computations {c.file}], [for w in _wasm {w.file}], [for f in _risingwave {f.file}], [for f in _steps {f.file}]])
 					dockerfile: {
 						from: (_from & {in: X.meta.images.compute}).out
 						copy: list.Concat([
 							[for c in X.state.computations {srcs: [c.file], dst: "/app/computations/\(c.name).js"}],
 							[for w in _wasm {srcs: [w.file], dst: w.target}],
-							[for f in _feldera {srcs: [f.file], dst: f.target}],
+							[for f in _risingwave {srcs: [f.file], dst: f.target}],
 							[for f in _steps {srcs: [f.file], dst: f.target}],
 						])
 					}
 					compose: {
-						volumes: ["../.pronto/live/duckstream:/state"]
-						if X.state.duckstreamEngine == "feldera" {depends_on: feldera: _healthy}
+						if X.state.duckstreamEngine == "risingwave" {depends_on: risingwave: _healthy}
 						environment: {
 							COMPUTE_STATE_DIR: "/state"
 							LAKE_DIR:          "/lake"
 							DUCKSTREAM_ENGINE: "${DUCKSTREAM_ENGINE:-\(X.state.duckstreamEngine)}"
-							if X.state.duckstreamEngine == "feldera" {
-								FELDERA_URL:                 "http://feldera:8080"
-								FELDERA_COMPILATION_PROFILE: "${FELDERA_COMPILATION_PROFILE:-optimized}"
+							if X.state.duckstreamEngine == "risingwave" {
+								RISINGWAVE_URL: "http://risingwave:4566"
 							}
 							COMPUTATIONS: json.Marshal([for c in X.state.computations {
 								name: c.name
 								file: "/app/computations/\(c.name).js"
-								if c.feldera != _|_ {feldera: "/app/computations/\(c.name).feldera.json"}
+								if c.risingwave != _|_ {risingwave: "/app/computations/\(c.name).risingwave.json"}
 								if c.steps != _|_ {steps: "/app/computations/\(c.name).steps"}
 								to: c.to
 								if c.sinkWrites != _|_ {sinkWrites: c.sinkWrites}
@@ -1810,7 +1808,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 								path:   "../\(c.file)"
 								target: "/app/computations/\(c.name).js"
 							}],
-							[for f in _feldera {
+							[for f in _risingwave {
 								action: "sync+restart"
 								path:   "../\(f.file)"
 								target: f.target

@@ -46,9 +46,9 @@ const hosts = [
 
 /** Paths are deployment details; program bytes, declared authority and pinned host code are the contract. */
 export async function snapshotVersion(spec: SnapshotSpec): Promise<string> {
-  const { file, wasm, feldera, steps: _steps, version: _version, ...contract } = spec;
+  const { file, wasm, risingwave, steps: _steps, version: _version, ...contract } = spec;
   const files = await Promise.all(
-    [file, ...wasm, ...(feldera ? [feldera] : [])].map(async (path) =>
+    [file, ...wasm, ...(risingwave ? [risingwave] : [])].map(async (path) =>
       await hash(await Deno.readFile(path))
     ),
   );

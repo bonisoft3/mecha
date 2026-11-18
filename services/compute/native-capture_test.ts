@@ -1,13 +1,14 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import pg from "npm:pg@8.16.3";
-import { NativeFeldera } from "./native-feldera.ts";
+import { NativeRisingWave } from "./native-risingwave.ts";
+import { defaultRisingWaveConnect } from "./risingwave.ts";
 import { DeltaStore } from "./deltas.ts";
 import { type IncrementalProgram, installSources } from "./native-sources.ts";
 
 Deno.test({
   name:
     "native capture keeps heterogeneous outputs and validation in one request snapshot",
-  ignore: Deno.env.get("NATIVE_FELDERA_INTEGRATION") !== "1",
+  ignore: Deno.env.get("NATIVE_RISINGWAVE_INTEGRATION") !== "1",
   sanitizeResources: false,
   sanitizeOps: false,
   async fn() {
@@ -20,7 +21,7 @@ Deno.test({
       file,
       `services:
   postgres:
-    image: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
+    image: bonitao/mecha-database:0.25.2@sha256:2229cfefd31a8ee37eb2f88414fcb37eb8b990288cd65e873c70c6fa3af5fd55
     command: [postgres, -c, wal_level=logical, -c, max_replication_slots=20]
     environment: {POSTGRES_PASSWORD: spike, POSTGRES_DB: spike}
     ports: ["127.0.0.1::5432"]
@@ -29,12 +30,12 @@ Deno.test({
       interval: 1s
       timeout: 3s
       retries: 30
-  feldera:
-    image: images.feldera.com/feldera/pipeline-manager:0.367.0@sha256:42819714d16f7d5d37c17c87812ce98fb23efd2b1bfbf95b4889877f14693272
-    environment: {FELDERA_DATABASE_URL: "postgres://postgres:spike@postgres:5432/spike"}
-    ports: ["127.0.0.1::8080"]
+  risingwave:
+    image: risingwavelabs/risingwave:v3.1.1@sha256:b869358fa704250d25045d3575145ca59cfb67a558a08fa4f8fd375874c24d63
+    command: [single_node]
+    ports: ["127.0.0.1::4566"]
     healthcheck:
-      test: [CMD, curl, --fail, http://localhost:8080/healthz]
+      test: [CMD-SHELL, "bash -c '</dev/tcp/127.0.0.1/4566'"]
       interval: 1s
       timeout: 3s
       retries: 60
@@ -51,15 +52,24 @@ Deno.test({
       assert(result.success, new TextDecoder().decode(result.stderr));
       return new TextDecoder().decode(result.stdout).trim();
     }
-    const originalFetch = globalThis.fetch;
     let captures = false;
     let queries: string[] = [];
-    globalThis.fetch = (input, init) => {
-      const url = new URL(input instanceof Request ? input.url : String(input));
-      if (captures && url.pathname.endsWith("/query")) {
-        queries.push(url.searchParams.get("sql")!);
-      }
-      return originalFetch(input, init);
+    const trackedConnect = async (connStr: string) => {
+      const session = await defaultRisingWaveConnect(connStr);
+      return {
+        query<R extends Record<string, unknown> = Record<string, unknown>>(
+          text: string,
+          values?: unknown[],
+        ): Promise<{ rows: R[] }> {
+          if (captures && text.includes("UNION ALL")) {
+            queries.push(text);
+          }
+          return session.query<R>(text, values);
+        },
+        end() {
+          return session.end();
+        },
+      };
     };
     let db: pg.Pool | undefined;
     try {
@@ -68,7 +78,7 @@ Deno.test({
         connectionString: "postgres://postgres:spike@" +
           await compose("port", "postgres", "5432") + "/spike",
       });
-      const endpoint = "http://" + await compose("port", "feldera", "8080");
+      const endpoint = "http://" + await compose("port", "risingwave", "4566");
       const fields = [
         { name: "record_id", type: "INTEGER" },
         { name: "amount", type: "INTEGER" },
@@ -80,10 +90,15 @@ Deno.test({
         sql:
           `CREATE TABLE source_rows(record_id INTEGER,amount INTEGER,label VARCHAR,occurred TIMESTAMP(6),flag BOOLEAN);
           CREATE VIEW detail AS SELECT * FROM source_rows;
+          CREATE VIEW labels AS SELECT label FROM source_rows;
           CREATE VIEW summary AS SELECT COUNT(*) AS n,SUM(amount) AS total FROM source_rows;`,
         inputs: { source_rows: { query: "", fields } },
         outputs: {
           detail: { view: "detail", fields },
+          labels: {
+            view: "labels",
+            fields: [{ name: "label", type: "VARCHAR" }],
+          },
           summary: {
             view: "summary",
             fields: [{ name: "n", type: "BIGINT" }, {
@@ -102,6 +117,9 @@ Deno.test({
           outputs: {
             detail: {
               partitionQuery: "SELECT '' AS __partition,* FROM detail",
+            },
+            labels: {
+              partitionQuery: "SELECT '' AS __partition,* FROM labels",
             },
             summary: {
               partitionQuery: "SELECT '' AS __partition,* FROM summary",
@@ -125,19 +143,21 @@ Deno.test({
       } finally {
         client.release();
       }
-      const runtime = new NativeFeldera(
+      const runtime = new NativeRisingWave(
         endpoint,
         "capture-test",
         program,
         version,
         "postgres://postgres:spike@postgres:5432/spike",
+        trackedConnect,
       );
-      await runtime.initialize(db, { detail: [], summary: [] }, []);
+      await runtime.initialize(db, { detail: [], labels: [], summary: [] }, []);
       const store = new DeltaStore({
         detail: "__partition",
+        labels: "__partition",
         summary: "__partition",
       });
-      store.bootstrap({ detail: [], summary: [] });
+      store.bootstrap({ detail: [], labels: [], summary: [] });
       let sequence = 0;
       const capture = async () => {
         queries = [];
@@ -151,12 +171,13 @@ Deno.test({
         assertEquals(
           queries.length,
           1,
-          "one HTTP SQL request must capture every output and validation relation",
+          "one SQL request must capture every output and validation relation",
         );
         store.apply(delta);
         const state = store.capture("");
         assertEquals(state.summary.length, 1);
         assertEquals(state.summary[0].n, state.detail.length);
+        assertEquals(state.labels.length, state.detail.length);
         assertEquals(
           state.summary[0].total,
           state.detail.reduce((total, row) => total + Number(row.amount), 0),
@@ -170,7 +191,6 @@ Deno.test({
         return state;
       };
       assertEquals((await capture()).detail.length, 256);
-      // Every cut must satisfy the aggregate/detail invariant even if a source transaction is split.
       for (let wave = 1; wave <= 6; wave++) {
         const writes = (async () => {
           for (let update = 0; update < 8; update++) {
@@ -197,32 +217,29 @@ Deno.test({
       await db.query("UPDATE items SET amount=-1 WHERE id=1");
       const invalidDeadline = Date.now() + 30000;
       for (;;) {
-        const response = await fetch(
-          endpoint + "/v0/pipelines/capture-test/query?" +
-            new URLSearchParams({
-              sql: "SELECT * FROM invalid_negative_amount",
-              format: "json",
-            }),
-        );
-        assert(response.ok);
-        if ((await response.text()).trim()) break;
+        queries = [];
+        captures = true;
+        try {
+          await runtime.capture();
+        } catch (err) {
+          if (err instanceof Error && err.message.includes("negative_amount")) {
+            assertEquals(
+              queries.length,
+              1,
+              "validation must share the captured output snapshot",
+            );
+            break;
+          }
+          throw err;
+        } finally {
+          captures = false;
+        }
         assert(Date.now() < invalidDeadline, "invalid source row not observed");
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      queries = [];
-      captures = true;
-      try {
-        await assertRejects(() => runtime.capture(), Error, "negative_amount");
-      } finally {
-        captures = false;
-      }
-      assertEquals(
-        queries.length,
-        1,
-        "validation must share the captured output snapshot",
-      );
+      await assertRejects(() => runtime.capture(), Error, "negative_amount");
+      await runtime.close();
     } finally {
-      globalThis.fetch = originalFetch;
       if (db) await db.end();
       await compose("down", "-v");
       await Deno.remove(directory, { recursive: true });

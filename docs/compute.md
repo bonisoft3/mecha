@@ -72,10 +72,14 @@ declarations are checked even when no rows are returned. Retained inputs are
 validated again on replay. Untyped queries retain the numerical API required by
 existing WASM computations.
 
-Feldera currently admits typed UUID results through VARCHAR carriers only.
-Declared columns and physical carriers are checked before connecting; canonical
-UUID values are checked again before calculation and replay. Other typed native
-Feldera boundaries remain refused. This does not limit DuckDB typed transport.
+RisingWave admits all fifteen portable types across its physical carrier rules
+(`RISINGWAVE_PHYSICAL`): booleans (`BOOLEAN`), `int32` (`SMALLINT`/`INTEGER`),
+`int64` (`SMALLINT`/`INTEGER`/`BIGINT`), `double` (`DOUBLE`), `timestamp`
+(`TIMESTAMP`/`VARCHAR`), `json` and `geojson` (`VARCHAR` or JSONB carriers),
+and `string`, `bytes`, `uuid`, `date`, `time`, `timezone`, `duration`, and
+`decimal` (`VARCHAR` carriers). Declared columns and physical carriers are
+checked before connecting; canonical values are normalized and validated through
+`bindBoundary` before calculation and replay, refusing precision loss.
 
 Typed queries require compatible physical SQL types before projection. A
 floating-point result cannot silently become an exact decimal or integer.
@@ -93,7 +97,7 @@ operators. Carrying GeoJSON does not provide spatial operations; carrying a
 
 Source PostgreSQL can normalize values through stored columns and maintain
 constraints. Snapshot capture reads the declared source tables from one repeatable-read
-snapshot. Native capture uses maintained Feldera deltas as described below.
+snapshot. Native capture uses maintained RisingWave deltas as described below.
 SQL queries prepare retained inputs for the unchanged numerical module. The module plans WASM jobs and forms complete sink rows. Sink PostgreSQL
 owns constraints and transactional completion hooks.
 
@@ -147,13 +151,16 @@ replays steps from the retained capture after interruption; it does not persist
 each step's checkpoint as the Cloudflare executor does. Worker SQL cannot access
 host files or the network through DuckDB.
 
-`COMPUTE_STATE_DIR` must survive process and container replacement alongside the
-PostgreSQL batch ledger. The Docker appliance uses `/var/lib/duckstream`: mount
-and reuse a named volume there. Local execution uses `.pronto/live/duckstream`;
-Compose binds that directory to `/state`. Do not delete retained captures to
-recover space. Successful or superseded work releases its files after commit;
-startup collects abandoned files under the coordinator singleton, preserving
-all manifests referenced by the ledger. A missing retained file is an error.
+`COMPUTE_STATE_DIR` follows the same persistence boundary as `PGDATA`: neither
+Compose (`COMPUTE_STATE_DIR=/state`) nor local host execution mounts a host
+volume by default, so container replacement starts clean alongside an
+ephemeral database. Only `release@docker` (`/var/lib/duckstream`) allows an
+opt-in user-mounted named volume alongside `PGDATA`, and RisingWave does not
+require one because its streaming state reconstructs from PostgreSQL on startup.
+For bounded DuckDB snapshots, successful or superseded work releases its files
+after commit; startup collects abandoned files under the coordinator singleton,
+preserving all manifests referenced by the ledger. A missing retained file is an
+error.
 
 Startup reconciliation runs before workers begin capturing. Statement triggers on
 physical `public` source and sink tables advance `compute.source` revisions,
@@ -242,7 +249,7 @@ These bounds do not make arbitrary SQL or a single numerical job fit memory.
 
 Generated modules may also export `queryStages`, a physical plan for selected
 queries: ordered `{name, sql}` intermediate relations and the final `sql`.
-The Feldera-plan translator emits these barriers after joins, aggregates and
+The streaming-plan translator emits these barriers after joins, aggregates and
 shared views without changing expressions or the legacy query strings. Backward
 column demand keeps only required fields in each physical stage, while retaining
 predicate keys, grouping/distinct semantics and row cardinality. The
@@ -329,7 +336,7 @@ bounded pages through private RPC. Keeping Reader in a distinct Worker matters:
 Durable Objects defined in the same Worker may share an isolate and its memory
 budget. This default needs no Cloudflare Container. Pages keeps
 its browser snapshot/export path, and native deployments keep their selected
-DuckDB snapshot or Feldera engine.
+DuckDB snapshot or RisingWave engine.
 
 Companion Workers are retained across deployments so in-flight work and rollback
 bindings remain valid. Automatic garbage collection is not implemented. They
@@ -391,83 +398,30 @@ schema migration.
 
 ## Query engines
 
-`DUCKSTREAM_ENGINE` selects `duckdb-snapshot` (the default) or `feldera`.
-Feldera mode requires a generated `feldera` descriptor file for every
-computation and either `FELDERA_ARTIFACTS_DIR` or `FELDERA_URL`. The descriptor contains the authored SQL, projected
+`state.duckstreamEngine` in `cluster.cue` defaults Compose and container
+deployments to `risingwave`; `DUCKSTREAM_ENGINE` overrides the process engine
+(defaulting to `duckdb-snapshot` when unset on standalone or host processes).
+RisingWave mode requires a generated `risingwave` descriptor file for every
+computation and `RISINGWAVE_URL`. The descriptor contains the authored SQL, projected
 input queries and typed materialized output views. Its bytes and engine choice
 participate in the computation version, so a deployment cannot reinterpret
 retained inputs after changing engines. Computations without a descriptor keep
 the existing snapshot contract.
 
-`FELDERA_ARTIFACTS_DIR` selects locally supervised, precompiled Linux pipelines.
-The Docker appliance builds these when its declared engine is Feldera. Its
-release build compiles connector-free SQL and packages the executable, program
-information, a Linux parent-death supervisor and isolated shared libraries. The
-runtime checks their digests, SQL identity, architecture and pinned Feldera
-version before starting CDC. It never compiles on demand or falls back to
-snapshot execution. Changing SQL requires rebuilding the release artifact.
-
-Publication and carrier-table identities remain runtime configuration, so a
-fresh circuit can use fresh CDC identities with the same executable. Coordinator
-death terminates its pipelines through Linux parent-death signaling. Restart
-still reconstructs OSS relational state from a fresh baseline; precompilation
-does not introduce checkpoint support. `FELDERA_MAX_RSS` sets each pipeline's
-memory-pressure budget (default `384MiB`), not an operating-system hard limit.
-Standalone CDC connectors apply backpressure at 10,000 queued records or 16 MiB
-per input, with PostgreSQL CDC batches capped at 1 MiB and a one-second fill
-time. These thresholds may overshoot; they limit ingestion queues separately
-from circuit storage. Size the complete application under a container limit, including PostgreSQL,
-Electric, queries and the computation workers.
-
-The [pinned CDC memory guard](https://github.com/feldera/etl/blob/cdfb3c7e6581b63d8876c3c1b335b3a99e676c55/crates/etl/src/runtime/memory_monitor.rs)
-counts the entire cgroup, including
-file cache and sibling services. It pauses at 85% and resumes below 75%; drained
-input queues alone need not release that pause. A dedicated VM appliance can
-use host-memory accounting by omitting a smaller container memory limit. This
-keeps the connector's emergency guard enabled; it does not prove the complete
-application fits. Measure bootstrap and steady-state memory on the deployment.
-Bootstrap fails after ten minutes without ingestion or circuit progress, rather
-than imposing a total duration limit on a growing snapshot.
-
-Artifact execution requires a private, disk-backed `FELDERA_WORK_DIR`; the
-appliance uses `/var/lib/feldera`. Each computation has a separate directory and
-each incarnation a unique child directory. After retiring previous CDC slots,
-startup removes stale scratch for that computation and starts fresh spill
-storage with a 64 MiB cache. Retirement also removes obsolete computations'
-scratch under the configured root, preserving active computations. A previous
-host or a changed root needs separate deployment cleanup. Spill storage is
-recomputable scratch, not an OSS checkpoint.
-
-Without an artifact directory, `FELDERA_URL` selects the existing remote manager
-path. When migrating a retained database from manager-owned pipelines, leave the
-old manager reachable until its registered pipelines have been retired. The
-coordinator refuses to drop active CDC resources merely because a manager is
-unreachable. A fresh database has no such retirement dependency.
-
-`FELDERA_COMPILATION_PROFILE` accepts `optimized` (the default) or `unoptimized`.
-Disposable test runners use `unoptimized` to reduce cold Rust compilation time;
-the pinned container strips symbols for that profile before Feldera copies and
-checksums its executables. These test binaries lack symbolic native backtraces.
-Direct launches and production retain `optimized`. The profile changes compiler
-optimization, not the computation version or retained-input contract. The container
-limits Cargo to two concurrent build jobs to reduce compiler memory pressure.
-This does not limit pipeline execution workers.
-The limit lives in Cargo configuration because Feldera clears compiler environment
-overrides.
-
 Snapshot mode reads one repeatable-read PostgreSQL snapshot. Native mode uses
-Feldera's PostgreSQL CDC connector. Row-local PostgreSQL projections maintain
+RisingWave's transactional `postgres-cdc` shared source (`transactional = 'true'`).
+Row-local PostgreSQL projections maintain
 private current-row carrier tables in the source transaction, including deletes
 and truncation. These tables normalize UUID limbs, calendar values and numerical
 carriers; they contain current state, not queued jobs. Installation fences writes
 while backfilling once per computation version. Steady-state projection work is
 indexed by the changed source key.
 
-Each declared output maps rows to a computation partition. Feldera maintains
-`stream EXCEPT ALL captured` and its inverse. The coordinator pauses input readers and reads every difference and validation
-view in one query against a single consistent circuit snapshot. Pause alone does
-not drain buffered work. It updates only affected retained partition inputs in
-the claim transaction, then resumes and acknowledges that captured baseline.
+Each declared output maps rows to a computation partition. RisingWave maintains
+`stream EXCEPT captured` and its inverse. The coordinator reads every difference and validation
+view in one SQL query against a single consistent RisingWave snapshot.
+It updates only affected retained partition inputs in
+the claim transaction, then acknowledges that captured baseline into `captured_<name>` tables.
 Acknowledgment is after commit: a crash cannot discard uncaptured work. Pure
 calculation uses immutable retained inputs while CDC continues accumulating the
 next difference. Publication writes changed sink keys and commits partition
@@ -480,7 +434,7 @@ or foreign-key cascade changes its rows. Repair reasserts its desired rows;
 equal live rows are not rewritten. Owned sink identities are immutable. Rows inserted by another producer
 without partition ownership are outside this repair contract. This guard metadata is separate from source
 ingestion and does not turn source tables into a work queue. The current Durex worker executes one computation at a time; changes continue
-accumulating in Feldera while it runs. WASM job parallelism remains inside the
+accumulating in RisingWave while it runs. WASM job parallelism remains inside the
 calculation runner.
 
 Golaberto odds use phase partitions because game importance combines groups in
@@ -490,67 +444,51 @@ The WASM algorithm and content cache are unchanged. Work is proportional to
 changed relational outputs and affected computation partitions; a change to a
 global dependency can legitimately affect every partition.
 
-Native CDC connectors have independent per-table progress. The single capture
-query gives a stable Feldera cut, **not a PostgreSQL-wide transaction-consistent cut**. A join
-can transiently observe one table's committed changes before another table's.
-This path provides the published connector's eventual relational semantics;
-it is not admitted for computations requiring atomic multi-table source reads.
-Sink publication is still atomic and retries cannot overwrite newer completed
+RisingWave's shared `postgres-cdc` source with `transactional = 'true'` reads a single
+replication slot and injects barriers at PostgreSQL transaction commit boundaries,
+preserving cross-table transaction consistency across streaming joins and aggregates.
+Sink publication is atomic and retries cannot overwrite newer completed
 work. pg_duckpipe independently feeds the lake and does not supply this runtime's
 input frontier.
 
-The singleton coordinator owns the pipeline. An OSS restart reconstructs source
+The singleton coordinator owns the RisingWave schema. An uncheckpointed restart reconstructs source
 state using fresh publications and replication identities, then restores the
-last durably captured baseline. It does not reuse a consumed cursor with lost
-relational state. Unchanged reconstruction runs no numerical calculation.
+last durably captured baseline into the `captured_<name>` tables.
+Unchanged reconstruction runs no numerical calculation.
 Retained claims finish with their original inputs. Owned old replication slots,
 publications and obsolete carrier schemas are retired; unrelated resources are
 preserved. Startup also retires removed or renamed computations from the ownership
-registry, stopping their recorded pipelines before removing slots, publications,
+registry, dropping their recorded RisingWave schemas before removing slots, publications,
 carrier schemas and repair triggers. Registry records survive failed retirement
-so the next startup can resume it. Epochs created before pipeline endpoints were
-recorded require `FELDERA_URL` during retirement. New and reused carrier schemas
+so the next startup can resume it. Epochs with recorded RisingWave schemas
+require `RISINGWAVE_URL` during retirement. New and reused carrier schemas
 strip nonowner grants and enable RLS; owner-run replication and source triggers
 retain access.
 
-Source rescan and baseline transfer are restart costs, not per-batch
-costs. Deleted historical events cannot be reconstructed from current rows.
-
-This boundary admits booleans, strings, small/int/safe-number big integers,
-finite doubles and UTC microsecond timestamps, including nulls. Typed native
-UUID results use VARCHAR carriers. Other typed native boundaries remain refused;
-DuckDB portable transport stays available. An unexpected incarnation or ambiguous
+This boundary admits all fifteen portable types (including nulls) through their
+declared RisingWave carriers, normalizing them canonically before calculation
+and replay while untyped numerical queries keep safe-integer and finite-double
+checks. An unexpected incarnation or ambiguous
 acknowledgment fails the service and requires reconstruction; no engine fallback
 is implicit. PostgreSQL crash durability additionally requires durable database
 settings: the local development stack's disabled fsync is not a production
 exactly-once guarantee.
 
-[[../../../plugins/pronto/bundle/derived.ts|Pages export]] selects DuckDB snapshot
-mode and removes Feldera from its disposable computation stack. The exported
-page contains derived rows; it does not host a native Feldera process.
+[[../../../plugins/pronto/bundle/derived.ts|Pages and Cloudflare snapshot export]]
+selects DuckDB snapshot mode, wires `compute-events` on `transform`, and removes
+RisingWave from its disposable computation stack.
 
-The opt-in native regressions start isolated PostgreSQL and pinned Feldera
+The opt-in native regressions start isolated PostgreSQL and pinned RisingWave
 containers. From the repository root:
 
 ```sh
-NATIVE_FELDERA_INTEGRATION=1 mise exec -- deno test -A \
+NATIVE_RISINGWAVE_INTEGRATION=1 mise exec -- deno test -A \
   --config libraries/mecha/services/compute/deno.json \
-  libraries/mecha/services/compute/native-feldera_test.ts \
+  libraries/mecha/services/compute/native-risingwave_test.ts \
   libraries/mecha/services/compute/native-capture_test.ts
 ```
 
 They check restart and resource ownership, publication repair, and agreement
 between detail rows and aggregates captured during concurrent source updates.
-Set `FELDERA_COMPILATION_PROFILE=unoptimized` to exercise the native CDC runtime
-regression with the test-runner compilation profile.
-The capture regression also requires one HTTP SQL request for all relations and
-validation checks, so asynchronous pause cannot reintroduce mixed snapshots.
-
-### Feldera credentials
-
-The generated PostgreSQL connector URI is always `${env:FELDERA_DATABASE_URL}`.
-The pinned Feldera engine resolves it in its own process; pipeline SQL and API
-program text contain no database password. Docker supplies the same URI as the
-compute service. Kubernetes and GKE construct both from the same database Secret.
-Feldera's administrative API remains private: secret references prevent accidental
-program-text disclosure, but do not make an administrator an untrusted caller.
+The capture regression also requires one SQL query for all relations and
+validation checks.

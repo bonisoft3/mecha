@@ -279,7 +279,7 @@ _mecha: bayt.#project & _where & {
 		// running service reaches no extension host. Workers take no
 		// permissions of their own, an option Deno still calls unstable.
 		"compute-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts job.ts step-worker.ts", frozen: false}).out & {
-			let _files = ["deno.json", "deno.lock", "main.ts", "feldera.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "bounded-runtime.ts", "step-cage.ts", "step-worker.ts", "native-feldera.ts", "native-cleanup.ts", "native-sources.ts", "native-artifacts.ts", "native-artifacts-build.ts", "native-process.ts", "native-supervisor.c", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts", "events.yaml"]
+			let _files = ["deno.json", "deno.lock", "main.ts", "risingwave.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "bounded-runtime.ts", "step-cage.ts", "step-worker.ts", "native-risingwave.ts", "native-cleanup.ts", "native-sources.ts", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts", "events.yaml"]
 			// endowments.ts imports the Pdf and Xlsx endowments from its sibling, the airlock.
 			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/airlock/pdf.ts", "services/airlock/xlsx.ts", "services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts", "packages/compute-snapshot/src/bounded.ts", "packages/compute-snapshot/src/json.ts"]])
 			cmd: "duckdb": (deno.#duckdbContainerCmd & {
@@ -296,7 +296,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: ["packages/lake/src/lake-types.ts"], dst: "/packages/lake/src/"},
 					{srcs: ["packages/compute-snapshot/src/sink-writes.ts", "packages/compute-snapshot/src/bounded.ts", "packages/compute-snapshot/src/json.ts"], dst: "/packages/compute-snapshot/src/"},
 				]
-				cmd: ["run", "--unstable-worker-options", "--allow-run=/opt/feldera/runtime/supervisor", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "--allow-sys", "/app/main.ts"]
+				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "--allow-sys", "/app/main.ts"]
 			}
 		}
 		"activepieces-image": (activepieces.#Target & {source: "services/activepieces"}).target

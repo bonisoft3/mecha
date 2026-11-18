@@ -644,6 +644,85 @@ export class BoundedRuntime {
     });
     return manifest;
   }
+  async materializeCapture(
+    id: string,
+    batchesOf: (
+      name: string,
+    ) => AsyncIterable<Row[]> | Iterable<Row[]>,
+  ): Promise<BoundedCapture> {
+    if (!uuid.test(id)) throw new Error("invalid bounded manifest");
+    const manifest: BoundedCapture = {
+      id,
+      version: this.options.version,
+      name: this.options.spec.name,
+    };
+    const file = this.path(manifest, "capture");
+    for (const suffix of ["", ".wal", ".tmp"]) {
+      await removeOwned(file + suffix);
+    }
+    const held = await database(file);
+    const { con } = held;
+    try {
+      await con.run("CREATE SCHEMA duckstream_private");
+      for (const name of Object.keys(this.options.queries)) {
+        const target = `duckstream_private.${quote(`result_${name}`)}`;
+        await con.run(`CREATE TABLE ${target}(sequence BIGINT,value VARCHAR)`);
+        let offset = 0;
+        await con.run("BEGIN");
+        for await (const batch of batchesOf(name)) {
+          if (batch.length === 0) continue;
+          let pending: string[] = [];
+          let pendingBytes = 2;
+          const flushPending = async () => {
+            if (!pending.length) return;
+            await con.run(
+              `INSERT INTO ${target} SELECT CAST(? AS BIGINT)+CAST(key AS BIGINT)+1,value::VARCHAR FROM json_each(CAST(? AS JSON))`,
+              [offset, `[${pending.join(",")}]`],
+            );
+            offset += pending.length;
+            pending = [];
+            pendingBytes = 2;
+          };
+          for (const row of batch) {
+            const encoded = strictJson(row);
+            const rowBytes = bytes(encoded);
+            if (rowBytes > 1048576) {
+              throw new Error("capture row exceeds byte limit");
+            }
+            if (
+              pending.length > 0 &&
+              (pending.length >= 2048 ||
+                pendingBytes + rowBytes + 1 > 2 * 1024 * 1024)
+            ) {
+              await flushPending();
+            }
+            pending.push(encoded);
+            pendingBytes += rowBytes + 1;
+          }
+          await flushPending();
+        }
+        await con.run("COMMIT");
+      }
+      await con.run("CHECKPOINT");
+    } catch (error) {
+      held.close();
+      for (const suffix of ["", ".wal", ".tmp"]) {
+        await removeOwned(file + suffix);
+      }
+      throw error;
+    } finally {
+      held.close();
+      await removeOwned(`${file}.tmp`);
+    }
+    await Deno.chmod(file, 0o400);
+    return manifest;
+  }
+  async discardCapture(capture: BoundedCapture): Promise<void> {
+    const input = this.path(capture, "capture");
+    for (const file of [input, `${input}.wal`, `${input}.tmp`]) {
+      await removeOwned(file);
+    }
+  }
   private async query(con: DuckDBConnection, sql: string): Promise<Row[]> {
     await validateQuery(con, sql);
     const rows = await readerOf(con).query(
@@ -979,11 +1058,15 @@ export async function collectBoundedFiles(
       throw new Error("invalid retained bounded manifest");
     }
     const name = `capture-${capture.id}.duckdb`;
-    const info = await Deno.lstat(join(root, name));
-    if (!info.isFile || info.isSymlink) {
-      throw new Error("retained bounded capture must be a regular file");
+    try {
+      const info = await Deno.lstat(join(root, name));
+      if (!info.isFile || info.isSymlink) {
+        throw new Error("retained bounded capture must be a regular file");
+      }
+      keep.add(name);
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
     }
-    keep.add(name);
   }
   const owned = /^(capture|output)-([0-9a-f-]+)\.duckdb(?:\.(wal|tmp))?$/;
   for await (const entry of Deno.readDir(root)) {

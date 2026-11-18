@@ -34,7 +34,7 @@ function identifier(name: string) {
   return `"${name}"`;
 }
 
-function json(value: unknown): string {
+function assertFiniteJson(value: unknown): void {
   const ancestors = new Set<object>();
   const visit = (value: unknown): void => {
     if (
@@ -54,6 +54,10 @@ function json(value: unknown): string {
     ancestors.delete(value);
   };
   visit(value);
+}
+
+function json(value: unknown): string {
+  assertFiniteJson(value);
   return JSON.stringify(value);
 }
 
@@ -78,19 +82,39 @@ function validate(spec: Publication, out: unknown): Record<string, Row[]> {
       throw new Error(`computation ${spec.name}: ${table} is no list of rows`);
     }
     const ids = new Set<string>();
-    const columns = rows.length
-      ? JSON.stringify(Object.keys(rows[0]).sort())
-      : "";
+    const firstKeys = rows.length ? Object.keys(rows[0]) : [];
+    const sortedColumns = [...firstKeys].sort();
+    for (const name of sortedColumns) identifier(name);
     for (const row of rows) {
       if (typeof row.id !== "string" || ids.has(row.id)) {
         throw new Error(`${table} row id is not a unique text id`);
       }
       ids.add(row.id);
-      for (const name of Object.keys(row)) identifier(name);
-      if (JSON.stringify(Object.keys(row).sort()) !== columns) {
+      const keys = Object.keys(row);
+      let sameColumns = keys.length === firstKeys.length;
+      if (sameColumns) {
+        let sameOrder = true;
+        for (let i = 0; i < keys.length; i++) {
+          if (keys[i] !== firstKeys[i]) {
+            sameOrder = false;
+            break;
+          }
+        }
+        if (!sameOrder) {
+          keys.sort();
+          for (let i = 0; i < keys.length; i++) {
+            if (keys[i] !== sortedColumns[i]) {
+              sameColumns = false;
+              break;
+            }
+          }
+        }
+      }
+      if (!sameColumns) {
+        for (const name of keys) identifier(name);
         throw new Error(`${table} rows differ in columns`);
       }
-      json(row);
+      assertFiniteJson(row);
     }
   }
   return out as Record<string, Row[]>;
@@ -550,7 +574,7 @@ async function apply(
         );
         summary[table].deleted += result.rowCount!;
       }
-    } else {
+    } else if (sinks[table].length <= BATCH) {
       const result = await client.query(
         `DELETE FROM public.${identifier(table)} AS sink
          WHERE NOT EXISTS (
@@ -562,6 +586,31 @@ async function apply(
         [json(sinks[table].map(({ id }) => ({ id })))],
       );
       summary[table].deleted = result.rowCount!;
+    } else {
+      const retainedName = `retained_${crypto.randomUUID().replaceAll("-", "")}`;
+      const retainedStage = `pg_temp.${identifier(retainedName)}`;
+      await client.query(
+        `CREATE TEMP TABLE ${identifier(retainedName)} ON COMMIT DROP AS SELECT id FROM public.${identifier(table)} WITH NO DATA`,
+      );
+      await client.query(`GRANT SELECT ON TABLE ${retainedStage} TO PUBLIC`);
+      await client.query(`CREATE UNIQUE INDEX ON ${retainedStage} (id)`);
+      const rows = sinks[table];
+      for (let i = 0; i < rows.length; i += BATCH) {
+        await client.query(
+          `INSERT INTO ${retainedStage} (id)
+           SELECT id FROM json_populate_recordset(NULL::public.${identifier(table)}, $1::json)`,
+          [json(rows.slice(i, i + BATCH).map(({ id }) => ({ id })))],
+        );
+      }
+      const result = await client.query(
+        `DELETE FROM public.${identifier(table)} AS sink
+         WHERE NOT EXISTS (
+           SELECT FROM ${retainedStage} AS retained
+           WHERE sink.id = retained.id
+         )`,
+      );
+      summary[table].deleted = result.rowCount!;
+      await client.query(`DROP TABLE ${retainedStage}`);
     }
   }
   if (spec.onComplete) {

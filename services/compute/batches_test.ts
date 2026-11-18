@@ -1530,3 +1530,99 @@ pgTest(
     }
   },
 );
+
+pgTest(
+  "prepared write-captures avoid batch-lock starvation under concurrent invalidations and skip preparation on retained recovery",
+  async () => {
+    await using server = await postgres();
+    const db = new pg.Pool({ connectionString: server.url });
+    await db.query("CREATE TABLE partition_state (value int NOT NULL)");
+    const preparePaused = Promise.withResolvers<void>();
+    const releasePrepare = Promise.withResolvers<void>();
+    let prepareCalls = 0;
+    let captureCalls = 0;
+    let failFirstPublish = true;
+
+    const makeSpecs = (): BatchSpec[] => [
+      spec({
+        name: "ratings",
+        reads: [],
+        to: ["ratings"],
+        writesCapture: true,
+        prepareCapture: async () => {
+          prepareCalls++;
+          preparePaused.resolve();
+          await releasePrepare.promise;
+          return { delta: 42 };
+        },
+        capture: async (client, prepared) => {
+          captureCalls++;
+          const { delta } = prepared as { delta: number };
+          await client.query("INSERT INTO partition_state VALUES ($1)", [delta]);
+          return delta;
+        },
+        publish: () => {
+          if (failFirstPublish) {
+            failFirstPublish = false;
+            return Promise.reject(new Error("interrupted after claim"));
+          }
+          return Promise.resolve();
+        },
+      }),
+      spec({
+        name: "chances",
+        reads: [],
+        to: ["chances"],
+      }),
+    ];
+
+    let batches = await openBatches(server.url, makeSpecs(), { ...options, maxAttempts: 2 });
+    try {
+      await batches.invalidateNames(["ratings"]);
+      await db.query("UPDATE graphile_worker._private_jobs SET run_at = now()");
+      await preparePaused.promise;
+
+      const probe = await db.connect();
+      try {
+        await probe.query("BEGIN");
+        await probe.query("SET LOCAL lock_timeout = '100ms'");
+        assertEquals((await probe.query("SELECT 1 FROM durex.work FOR UPDATE NOWAIT")).rowCount, 1);
+        assertEquals((await probe.query("SELECT 1 FROM hybrid_compute_batch.instance FOR UPDATE NOWAIT")).rowCount, 2);
+        await probe.query("ROLLBACK");
+      } finally {
+        probe.release();
+      }
+
+      // Advance hybrid_compute_batch.instance repeatedly while prepareCapture is open;
+      // without upfront locking after prepareCapture, claim's SERIALIZABLE snapshot would abort with 40001.
+      for (let i = 0; i < 30; i++) {
+        await batches.invalidateNames(["chances"]);
+      }
+      releasePrepare.resolve();
+
+      await until(async () =>
+        (await db.query(
+          "SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE attempts = 1 AND locked_at IS NULL AND last_error IS NOT NULL",
+        )).rows[0].n === 1
+      );
+      assertEquals(prepareCalls, 1);
+      assertEquals(captureCalls, 1);
+      assertEquals((await db.query("SELECT value FROM partition_state")).rows, [{ value: 42 }]);
+
+      await batches.close();
+      await db.query("UPDATE graphile_worker._private_jobs SET run_at = now()");
+      batches = await openBatches(server.url, makeSpecs(), { ...options, maxAttempts: 2 });
+      await until(async () =>
+        (await db.query(
+          "SELECT bool_and(requested = completed) AS done FROM compute.batch",
+        )).rows[0].done
+      );
+      assertEquals(prepareCalls, 1);
+      assertEquals(captureCalls, 1);
+    } finally {
+      releasePrepare.resolve();
+      await batches.close();
+      await db.end();
+    }
+  },
+);

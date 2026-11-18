@@ -11,9 +11,9 @@ import { executionVersion, type Job, type JobCache, jobKey, Runner } from "./wor
 import { pgTest, postgres } from "./pg-test.ts";
 import { PostgresJobCache } from "./job-cache.ts";
 
-Deno.test("engine and Feldera program bytes fence retained computation inputs", async () => {
+Deno.test("engine and RisingWave program bytes fence retained computation inputs", async () => {
   assertEquals(queryEngine(), "duckdb-snapshot");
-  assertEquals(queryEngine("feldera"), "feldera");
+  assertEquals(queryEngine("risingwave"), "risingwave");
   assertThrows(
     () => queryEngine("auto"),
     Error,
@@ -24,22 +24,46 @@ Deno.test("engine and Feldera program bytes fence retained computation inputs", 
     const spec = {
       name: "analytics",
       file: `${dir}/program.js`,
-      feldera: `${dir}/feldera.json`,
+      risingwave: `${dir}/risingwave.json`,
       to: ["result"],
       wasm: [],
     };
     await Deno.writeTextFile(spec.file, "export const queries = {};");
-    await Deno.writeTextFile(spec.feldera, '{"sql":"SELECT 1"}');
+    await Deno.writeTextFile(spec.risingwave, '{"sql":"SELECT 1"}');
     const snapshot = await computationVersion(spec, [], "duckdb-snapshot");
-    const native = await computationVersion(spec, [], "feldera");
+    const native = await computationVersion(spec, [], "risingwave");
     assert(snapshot !== native);
     const bounded = { ...spec, steps: `${dir}/steps` };
+    await Deno.writeTextFile(
+      spec.risingwave,
+      JSON.stringify({
+        sql: "SELECT 1",
+        incremental: {
+          outputs: { out: { partitionQuery: "SELECT id AS __partition, id FROM t" } },
+        },
+      }),
+    );
     await Deno.writeTextFile(`${bounded.steps}.bundle.js`, "first bounded algorithm");
     const first = await computationVersion(bounded, [], "duckdb-snapshot");
+    const partitionedNative = await computationVersion(bounded, [], "risingwave");
     await Deno.writeTextFile(`${bounded.steps}.bundle.js`, "changed bounded algorithm");
     assert(first !== await computationVersion(bounded, [], "duckdb-snapshot"));
-    await Deno.writeTextFile(spec.feldera, '{"sql":"SELECT 2"}');
-    assert(native !== await computationVersion(spec, [], "feldera"));
+    assertEquals(partitionedNative, await computationVersion(bounded, [], "risingwave"));
+
+    await Deno.writeTextFile(
+      spec.risingwave,
+      JSON.stringify({
+        sql: "SELECT 1",
+        incremental: {
+          outputs: { out: { partitionQuery: "SELECT CAST('' AS VARCHAR) AS __partition, id FROM t" } },
+        },
+      }),
+    );
+    const globalNative = await computationVersion(bounded, [], "risingwave");
+    await Deno.writeTextFile(`${bounded.steps}.bundle.js`, "third bounded algorithm");
+    assert(globalNative !== await computationVersion(bounded, [], "risingwave"));
+    await Deno.writeTextFile(spec.risingwave, '{"sql":"SELECT 2"}');
+    assert(native !== await computationVersion(spec, [], "risingwave"));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -734,6 +758,16 @@ pgTest("durable job reuse keeps full phased results after edits, deletions and w
       assertEquals(writes, 8);
       assertEquals(await replay.calculate({ games: [] }), { sink: [] });
       assertEquals(writes, 8);
+      assertEquals(
+        await replay.calculateMany([
+          ["p1", { games: [{ id: "a" }, { id: "b" }] }],
+          ["p2", { games: [{ id: "c" }] }],
+        ]),
+        {
+          p1: await expected(["a", "b"]),
+          p2: await expected(["c"]),
+        },
+      );
     }
   } finally {
     await Deno.remove(dir, { recursive: true });

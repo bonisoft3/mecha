@@ -64,7 +64,7 @@ state transition:
 | `delete` | Cascade/Prune | `DELETE FROM <table> WHERE <predicate>` | Cleaning up transient child records upon terminal state. |
 | `call` | Stored procedure| `PERFORM <function>(...)` | Invoking domain-specific procedural logic. |
 | `notify` | Signaling | `PERFORM pg_notify('<channel>', <payload>)` | Waking a daemon inside the cluster; nothing is recorded. |
-| `stream` | DuckStream Signal | `PERFORM pg_notify('duckstream_<name>', ...)` | Signaling Feldera incremental circuits or refreshing streaming views. |
+| `stream` | DuckStream Signal | `PERFORM pg_notify('duckstream_<name>', ...)` | Signaling incremental streaming views or refreshing computations. |
 
 ## Invoking an external effect
 

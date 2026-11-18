@@ -9,7 +9,10 @@ export type BatchSpec = {
 	version: string;
 	initialize?(client: pg.PoolClient): Promise<void>;
 	hasCapture?(inputs: unknown): Promise<boolean>;
-	capture(client: pg.PoolClient): Promise<unknown>;
+	writesCapture?: boolean;
+	prepareCapture?(): Promise<unknown>;
+	abortCapture?(prepared: unknown): Promise<void> | void;
+	capture(client: pg.PoolClient, prepared?: unknown): Promise<unknown>;
 	captured?(inputs: unknown): Promise<void>;
 	supersedeOnForeignKey?: boolean;
 	calculate(inputs: unknown): Promise<unknown>;
@@ -83,6 +86,7 @@ export async function openBatches(
 		pollInterval?: number;
 		coalesceMs?: number;
 		invalidateOnStart?: boolean;
+		afterBootstrap?: () => Promise<void>;
 	} = {},
 ): Promise<Batches> {
 	const attempts = options.maxAttempts ?? 25;
@@ -97,6 +101,9 @@ export async function openBatches(
 		throw new Error("too many computations for the bounded coordinator");
 	}
 	const byName = new Map(specs.map((s) => [s.name, s]));
+	const hasPreparedOrWriteCapture = specs.some((s) =>
+		Boolean(s.writesCapture || s.prepareCapture)
+	);
 	const { parents, ordered } = computationGraph(specs);
 	async function transaction<T>(
 		db: pg.Pool,
@@ -343,6 +350,7 @@ export async function openBatches(
 				"SELECT compute.reconcile($1::boolean)",
 				[Boolean(options.invalidateOnStart)],
 			));
+			await options.afterBootstrap?.();
 		},
 		async task(payload, db) {
 			const { key } = payload as { key: string };
@@ -411,6 +419,9 @@ export async function openBatches(
 			};
 			const claim = await (async () => {
 				const client = await db.connect();
+				let preparedSpec: BatchSpec | undefined;
+				let prepared: unknown;
+				let completedClaim = false;
 				let deferred:
 					| {
 						spec: BatchSpec;
@@ -429,166 +440,233 @@ export async function openBatches(
 					}
 					| undefined;
 				try {
-					for (let attempt = 0;; attempt++) {
-						await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-						try {
-							const { rows: [work] } = await client.query<WorkDelivery>(
-								"SELECT * FROM durex.work WHERE key = $1",
+					try {
+						let lockEarly = false;
+						if (hasPreparedOrWriteCapture) {
+							const { rows: [pre] } = await client.query<{
+								outcome: WorkDelivery["outcome"];
+								input: { name: string };
+								version: string | null;
+								claimed: string | null;
+								inputs: unknown;
+							}>(
+								`SELECT w.outcome, w.input, b.version, b.claimed, b.inputs
+								 FROM durex.work w
+								 LEFT JOIN compute.batch b ON b.name = w.input->>'name'
+								 WHERE w.key = $1`,
 								[key],
 							);
-							if (!work) throw new Error(`durex.work holds no ${key}`);
-							if (work.outcome !== null) {
-								await client.query("COMMIT");
-								return;
+							if (!pre) throw new Error(`durex.work holds no ${key}`);
+							if (pre.outcome !== null) return;
+							const preSpec = byName.get(pre.input.name);
+							if (!preSpec) {
+								throw new Error(`unknown computation ${pre.input.name}`);
 							}
-							const { name } = work.input as { name: string };
-							const spec = byName.get(name);
-							if (!spec) throw new Error(`unknown computation ${name}`);
-							const { rows: [state] } = await client.query(
-								"SELECT * FROM compute.batch WHERE name=$1",
-								[name],
-							);
-							if (state.version !== spec.version) {
-								throw new Error(`incompatible computation ${name}`);
+							if (pre.version !== preSpec.version) {
+								throw new Error(`incompatible computation ${pre.input.name}`);
 							}
-							if (state.claimed !== null) {
-								if (!spec.hasCapture || await spec.hasCapture(state.inputs)) {
-									await client.query("COMMIT");
-									return { spec, work, inputs: state.inputs, unchanged: false };
+							const retained = pre.claimed !== null &&
+								(!preSpec.hasCapture || await preSpec.hasCapture(pre.inputs));
+							lockEarly = Boolean(preSpec.writesCapture) && !retained;
+							if (!retained && preSpec.prepareCapture) {
+								prepared = await preSpec.prepareCapture();
+								preparedSpec = preSpec;
+							}
+						}
+						for (let attempt = 0;;) {
+							await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+							let locked = false;
+							let sawWrite = false;
+							try {
+								if (lockEarly) {
+									await client.query("SELECT compute.lock_batches()");
+									locked = true;
 								}
-							}
-							const { rows: [coverage] } = await client.query<{
-								input: Record<string, unknown> | null;
-								sink: Record<string, unknown> | null;
-								completed: Record<string, unknown> | null;
-							}>(
-								`SELECT compute.input_coverage($2) AS input,
-                        compute.sink_coverage($2) AS sink,
-                        c.completed_coverage AS completed
-                 FROM compute.capture c WHERE c.instance_id=$1`,
-								[work.instance, name],
-							);
-							const captured = await spec.capture(client);
-							const inputs = strictJson(captured);
-							const digest = captureDigest(captured);
-							const { rows: [{ wrote }] } = await client.query<{ wrote: boolean }>(
-								"SELECT pg_current_xact_id_if_assigned() IS NOT NULL AS wrote",
-							);
-							if (wrote) {
-								await client.query("SELECT compute.lock_batches()");
-								const lockedWork = await getWork(client, key);
-								if (lockedWork.outcome !== null) {
+								const work = locked ? await getWork(client, key) : await (async () => {
+									const { rows: [row] } = await client.query<WorkDelivery>(
+										"SELECT * FROM durex.work WHERE key = $1",
+										[key],
+									);
+									if (!row) throw new Error(`durex.work holds no ${key}`);
+									return row;
+								})();
+								if (work.outcome !== null) {
 									await client.query("COMMIT");
 									return;
 								}
-								const result = await finishClaim(
+								const { name } = work.input as { name: string };
+								const spec = byName.get(name);
+								if (!spec) throw new Error(`unknown computation ${name}`);
+								const { rows: [state] } = await client.query(
+									"SELECT * FROM compute.batch WHERE name=$1",
+									[name],
+								);
+								if (state.version !== spec.version) {
+									throw new Error(`incompatible computation ${name}`);
+								}
+								if (state.claimed !== null) {
+									if (!spec.hasCapture || await spec.hasCapture(state.inputs)) {
+										await client.query("COMMIT");
+										return { spec, work, inputs: state.inputs, unchanged: false };
+									}
+								}
+								if (spec.prepareCapture && preparedSpec !== spec) {
+									await client.query("ROLLBACK");
+									prepared = await spec.prepareCapture();
+									preparedSpec = spec;
+									lockEarly = Boolean(spec.writesCapture);
+									continue;
+								}
+								const { rows: [coverage] } = await client.query<{
+									input: Record<string, unknown> | null;
+									sink: Record<string, unknown> | null;
+									completed: Record<string, unknown> | null;
+								}>(
+									`SELECT compute.input_coverage($2) AS input,
+                        compute.sink_coverage($2) AS sink,
+                        c.completed_coverage AS completed
+                 FROM compute.capture c WHERE c.instance_id=$1`,
+									[work.instance, name],
+								);
+								const captured = await spec.capture(
 									client,
+									preparedSpec === spec ? prepared : undefined,
+								);
+								const inputs = strictJson(captured);
+								const digest = captureDigest(captured);
+								const { rows: [{ wrote }] } = await client.query<{ wrote: boolean }>(
+									"SELECT pg_current_xact_id_if_assigned() IS NOT NULL AS wrote",
+								);
+								if (wrote) sawWrite = true;
+								if (wrote || locked) {
+									if (!locked) await client.query("SELECT compute.lock_batches()");
+									const lockedWork = locked ? work : await getWork(client, key);
+									if (lockedWork.outcome !== null) {
+										await client.query("COMMIT");
+										return;
+									}
+									const result = await finishClaim(
+										client,
+										spec,
+										lockedWork,
+										state.claimed !== null,
+										state.requested,
+										state.completed,
+										coverage,
+										state.requested,
+										coverage,
+										inputs,
+										digest,
+									);
+									await client.query("COMMIT");
+									completedClaim = true;
+									return result;
+								}
+								await client.query("COMMIT");
+								deferred = {
 									spec,
-									lockedWork,
-									state.claimed !== null,
-									state.requested,
-									state.completed,
+									work,
+									alreadyClaimed: state.claimed !== null,
+									requested: state.requested,
+									completed: state.completed,
 									coverage,
-									state.requested,
-									coverage,
+									captured,
 									inputs,
 									digest,
-								);
-								await client.query("COMMIT");
-								return result;
+								};
+								break;
+							} catch (error) {
+								await client.query("ROLLBACK");
+								if (
+									!(error instanceof pg.DatabaseError) ||
+									!["40001", "40P01"].includes(error.code ?? "") ||
+									attempt >= TRANSACTION_ATTEMPTS - 1
+								) throw error;
+								if (sawWrite) lockEarly = true;
+								attempt++;
 							}
-							await client.query("COMMIT");
-							deferred = {
-								spec,
-								work,
-								alreadyClaimed: state.claimed !== null,
-								requested: state.requested,
-								completed: state.completed,
-								coverage,
-								captured,
-								inputs,
-								digest,
-							};
-							break;
-						} catch (error) {
-							await client.query("ROLLBACK");
-							if (
-								!(error instanceof pg.DatabaseError) ||
-								!["40001", "40P01"].includes(error.code ?? "") ||
-								attempt >= TRANSACTION_ATTEMPTS - 1
-							) throw error;
 						}
+					} finally {
+						client.release();
 					}
-				} finally {
-					client.release();
-				}
-				if (!deferred) return;
-				let discardDeferred = false;
-				const claimed = await transaction(db, async (claimClient) => {
-					const work = await getWork(claimClient, key);
-					if (work.outcome !== null) {
-						discardDeferred = true;
-						return;
-					}
-					const { rows: [afterState] } = await claimClient.query(
-						"SELECT * FROM compute.batch WHERE name=$1",
-						[deferred.spec.name],
-					);
-					if (afterState.version !== deferred.spec.version) {
-						discardDeferred = true;
-						throw new Error(`incompatible computation ${deferred.spec.name}`);
-					}
-					if (!deferred.alreadyClaimed && afterState.claimed !== null) {
-						discardDeferred = true;
-						return;
-					}
-					const { rows: [afterCoverage] } = await claimClient.query<{
-						input: Record<string, unknown> | null;
-						sink: Record<string, unknown> | null;
-						completed: Record<string, unknown> | null;
-					}>(
-						`SELECT compute.input_coverage($2) AS input,
+					const pendingDeferred = deferred;
+					if (!pendingDeferred) return;
+					let discardDeferred = false;
+					const claimed = await transaction(db, async (claimClient) => {
+						const work = await getWork(claimClient, key);
+						if (work.outcome !== null) {
+							discardDeferred = true;
+							return;
+						}
+						const { rows: [afterState] } = await claimClient.query(
+							"SELECT * FROM compute.batch WHERE name=$1",
+							[pendingDeferred.spec.name],
+						);
+						if (afterState.version !== pendingDeferred.spec.version) {
+							discardDeferred = true;
+							throw new Error(
+								`incompatible computation ${pendingDeferred.spec.name}`,
+							);
+						}
+						if (!pendingDeferred.alreadyClaimed && afterState.claimed !== null) {
+							discardDeferred = true;
+							return;
+						}
+						const { rows: [afterCoverage] } = await claimClient.query<{
+							input: Record<string, unknown> | null;
+							sink: Record<string, unknown> | null;
+							completed: Record<string, unknown> | null;
+						}>(
+							`SELECT compute.input_coverage($2) AS input,
                     compute.sink_coverage($2) AS sink,
                     c.completed_coverage AS completed
              FROM compute.capture c WHERE c.instance_id=$1`,
-						[work.instance, deferred.spec.name],
-					);
-					discardDeferred = false;
-					return await finishClaim(
-						claimClient,
-						deferred.spec,
-						work,
-						deferred.alreadyClaimed,
-						deferred.requested,
-						deferred.completed,
-						deferred.coverage,
-						afterState.requested,
-						afterCoverage,
-						deferred.inputs,
-						deferred.digest,
-					);
-				}).catch(async (error) => {
+							[work.instance, pendingDeferred.spec.name],
+						);
+						discardDeferred = false;
+						return await finishClaim(
+							claimClient,
+							pendingDeferred.spec,
+							work,
+							pendingDeferred.alreadyClaimed,
+							pendingDeferred.requested,
+							pendingDeferred.completed,
+							pendingDeferred.coverage,
+							afterState.requested,
+							afterCoverage,
+							pendingDeferred.inputs,
+							pendingDeferred.digest,
+						);
+					}).catch(async (error) => {
+						if (
+							pendingDeferred.captured &&
+							typeof pendingDeferred.captured === "object" &&
+							pendingDeferred.spec.release
+						) {
+							await pendingDeferred.spec.release(pendingDeferred.captured, {
+								...(pendingDeferred.captured as Record<string, unknown>),
+								capture: pendingDeferred.captured,
+							});
+						}
+						throw error;
+					});
 					if (
-						deferred.captured && typeof deferred.captured === "object" &&
-						deferred.spec.release
+						discardDeferred && pendingDeferred.captured &&
+						typeof pendingDeferred.captured === "object" &&
+						pendingDeferred.spec.release
 					) {
-						await deferred.spec.release(deferred.captured, {
-							...(deferred.captured as Record<string, unknown>),
-							capture: deferred.captured,
+						await pendingDeferred.spec.release(pendingDeferred.captured, {
+							...(pendingDeferred.captured as Record<string, unknown>),
+							capture: pendingDeferred.captured,
 						});
 					}
-					throw error;
-				});
-				if (
-					discardDeferred && deferred.captured &&
-					typeof deferred.captured === "object" && deferred.spec.release
-				) {
-					await deferred.spec.release(deferred.captured, {
-						...(deferred.captured as Record<string, unknown>),
-						capture: deferred.captured,
-					});
+					if (claimed) completedClaim = true;
+					return claimed;
+				} finally {
+					if (!completedClaim && preparedSpec) {
+						await preparedSpec.abortCapture?.(prepared);
+					}
 				}
-				return claimed;
 			})();
 			if (!claim) return;
 			await claim.spec.captured?.(claim.inputs);

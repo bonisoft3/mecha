@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import pg from "npm:pg@8.16.3";
 import { type Batches, openBatches } from "./batches.ts";
+import { BoundedRuntime } from "./bounded-runtime.ts";
 import type { DeltaStep } from "./deltas.ts";
 import { NativeRuntime } from "./native-runtime.ts";
 import { type IncrementalProgram, sourceSchema } from "./native-sources.ts";
@@ -719,6 +720,396 @@ pgTest(
       await writer.query("ROLLBACK");
       writer.release();
       await starting;
+    }
+  },
+);
+
+// Single-partition global computations (e.g. ratings) exceed 5,000 rows and
+// approach PostgreSQL's 256 MiB jsonb datum cap if stored inline.
+pgTest(
+  "oversized native partitions spill to stream_partition_chunk and survive restart",
+  async () => {
+    await using server = await postgres();
+    const db = new pg.Pool({ connectionString: server.url });
+    try {
+      await db.query(`CREATE ROLE service NOLOGIN;
+        CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$;
+        CREATE TABLE item(id text PRIMARY KEY,bucket text NOT NULL,amount int NOT NULL);
+        INSERT INTO item SELECT 'k'||i,'global',1 FROM generate_series(1,5200) i;
+        CREATE TABLE sink(id text PRIMARY KEY,amount bigint NOT NULL);
+        GRANT ALL ON sink TO service;`);
+      const detailProgram: IncrementalProgram = {
+        ...program,
+        outputs: {
+          totals: {
+            view: "result_totals",
+            fields: [
+              { name: "id", type: "VARCHAR" },
+              { name: "bucket", type: "VARCHAR" },
+              { name: "amount", type: "INTEGER" },
+            ],
+          },
+        },
+        incremental: {
+          ...program.incremental,
+          outputs: {
+            totals: {
+              partitionQuery: "SELECT bucket AS __partition,* FROM source_item",
+            },
+          },
+        },
+      };
+      let baselineRows = 0;
+      const runOnce = async () => {
+        let acked = false;
+        const runtime = new NativeRuntime(
+          db,
+          "http://unused.invalid",
+          {
+            name: "totals",
+            to: ["sink"],
+            calculate: (val) => {
+              const { totals } = val as { totals: Row[] };
+              return Promise.resolve({
+                sink: [{
+                  id: "global",
+                  amount: totals.reduce((s, r) => s + Number(r.amount), 0),
+                }],
+              });
+            },
+          },
+          detailProgram,
+          version,
+          server.url,
+          { role: "service" },
+        );
+        runtime.engine.check = () => Promise.resolve();
+        runtime.engine.initialize = (_db, initial) => {
+          baselineRows = initial.totals.length;
+          acked = baselineRows === 5200;
+          return Promise.resolve();
+        };
+        runtime.engine.pending = () => Promise.resolve(!acked);
+        runtime.engine.capture = async () => {
+          if (acked) return { totals: [] };
+          const { rows } = await db.query(
+            `SELECT bucket AS __partition,id,bucket,amount FROM ${
+              sourceSchema(version)
+            }.source_item ORDER BY id`,
+          );
+          return { totals: rows.map((row) => ({ row, weight: 1 })) };
+        };
+        runtime.engine.acknowledge = () => {
+          acked = true;
+          return Promise.resolve();
+        };
+        const batches = await openBatches(server.url, [runtime.spec], {
+          coalesceMs: 0,
+          pollInterval: 20,
+          afterBootstrap: () => runtime.initialize(),
+        });
+        try {
+          if (await runtime.pending()) {
+            await batches.invalidateNames(["totals"]);
+          }
+          await until(async () =>
+            (await db.query(
+              "SELECT requested=completed AS done FROM compute.batch",
+            )).rows[0].done
+          );
+        } finally {
+          await batches.close();
+          await runtime.close();
+        }
+      };
+      await runOnce();
+      assertEquals(baselineRows, 0);
+      assertEquals(
+        (await db.query(
+          "SELECT count(*)::int AS n FROM compute.stream_partition_chunk",
+        )).rows,
+        [{ n: 2 }],
+      );
+      assertEquals(
+        (await db.query("SELECT id,amount::int FROM sink")).rows,
+        [{ id: "global", amount: 5200 }],
+      );
+      await runOnce();
+      assertEquals(baselineRows, 5200);
+    } finally {
+      await db.end();
+    }
+  },
+);
+
+pgTest(
+  "native bounded steps stream chunked global partitions, stage sink pages, repair manual edits, and clean scratch files",
+  async () => {
+    await using server = await postgres();
+    const db = new pg.Pool({ connectionString: server.url });
+    const directory = await Deno.makeTempDir();
+    try {
+      await db.query(`CREATE ROLE service NOLOGIN;
+        CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$;
+        CREATE TABLE item(id text PRIMARY KEY,bucket text NOT NULL,amount int NOT NULL);
+        INSERT INTO item SELECT 'item-' || lpad(i::text,4,'0'),'global',1 FROM generate_series(1,5200) i;
+        CREATE TABLE sink(id text PRIMARY KEY,amount int NOT NULL);
+        GRANT ALL ON sink TO service`);
+      const detailProgram: IncrementalProgram = {
+        ...program,
+        outputs: {
+          totals: {
+            view: "result_totals",
+            fields: [
+              { name: "id", type: "VARCHAR" },
+              { name: "bucket", type: "VARCHAR" },
+              { name: "amount", type: "INTEGER" },
+            ],
+          },
+        },
+        incremental: {
+          ...program.incremental,
+          outputs: {
+            totals: {
+              partitionQuery:
+                "SELECT '' AS __partition,id,bucket,amount FROM result_totals",
+            },
+          },
+        },
+      };
+      // Unpaged ratings-style global partitions exceed V8 heap if routed through
+      // monolithic calculate(); bounded steps page through DuckDB scratch tables.
+      const stepBundle =
+        `export const reads=[]; export const queries={}; export const finish=()=>({});
+export async function plan(host, _seed, checkpoint) {
+  if (checkpoint === 'done') return {checkpoint:'done',writes:{},done:true};
+  const [row] = await host.query("SELECT coalesce(sum((value->>'amount')::INTEGER),0)::INTEGER AS total FROM duckstream_private.result_totals");
+  return {checkpoint:'done',writes:{sink:[{id:'global',amount:row.total}]},done:true};
+}`;
+      const stepsRuntime = await BoundedRuntime.create({
+        directory,
+        databaseUrl: "",
+        source: stepBundle,
+        version,
+        spec: {
+          name: "totals",
+          file: "totals.js",
+          steps: "totals-steps",
+          to: ["sink"],
+          wasm: [],
+        },
+        reads: ["item"],
+        queries: { totals: "SELECT id,bucket,amount FROM item" },
+        runner: {
+          run: () => {
+            throw new Error("unexpected WASM");
+          },
+        },
+      });
+      await Deno.writeTextFile(
+        `${directory}/capture-00000000-0000-4000-8000-000000000099.duckdb`,
+        "orphan",
+      );
+      let acked = false;
+      const runtime = new NativeRuntime(
+        db,
+        "http://unused.invalid",
+        {
+          name: "totals",
+          to: ["sink"],
+          calculate: () => {
+            throw new Error("monolithic calculate must not run when steps exist");
+          },
+        },
+        detailProgram,
+        version,
+        server.url,
+        { role: "service" },
+        { runtime: stepsRuntime, directory },
+      );
+      runtime.engine.check = () => Promise.resolve();
+      runtime.engine.initialize = () => Promise.resolve();
+      runtime.engine.pending = () => Promise.resolve(!acked);
+      runtime.engine.capture = async () => {
+        if (acked) return { totals: [] };
+        const { rows } = await db.query(
+          `SELECT '' AS __partition,id,bucket,amount FROM ${
+            sourceSchema(version)
+          }.source_item ORDER BY id`,
+        );
+        return { totals: rows.map((row) => ({ row, weight: 1 })) };
+      };
+      runtime.engine.acknowledge = () => {
+        acked = true;
+        return Promise.resolve();
+      };
+      const batches = await openBatches(server.url, [runtime.spec], {
+        coalesceMs: 0,
+        pollInterval: 20,
+        afterBootstrap: () => runtime.initialize(),
+      });
+      try {
+        if (await runtime.pending()) await batches.invalidateNames(["totals"]);
+        await until(async () =>
+          (await db.query(
+            "SELECT requested=completed AS done FROM compute.batch",
+          )).rows[0].done &&
+          (await Array.fromAsync(Deno.readDir(directory))).length === 0
+        );
+        assertEquals(
+          (await db.query("SELECT id,amount::int FROM sink")).rows,
+          [{ id: "global", amount: 5200 }],
+        );
+
+        // Manual sink mutation marks the global partition dirty through compute.stream_owner.
+        await db.query("UPDATE sink SET amount=0 WHERE id='global'");
+        assertEquals(await runtime.pending(), true);
+        await batches.invalidateNames(["totals"]);
+        await until(async () =>
+          (await db.query(
+            "SELECT requested=completed AND completed=2 AS done FROM compute.batch",
+          )).rows[0].done &&
+          (await Array.fromAsync(Deno.readDir(directory))).length === 0
+        );
+        assertEquals(
+          (await db.query("SELECT id,amount::int FROM sink")).rows,
+          [{ id: "global", amount: 5200 }],
+        );
+      } finally {
+        await batches.close();
+        await runtime.close();
+      }
+    } finally {
+      await Deno.remove(directory, { recursive: true });
+      await db.end();
+    }
+  },
+);
+
+pgTest(
+  "large partition batches page outputs through stream_partition without retaining full V8 maps",
+  async () => {
+    await using server = await postgres();
+    const db = new pg.Pool({ connectionString: server.url });
+    try {
+      await db.query(`CREATE ROLE service NOLOGIN;
+        CREATE OR REPLACE FUNCTION public.app_pre_request() RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$;
+        CREATE TABLE item(id text PRIMARY KEY,bucket text NOT NULL,amount int NOT NULL);
+        INSERT INTO item SELECT 'i-' || lpad(i::text,4,'0'),'p-' || lpad(i::text,4,'0'),i FROM generate_series(1,200) i;
+        CREATE TABLE sink(id text PRIMARY KEY,amount int NOT NULL);
+        CREATE TABLE child_sink(id text PRIMARY KEY,parent_id text NOT NULL REFERENCES sink(id),amount int NOT NULL);
+        INSERT INTO sink VALUES ('stale',999);
+        GRANT ALL ON sink,child_sink TO service`);
+      let manyCalls = 0;
+      let emitNaN = true;
+      let acked = false;
+      const runtime = new NativeRuntime(
+        db,
+        "http://unused.invalid",
+        {
+          name: "totals",
+          to: ["sink", "child_sink"],
+          calculate: () => Promise.reject(new Error("expected calculateMany")),
+          calculateMany: (entries) => {
+            if (emitNaN) {
+              emitNaN = false;
+              const [[firstKey]] = [...entries];
+              return Promise.resolve({
+                [firstKey]: {
+                  sink: [{ id: firstKey, amount: Number.NaN }],
+                  child_sink: [],
+                },
+              });
+            }
+            manyCalls++;
+            return Promise.resolve(
+              Object.fromEntries(
+                [...entries].map(([k, val]) => {
+                  const { totals } = val as { totals: Row[] };
+                  return [
+                    k,
+                    {
+                      sink: totals.map((r) => ({
+                        id: r.bucket,
+                        amount: r.amount,
+                      })),
+                      // Slice 0 references p-0200 from slice 1 to verify parent-first sink ordering across slices.
+                      child_sink: totals.map((r) => ({
+                        id: `c-${r.bucket}`,
+                        parent_id: "p-0200",
+                        amount: r.amount,
+                      })),
+                    },
+                  ];
+                }),
+              ),
+            );
+          },
+        },
+        program,
+        version,
+        server.url,
+        { role: "service" },
+      );
+      runtime.engine.check = () => Promise.resolve();
+      runtime.engine.initialize = () => Promise.resolve();
+      runtime.engine.pending = () => Promise.resolve(!acked);
+      runtime.engine.capture = async () => {
+        if (acked) return { totals: [] };
+        const { rows } = await db.query(
+          `SELECT bucket AS __partition,bucket,amount FROM ${
+            sourceSchema(version)
+          }.source_item ORDER BY bucket`,
+        );
+        return { totals: rows.map((row) => ({ row, weight: 1 })) };
+      };
+      runtime.engine.acknowledge = () => {
+        acked = true;
+        return Promise.resolve();
+      };
+      const batches = await openBatches(server.url, [runtime.spec], {
+        coalesceMs: 0,
+        pollInterval: 20,
+        afterBootstrap: () => runtime.initialize(),
+      });
+      try {
+        if (await runtime.pending()) await batches.invalidateNames(["totals"]);
+        await until(async () =>
+          (await db.query(
+            "SELECT count(*)::int AS n FROM graphile_worker._private_jobs WHERE attempts = 1 AND locked_at IS NULL AND last_error IS NOT NULL",
+          )).rows[0].n === 1
+        );
+        await db.query("UPDATE graphile_worker._private_jobs SET run_at = now()");
+        await until(async () =>
+          (await db.query(
+            "SELECT requested=completed AS done FROM compute.batch",
+          )).rows[0].done
+        );
+        assertEquals(manyCalls, 2);
+        assertEquals(
+          (await db.query(
+            "SELECT count(*)::int AS n,sum(amount)::int AS total FROM sink",
+          )).rows,
+          [{ n: 200, total: 20100 }],
+        );
+        assertEquals(
+          (await db.query(
+            "SELECT count(*)::int AS n,sum(amount)::int AS total FROM child_sink",
+          )).rows,
+          [{ n: 200, total: 20100 }],
+        );
+        assertEquals(
+          (await db.query(
+            "SELECT count(*)::int AS n FROM compute.stream_partition WHERE outputs <> '{}'::jsonb",
+          )).rows,
+          [{ n: 0 }],
+        );
+      } finally {
+        await batches.close();
+        await runtime.close();
+      }
+    } finally {
+      await db.end();
     }
   },
 );

@@ -255,4 +255,4 @@ Pronto packages the same admitted computation, pure WASM workers and generated
 DuckDB SQL for Pages. DuckDB-Wasm, JSON and ICU are packaged assets with pinned
 versions and extension checksums; execution requires no extension downloads.
 This remains whole-snapshot execution for small demos. The native runtime
-uses Feldera for incremental relational maintenance.
+uses RisingWave for incremental relational maintenance.

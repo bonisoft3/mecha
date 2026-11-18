@@ -58,10 +58,10 @@
 
 import pg from "npm:pg@8.16.3";
 import { NativeRuntime } from "./native-runtime.ts";
-import { compilationProfile } from "./native-feldera.ts";
 import { reconcileNativeResources } from "./native-cleanup.ts";
+import { isGlobalIncrementalProgram } from "./native-sources.ts";
 import type { BatchSpec } from "./batches.ts";
-import { Feldera, type FelderaProgram } from "./feldera.ts";
+import { RisingWave, type RisingWaveProgram } from "./risingwave.ts";
 import {
   dropStagedPages,
   preparePublish,
@@ -74,8 +74,9 @@ import {
 import { BoundedRuntime, collectBoundedFiles, type BoundedCapture, type BoundedOutput } from "./bounded-runtime.ts";
 import { type SinkWrites, validateSinkWrites } from "../../packages/compute-snapshot/src/sink-writes.ts";
 import { PostgresJobCache } from "./job-cache.ts";
-import type { TypeTable } from "./portable-contract.ts";
+import type { PortableType, TypeTable } from "./portable-contract.ts";
 import { bindBoundary, portableQuery, type TypeBoundary, type TypeSchemas, validateSchemas } from "./portable.ts";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -160,7 +161,7 @@ const PLAIN = createDuckDBValueConverter(BY_TYPE as Record<DuckDBTypeId, DuckDBV
 export type Spec = {
   name: string;
   file: string;
-  feldera?: string;
+  risingwave?: string;
   steps?: string;
   to: string[];
   wasm: string[];
@@ -201,6 +202,24 @@ export async function seedOf(name: string): Promise<number> {
 
 /** Each wasm file's stem, its name in a job. */
 export const stem = (file: string) => file.replace(/^.*\//, "").replace(/\.wasm$/, "");
+
+const RISINGWAVE_PHYSICAL: Record<PortableType, readonly string[]> = {
+  string: ["VARCHAR"],
+  bool: ["BOOLEAN"],
+  int32: ["SMALLINT", "INTEGER"],
+  int64: ["SMALLINT", "INTEGER", "BIGINT", "VARCHAR"],
+  double: ["DOUBLE"],
+  bytes: ["VARCHAR"],
+  uuid: ["VARCHAR"],
+  timestamp: ["TIMESTAMP", "VARCHAR"],
+  date: ["VARCHAR"],
+  time: ["VARCHAR"],
+  timezone: ["VARCHAR"],
+  duration: ["VARCHAR"],
+  decimal: ["SMALLINT", "INTEGER", "BIGINT", "VARCHAR"],
+  json: ["VARCHAR"],
+  geojson: ["VARCHAR"],
+};
 
 export class Computation implements Runnable {
   private previous?: { inputs: Record<string, Row[]>; out: unknown };
@@ -272,7 +291,11 @@ export class Computation implements Runnable {
     return inputs;
   }
 
-  feldera(endpoint: string, program: FelderaProgram): Feldera {
+  risingwave(
+    endpoint: string,
+    program: RisingWaveProgram,
+    connect?: ConstructorParameters<typeof RisingWave>[3],
+  ): RisingWave {
     if (
       !isDeepStrictEqual(
         Object.keys(program.outputs).sort(),
@@ -280,28 +303,93 @@ export class Computation implements Runnable {
       )
     ) {
       throw new Error(
-        `computation ${this.name}: Feldera outputs differ from declared queries`,
+        `computation ${this.name}: RisingWave outputs differ from declared queries`,
       );
     }
     for (const [name, fields] of Object.entries(this.queryTypes ?? {})) {
       const physical = program.outputs[name].fields;
-      bindBoundary({ fields, types: this.types! }).columns(physical.map((field) => field.name));
+      const held = bindBoundary({ fields, types: this.types! });
+      held.columns(physical.map((field) => field.name));
       for (const field of fields) {
-        if (field.type !== "uuid" || physical.find((column) => column.name === field.name)?.type !== "VARCHAR") {
+        const canonical = held.bound.canonicalType(field.type);
+        const carrier = physical.find((column) => column.name === field.name)
+          ?.type;
+        if (!carrier || !RISINGWAVE_PHYSICAL[canonical].includes(carrier)) {
           throw new Error(
-            `computation ${this.name}: typed Feldera query ${name}.${field.name} requires an admitted UUID string carrier`,
+            `computation ${this.name}: typed RisingWave query ${name}.${field.name} cannot use ${carrier} carrier for ${canonical}`,
           );
         }
       }
     }
-    return new Feldera(endpoint, this.name, program);
+    return new RisingWave(
+      endpoint,
+      this.name,
+      program,
+      connect,
+      (name, rows) =>
+        this.normalizeRisingWaveOutput(name, rows, program.outputs[name]?.fields),
+    );
+  }
+
+  normalizeRisingWaveOutput(
+    name: string,
+    rows: Row[],
+    fields?: { name: string; type: string }[],
+  ): Row[] {
+    const declared = this.queryTypes?.[name];
+    if (declared !== undefined) {
+      const held = bindBoundary({ fields: declared, types: this.types! });
+      const prepared = rows.map((row) => {
+        const copy: Row = { ...row };
+        for (const field of declared) {
+          const val = copy[field.name];
+          if (
+            held.bound.canonicalType(field.type) === "timestamp" &&
+            typeof val === "string" &&
+            /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(val)
+          ) {
+            copy[field.name] = `${val.replace(" ", "T")}Z`;
+          }
+        }
+        return copy;
+      });
+      return held.rows(prepared, "duckdb");
+    }
+    for (const row of rows) {
+      for (const [col, val] of Object.entries(row)) {
+        const f = fields?.find((field) => field.name === col);
+        if (f?.type === "BIGINT" && typeof val !== "number" && val !== null) {
+          throw new RangeError(`${val} is beyond a number's exact integers`);
+        }
+      }
+    }
+    return rows;
+  }
+
+  normalizeRisingWaveInputs(
+    inputs: Record<string, Row[]>,
+    program: RisingWaveProgram,
+  ): Record<string, Row[]> {
+    return Object.fromEntries(
+      Object.entries(inputs).map(([name, rows]) => [
+        name,
+        this.normalizeRisingWaveOutput(
+          name,
+          rows,
+          program.outputs[name]?.fields,
+        ),
+      ]),
+    );
   }
 
   async run(lake: Reader): Promise<unknown> {
     return await this.calculate(await this.capture(lake));
   }
 
-  async calculate(value: unknown): Promise<unknown> {
+  private validateInputs(
+    value: unknown,
+    boundaries?: Record<string, ReturnType<typeof bindBoundary>>,
+  ): Record<string, Row[]> {
     if (
       !isRow(value) || Object.keys(value).sort().join() !== Object.keys(this.queries).sort().join() ||
       !Object.values(value).every((rows) => Array.isArray(rows) && rows.every(isRow))
@@ -310,11 +398,35 @@ export class Computation implements Runnable {
     }
     const inputs = value as Record<string, Row[]>;
     for (const [name, fields] of Object.entries(this.queryTypes ?? {})) {
-      const normalized = bindBoundary({ fields, types: this.types! }).rows(inputs[name], "canonical");
+      const held = boundaries?.[name] ?? bindBoundary({ fields, types: this.types! });
+      const normalized = held.rows(inputs[name], "canonical");
       if (!isDeepStrictEqual(normalized, inputs[name])) {
         throw new Error(`computation ${this.name}: retained query ${name} is not canonical`);
       }
     }
+    return inputs;
+  }
+
+  private async runInCage(cage: Cage, inputs: Record<string, Row[]>): Promise<unknown> {
+    const ran: Job[] = [];
+    const outputs: unknown[] = [];
+    let { jobs } = await cage.ask({ inputs, seed: this.seed });
+    while (true) {
+      const planned = this.jobs(jobs);
+      if (ran.some((job, i) => job.wasm !== planned[i]?.wasm || job.input !== planned[i].input)) {
+        throw new Error(`computation ${this.name}: plan changed the jobs it was answered`);
+      }
+      if (planned.length === ran.length) break;
+      const fresh = planned.slice(ran.length);
+      outputs.push(...await this.runner.run(fresh));
+      ran.push(...fresh);
+      ({ jobs } = await cage.ask({ outputs, plan: true }));
+    }
+    return (await cage.ask({ outputs })).out;
+  }
+
+  async calculate(value: unknown): Promise<unknown> {
+    const inputs = this.validateInputs(value);
     // Replayed capture notifications may describe inputs already calculated.
     if (this.previous && isDeepStrictEqual(inputs, this.previous.inputs)) {
       return structuredClone(this.previous.out);
@@ -322,23 +434,36 @@ export class Computation implements Runnable {
     const cage = new Cage(this.file);
     try {
       await cage.load(this.compiled, this.endowments);
-      const ran: Job[] = [];
-      const outputs: unknown[] = [];
-      let { jobs } = await cage.ask({ inputs, seed: this.seed });
-      while (true) {
-        const planned = this.jobs(jobs);
-        if (ran.some((job, i) => job.wasm !== planned[i]?.wasm || job.input !== planned[i].input)) {
-          throw new Error(`computation ${this.name}: plan changed the jobs it was answered`);
-        }
-        if (planned.length === ran.length) break;
-        const fresh = planned.slice(ran.length);
-        outputs.push(...await this.runner.run(fresh));
-        ran.push(...fresh);
-        ({ jobs } = await cage.ask({ outputs, plan: true }));
-      }
-      const out = (await cage.ask({ outputs })).out;
+      const out = await this.runInCage(cage, inputs);
       this.previous = structuredClone({ inputs, out });
       return out;
+    } finally {
+      cage.close();
+    }
+  }
+
+  // Evaluate a partition batch inside one SES worker instead of spawning an
+  // isolate and re-evaluating multi-megabyte module sources per partition key.
+  async calculateMany(entries: Iterable<readonly [string, unknown]>): Promise<Record<string, unknown>> {
+    const list = [...entries];
+    if (list.length === 0) return {};
+    const boundaries = this.queryTypes
+      ? Object.fromEntries(
+        Object.entries(this.queryTypes).map(([name, fields]) => [
+          name,
+          bindBoundary({ fields, types: this.types! }),
+        ]),
+      )
+      : undefined;
+    const validated = list.map(([key, raw]) => [key, this.validateInputs(raw, boundaries)] as const);
+    const cage = new Cage(this.file);
+    try {
+      await cage.load(this.compiled, this.endowments);
+      const outputs: Record<string, unknown> = {};
+      for (const [key, inputs] of validated) {
+        outputs[key] = await this.runInCage(cage, inputs);
+      }
+      return outputs;
     } finally {
       cage.close();
     }
@@ -542,10 +667,10 @@ function need(name: string): string {
   return value;
 }
 
-export type QueryEngine = "duckdb-snapshot" | "feldera";
+export type QueryEngine = "duckdb-snapshot" | "risingwave";
 
 export function queryEngine(value = "duckdb-snapshot"): QueryEngine {
-  if (value !== "duckdb-snapshot" && value !== "feldera") {
+  if (value !== "duckdb-snapshot" && value !== "risingwave") {
     throw new Error(`unsupported DUCKSTREAM_ENGINE: ${value}`);
   }
   return value;
@@ -563,13 +688,25 @@ export async function computationVersion(
       ),
     )
       .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const includeSteps = Boolean(spec.steps) && (
+    engine === "duckdb-snapshot" ||
+    (spec.risingwave !== undefined &&
+      isGlobalIncrementalProgram(
+        JSON.parse(await Deno.readTextFile(spec.risingwave)),
+      ))
+  );
   const files = await Promise.all(
-    [spec.file, ...spec.wasm, ...(spec.feldera ? [spec.feldera] : []), ...(engine === "duckdb-snapshot" && spec.steps ? [`${spec.steps}.bundle.js`] : [])]
+    [
+      spec.file,
+      ...spec.wasm,
+      ...(spec.risingwave ? [spec.risingwave] : []),
+      ...(includeSteps ? [`${spec.steps}.bundle.js`] : []),
+    ]
       .map(async (file) => await hash(await Deno.readFile(file))),
   );
-  const contract = spec.feldera === undefined && engine === "duckdb-snapshot"
+  const contract = spec.risingwave === undefined && engine === "duckdb-snapshot"
     ? { protocol: 1, spec, schema, files }
-    : { protocol: engine === "feldera" ? 3 : spec.steps ? 4 : 2, engine, spec, schema, files };
+    : { protocol: engine === "risingwave" ? 3 : spec.steps ? 4 : 2, engine, spec, schema, files };
   return await hash(new TextEncoder().encode(strictJson(contract, true)));
 }
 
@@ -577,12 +714,9 @@ async function main() {
   const { openBatches } = await import("./batches.ts");
   const specs: Spec[] = JSON.parse(need("COMPUTATIONS"));
   const engine = queryEngine(Deno.env.get("DUCKSTREAM_ENGINE"));
-  const artifacts = Deno.env.get("FELDERA_ARTIFACTS_DIR");
-  if (engine === "feldera" && artifacts !== undefined && (!artifacts || !artifacts.startsWith("/"))) throw new Error("FELDERA_ARTIFACTS_DIR must be an absolute path");
-  const profile = compilationProfile(Deno.env.get("FELDERA_COMPILATION_PROFILE"));
-  if (engine === "feldera" && specs.some((spec) => !spec.feldera)) {
+  if (engine === "risingwave" && specs.some((spec) => !spec.risingwave)) {
     throw new Error(
-      "Feldera mode requires a compiled Feldera descriptor for every computation",
+      "RisingWave mode requires a compiled RisingWave descriptor for every computation",
     );
   }
 
@@ -618,11 +752,30 @@ async function main() {
       await database.schema([...c.reads, ...c.to]),
       engine,
     );
-    if (engine === "feldera") {
-      const program = JSON.parse(await Deno.readTextFile(spec.feldera!));
-      c.feldera((artifacts ? Deno.env.get("FELDERA_URL") ?? "http://127.0.0.1" : need("FELDERA_URL")), program);
-      const runtime = new NativeRuntime(nativeDb, (artifacts ? Deno.env.get("FELDERA_URL") ?? "" : need("FELDERA_URL")), c,
-        program, version, databaseUrl, claims, profile, artifacts);
+    if (engine === "risingwave") {
+      const program = JSON.parse(await Deno.readTextFile(spec.risingwave!));
+      const rwUrl = need("RISINGWAVE_URL");
+      c.risingwave(rwUrl, program);
+      let steps;
+      if (spec.steps && isGlobalIncrementalProgram(program)) {
+        const base = stateDir ?? Deno.env.get("LAKE_DIR") ?? need("COMPUTE_STATE_DIR");
+        const directory = join(base, "steps", spec.name);
+        const admitted = await admit(spec.file, spec.endowments ?? []);
+        const stepsRuntime = await BoundedRuntime.create({
+          spec,
+          version,
+          databaseUrl,
+          directory,
+          runner,
+          source: await Deno.readTextFile(`${spec.steps}.bundle.js`),
+          reads: admitted.reads,
+          queries: admitted.queries,
+          queryStages: admitted.queryStages,
+        });
+        steps = { runtime: stepsRuntime, directory };
+      }
+      const runtime = new NativeRuntime(nativeDb, rwUrl, c,
+        program, version, databaseUrl, claims, steps);
       native.push(runtime);
       batches.push(runtime.spec);
       continue;
@@ -707,7 +860,18 @@ async function main() {
     });
   }
   NativeRuntime.validateGraph(native);
-  const coordinator = await openBatches(databaseUrl, batches, { invalidateOnStart: !native.length });
+  const coordinator = await openBatches(databaseUrl, batches, {
+    invalidateOnStart: !native.length,
+    async afterBootstrap() {
+      await reconcileNativeResources(nativeDb, native.map((runtime) => runtime.spec.name), Deno.env.get("RISINGWAVE_URL"));
+      try {
+        for (const runtime of native) await runtime.initialize();
+      } catch (error) {
+        for (const runtime of native) await runtime.close();
+        throw error;
+      }
+    },
+  });
   const service = {
     async refresh(tables?: string[]) {
       if (native.length) throw new Error("native CDC owns computation invalidation");
@@ -715,20 +879,24 @@ async function main() {
       return true;
     },
   };
-  await reconcileNativeResources(nativeDb, native.map((runtime) => runtime.spec.name), Deno.env.get("FELDERA_URL"));
-  try {
-    for (const runtime of native) await runtime.initialize();
-  } catch (error) {
-    for (const runtime of native) await runtime.close();
-    throw error;
-  }
   let stopping = false;
   const polling = (async () => {
     while (!stopping && native.length) {
+      const { rows: active } = await nativeDb.query<{ name: string }>(
+        "SELECT name FROM compute.batch WHERE requested > coalesce(claimed, completed) AND wake IS NOT NULL",
+      );
+      const queued = new Set(active.map((row) => row.name));
+      const flush = { done: false };
+      const dirty: string[] = [];
       for (const runtime of native) {
-        if (await runtime.pending()) await coordinator.invalidateNames([runtime.spec.name]);
+        if (queued.has(runtime.spec.name)) {
+          await runtime.check();
+          continue;
+        }
+        if (await runtime.pending(flush)) dirty.push(runtime.spec.name);
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (dirty.length) await coordinator.invalidateNames(dirty);
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
   })();
   polling.catch((error) => engineFailure.resolve(error));

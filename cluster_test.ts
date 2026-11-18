@@ -15,8 +15,8 @@ type State = {
   migrations: string[];
   pipelines: { name: string; file: string }[];
   schedules: string[];
-  computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string; feldera?: string }[];
-  duckstreamEngine?: "duckdb-snapshot" | "feldera";
+  computations: { name: string; file: string; to: string[]; wasm: string[]; onComplete?: string; risingwave?: string }[];
+  duckstreamEngine?: "duckdb-snapshot" | "risingwave";
   effects?: Effect[];
   effectInterpreters?: string;
   pgroll?: Record<string, { operations: unknown[] }>;
@@ -74,11 +74,12 @@ Deno.test("database guards accept a single refusal or ordered nonempty checks", 
 
 Deno.test("a computation alone gets a durable CDC consumer without a clock", async () => {
   const got = await exported({
+    duckstreamEngine: "duckdb-snapshot",
     computations: [{ name: "c", file: "c.js", to: ["sink"], wasm: [] }],
   }, "surface.targets");
   assert.equal(got.ok, true, got.stderr);
   assert.equal(got.value.clock, undefined);
-  assert.equal(got.value.feldera, undefined);
+  assert.equal(got.value.risingwave, undefined);
   assert.equal(got.value.compute.compose.environment.DUCKSTREAM_ENGINE, "${DUCKSTREAM_ENGINE:-duckdb-snapshot}");
   assert.equal(got.value.ticker, undefined);
   assert.equal(got.value.launch.compose.depends_on.transform.condition, "service_started");
@@ -806,41 +807,43 @@ Deno.test("a provider's program defaults stand until the deployment sets its own
 });
 
 Deno.test("compute readiness preserves the startup allowance for each sequential native program", async () => {
-  for (const duckstreamEngine of ["duckdb-snapshot", "feldera"] as const) {
+  for (const duckstreamEngine of ["duckdb-snapshot", "risingwave"] as const) {
     for (const count of [1, 2]) {
-      const computations = Array.from({ length: count }, (_, i) => ({ name: `analytics_${i}`, file: `program_${i}.js`, feldera: `program_${i}.json`, to: [`metric_${i}`], wasm: [] }));
+      const computations = Array.from({ length: count }, (_, i) => ({ name: `analytics_${i}`, file: `program_${i}.js`, risingwave: `program_${i}.json`, to: [`metric_${i}`], wasm: [] }));
       const got = await exported({ duckstreamEngine, computations }, "surface.targets.compute.compose.healthcheck");
       assert.equal(got.ok, true, got.stderr);
-      assert.equal(got.value.start_period, `${duckstreamEngine === "feldera" ? 30 * count : 15}m`);
+      assert.equal(got.value.start_period, `${duckstreamEngine === "risingwave" ? 30 * count : 15}m`);
       assert.deepEqual(got.value.test, ["CMD", "portcheck", "--port", "9997"]);
     }
   }
 });
 
-Deno.test("Feldera deployment selects its pinned internal service and ships the descriptor for either engine", async () => {
-  for (const duckstreamEngine of ["duckdb-snapshot", "feldera"] as const) {
-    const got = await exported({ duckstreamEngine, computations: [{ name: "analytics", file: "duckstream/program.js", feldera: "duckstream/feldera.json", to: ["metric"], wasm: [] }] }, "surface.targets");
+Deno.test("RisingWave deployment selects its pinned internal service and ships the descriptor for either engine", async () => {
+  for (const duckstreamEngine of ["duckdb-snapshot", "risingwave"] as const) {
+    const got = await exported({ duckstreamEngine, computations: [{ name: "analytics", file: "duckstream/program.js", risingwave: "duckstream/risingwave.json", to: ["metric"], wasm: [] }] }, "surface.targets");
     assert.equal(got.ok, true, got.stderr);
-    const { compute, feldera } = got.value;
+    const { compute, risingwave, transform } = got.value;
+    assert.equal(compute.compose.volumes, undefined);
     assert.equal(compute.compose.environment.DUCKSTREAM_ENGINE, "${DUCKSTREAM_ENGINE:-" + duckstreamEngine + "}");
-    assert.equal(JSON.parse(compute.compose.environment.COMPUTATIONS)[0].feldera, "/app/computations/analytics.feldera.json");
-    assert.ok(compute.srcs.globs.includes("duckstream/feldera.json"));
-    assert.ok(compute.dockerfile.copy.some((copy: { srcs: string[]; dst: string }) => copy.srcs[0] === "duckstream/feldera.json" && copy.dst === "/app/computations/analytics.feldera.json"));
-    if (duckstreamEngine === "feldera") {
-      assert.equal(feldera.dockerfile.from.name, "images.feldera.com/feldera/pipeline-manager:0.367.0@sha256:42819714d16f7d5d37c17c87812ce98fb23efd2b1bfbf95b4889877f14693272");
-      // Host CPU count can launch enough compiler processes to starve the manager's status API.
-      assert.match(feldera.dockerfile.preamble.join("\n"), /\[build\].*jobs = 2/);
-      assert.match(feldera.dockerfile.preamble.join("\n"), /\[profile\.unoptimized\].*strip = "symbols"/);
-      assert.deepEqual(feldera.compose.healthcheck.test, ["CMD", "httpcheck", "http://127.0.0.1:8080/healthz"]);
-      assert.equal(feldera.compose.ports, undefined);
-      assert.equal(compute.compose.depends_on.feldera.condition, "service_healthy");
-      assert.equal(compute.compose.environment.FELDERA_URL, "http://feldera:8080");
-      assert.equal(feldera.compose.environment.FELDERA_DATABASE_URL, compute.compose.environment.DATABASE_URL);
-      assert.match(feldera.compose.environment.FELDERA_DATABASE_URL, /\$\{POSTGRES_PASSWORD:-postgres\}/);
+    assert.equal(JSON.parse(compute.compose.environment.COMPUTATIONS)[0].risingwave, "/app/computations/analytics.risingwave.json");
+    assert.ok(compute.srcs.globs.includes("duckstream/risingwave.json"));
+    assert.ok(compute.dockerfile.copy.some((copy: { srcs: string[]; dst: string }) => copy.srcs[0] === "duckstream/risingwave.json" && copy.dst === "/app/computations/analytics.risingwave.json"));
+    assert.match(transform.dockerfile.epilogue[1], /client_id: compute/);
+    if (duckstreamEngine === "risingwave") {
+      assert.equal(risingwave.dockerfile.from.name, "risingwavelabs/risingwave:v3.1.1@sha256:b869358fa704250d25045d3575145ca59cfb67a558a08fa4f8fd375874c24d63");
+      assert.deepEqual(risingwave.dockerfile.cmd, ["single_node"]);
+      assert.deepEqual(risingwave.compose.healthcheck.test, ["CMD", "portcheck", "--port", "4566"]);
+      assert.equal(risingwave.compose.ports, undefined);
+      assert.equal(compute.compose.depends_on.risingwave.condition, "service_healthy");
+      assert.equal(compute.compose.environment.RISINGWAVE_URL, "http://risingwave:4566");
+      assert.deepEqual(transform.dockerfile.cmd, ["streams", "--no-api", "-r", "/cdc-trace.yaml"]);
+      assert.equal(transform.compose.environment.COMPUTE_GROUP, undefined);
     } else {
-      assert.equal(feldera, undefined);
-      assert.equal(compute.compose.depends_on.feldera, undefined);
-      assert.equal(compute.compose.environment.FELDERA_URL, undefined);
+      assert.equal(risingwave, undefined);
+      assert.equal(compute.compose.depends_on.risingwave, undefined);
+      assert.equal(compute.compose.environment.RISINGWAVE_URL, undefined);
+      assert.deepEqual(transform.dockerfile.cmd, ["streams", "--no-api", "-r", "/cdc-trace.yaml", "/compute-events.yaml"]);
+      assert.equal(transform.compose.environment.COMPUTE_GROUP, "t-compute");
     }
   }
 });

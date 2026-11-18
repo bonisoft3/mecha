@@ -403,6 +403,15 @@ type Session = { query(text: string): Promise<{ rows: Record<string, unknown>[] 
  * its index as a leftover. */
 const JOURNAL_INDEX_LOCK = "hashtext('airlock.read_journal indexes')";
 
+/** Whether every journal index stands valid, which a sweep waits for. */
+export async function journalIndexed(db: { query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> }): Promise<boolean> {
+  const { rows } = await db.query(
+    "SELECT count(*)::int AS valid FROM pg_index WHERE indexrelid = ANY (ARRAY(SELECT to_regclass('airlock.' || n) FROM unnest($1::text[]) n)) AND indisvalid",
+    [JOURNAL_INDEXES.map(([name]) => name)],
+  );
+  return rows[0]?.valid === JOURNAL_INDEXES.length;
+}
+
 export async function journalIndexes(db: { connect(): Promise<Session> }): Promise<void> {
   const session = await db.connect();
   try {

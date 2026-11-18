@@ -220,9 +220,11 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   gone. A delivery drops its row's earlier incarnations, found by the row's index (built
   concurrently once the worker runs, `journalIndexes` in read.ts); the
   housekeeping sweep, once a minute and first once the worker serves, drops up to 500
-  entries past the retention, oldest first, and walks each read's next 500 from where it
+  entries past the retention, oldest first, of any read the journal holds, declared now or
+  not, and walks each declared read's next 500 from where it
   last stopped, dropping those whose row is gone, so each sweep's cost is bounded however
-  long the journal; a backlog drains over successive sweeps. The table (`READ_JOURNAL_SQL` in [read.ts](read.ts)) is brought
+  long the journal; a backlog drains over successive sweeps. A sweep waits for the
+  journal's indexes: while one is being built, or a build failed, it skips. The table (`READ_JOURNAL_SQL` in [read.ts](read.ts)) is brought
   at every airlock start, so `job_key.sql` stays byte-for-byte for retained edge databases.
 
 ## Sealed values

@@ -23,7 +23,7 @@ import pg from "pg";
 import { type Answer, type Effect, ledgerKeySql, outcome, type Outcome, step, undeployed } from "./reentry.ts";
 import { BreakerOpen, type Handler, type Transport } from "./handler.ts";
 import { type BlobStore, stowed } from "./blobs.ts";
-import { expand, get, journalIndexes, type Read, READ_JOURNAL_SQL, ReadCache, readOutcome, Unparsable, Unsendable } from "./read.ts";
+import { expand, get, journalIndexed, journalIndexes, type Read, READ_JOURNAL_SQL, ReadCache, readOutcome, Unparsable, Unsendable } from "./read.ts";
 import { openFields, type Opened, type SealKeys } from "./seal.ts";
 import { PUBLISH_SEAL_SQL, SEAL_TABLES_SQL } from "./seal-tables.ts";
 
@@ -351,14 +351,31 @@ export const JOURNAL_SWEEP_BATCH = 500;
  * this finds the rows deleted outright. */
 export async function pruneJournal(a: Airlock): Promise<void> {
   if (a.replay) return;
+  // Without its indexes a sweep scans the whole journal: one another airlock
+  // is still building, or a build that failed, waits for the next sweep.
+  if (!(await journalIndexed(a.db))) return;
+  // A batch past the retention, oldest first, of every read the journal holds
+  // answers of, declared now or not: a read removed or renamed leaves its
+  // entries behind. Each read's own, by the recorded index, the reads found
+  // by skipping along the row index's leading column.
+  await a.db.query(
+    `WITH RECURSIVE effects AS (
+       (SELECT effect FROM airlock.read_journal ORDER BY effect LIMIT 1)
+       UNION ALL
+       SELECT (SELECT j.effect FROM airlock.read_journal j WHERE j.effect > e.effect ORDER BY j.effect LIMIT 1)
+         FROM effects e WHERE e.effect IS NOT NULL
+     ), old AS (
+       SELECT o.key FROM effects e CROSS JOIN LATERAL (
+         SELECT key FROM airlock.read_journal
+          WHERE effect = e.effect AND recorded_at < now() - make_interval(days => $1)
+          ORDER BY recorded_at, key LIMIT ${JOURNAL_SWEEP_BATCH}) o
+        WHERE e.effect IS NOT NULL
+        LIMIT ${JOURNAL_SWEEP_BATCH}
+     )
+     DELETE FROM airlock.read_journal WHERE key IN (SELECT key FROM old)`,
+    [JOURNAL_RETENTION_DAYS],
+  );
   for (const [name, r] of Object.entries(a.reads ?? {})) {
-    // A batch past the retention, oldest first, by the recorded index.
-    await a.db.query(
-      `DELETE FROM airlock.read_journal WHERE key IN (
-         SELECT key FROM airlock.read_journal WHERE effect = $1 AND recorded_at < now() - make_interval(days => $2)
-          ORDER BY recorded_at, key LIMIT ${JOURNAL_SWEEP_BATCH})`,
-      [name, JOURNAL_RETENTION_DAYS],
-    );
     const from = a.journalSwept?.[name] ?? { at: "-infinity", key: "" };
     const same = r.invoke.row.map((c) => `t.${q(c)}::text = b.row->>'${c}'`).join(" AND ");
     const { rows: [swept] } = await a.db.query(

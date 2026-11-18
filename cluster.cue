@@ -1230,7 +1230,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					compose: {}
 				}
 			}
-			caddy: bayt.healthcheck.http & X._image & {
+			caddy: bayt.healthcheck.http200 & X._image & {
 				"process-compose": {activate: "mise x --", ...}
 				healthcheck: {
 					port:           8080

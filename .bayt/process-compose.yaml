@@ -170,8 +170,6 @@ processes:
     depends_on:
       crud:
         condition: process_healthy
-      "bayt:httpcheck":
-        condition: process_completed_successfully
     entrypoint:
     - mise
     - x
@@ -192,10 +190,12 @@ processes:
     - PRONTO_UPSTREAM_RCLONE_S3=127.0.0.1:${RCLONE_S3_HTTP_PORT:-21694}
     - PRONTO_UPSTREAM_TICKER=127.0.0.1:${TICKER_HTTP_PORT:-11760}
     readiness_probe:
-      exec:
-        command: >-
-          mise tool-stub ../../plugins/bayt/runtime/nu.toml
-          ../../plugins/bayt/runtime/bayt.nu microcheck httpcheck http://127.0.0.1:${CADDY_HTTP_PORT:-31405}/health
+      http_get:
+        scheme: http
+        host: 127.0.0.1
+        port: ${CADDY_HTTP_PORT:-31405}
+        path: /health
+        status_code: 200
       period_seconds: 5
       timeout_seconds: 5
       failure_threshold: 32

@@ -63,8 +63,19 @@ export async function sealKey(pkcs8: string): Promise<SealKey> {
  * is spelled. */
 export const DEV_SEAL_KID = "vRlQ6_taRMJ1tb6v";
 
+/** Whether this is the local stack, which alone seals to the development key:
+ * it says so with AIRLOCK_SEAL_DEV=local. A release names itself with
+ * AIRLOCK_RELEASE, and a release that also claims to be the local stack is
+ * refused rather than believed, whichever of its environments said so. */
+export function sealLocal(env: { get(name: string): string | undefined }): boolean {
+  const dev = env.get("AIRLOCK_SEAL_DEV") ?? "";
+  const release = env.get("AIRLOCK_RELEASE") ?? "";
+  if (dev !== "" && release !== "") throw new SealError(`AIRLOCK_SEAL_DEV=${dev} in the ${release} release: only the local stack says so, and it seals to the development key`);
+  return dev === "local";
+}
+
 /** The keys, refused where either is the development key and the stack is not
- * the local one, which says so with AIRLOCK_SEAL_DEV=local. */
+ * the local one (sealLocal). */
 export function refuseDevKey(keys: SealKeys, local: boolean): SealKeys {
   if (local) return keys;
   for (const [name, key] of [["AIRLOCK_SEAL_KEY", keys.current], ["AIRLOCK_SEAL_KEY_PREVIOUS", keys.previous]] as const) {

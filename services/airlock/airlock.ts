@@ -23,7 +23,7 @@ import pg from "pg";
 import { type Answer, type Effect, ledgerKeySql, outcome, type Outcome, step, undeployed } from "./reentry.ts";
 import { BreakerOpen, type Handler, type Transport } from "./handler.ts";
 import { type BlobStore, stowed } from "./blobs.ts";
-import { get, type Read, READ_JOURNAL_SQL, ReadCache, readOutcome } from "./read.ts";
+import { expand, get, journalIndexes, type Read, READ_JOURNAL_SQL, ReadCache, readOutcome, Unparsable, Unsendable } from "./read.ts";
 import { openFields, type Opened, type SealKeys } from "./seal.ts";
 import { PUBLISH_SEAL_SQL, SEAL_TABLES_SQL } from "./seal-tables.ts";
 
@@ -55,6 +55,8 @@ export type Airlock = {
   replay?: boolean;
   /** The airlock's daprd, which a read calls through got. */
   mesh?: string;
+  /** Where each read's journal sweep stopped (pruneJournal). */
+  journalSwept?: Record<string, { at: string; key: string }>;
   /** The key a secret field's value is sealed to (seal.ts), and the one a
    * rotation replaced; absent where no effect reads a secret field. */
   seal?: SealKeys;
@@ -245,10 +247,16 @@ export async function deliverRead(a: Airlock, job: ReadJob, settled: ReadSettled
       [settled.target, invoke.state, job.n, job.incarnation, ...invoke.row.map((c) => String(job.row[c]))],
     );
     // The key names the row's incarnation, so no other history shares it.
+    // An incarnation the row is no longer has no history left to re-run:
+    // its entries go here, by the row's index, rather than wait for a sweep.
     if (moved.rowCount === 1 && !a.replay) {
       await client.query(
         `INSERT INTO airlock.read_journal (key, effect, row, incarnation, n, digest, outcome) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (key) DO NOTHING`,
         [job.key, job.effect, JSON.stringify(job.row), job.incarnation, job.n, job.digest, JSON.stringify(settled)],
+      );
+      await client.query(
+        "DELETE FROM airlock.read_journal WHERE effect = $1 AND row = $2::jsonb AND incarnation <> $3",
+        [job.effect, JSON.stringify(job.row), job.incarnation],
       );
     }
     await client.query("COMMIT");
@@ -273,8 +281,11 @@ export async function journaled(a: Airlock, job: ReadJob): Promise<ReadSettled |
 
 /** A machine's read run once: asked of the sink, its answer delivered. A run
  * with no answer is retried on Graphile's backoff; the last one delivers
- * `failed`, since a GET that never answered changed nothing. In replay the
- * journal answers instead, and a request it never answered stops the run. */
+ * `failed`, since a GET that never answered changed nothing. One that could
+ * not be asked (the row's input makes no request) or whose answer cannot be
+ * read (JSON that is not) is failed at once: asking again changes neither,
+ * and the unreadable answer leaves the cache. In replay the journal answers
+ * instead, and a request it never answered stops the run. */
 export async function performRead(a: Airlock, job: ReadJob, last: boolean): Promise<void> {
   const read = a.reads?.[job.effect] ?? die(`read ${job.effect} is invoked by no machine in effects.json`);
   if (a.replay) {
@@ -284,11 +295,14 @@ export async function performRead(a: Airlock, job: ReadJob, last: boolean): Prom
     return;
   }
   let settled: ReadSettled;
+  const cache = a.cache ??= new ReadCache();
   try {
-    settled = readOutcome(read.invoke, await get(job.effect, read, job.input, { mesh: a.mesh ?? die("a read needs the airlock's daprd"), headers: a.headers[job.effect] ?? {}, cache: a.cache ??= new ReadCache() }));
+    settled = readOutcome(read.invoke, await get(job.effect, read, job.input, { mesh: a.mesh ?? die("a read needs the airlock's daprd"), headers: a.headers[job.effect] ?? {}, cache }));
   } catch (e) {
-    if (!last) throw e;
-    console.error(`read ${job.key}: no answer on the last run, so failed: ${e instanceof Error ? e.message : e}`);
+    const settledNow = e instanceof Unsendable || e instanceof Unparsable;
+    if (e instanceof Unparsable) cache.forget(expand(read.request.path, job.input));
+    if (!last && !settledNow) throw e;
+    console.error(`read ${job.key}: ${settledNow ? "no request or no readable answer" : "no answer on the last run"}, so failed: ${e instanceof Error ? e.message : e}`);
     settled = { target: read.invoke.onError, kind: "failed", data: { error: e instanceof Error ? e.message : String(e) } };
   }
   await deliverRead(a, job, settled);
@@ -321,15 +335,49 @@ async function settleDeadReads(a: Airlock): Promise<number> {
   return settled;
 }
 
-/** The journal's entries whose row is gone, in the incarnation they were
- * taken in. The journal is replay's record of the answers rows took, so an
- * entry lives as long as its row: a deleted row has no history left to
- * re-run. */
+/** How long a read's answer stays in the journal: replay re-runs a history
+ * this far back at most, and one reaching further diverges where its answer
+ * is gone. */
+export const JOURNAL_RETENTION_DAYS = 30;
+/** The entries a sweep looks at for each read, on from where the last one
+ * stopped, so its cost is this many lookups however long the journal. */
+export const JOURNAL_SWEEP_BATCH = 500;
+
+/** The journal's entries past their retention, and, a batch at a time, those
+ * whose row is gone in the incarnation they were taken in. The journal is
+ * replay's record of the answers rows took, so an entry lives as long as its
+ * row, and no longer than the retention: a deleted row has no history left
+ * to re-run. A delivery drops its row's earlier incarnations (deliverRead);
+ * this finds the rows deleted outright. */
 export async function pruneJournal(a: Airlock): Promise<void> {
   if (a.replay) return;
   for (const [name, r] of Object.entries(a.reads ?? {})) {
-    const same = r.invoke.row.map((c) => `t.${q(c)}::text = j.row->>'${c}'`).join(" AND ");
-    await a.db.query(`DELETE FROM airlock.read_journal j WHERE j.effect = $1 AND NOT EXISTS (SELECT 1 FROM ${q(r.invoke.table)} t WHERE ${same} AND t.${q(r.invoke.incarnation)}::text = j.incarnation)`, [name]);
+    // A batch past the retention, oldest first, by the recorded index.
+    await a.db.query(
+      `DELETE FROM airlock.read_journal WHERE key IN (
+         SELECT key FROM airlock.read_journal WHERE effect = $1 AND recorded_at < now() - make_interval(days => $2)
+          ORDER BY recorded_at, key LIMIT ${JOURNAL_SWEEP_BATCH})`,
+      [name, JOURNAL_RETENTION_DAYS],
+    );
+    const from = a.journalSwept?.[name] ?? { at: "-infinity", key: "" };
+    const same = r.invoke.row.map((c) => `t.${q(c)}::text = b.row->>'${c}'`).join(" AND ");
+    const { rows: [swept] } = await a.db.query(
+      `WITH batch AS (
+         SELECT key, row, incarnation, recorded_at FROM airlock.read_journal
+          WHERE effect = $1 AND (recorded_at, key) > ($2::timestamptz, $3)
+          ORDER BY recorded_at, key LIMIT ${JOURNAL_SWEEP_BATCH}
+       ), gone AS (
+         DELETE FROM airlock.read_journal j USING batch b
+          WHERE j.key = b.key AND NOT EXISTS (SELECT 1 FROM ${q(r.invoke.table)} t WHERE ${same} AND t.${q(r.invoke.incarnation)}::text = b.incarnation)
+       )
+       SELECT (SELECT count(*) FROM batch)::int AS n, l.recorded_at::text AS at, l.key
+         FROM (SELECT recorded_at, key FROM batch ORDER BY recorded_at DESC, key DESC LIMIT 1) l`,
+      [name, from.at, from.key],
+    );
+    // A batch short of full reached the end: the next sweep starts over.
+    a.journalSwept = { ...a.journalSwept };
+    if (swept === undefined || swept.n < JOURNAL_SWEEP_BATCH) delete a.journalSwept[name];
+    else a.journalSwept[name] = { at: swept.at, key: swept.key };
   }
 }
 
@@ -357,7 +405,6 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
   await settleDead(a);
   await settleDeadReads(a);
   await prune(a);
-  await pruneJournal(a);
   const events = new EventEmitter();
   let recorded: Promise<unknown> | undefined;
   events.on("pool:create", ({ workerPool }) => {
@@ -400,7 +447,7 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
     await settle(a, key, l, effect, settled, consumed);
   };
 
-  return await run({
+  const runner = await run({
     connectionString: a.connectionString,
     events,
     noHandleSignals: opts.noHandleSignals,
@@ -413,6 +460,15 @@ export async function start(a: Airlock, key: string, opts: { noHandleSignals?: b
       },
     },
   });
+  // The journal's indexes are built, and its first sweep run, once the
+  // worker serves: neither holds up a start, however long the journal. Of
+  // two airlocks starting together one builds, under an advisory lock, and
+  // the other leaves it to that one; until it is built a sweep scans.
+  journalIndexes(a.db)
+    .catch((e) => console.error("the read journal's indexes are not built yet:", e))
+    .then(() => pruneJournal(a))
+    .catch((e) => console.error("the read journal's first sweep failed:", e));
+  return runner;
 }
 
 /** The handler run the ledger's count calls for, as an outcome. A throw is no

@@ -690,6 +690,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		if issuers {
 			server: true
 		}
+		// The roles a program declares for those issuers' tokens, which crud
+		// tells the floor at every request (PGRST_APP_SETTINGS_TOKEN_ROLES):
+		// a role registered in the database and not here acts for no token.
+		tokenRoles: *[] | [...string]
 
 		// The AI plane: tiered model routing across browser worker, cheap
 		// backend, and heavy backend tiers via mecha's tsbifrost AI gateway.
@@ -1166,6 +1170,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// Without it current_scopes() is empty and every floored table is
 							// invisible -- the floor fails closed, so this is not optional.
 							PGRST_DB_PRE_REQUEST:    "public.app_pre_request"
+							// The declared token roles, the deployment's and no client's:
+							// PostgREST sets app.settings.* itself in every request.
+							PGRST_APP_SETTINGS_TOKEN_ROLES: strings.Join(X.capabilities.tokenRoles, ",")
 							PGRST_SERVER_HOST:       "*"
 							PGRST_SERVER_PORT:       {port: "http", part: "port"}
 							PGRST_ADMIN_SERVER_PORT: {port: "admin", part: "port"}

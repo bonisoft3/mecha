@@ -11,7 +11,7 @@ import {
 } from '../../../services/airlock/tsbifrost.ts'
 import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, ORIGIN, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
 import { type BlobStore, contentBlob, stowed } from '../../../services/airlock/blobs.ts'
-import { openFields, type SealKeys, sealKeys } from '../../../services/airlock/seal.ts'
+import { openFields, refuseDevKey, type SealKeys, sealKeys } from '../../../services/airlock/seal.ts'
 
 export interface EdgeSink {
   key: string
@@ -301,13 +301,14 @@ export async function performEffect(spec: EdgeEffect, run: { key: string; entere
 }
 
 // The dispatcher's seal key and the one a rotation replaced, imported once
-// per isolate for as long as the deployment's secrets stay the same.
+// per isolate for as long as the deployment's secrets stay the same. A
+// deployment is always a release: the development key is refused here.
 let sealed: { from: string; keys: Promise<SealKeys> } | undefined
 function sealKeysOf(strings: Record<string, string | undefined>): Promise<SealKeys> {
   const current = strings.AIRLOCK_SEAL_KEY || die('an effect reads a secret field, and AIRLOCK_SEAL_KEY is not set on this deployment')
   const previous = strings.AIRLOCK_SEAL_KEY_PREVIOUS || undefined
   const from = `${current}\n${previous ?? ''}`
-  if (sealed?.from !== from) sealed = { from, keys: sealKeys(current, previous) }
+  if (sealed?.from !== from) sealed = { from, keys: sealKeys(current, previous).then((keys) => refuseDevKey(keys, false)) }
   return sealed.keys
 }
 

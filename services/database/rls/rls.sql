@@ -142,9 +142,11 @@ END $init$;
 -- app sharing the issuer act here). A token naming no issuer is the stack's
 -- from before it named one, believed only where the app trusts no other
 -- issuer, so no outside key could have signed it; where it trusts one, such
--- a token acts as nothing but anon. An outside issuer's key that signs a
--- token naming the stack's issuer is beyond this: PostgREST does not say
--- which key verified a token.
+-- a token acts as anon, with no subject: the request goes on as a reader
+-- signed out, which the session it came from was not. The switch is allowed
+-- because PostgREST's own role, the session's, holds anon. An outside
+-- issuer's key that signs a token naming the stack's issuer is beyond this:
+-- PostgREST does not say which key verified a token.
 CREATE OR REPLACE FUNCTION mecha.stack_issuer() RETURNS text
   LANGUAGE sql IMMUTABLE PARALLEL SAFE RETURN 'mecha:stack';
 GRANT EXECUTE ON FUNCTION mecha.stack_issuer() TO PUBLIC;
@@ -160,9 +162,30 @@ DECLARE
     WHEN 'string' THEN claims->>'aud' <> ''
     WHEN 'array' THEN jsonb_array_length(claims->'aud') > 0
     ELSE false END;
+  -- The roles the release declares, as crud is told them
+  -- (PGRST_APP_SETTINGS_TOKEN_ROLES), which PostgREST sets in every request
+  -- and no client can: a role the registry still holds acts only while the
+  -- deployment declares it, so one a release removed is refused from that
+  -- release on, whether or not anything has pruned the registry yet. Unset,
+  -- none is declared.
+  declared text[] := array_remove(string_to_array(replace(coalesce(current_setting('app.settings.token_roles', true), ''), ' ', ''), ','), '');
 BEGIN
-  IF EXISTS (SELECT 1 FROM mecha.token_role WHERE role_name = current_user) THEN
-    IF NOT named OR stack THEN
+  IF NOT named AND claims <> '{}'::jsonb AND EXISTS (SELECT 1 FROM mecha.token_role) THEN
+    -- Whatever role it wrote, anon's included: its subject is no one's.
+    -- Logged, the role alone and never the token, so a client still holding
+    -- such a token is seen rather than silently signed out.
+    IF current_user <> 'anon' THEN
+      RAISE WARNING 'a token naming no issuer, as %, acts as anon where the app trusts another issuer', current_user;
+      PERFORM set_config('role', 'anon', true);
+    END IF;
+    PERFORM set_config('request.jwt.claims', '{"role":"anon"}', true);
+    sub := NULL;
+  ELSIF EXISTS (SELECT 1 FROM mecha.token_role WHERE role_name = current_user) THEN
+    IF current_user <> ALL (declared) THEN
+      RAISE EXCEPTION 'a token acts as %, a token role this release does not declare', current_user
+        USING ERRCODE = '42501';
+    END IF;
+    IF stack THEN
       RAISE EXCEPTION 'a token acts as %, a declared token role, only as another issuer signed it', current_user
         USING ERRCODE = '42501';
     END IF;
@@ -171,9 +194,6 @@ BEGIN
     END IF;
   ELSIF named AND NOT stack THEN
     RAISE EXCEPTION 'a token another issuer signed cannot act as %, which is no declared token role', current_user
-      USING ERRCODE = '42501';
-  ELSIF NOT named AND current_user <> 'anon' AND claims <> '{}'::jsonb AND EXISTS (SELECT 1 FROM mecha.token_role) THEN
-    RAISE EXCEPTION 'a token naming no issuer acts as anon alone where the app trusts another issuer, and this one names %', current_user
       USING ERRCODE = '42501';
   END IF;
   IF sub LIKE '%,%' THEN
@@ -241,7 +261,9 @@ GRANT SELECT ON mecha.shape_key TO PUBLIC;
 -- The roles a token another issuer signed may act as, declared rather than
 -- discovered: the app's own, which its schema names here, and none of the
 -- cluster's. Outside `public` for the reason given at `rls_exempt`: a row here
--- lets an outside issuer's token through `app_pre_request`.
+-- lets an outside issuer's token through `app_pre_request`. The row '', which
+-- names no role, is an app that trusted an issuer once and declares none now:
+-- a token naming no issuer stays anon's there.
 CREATE TABLE IF NOT EXISTS mecha.token_role (
   role_name text PRIMARY KEY
 );

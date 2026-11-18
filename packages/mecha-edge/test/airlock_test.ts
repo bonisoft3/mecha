@@ -52,6 +52,14 @@ Deno.test({ name: 'edge effects run in the dispatcher Worker and settle in the o
       GRANT SELECT ON effect_row TO service; GRANT ALL ON settled_seen TO service;
       CREATE FUNCTION see_settled() RETURNS integer LANGUAGE sql AS $$
         INSERT INTO settled_seen SELECT count(*) FROM effect_row WHERE status <> 'running' RETURNING 1 $$;
+      -- A write that enqueues its own effect at its commit, as an interpreter's does.
+      CREATE FUNCTION enqueue_pinned() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN
+        INSERT INTO airlock.external_effect_ledger (key, effect, row, input) VALUES ('pinned:' || NEW.id, 'pinned', jsonb_build_object('id', NEW.id), jsonb_build_object('id', NEW.id, 'mode', 'pin'));
+        PERFORM graphile_worker.add_job('external_effect', json_build_object('key', 'pinned:' || NEW.id), job_key => 'pinned:' || NEW.id);
+        NEW.status := 'running';
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER enqueue_pinned BEFORE INSERT ON effect_row FOR EACH ROW WHEN (NEW.status = 'enqueue') EXECUTE FUNCTION enqueue_pinned();
       CHECKPOINT`)
   } finally {
     await db.close()
@@ -149,6 +157,43 @@ Deno.test({ name: 'edge effects run in the dispatcher Worker and settle in the o
     await claim(upper, 'pinned', 'pin')
     assert.equal((await outcomeOf(`pinned:${upper}`))?.kind, 'done')
     assert.equal(pins.get(upper), '1357')
+    // A write that enqueues its effect at its commit: the claim may reach the
+    // object before the write's answer, and finds the value all the same.
+    const enqueued = await crud('POST', '/crud/effect_row', { id: 's7', status: 'enqueue', pin: await sealFor('s7', '2468') })
+    assert.equal(enqueued.status, 201, await enqueued.clone().text())
+    await enqueued.body?.cancel()
+    assert.equal((await outcomeOf('pinned:s7'))?.kind, 'done')
+    assert.equal(pins.get('s7'), '2468')
+    // A PATCH that asks for no representation keeps the value for the row it
+    // reached, counted rather than read back; one that reached none keeps nothing.
+    const minimal = (id: string, body: unknown) => fetch(at(`/crud/effect_row?id=eq.${id}`), {
+      method: 'PATCH', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', prefer: 'return=minimal' }, body: JSON.stringify(body),
+    })
+    const made = await crud('POST', '/crud/effect_row', { id: 's5', status: 'pending' })
+    await made.body?.cancel()
+    const reached = await minimal('s5', { pin: await sealFor('s5', '9753') })
+    assert.deepEqual([reached.status, await reached.text()], [204, ''])
+    await claim('s5', 'pinned', 'pin')
+    assert.equal((await outcomeOf('pinned:s5'))?.kind, 'done')
+    assert.equal(pins.get('s5'), '9753')
+    const missed = await minimal('s6', { pin: await sealFor('s6', '8642') })
+    assert.equal(missed.status, 204)
+    await missed.body?.cancel()
+    await claim('s6', 'pinned', 'pin')
+    assert.deepEqual(await outcomeOf('pinned:s6'), { kind: 'failed', data: { secrets: ['pin'], reason: 'absent' } })
+    // A POST that asks for no representation, or names no preference, keeps
+    // its value for the row it wrote all the same.
+    for (const [id, prefer] of [['s8', 'return=minimal'], ['s9', undefined]] as const) {
+      const posted = await fetch(at('/crud/effect_row'), {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(prefer ? { prefer } : {}) },
+        body: JSON.stringify({ id, status: 'pending', pin: await sealFor(id, `pin-${id}`) }),
+      })
+      assert.equal(posted.status, 201, await posted.clone().text())
+      await posted.body?.cancel()
+      await claim(id, 'pinned', 'pin')
+      assert.equal((await outcomeOf(`pinned:${id}`))?.kind, 'done', id)
+      assert.equal(pins.get(id), `pin-${id}`)
+    }
     // One the object does not hold, as after an eviction, fails the first run.
     await claim('s2', 'pinned', 'pin')
     assert.deepEqual(await until('s2 settles', () => row('s2'), (r) => r?.status !== 'running'), { status: 'failed', entered: 1, kind: 'failed', data: { secrets: ['pin'], reason: 'absent' } })

@@ -121,6 +121,7 @@ processes:
       exit_on_skipped: true
     environment:
     - PGRST_ADMIN_SERVER_PORT=${CRUD_ADMIN_PORT:-11100}
+    - PGRST_APP_SETTINGS_TOKEN_ROLES=
     - PGRST_DB_ANON_ROLE=anon
     - PGRST_DB_PRE_REQUEST=public.app_pre_request
     - PGRST_DB_SCHEMA=public

@@ -55,6 +55,9 @@ const AGENT = { http: new http.Agent({ keepAlive: false }) };
  * Content-Length, an answer is not kept. */
 const CACHE_ENTRIES = 1_000;
 const CACHE_BYTES = 1 << 20;
+/** What the stored answers come to together: the least recently used go
+ * first past it, so the cache costs the process this much at most. */
+const CACHE_TOTAL_BYTES = 64 << 20;
 
 /** RFC 9110 §15.1: the status codes a cache may give a heuristic freshness,
  * which is what a declared default stands in for. */
@@ -164,37 +167,95 @@ export function parseReads(text: string): Record<string, Read> {
 
 type Store = { get(k: string): unknown; set(k: string, v: unknown, ttl?: number): boolean; delete(k: string): boolean; clear(): void };
 
+/** What a stored answer costs: got's cache stores each serialized, a string,
+ * counted at two bytes a code unit, as the engine may hold it. */
+function sizeOf(v: unknown): number {
+  if (typeof v === "string") return v.length * 2;
+  if (v instanceof Uint8Array) return v.byteLength;
+  return (JSON.stringify(v) ?? "").length * 2;
+}
+
 /** The process's cache: one LRU of answers, shared by every row's read and
  * so keeping no private answer (RFC 9111 §5.2.2.7), partitioned by the
  * request's own path: got's key is the URL as normalize-url rewrites it,
  * which drops utm_ parameters and spells a space as `+`, so two requests HTTP
- * tells apart could share it. */
+ * tells apart could share it. Bounded in entries and in the bytes they hold
+ * together, the least recently used dropped first. */
 export class ReadCache {
-  #answers = new QuickLRU<string, unknown>({ maxSize: CACHE_ENTRIES });
+  // A Map keeps insertion order: each use moves an entry to the end, so the
+  // first is the least recently used.
+  #answers = new Map<string, { value: unknown; size: number; expires?: number }>();
+  #bytes = 0;
   #partitions = new QuickLRU<string, Store>({ maxSize: CACHE_ENTRIES });
+  readonly #entries: number;
+  readonly #totalBytes: number;
+
+  constructor(bounds: { entries?: number; bytes?: number } = {}) {
+    this.#entries = bounds.entries ?? CACHE_ENTRIES;
+    this.#totalBytes = bounds.bytes ?? CACHE_TOTAL_BYTES;
+  }
+
+  #get(k: string): unknown {
+    const e = this.#answers.get(k);
+    if (e === undefined) return undefined;
+    if (e.expires !== undefined && e.expires <= Date.now()) {
+      this.#delete(k);
+      return undefined;
+    }
+    this.#answers.delete(k);
+    this.#answers.set(k, e);
+    return e.value;
+  }
+
+  #set(k: string, value: unknown, ttl?: number) {
+    this.#delete(k);
+    const size = sizeOf(value);
+    if (size > this.#totalBytes) return;
+    this.#answers.set(k, { value, size, ...(ttl === undefined ? {} : { expires: Date.now() + ttl }) });
+    this.#bytes += size;
+    for (const [first] of this.#answers) {
+      if (this.#bytes <= this.#totalBytes && this.#answers.size <= this.#entries) break;
+      this.#delete(first);
+    }
+  }
+
+  #delete(k: string): boolean {
+    const e = this.#answers.get(k);
+    if (e === undefined) return false;
+    this.#answers.delete(k);
+    this.#bytes -= e.size;
+    return true;
+  }
 
   /** got keeps a store's state per store object, so each partition is one. */
   partition(path: string): Store {
     let store = this.#partitions.get(path);
     if (store === undefined) {
-      const answers = this.#answers;
       const at = (k: string) => `${path}\u0000${k}`;
       store = {
-        get: (k) => answers.get(at(k)),
-        set: (k, v, ttl) => (answers.set(at(k), v, ttl === undefined ? undefined : { maxAge: ttl }), true),
-        delete: (k) => answers.delete(at(k)),
-        clear: () => {
-          for (const k of [...answers.keys()]) if (k.startsWith(`${path}\u0000`)) answers.delete(k);
-        },
+        get: (k) => this.#get(at(k)),
+        set: (k, v, ttl) => (this.#set(at(k), v, ttl), true),
+        delete: (k) => this.#delete(at(k)),
+        clear: () => this.forget(path),
       };
       this.#partitions.set(path, store);
     }
     return store;
   }
 
+  /** Every answer kept for a path: one its read could not take is asked again. */
+  forget(path: string): void {
+    for (const k of [...this.#answers.keys()]) if (k.startsWith(`${path}\u0000`)) this.#delete(k);
+  }
+
   /** What the cache is keyed by: method and URL, never a header. */
   keys(): string[] {
     return [...this.#answers.keys()];
+  }
+
+  /** What the kept answers hold together. */
+  bytes(): number {
+    return this.#bytes;
   }
 }
 
@@ -266,10 +327,19 @@ export async function get(name: string, read: Read, values: Record<string, unkno
   };
 }
 
+/** A sink's answer that says it is JSON and is not: asked again, it says
+ * the same, so a read meeting one is failed at once. */
+export class Unparsable extends Error {}
+
 /** The answer's body: parsed when the sink answers JSON, its text otherwise. */
 export function bodyOf(answer: Answer): unknown {
   const text = new TextDecoder().decode(answer.body);
-  return (answer.headers["content-type"] ?? "").includes("json") && text !== "" ? JSON.parse(text) : text;
+  if (!(answer.headers["content-type"] ?? "").includes("json") || text === "") return text;
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Unparsable(`the sink answered ${answer.status} as JSON, and its body is not: ${(e as Error).message}`);
+  }
 }
 
 /** A machine's outcome: a 2xx is done, anything else the sink answered is
@@ -313,3 +383,42 @@ BEGIN
 END
 $$;
 `;
+
+/** The journal's indexes: a delivery finds its row's earlier incarnations by
+ * the row, and the sweep walks each read's entries in the order they were
+ * recorded and drops those past the retention by the same order (airlock.ts
+ * pruneJournal). Each is built
+ * concurrently, one statement at a time, after the worker starts, so a long
+ * journal neither holds its table's lock nor keeps the airlock from serving;
+ * one a crash left invalid is built again. */
+const JOURNAL_INDEXES: [string, string][] = [
+  ["read_journal_row", "(effect, row)"],
+  ["read_journal_recorded", "(effect, recorded_at, key)"],
+];
+
+type Session = { query(text: string): Promise<{ rows: Record<string, unknown>[] }>; release(): void };
+
+/** The advisory lock a build holds for its session, so an airlock starting
+ * beside another one still building leaves that build alone rather than drop
+ * its index as a leftover. */
+const JOURNAL_INDEX_LOCK = "hashtext('airlock.read_journal indexes')";
+
+export async function journalIndexes(db: { connect(): Promise<Session> }): Promise<void> {
+  const session = await db.connect();
+  try {
+    if ((await session.query(`SELECT pg_try_advisory_lock(${JOURNAL_INDEX_LOCK}) AS held`)).rows[0]?.held !== true) return;
+    try {
+      for (const [name, columns] of JOURNAL_INDEXES) {
+        const { rows } = await session.query(`SELECT i.indisvalid AS valid FROM pg_index i WHERE i.indexrelid = to_regclass('airlock.${name}')`);
+        if (rows[0]?.valid === true) continue;
+        // Invalid with the lock held: a build that died, not one under way.
+        if (rows.length > 0) await session.query(`DROP INDEX CONCURRENTLY IF EXISTS airlock.${name}`);
+        await session.query(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${name} ON airlock.read_journal ${columns}`);
+      }
+    } finally {
+      await session.query(`SELECT pg_advisory_unlock(${JOURNAL_INDEX_LOCK})`);
+    }
+  } finally {
+    session.release();
+  }
+}

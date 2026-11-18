@@ -1,5 +1,5 @@
 import { assertEquals, assertMatch, assertRejects, assertThrows } from "@std/assert";
-import { DEV_SEAL_KID, generateSealKey, openSealed, refuseDevKey, seal, SEALED, SealError, sealKeys, sealLabel } from "./seal.ts";
+import { DEV_SEAL_KID, generateSealKey, openSealed, refuseDevKey, seal, SEALED, SealError, sealKeys, sealLabel, sealLocal } from "./seal.ts";
 
 const label = sealLabel("payment", "pin", "00000000-0000-0000-0000-000000000001");
 
@@ -58,4 +58,12 @@ Deno.test("the development key is refused outside the local stack however its PK
     refuseDevKey(await sealKeys(spelling), true);
   }
   refuseDevKey(await sealKeys(await generateSealKey()), false);
+  // A release's airlock is no local stack, whatever its environment also says:
+  // the appliance's processes inherit the local stack's word with its file.
+  const env = (vars: Record<string, string>) => new Map(Object.entries(vars));
+  assertEquals(sealLocal(env({ AIRLOCK_SEAL_DEV: "local" })), true);
+  assertEquals(sealLocal(env({ AIRLOCK_RELEASE: "docker", AIRLOCK_SEAL_DEV: "" })), false);
+  assertEquals(sealLocal(env({})), false);
+  assertThrows(() => sealLocal(env({ AIRLOCK_RELEASE: "docker", AIRLOCK_SEAL_DEV: "local" })), SealError, "docker release");
+  await assertRejects(async () => refuseDevKey(await sealKeys(respelled), sealLocal(env({ AIRLOCK_RELEASE: "docker" }))), SealError, "development key");
 });

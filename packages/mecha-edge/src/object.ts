@@ -24,6 +24,7 @@ import { type Clock, createClock, hasSchedules, serviceCrud } from './clock.ts'
 import type { Drain } from '../../mecha-browser/drains.ts'
 import { type EdgeFunctions, type EdgeMachines, installEngines, installHostStep } from './machines.ts'
 import { createEdgeAirlock, die, type EdgeAirlock, type EdgeEffectDeclarations } from './airlock.ts'
+import { SealedValues } from './sealed.ts'
 import type { ClaimedRun, DispatchedRun, RunAnswer } from './dispatch.ts'
 import { hatchAt, type EdgeHatch } from './hatches.ts'
 import { verifyJwt } from '../../../services/auth/jwt.ts'
@@ -110,8 +111,8 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     // last effect naming it on its row settles or five minutes pass: in this
     // instance's memory and nowhere else, never its storage, the queue or the
     // database, so an eviction loses it, which its effect meets as a value
-    // never written. `keys` are the invocations that claimed it.
-    readonly #sealed = new Map<string, { value: string; expires: number; keys: Set<string> }>()
+    // never written (sealed.ts).
+    readonly #sealed = new SealedValues(SEAL_TTL_SECONDS * 1000)
     readonly #dir = new DataDirectory(this.ctx.storage, storageFormat, error => { this.ctx.abort(error instanceof Error ? error.message : String(error)); throw error })
     readonly #readers = new ComputeReaderOwners(this.ctx.storage.sql)
     #resetting = false
@@ -461,7 +462,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       // can open them, and leave memory once the key's outcome lands.
       const sealed: Record<string, string> = {}
       for (const f of d.secretFields) {
-        const held = this.#heldSecret(d.table, String(run.row[d.row[0]]), f)
+        const held = await this.#sealed.take(this.#secretKey(d.table, String(run.row[d.row[0]]), f))
         if (held) {
           held.keys.add(key)
           sealed[f] = held.value
@@ -472,17 +473,26 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
 
     #secretKey = (table: string, pk: string, field: string) => JSON.stringify([table, pk, field])
 
-    #heldSecret(table: string, pk: string, field: string) {
-      const now = Date.now()
-      for (const [k, v] of this.#sealed) if (v.expires <= now) this.#sealed.delete(k)
-      return this.#sealed.get(this.#secretKey(table, pk, field))
+    // Whether a table's key column is a uuid, which the database spells back
+    // in lowercase however a write named it.
+    readonly #uuidKeys = new Map<string, Promise<boolean>>()
+    #uuidKey(table: string, column: string): Promise<boolean> {
+      const k = `${table}.${column}`
+      let known = this.#uuidKeys.get(k)
+      if (known === undefined) {
+        known = this.#boot().then(async ({ db }) => (await db.query<{ uuid: boolean }>(
+          `SELECT atttypid = 'uuid'::regtype AS uuid FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2`, [`public.${JSON.stringify(table)}`, column])).rows[0]?.uuid === true)
+        known.catch(() => this.#uuidKeys.delete(k))
+        this.#uuidKeys.set(k, known)
+      }
+      return known
     }
 
     /** A write naming a secret field: the sealed values taken out of its body,
-     * which reaches the database without them, and kept here once the write
-     * lands, for the rows it returned. What is not sealed is refused, and not
-     * repeated. A PATCH names its one row by its key, the row a seal binds
-     * to. */
+     * which reaches the database without them, and kept here for the rows the
+     * write landed on, held from every claim until it settles. What is not
+     * sealed is refused, and not repeated. A PATCH names its one row by its
+     * key, the row a seal binds to. */
     async #withoutSecrets(req: Request, write: (req: Request) => Promise<Response>): Promise<Response> {
       const url = new URL(req.url)
       // The table as crud's router reads it (cluster.ts): the first segment past /crud.
@@ -500,8 +510,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         return json({ error: `a write to ${table} is JSON, which its secret fields are read from` }, 400)
       }
       const rows = (Array.isArray(body) ? body : [body]) as Record<string, unknown>[]
-      const named = req.method === 'PATCH' ? /^eq\.(.+)$/.exec(url.searchParams.get(spec.pk) ?? '')?.[1] : undefined
-      const patched = named
+      const patched = req.method === 'PATCH' ? /^eq\.(.+)$/.exec(url.searchParams.get(spec.pk) ?? '')?.[1] : undefined
       const taken: { pk: string; field: string; value: string }[] = []
       for (const row of rows) {
         if (row === null || typeof row !== 'object') continue
@@ -522,26 +531,52 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       // offer's value for the other's row once a conflict turns one away.
       const offered = rows.flatMap((r) => r !== null && typeof r === 'object' && r[spec.pk] !== undefined ? [canonicalKey(r[spec.pk])] : [])
       if (new Set(offered).size !== offered.length) return json({ error: `${table} is offered one row twice in one write, which a secret field cannot tell apart` }, 400)
-      const headers = new Headers(req.headers)
-      headers.delete('content-length')
-      // The rows the write landed on, which the caller may write, are the
-      // ones a sealed value is kept for; a filter that matched none keeps none.
-      const prefer = (headers.get('prefer') ?? '').split(',').map((p) => p.trim()).filter((p) => p !== '' && !p.startsWith('return='))
-      headers.set('prefer', [...prefer, 'return=representation'].join(','))
-      const res = await write(new Request(req.url, { method: req.method, headers, body: JSON.stringify(body) }))
-      if (!res.ok) return res
-      const answered = await res.text()
-      // Each offered key as the database answered it: exactly, or, where the
-      // column lowercased a uuid, its lowercase.
-      const landed = (JSON.parse(answered || '[]') as Record<string, unknown>[]).map((r) => String(r[spec.pk]))
-      const answeredAs = (pk: string) => landed.includes(pk) ? pk : landed.find((l) => l === canonicalKey(l) && l === canonicalKey(pk) && l !== pk)
-      const now = Date.now()
-      for (const [k, v] of this.#sealed) if (v.expires <= now) this.#sealed.delete(k)
-      for (const { pk, field, value } of taken) {
-        const at = answeredAs(pk)
-        if (at !== undefined) this.#sealed.set(this.#secretKey(table!, at, field), { value, expires: now + SEAL_TTL_SECONDS * 1000, keys: new Set() })
+      // Each key as the write named it and as a uuid column spells it back:
+      // the one the database answers is the one a run's row names.
+      const spellings = (pk: string) => [...new Set([pk, canonicalKey(pk)])]
+      const settle = this.#sealed.writing(taken.map(({ pk, field, value }) => ({ at: spellings(pk).map((k) => this.#secretKey(table!, k, field)), value })))
+      const landed = new Set<string>()
+      // The transaction the write committed in (crud's x-txid), which orders
+      // two writes to one row however their answers came back.
+      let committed: number | undefined
+      try {
+        // Asked before the write, so nothing after its commit can fail it: a
+        // uuid key is spelled back in lowercase, a text key as named.
+        const uuid = patched !== undefined && canonicalKey(patched) !== patched && await this.#uuidKey(table!, spec.pk)
+        const headers = new Headers(req.headers)
+        headers.delete('content-length')
+        // A POST names its rows in its body, and one turned away by a
+        // conflict is not among them: the representation tells which landed,
+        // and the edge's crud answers every POST with it anyway.
+        const shown = (headers.get('prefer') ?? '').split(',').some((p) => p.trim() === 'return=representation')
+        if (req.method === 'POST' && !shown) headers.set('prefer', [...(headers.get('prefer') ?? '').split(',').map((p) => p.trim()).filter((p) => p !== '' && !p.startsWith('return=')), 'return=representation'].join(','))
+        const res = await write(new Request(req.url, { method: req.method, headers, body: JSON.stringify(body) }))
+        if (!res.ok) return res
+        const txid = Number(res.headers.get('x-txid'))
+        if (Number.isSafeInteger(txid)) committed = txid
+        // The rows the write landed on, which the caller may write, are the
+        // ones a value is kept for; a filter that matched none keeps none.
+        // A representation names them, whichever form it came in; a minimal
+        // answer to a PATCH, which names its one row by its key, counts them
+        // (Content-Range), so the caller needs no SELECT.
+        const answered = await res.text()
+        const counted = /^(?:\d+-(\d+)|\*)\/(?:\d+|\*)$/.exec(res.headers.get('content-range') ?? '')
+        if (answered === '' && req.method === 'PATCH' && counted) {
+          if (counted[1] !== undefined) landed.add(uuid ? canonicalKey(patched) : patched!)
+        } else if (answered !== '') {
+          try {
+            const rowsShown = JSON.parse(answered) as unknown
+            for (const r of Array.isArray(rowsShown) ? rowsShown : [rowsShown]) if (r !== null && typeof r === 'object' && spec.pk in r) landed.add(String((r as Record<string, unknown>)[spec.pk]))
+          } catch (e) {
+            // The write committed: it is answered as it was, its value kept for no row.
+            console.error(`a write to ${table} answered no JSON its rows could be read from: ${e instanceof Error ? e.message : e}`)
+          }
+        }
+        return new Response(answered === '' ? null : answered, { status: res.status, headers: res.headers })
+      } finally {
+        const kept = new Set([...landed].flatMap((k) => [...spec.fields].map((f) => this.#secretKey(table!, k, f))))
+        await settle((at) => kept.has(at), committed)
       }
-      return new Response(answered, { status: res.status, headers: res.headers })
     }
 
     /** The dispatcher's answer for a run, settled here in the object's
@@ -554,7 +589,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
       // A value another effect naming its field still awaits on the row
       // (claimed, unsettled) is kept for that one.
       if ('outcome' in answer || entered >= (effects[key.slice(0, key.indexOf(':'))]?.declaration.attempts ?? Infinity)) {
-        for (const [k, v] of this.#sealed) {
+        for (const [k, v] of this.#sealed.entries()) {
           if (!v.keys.delete(key)) continue
           const [table, pk, field] = JSON.parse(k) as [string, string, string]
           const naming = Object.entries(effects).filter(([, e]) => e.declaration.table === table && e.declaration.secretFields?.includes(field))

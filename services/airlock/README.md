@@ -179,7 +179,8 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   two retries on 408, 429, 5xx and network errors, honouring `Retry-After` up to 5 s, and
   5 s a request. `READ_TIMEOUT_MS`, 20 s, bounds a read whole. got follows no redirect.
 - The cache is RFC 9111's, in this process's memory, shared by every row's read: a
-  thousand answers, none over 1 MiB and none without a `Content-Length`, each exact path
+  thousand answers holding 64 MiB together at most, the least recently used dropped
+  first, none over 1 MiB and none without a `Content-Length`, each exact path
   in a partition of its own (got's key is the URL as normalize-url rewrites it, with no
   `utm_` parameter and a space as `+`), so a credential is never part of a key. As a
   shared cache it keeps no `private` answer and no answer to an authorized request unless
@@ -194,7 +195,10 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   (the row's key as the ledger's), `digest`
   the MD5 of the input's text. Five runs at most. A 2xx is `{target: onDone, kind: done,
   data: <body>}`; any other answer `{target: onError, kind: failed, data: {status, body}}`;
-  a run with no answer throws, and the last delivers `failed` with the error. A job
+  a run with no answer throws, and the last delivers `failed` with the error. A run
+  that cannot be asked (the input makes no path) or whose answer cannot be read (it says
+  JSON and is not) delivers `failed` with the error at once, since asking again changes
+  neither, and the unreadable answer leaves the cache. A job
   Graphile gave up on is delivered `failed` with its last error at the next sweep, and
   completed.
 - Delivery (`deliverRead` in [airlock.ts](airlock.ts)) is one transaction: it sets
@@ -210,9 +214,15 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   the sink. The digest is a check: a key the journal holds under another digest, or does
   not hold, is a history that diverged, and the run stops there (`ReadDiverged`) rather
   than hand back an answer to another request; a replay settles no dead job. A row made
-  again under a deleted one's key is another incarnation, so its keys are its own. The
-  housekeeping sweep drops the entries of incarnations that are gone, which have no
-  history left to re-run. The table (`READ_JOURNAL_SQL` in [read.ts](read.ts)) is brought
+  again under a deleted one's key is another incarnation, so its keys are its own. An
+  entry lives while its incarnation does, and 30 days at most (`JOURNAL_RETENTION_DAYS`):
+  a replay reaches back that far, and one reaching further diverges where the answer is
+  gone. A delivery drops its row's earlier incarnations, found by the row's index (built
+  concurrently once the worker runs, `journalIndexes` in read.ts); the
+  housekeeping sweep, once a minute and first once the worker serves, drops up to 500
+  entries past the retention, oldest first, and walks each read's next 500 from where it
+  last stopped, dropping those whose row is gone, so each sweep's cost is bounded however
+  long the journal; a backlog drains over successive sweeps. The table (`READ_JOURNAL_SQL` in [read.ts](read.ts)) is brought
   at every airlock start, so `job_key.sql` stays byte-for-byte for retained edge databases.
 
 ## Sealed values
@@ -235,7 +245,7 @@ the sink before, and `unknown` when an earlier run may have reached it.
 
 | | |
 |---|---|
-| `AIRLOCK_SEAL_KEY` | Base64 PKCS#8, required where an effect reads a secret field. The airlock publishes its public half in `public.airlock_seal` at start, which every client role reads through crud and none writes. `deno run seal-key.ts` prints a new one. No release makes one: it comes from the release's environment, or the target's secret store, and the airlock does not start without it. The local stack alone falls back to the repository's development key (`dev-seal.key`), which every release refuses. |
+| `AIRLOCK_SEAL_KEY` | Base64 PKCS#8, required where an effect reads a secret field. The airlock publishes its public half in `public.airlock_seal` at start, which every client role reads through crud and none writes. `deno run seal-key.ts` prints a new one. No release makes one: it comes from the release's environment, or the target's secret store, and the airlock does not start without it. The local stack alone falls back to the repository's development key (`dev-seal.key`), and says so with `AIRLOCK_SEAL_DEV=local`; every release refuses the key, and an airlock whose `AIRLOCK_RELEASE` names its release refuses to start where `AIRLOCK_SEAL_DEV` is set too (seal.ts `sealLocal`). |
 | `AIRLOCK_SEAL_KEY_PREVIOUS` | The key a rotation replaced, which still opens what was sealed to it. |
 
 Only ciphertext is stored, so the table is logged: an effect in flight keeps its value

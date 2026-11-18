@@ -3,7 +3,7 @@
 // make of the sink's answers, and what a read delivers and journals, or, in
 // replay, answers from the journal.
 
-import { assertEquals, assertExists, assertRejects, assertThrows } from "@std/assert";
+import { assertEquals, assertExists, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { type Airlock, deliverRead, performRead, ReadDiverged, type ReadJob } from "./airlock.ts";
 import { bodyOf, expand, get, parseReads, type Read, ReadCache, readOutcome, Unsendable } from "./read.ts";
 
@@ -256,12 +256,14 @@ Deno.test("a read delivers its answer as the row's move on the entry it was aske
     const a = { db, reads: { rate: { ...rate, got: fast } }, headers: {}, mesh: s.base } as unknown as Airlock;
     await performRead(a, job, false);
     assertEquals(s.asked[0].path, "/rates/USD");
-    assertEquals(verbs(queries), ["BEGIN", "SELECT", "UPDATE", "INSERT", "COMMIT"]);
+    assertEquals(verbs(queries), ["BEGIN", "SELECT", "UPDATE", "INSERT", "DELETE", "COMMIT"]);
     assertEquals(queries[1].text, "SELECT set_config('airlock.read', $1, true)");
     assertEquals(JSON.parse(queries[1].values![0] as string), { effect: "rate", row: { id: "e1" }, incarnation: "i1", n: 3, target: "priced", kind: "done", data: { usd: 5.3 } });
     assertEquals(queries[2].text, `UPDATE "expense" SET "status" = $1 WHERE "status" = $2 AND "pricings" = $3 AND "lineage"::text = $4 AND "id"::text = $5`);
     assertEquals(queries[2].values, ["priced", "pricing", 3, "i1", "e1"]);
     assertEquals(queries[3].values, ["rate:e1:i1:3", "rate", JSON.stringify({ id: "e1" }), "i1", 3, "d1", JSON.stringify({ target: "priced", kind: "done", data: { usd: 5.3 } })]);
+    // The row's earlier incarnations go with the delivery, by the row's index.
+    assertEquals(queries[4].values, ["rate", JSON.stringify({ id: "e1" }), "i1"]);
   } finally {
     await s.close();
   }
@@ -280,12 +282,58 @@ Deno.test("a read with no answer is retried, and on its last run is failed into 
     await assertRejects(() => performRead(dead, job, false));
     assertEquals(queries.length, before, "a run with no answer delivers nothing, and Graphile retries it");
     await performRead(dead, job, true);
-    const last = JSON.parse(queries.at(-4)!.values![0] as string);
+    const last = JSON.parse(queries.at(-5)!.values![0] as string);
     assertEquals([last.target, last.kind], ["unpriced", "failed"]);
     assertExists(last.data.error);
   } finally {
     await s.close();
   }
+});
+
+// Asked again, a row whose input makes no request makes none, and JSON that
+// is not stays so: failed on the first run, not after every retry, and the
+// unreadable answer is not served from the cache to the next read.
+Deno.test("a read that cannot be asked, or whose answer cannot be read, is failed on its first run", async () => {
+  const s = sink(() => new Response("{not json", { headers: { "content-type": "application/json", "cache-control": "max-age=60" } }));
+  try {
+    const { queries, db } = recordingDb();
+    const cache = new ReadCache();
+    const a = { db, reads: { rate: { ...rate, got: fast } }, headers: {}, mesh: s.base, cache } as unknown as Airlock;
+    await performRead(a, { ...job, input: {} }, false);
+    assertEquals(s.asked.length, 0);
+    const unsent = JSON.parse(queries[1].values![0] as string);
+    assertEquals([unsent.target, unsent.kind], ["unpriced", "failed"]);
+    assertStringIncludes(unsent.data.error, "currency is missing");
+    const before = queries.length;
+    await performRead(a, job, false);
+    assertEquals(s.asked.length, 1);
+    const unread = JSON.parse(queries[before + 1].values![0] as string);
+    assertEquals([unread.target, unread.kind], ["unpriced", "failed"]);
+    assertStringIncludes(unread.data.error, "is not");
+    assertEquals(cache.keys(), [], "the unreadable answer is kept");
+  } finally {
+    await s.close();
+  }
+});
+
+// A thousand answers of a megabyte each would hold a gigabyte: the cache
+// holds what its byte bound allows, the least recently used dropped first.
+Deno.test("the cache's answers hold no more bytes together than its bound", () => {
+  const cache = new ReadCache({ bytes: 1_000 });
+  const store = cache.partition("/a");
+  const answer = (n: number) => "x".repeat(n / 2);
+  store.set("1", answer(400));
+  store.set("2", answer(400));
+  assertEquals(store.get("1"), answer(400));
+  store.set("3", answer(400));
+  assertEquals([store.get("1") !== undefined, store.get("2"), store.get("3") !== undefined], [true, undefined, true]);
+  assertEquals(cache.bytes(), 800);
+  store.set("4", answer(2_000));
+  assertEquals([store.get("4"), cache.bytes()], [undefined, 800]);
+  cache.partition("/b").set("1", answer(600));
+  assertEquals(cache.bytes() <= 1_000, true);
+  cache.forget("/a");
+  assertEquals([cache.keys(), cache.bytes()], [["/b\u00001"], 600]);
 });
 
 Deno.test("an answer to an entry the row no longer waits on moves nothing and journals nothing", async () => {

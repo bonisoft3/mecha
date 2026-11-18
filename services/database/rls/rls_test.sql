@@ -12,6 +12,10 @@ DO $c$ BEGIN
 END $c$;
 CREATE ROLE _f_app NOLOGIN;
 GRANT USAGE ON SCHEMA public TO _f_app;
+-- The role a token naming no issuer falls to, which a cluster's roles step makes.
+DO $c$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+END $c$;
 
 -- Only the three fixtures built out here need clearing. Everything else is
 -- created inside the DO block, which is one transaction: a failed assertion
@@ -55,7 +59,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON _f_posting TO _f_anon;
 CREATE POLICY anon_wide ON _f_posting FOR ALL TO _f_anon USING (true) WITH CHECK (true);
 
 DO $$
-DECLARE n int; msg text;
+DECLARE n int; msg text; v text;
 BEGIN
   SET LOCAL ROLE _f_app;
 
@@ -367,11 +371,25 @@ BEGIN
   RESET ROLE;
   INSERT INTO mecha.token_role VALUES ('_f_bot');
   SET LOCAL ROLE _f_app;
-  BEGIN
-    PERFORM app_pre_request();
-    RAISE EXCEPTION '67 a token naming no issuer acted as a role where the app trusts another issuer';
-  EXCEPTION WHEN insufficient_privilege THEN NULL;
-  END;
+  -- The downgrade's warning is the operator's, not the gate's output.
+  PERFORM set_config('client_min_messages', 'error', true);
+  -- Where the app trusts another issuer, one naming none goes on as anon,
+  -- signed out: its role and its subject are dropped, not refused.
+  PERFORM app_pre_request();
+  IF current_user <> 'anon' OR current_scopes() <> ARRAY['public:']
+     OR current_setting('request.jwt.claims', true)::jsonb <> '{"role":"anon"}'::jsonb THEN
+    RAISE EXCEPTION '67 a token naming no issuer acted as % (scopes %) where the app trusts another issuer', current_user, current_scopes();
+  END IF;
+  -- One that already names anon, with someone's subject, holds no subject's scope.
+  RESET ROLE;
+  SET LOCAL ROLE anon;
+  PERFORM set_config('request.jwt.claims', '{"sub":"ana","role":"anon"}', true);
+  PERFORM app_pre_request();
+  IF current_scopes() <> ARRAY['public:'] OR current_setting('request.jwt.claims', true)::jsonb <> '{"role":"anon"}'::jsonb THEN
+    RAISE EXCEPTION '67 a token naming no issuer, as anon, kept the subject % (scopes %)', current_setting('request.jwt.claims', true), current_scopes();
+  END IF;
+  RESET ROLE;
+  SET LOCAL ROLE _f_app;
   PERFORM set_config('request.jwt.claims', '{"sub":"ana","iss":"mecha:stack","role":"_f_app"}', true);
   PERFORM app_pre_request();
   IF current_scopes() <> ARRAY['public:', 'user:ana'] THEN
@@ -382,6 +400,22 @@ BEGIN
   INSERT INTO mecha.token_role VALUES ('_f_app');
   SET LOCAL ROLE _f_app;
   PERFORM set_config('request.jwt.claims', '{"sub":"bot","iss":"https://id.example","aud":"https://app.example/crud","role":"_f_app"}', true);
+  -- Registered and not declared by the release crud runs, or with crud told
+  -- nothing, the role acts for no token.
+  BEGIN
+    PERFORM app_pre_request();
+    RAISE EXCEPTION '65 a registered role acted with crud told no declared role';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  FOREACH v IN ARRAY ARRAY['', 'other_bot'] LOOP
+    PERFORM set_config('app.settings.token_roles', v, true);
+    BEGIN
+      PERFORM app_pre_request();
+      RAISE EXCEPTION '65 a registered role the release does not declare (%) acted', v;
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+  END LOOP;
+  PERFORM set_config('app.settings.token_roles', 'other_bot, _f_app', true);
   PERFORM app_pre_request();
   IF current_scopes() <> ARRAY['public:', 'user:bot'] THEN
     RAISE EXCEPTION '65 an outside issuer''s token was refused a declared role';
@@ -410,14 +444,14 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
   PERFORM set_config('request.jwt.claims', '{"sub":"bot","aud":"https://app.example/crud","role":"_f_app"}', true);
-  BEGIN
-    PERFORM app_pre_request();
-    RAISE EXCEPTION '68 a token naming no issuer acted as a declared role';
-  EXCEPTION WHEN insufficient_privilege THEN NULL;
-  END;
+  PERFORM app_pre_request();
+  IF current_user <> 'anon' OR current_scopes() <> ARRAY['public:'] THEN
+    RAISE EXCEPTION '68 a token naming no issuer acted as a declared role (as %)', current_user;
+  END IF;
   RESET ROLE;
   DELETE FROM mecha.token_role WHERE role_name = '_f_app';
   PERFORM set_config('request.jwt.claims', '{}', true);
+  PERFORM set_config('client_min_messages', 'warning', true);
 
   -- A write's response names its transaction, which is how the client
   -- confirms the write against its shape stream: as the 32-bit xid Electric

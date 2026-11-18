@@ -231,7 +231,10 @@ async function handlePatch(
       headers: { 'Content-Type': 'application/json' },
     })
   }
-  return new Response(null, { status: 204 })
+  // As PostgREST answers it: how many rows the update reached, which a
+  // caller that may not read them learns from no body.
+  const n = result.affectedRows ?? 0
+  return new Response(null, { status: 204, headers: { 'Content-Range': n > 0 ? `0-${n - 1}/*` : '*/*' } })
 }
 
 async function handleDelete(

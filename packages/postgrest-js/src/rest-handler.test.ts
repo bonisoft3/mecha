@@ -118,6 +118,16 @@ describe('createRestHandler', () => {
     expect(body[0].message).toBe('updated')
   })
 
+  it('counts the rows a minimal PATCH reached, as PostgREST does', async () => {
+    const patch = (filter: string) => handler(new Request(`http://localhost/hello?${filter}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'minimal' }),
+    }))
+    const reached = await patch('id=eq.1')
+    expect([reached.status, reached.headers.get('Content-Range'), await reached.text()]).toEqual([204, '0-0/*', ''])
+    const none = await patch('id=eq.no-such-row')
+    expect([none.status, none.headers.get('Content-Range')]).toEqual([204, '*/*'])
+  })
+
   it('handles DELETE', async () => {
     // Insert a row to delete
     await db.query(`INSERT INTO "hello" ("id", "message") VALUES ('del-1', 'to-delete')`)

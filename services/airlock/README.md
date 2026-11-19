@@ -197,7 +197,7 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   `Cache-Control` nor `Expires` whose status RFC 9110 §15.1 lets a cache give a freshness.
 - A row takes a new `incarnation` uuid at its insert, so one made again under a deleted
   one's key is another row. Entering the invoking state, which a request's anonymous role
-  may not, adds one to the row's `count` column; no other write may change either column.
+  may not but by a signal's own move, adds one to the row's `count` column; no other write may change either column.
   It enqueues an `external_read` job `{effect, row, incarnation, n, key, input, digest}`,
   the input evaluated once: `n` the count, `key` `<effect>:<row's key>:<incarnation>:<n>`
   (the row's key as the ledger's), `digest`
@@ -286,13 +286,12 @@ the dispatcher's key (pronto's `bundle/edge-seal.ts`).
 ## A bridge not deployed
 
 An effect whose sink is a bridge, its own or the one it names for
-cloudflare or k8s, carries where it can be called in `effects.json`
+cloudflare, k8s or the compose stack, carries where it can be called in `effects.json`
 (`bridge: {name, targets, simulated}`): the release targets where its sink
 is reachable, which are those the bridge's container is deployed on and
 those where the effect names an origin or another deployed bridge in its
 place, and whether the local stack calls it, an origin or a bridge it runs a
-simulator of. A read whose sink is a bridge carries the same in `reads`, the
-bridge it names for the compose stack counted too. The
+simulator of. A read whose sink is a bridge carries the same in `reads`. The
 airlock knows its own target: `AIRLOCK_TARGET` in a cluster, which compose sets to
 `local`, and `cloudflare` at the edge. An airlock told none refuses to start
 where any bridge names its targets. Locally a bridge is deployed as its

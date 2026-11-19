@@ -64,35 +64,34 @@ package cluster
 // A value's shape, checked at every step: what XState's `types` states for
 // context, input and events, as data the database and the browser both check.
 #Shape: {
-	let S = self
 	type: "string" | "integer" | "boolean" | "array" | "object"
-	if S.type == "string" {
+	if type == "string" {
 		close({
 			type:      "string"
 			maxLength: int & >=0 & <=65536
 			values?:   [...string]
 		})
 	}
-	if S.type == "integer" {
+	if type == "integer" {
 		close({
 			type: "integer"
 			min:  int & >=-9007199254740991
-			max:  int & <=9007199254740991 & >=S.min
+			max:  int & <=9007199254740991 & >=min
 		})
 	}
-	if S.type == "boolean" {
+	if type == "boolean" {
 		close({
 			type: "boolean"
 		})
 	}
-	if S.type == "array" {
+	if type == "array" {
 		close({
 			type:     "array"
 			maxItems: int & >=0 & <=1024
 			items:    #Shape
 		})
 	}
-	if S.type == "object" {
+	if type == "object" {
 		close({
 			type: "object"
 			fields: [string]: #Shape

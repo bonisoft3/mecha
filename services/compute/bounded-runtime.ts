@@ -24,6 +24,8 @@ import {
   type WasmQueryInput,
 } from "../../packages/compute-snapshot/src/bounded.ts";
 
+export const MAX_STEP_WASM_JOBS = 64;
+
 export interface BoundedCapture {
   id: string;
   version: string;
@@ -40,7 +42,7 @@ export interface BoundedOptions {
   computation?: { calculate(value: unknown): Promise<unknown> };
   databaseUrl: string;
   directory: string;
-  runner: Pick<Runner, "run">;
+  runner: Pick<Runner, "run"> & { concurrency?: number };
   reads: string[];
   queries: Record<string, string>;
   queryStages?: StagedQueries;
@@ -755,19 +757,33 @@ export class BoundedRuntime {
     const owned = new Set<string>();
     const fields = new Map<string, string>();
     const allowed = new Set(this.options.spec.wasm.map(stem));
+    const workerConcurrency = Math.max(1, this.options.runner.concurrency ?? 1);
+    const maxJobs = MAX_STEP_WASM_JOBS;
     let completed = false;
     let jobs = 0;
-    const wasm = async (name: string, input: string) => {
+    let dbQueue = Promise.resolve();
+    const withDb = <T>(work: () => Promise<T>): Promise<T> => {
+      const run = dbQueue.then(work, work);
+      dbQueue = run.then(() => {}, () => {});
+      return run;
+    };
+    const wasm = async (
+      name: string,
+      input: string,
+      select?: readonly string[],
+    ) => {
       if (!allowed.has(name)) {
         throw new Error(`undeclared WASM module: ${name}`);
       }
-      if (++jobs > 1) {
-        throw new Error("a bounded step runs at most one WASM job");
+      if (++jobs > maxJobs) {
+        throw new Error(`a bounded step runs at most ${maxJobs} WASM jobs`);
       }
       if (bytes(input) > WASM_QUERY_INPUT_BYTES) {
         throw new Error("WASM input exceeds byte limit");
       }
-      return (await this.options.runner.run([{ wasm: name, input }]))[0];
+      return (await this.options.runner.run([
+        select ? { wasm: name, input, select } : { wasm: name, input },
+      ]))[0];
     };
     try {
       await con.run(`ATTACH ${literal(input)} AS captured (READ_ONLY)`);
@@ -793,30 +809,39 @@ export class BoundedRuntime {
         const step = cage
           ? await cage.advance({
             seed: this.seed,
-            query: (sql: string) => this.query(con, sql),
-            wasm: (name: string, value: unknown) => wasm(name, strictJson(value)),
+            concurrency: workerConcurrency,
+            maxJobs,
+            query: (sql: string) => withDb(() => this.query(con, sql)),
+            wasm: (
+              name: string,
+              value: unknown,
+              select?: readonly string[],
+            ) => wasm(name, strictJson(value), select),
             wasmFromQuery: async (
               name: string,
               value: unknown,
               query: WasmQueryInput,
+              select?: readonly string[],
             ) => {
               const encoded = await encodeWasmQueryInput(
                 value,
                 query,
                 async (after) => {
-                  const rows = await this.query(
-                    con,
-                    `SELECT unnest(p.item) FROM (
-                      SELECT struct_pack(*COLUMNS(*)) AS item,
-                        sum(octet_length(encode(to_json(struct_pack(*COLUMNS(*)))::VARCHAR))+1)
-                        OVER (ORDER BY r.${quote(query.orderBy)} ROWS UNBOUNDED PRECEDING) AS total
-                      FROM (SELECT * FROM (${query.sql}) r WHERE ${
-                      quote(query.orderBy)
-                    } > ${after} ORDER BY ${quote(query.orderBy)} LIMIT 4096) r
-                    ) p WHERE CASE WHEN p.total>1048574 AND
-                      p.total=octet_length(encode(to_json(p.item)::VARCHAR))+1
-                      THEN error('execution query row exceeds page limit')
-                      ELSE p.total<=1048574 END ORDER BY p.item.${quote(query.orderBy)}`,
+                  const rows = await withDb(() =>
+                    this.query(
+                      con,
+                      `SELECT unnest(p.item) FROM (
+                        SELECT struct_pack(*COLUMNS(*)) AS item,
+                          sum(octet_length(encode(to_json(struct_pack(*COLUMNS(*)))::VARCHAR))+1)
+                          OVER (ORDER BY r.${quote(query.orderBy)} ROWS UNBOUNDED PRECEDING) AS total
+                        FROM (SELECT * FROM (${query.sql}) r WHERE ${
+                        quote(query.orderBy)
+                      } > ${after} ORDER BY ${quote(query.orderBy)} LIMIT 4096) r
+                      ) p WHERE CASE WHEN p.total>1048574 AND
+                        p.total=octet_length(encode(to_json(p.item)::VARCHAR))+1
+                        THEN error('execution query row exceeds page limit')
+                        ELSE p.total<=1048574 END ORDER BY p.item.${quote(query.orderBy)}`,
+                    )
                   );
                   let next = after;
                   const values = rows.map((row) => {
@@ -832,7 +857,7 @@ export class BoundedRuntime {
                   return { after, next, done: rows.length === 0, rows: values };
                 },
               );
-              return wasm(name, new TextDecoder().decode(encoded));
+              return wasm(name, new TextDecoder().decode(encoded), select);
             },
           }, checkpoint)
           : await (async () => {

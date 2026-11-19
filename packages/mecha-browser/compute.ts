@@ -1,6 +1,7 @@
 import * as duckdb from 'npm:@duckdb/duckdb-wasm@1.33.1-dev57.0/dist/duckdb-browser.mjs'
 import { types, typedSql, type TypeTable, type TypeField } from '../../services/compute/portable-contract.ts'
 import { planReplicaTable, snapshotStatements, type ReplicaWatermark } from '../../services/compute/snapshot-data.ts'
+import { normalizeSelect } from '../../services/compute/wasm-select.ts'
 import type { Snapshot, Output } from '../compute-snapshot/src/index.ts'
 
 export interface BrowserProgram {
@@ -140,7 +141,8 @@ export async function browserCompute(config: BrowserCompute) {
         if (ran.some((j, i) => j !== planned[i])) throw new Error('computation changed previously answered jobs')
         if (planned.length === ran.length) break
         for (let i = ran.length; i < jobs.length; i++) {
-          const answer = await ask(job, { wasm: jobs[i].wasm, input: json(jobs[i].input) })
+          const select = normalizeSelect(jobs[i].select)
+          const answer = await ask(job, select ? { wasm: jobs[i].wasm, input: json(jobs[i].input), select } : { wasm: jobs[i].wasm, input: json(jobs[i].input) })
           outputs.push(JSON.parse(answer.json))
           ran.push(planned[i])
         }

@@ -1,4 +1,5 @@
 import { StaticCage, type StaticFactory } from '../../../services/compute/static-cage.ts'
+import { normalizeSelect, projectOutput } from '../../../services/compute/wasm-select.ts'
 import { runWasm } from '../../../services/compute/wasi.ts'
 import type { Snapshot } from '../../../services/compute/snapshot-data.ts'
 import { identity, outputFor, programFor, strictJson, validateIdentity, type SnapshotProgram } from './snapshot-program.ts'
@@ -34,8 +35,9 @@ export async function computeSnapshot(programs: readonly StaticProgram[], querie
       if (ran.some((job, i) => job !== planned[i])) throw new Error('computation changed previously answered jobs')
       if (planned.length === ran.length) break
       for (let i = ran.length; i < jobs.length; i++) {
+        const select = normalizeSelect(jobs[i].select)
         const out = runWasm(program.wasm[jobs[i].wasm], new TextEncoder().encode(strictJson(jobs[i].input)), jobs[i].wasm)
-        outputs.push(JSON.parse(new TextDecoder().decode(out)))
+        outputs.push(JSON.parse(projectOutput(new TextDecoder().decode(out), select)))
         ran.push(planned[i])
       }
       ;({ jobs } = await cage.ask({ outputs, plan: true }))

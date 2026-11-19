@@ -196,7 +196,7 @@ Deno.test("RisingWave admits bounded VARCHAR outputs in SQL casts but refuses tr
   );
 });
 
-Deno.test("translateRisingWaveSql rewrites Calcite/Duckstream constructs without mutating string literals or quoted identifiers", () => {
+Deno.test("translateRisingWaveSql rewrites Duckstream constructs without mutating string literals or quoted identifiers", () => {
   const sql = [
     'CREATE TABLE t (id VARCHAR, ts TIMESTAMP(6), amount DOUBLE, "position" VARCHAR, "DOUBLE" INTEGER);',
     "-- Explicit filtered relations survive the stock export's missing aggregate filters.",

@@ -667,6 +667,24 @@ Deno.test("a plan that changes a job already answered fails the run", async () =
       Error,
       "plan changed the jobs it was answered",
     );
+    await Deno.writeTextFile(
+      `${dir}/fickle-select.js`,
+      `export const reads = []; export const queries = {};
+       export const plan = (inputs, seed, outputs) =>
+         outputs.length === 0
+           ? [{ wasm: "echo", input: { a: 1, b: 2 }, select: ["a"] }]
+           : [{ wasm: "echo", input: { a: 1, b: 2 }, select: ["b"] }, { wasm: "echo", input: { a: 3 } }];
+       export const finish = () => ({});`,
+    );
+    const cSelect = await Computation.load(
+      { name: "fickle-select", file: `${dir}/fickle-select.js`, to: [], wasm: [`${dir}/echo.wasm`], endowments: [] },
+      runner,
+    );
+    await assertRejects(
+      () => cSelect.run({ query: () => Promise.resolve([]) }),
+      Error,
+      "plan changed the jobs it was answered",
+    );
   } finally {
     runner.close();
     await Deno.remove(dir, { recursive: true });

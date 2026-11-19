@@ -1,5 +1,18 @@
+import { Buffer } from "node:buffer";
+import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import pg from "npm:pg@8.16.3";
 import type { JobCache } from "./workers.ts";
+
+function compressResult(result: string): Buffer {
+  JSON.parse(result);
+  return Buffer.from(zstdCompressSync(Buffer.from(result, "utf8")));
+}
+
+function decompressResult(bytes: Uint8Array): string {
+  const json = Buffer.from(zstdDecompressSync(bytes)).toString("utf8");
+  JSON.parse(json);
+  return json;
+}
 
 /** Disposable pure-function answers; Durex retains the invocation and publication receipt. */
 export class PostgresJobCache implements JobCache {
@@ -36,32 +49,32 @@ export class PostgresJobCache implements JobCache {
 
   async get(keys: string[]): Promise<Map<string, string>> {
     if (keys.length === 0) return new Map();
-    const { rows } = await this.db.query<{ key: string; result: string }>(
+    const { rows } = await this.db.query<{ key: string; result: Buffer }>(
       `UPDATE compute.job_result SET accessed=clock_timestamp()
        WHERE key=ANY($1::text[]) RETURNING key,result`,
       [keys],
     );
-    return new Map(rows.map(({ key, result }) => [key, result]));
+    return new Map(rows.map(({ key, result }) => [key, decompressResult(result)]));
   }
 
   async put(key: string, result: string): Promise<void> {
-    JSON.parse(result);
-    const bytes = new TextEncoder().encode(result).byteLength + 128;
+    const compressed = compressResult(result);
+    const bytes = compressed.byteLength + 128;
     if (bytes > this.maxBytes) return;
     await this.write(async (client) => {
-      const { rows: [existing] } = await client.query(
+      const { rows: [existing] } = await client.query<{ result: Buffer }>(
         "SELECT result FROM compute.job_result WHERE key=$1",
         [key],
       );
       if (existing) {
-        if (existing.result !== result) {
+        if (decompressResult(existing.result) !== result) {
           throw new Error(`pure WASM job produced conflicting results: ${key}`);
         }
         return;
       }
       await client.query(
         "INSERT INTO compute.job_result(key,result,bytes) VALUES ($1,$2,$3)",
-        [key, result, bytes],
+        [key, compressed, bytes],
       );
       await client.query(
         "UPDATE compute.job_cache_size SET entries=entries+1,bytes=bytes+$1",

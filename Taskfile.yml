@@ -141,6 +141,7 @@ tasks:
       - "../compute/endowments.ts"
       - "../compute/language.ts"
       - "../compute/workers.ts"
+      - "../compute/wasm-select.ts"
 
   generate:graphile:
     desc: "write Graphile Worker's schema as the initdb step services/durex/graphile.sql, from the graphile-worker deno.lock pins"

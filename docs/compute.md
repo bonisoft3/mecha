@@ -26,10 +26,11 @@ command, so the runner does not rewrite stdin. Stable planner serialization
 allows unchanged groups to reuse work; changed inputs, explicit seeds, binaries
 or execution contracts produce different keys.
 
-[[../services/compute/job-cache.ts|The cache]] stores original stdout JSON in
-private PostgreSQL tables. It retains at most 100,000 results and 256 MiB of
-UTF-8 payload plus 128 bytes per entry; this is a retention budget, not a limit
-on PostgreSQL's index/WAL/disk footprint. Indexed least-recently-used eviction
+[[../services/compute/job-cache.ts|The cache]] stores Zstd-compressed stdout JSON
+(after any declared `select` field projection) as `bytea` in private PostgreSQL
+tables. It retains at most 100,000 results and 512 MiB of compressed payload
+plus 128 bytes per entry; this is a retention budget, not a limit on PostgreSQL's
+index/WAL/disk footprint. Indexed least-recently-used eviction
 also applies when reopening the cache. Oversized results still execute and
 return normally without retention. Failed execution or invalid JSON never
 creates an entry. Database failures fail the calculation; conflicting answers
@@ -217,8 +218,15 @@ A revision compare-and-set
 commits each step's scratch SQL, output upserts and checkpoint together, then
 checkpoints DuckDB so committed append buffers can be evicted. Replaying a
 committed step returns its current state without repeating its writes.
-`wasmFromQuery(name, input, {path, sql, orderBy})` fills an existing empty array
-inside a small input envelope from an ordered SQL relation. The ordering column
+`wasmFromQuery(name, input, {path, sql, orderBy}, select?)` fills an existing empty array
+inside a small input envelope from an ordered SQL relation, and both `wasm` and
+`wasmFromQuery` accept an optional `select` field list to retain only needed
+top-level JSON properties before worker IPC and Zstd-compressed `bytea` job-cache
+storage. Native servers expose `host.concurrency` matching the bounded WASI
+worker pool (`COMPUTE_WASM_WORKERS` or hardware concurrency capped at 16) and a
+fixed `host.maxJobs = 64` per bounded step so checkpoint boundaries stay
+hardware-independent while sliding worker queues remain saturated; Cloudflare
+keeps `concurrency = 1` and `maxJobs = 1` per Durable Object tick. The ordering column
 must contain unique nonnegative safe integers; it is transport metadata and is
 removed from the WASM rows. Each page is bounded to 4,096 rows and 1 MiB and is
 fenced by the capture's execution revision. The host encodes directly into one
@@ -249,10 +257,9 @@ These bounds do not make arbitrary SQL or a single numerical job fit memory.
 
 Generated modules may also export `queryStages`, a physical plan for selected
 queries: ordered `{name, sql}` intermediate relations and the final `sql`.
-The streaming-plan translator emits these barriers after joins, aggregates and
-shared views without changing expressions or the legacy query strings. Backward
-column demand keeps only required fields in each physical stage, while retaining
-predicate keys, grouping/distinct semantics and row cardinality. The
+The Duckstream translator materializes one physical stage per transitive
+ancestor view in the authored view DAG under a scoped `__duckstream_` prefix
+without changing expressions or the legacy query strings. The
 paged executor commits one stage and its cursor per call, checkpoints it, and
 resumes that cursor after eviction. It drops intermediates when the final
 result commits. JSON result and output payload columns use uncompressed storage

@@ -1,6 +1,7 @@
 import { encodeWasmQueryInput, type WasmQueryInput } from '../../compute-snapshot/src/bounded.ts'
 export { encodeWasmQueryInput, WASM_QUERY_INPUT_BYTES, type WasmQueryInput } from '../../compute-snapshot/src/bounded.ts'
 import { StaticCage, type StaticFactory } from '../../../services/compute/static-cage.ts'
+import { normalizeSelect, projectOutput } from '../../../services/compute/wasm-select.ts'
 import { runWasm } from '../../../services/compute/wasi.ts'
 import type { ComputeService } from './compute.ts'
 import type { ComputeCapture } from './compute.ts'
@@ -52,9 +53,10 @@ export async function pagedComputeStep(programs: readonly PagedProgram[], querie
         if (ran.some((job, i) => job !== planned[i])) throw new Error('computation changed previously answered jobs')
         if (planned.length === ran.length) break
         for (let i = ran.length; i < jobs.length; i++) {
+          const select = normalizeSelect(jobs[i].select)
           const out = runWasm(program.wasm[jobs[i].wasm], new TextEncoder().encode(strictJson(jobs[i].input)), jobs[i].wasm)
           if (out.length > WASM_OUTPUT_BYTES) throw new Error('WASM output exceeds byte limit')
-          outputs.push(JSON.parse(new TextDecoder().decode(out)))
+          outputs.push(JSON.parse(projectOutput(new TextDecoder().decode(out), select)))
           ran.push(planned[i])
         }
         ;({ jobs } = await cage.ask({ outputs, plan: true }))
@@ -69,27 +71,32 @@ export async function pagedComputeStep(programs: readonly PagedProgram[], querie
   try {
     await cage.load()
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(program.spec.name)))
-    const run = (name: string, bytes: Uint8Array) => {
+    let jobs = 0
+    const run = (name: string, bytes: Uint8Array, select?: readonly string[]) => {
+      const normalized = normalizeSelect(select)
+      if (++jobs > 1) throw new Error('a bounded step runs at most one WASM job')
       const out = runWasm(program.wasm[name], bytes, name)
       if (out.length > WASM_OUTPUT_BYTES) throw new Error('WASM output exceeds byte limit')
-      return harden(JSON.parse(new TextDecoder().decode(out)))
+      return harden(JSON.parse(projectOutput(new TextDecoder().decode(out), normalized)))
     }
     const host = {
       seed: new DataView(digest.buffer).getUint32(0, false),
+      concurrency: 1,
+      maxJobs: 1,
       query: async (sql: string) => harden(await pagedRequest(queries, { capture, action: 'query', sql })),
-      wasm: async (name: string, input: unknown) => {
+      wasm: async (name: string, input: unknown, select?: readonly string[]) => {
         if (!Object.hasOwn(program.wasm, name)) throw new Error('undeclared WASM module')
         const bytes = new TextEncoder().encode(strictJson(input))
         if (bytes.length > EXECUTION_BYTES) throw new Error('WASM input exceeds byte limit')
-        return await Promise.resolve(run(name, bytes))
+        return await Promise.resolve(run(name, bytes, select))
       },
-      wasmFromQuery: async (name: string, input: unknown, query: WasmQueryInput) => {
+      wasmFromQuery: async (name: string, input: unknown, query: WasmQueryInput, select?: readonly string[]) => {
         if (!Object.hasOwn(program.wasm, name)) throw new Error('undeclared WASM module')
         const sql = query?.sql, orderBy = query?.orderBy
         const bytes = await encodeWasmQueryInput(input, query, after => pagedRequest<ExecutionQueryPage>(queries, {
           capture, action: 'query-page', revision: execution.revision, sql, orderBy, after,
         }))
-        return run(name, bytes)
+        return run(name, bytes, select)
       },
     }
     const step = await cage.advance(host, execution.checkpoint) as ExecutionStep

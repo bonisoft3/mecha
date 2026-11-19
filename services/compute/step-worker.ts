@@ -63,19 +63,25 @@ addEventListener("message", async (event) => {
       throw new Error("invalid step worker request");
     }
     running = true;
-    const { seed, checkpoint } = decode(data.json) as {
+    const { seed, concurrency, maxJobs, checkpoint } = decode(data.json) as {
       seed: number;
+      concurrency: number;
+      maxJobs: number;
       checkpoint: unknown;
     };
     const host = harden({
       seed,
+      concurrency,
+      maxJobs,
       query: (sql: string) => call("query", [sql]),
-      wasm: (name: string, input: unknown) => call("wasm", [name, input]),
+      wasm: (name: string, input: unknown, select?: readonly string[]) =>
+        call("wasm", select === undefined ? [name, input] : [name, input, select]),
       wasmFromQuery: (
         name: string,
         input: unknown,
         query: { path: string[]; sql: string; orderBy: string },
-      ) => call("wasmFromQuery", [name, input, query]),
+        select?: readonly string[],
+      ) => call("wasmFromQuery", select === undefined ? [name, input, query] : [name, input, query, select]),
     });
     const { namespace } = await compartment(
       loaded.file,

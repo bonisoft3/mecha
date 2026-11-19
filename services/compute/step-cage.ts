@@ -1,16 +1,19 @@
-import { compile, strictJson } from "./workers.ts";
+import { compile, normalizeSelect, strictJson } from "./workers.ts";
 import { endowable } from "./language.ts";
 
 export type StepQuery = { path: string[]; sql: string; orderBy: string };
 export type StepHost = {
   query(sql: string): Promise<Record<string, unknown>[]>;
-  wasm(name: string, input: unknown): Promise<unknown>;
+  wasm(name: string, input: unknown, select?: readonly string[]): Promise<unknown>;
   wasmFromQuery(
     name: string,
     input: unknown,
     query: StepQuery,
+    select?: readonly string[],
   ): Promise<unknown>;
   seed: number;
+  concurrency?: number;
+  maxJobs?: number;
 };
 export type StepResult = {
   checkpoint: unknown;
@@ -72,8 +75,16 @@ export class StepCage {
     if (this.active) {
       return Promise.reject(new Error("step cage already has an active step"));
     }
+    const concurrency = host.concurrency ?? 1;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+      return Promise.reject(new TypeError("step host concurrency must be a positive safe integer"));
+    }
+    const maxJobs = host.maxJobs ?? 1;
+    if (!Number.isSafeInteger(maxJobs) || maxJobs < 1) {
+      return Promise.reject(new TypeError("step host maxJobs must be a positive safe integer"));
+    }
     return new Promise((resolve, reject) => {
-      const json = encode({ seed: host.seed, checkpoint });
+      const json = encode({ seed: host.seed, concurrency, maxJobs, checkpoint });
       this.active = { host, resolve, reject };
       this.worker.postMessage({ kind: "advance", json });
     });
@@ -114,15 +125,17 @@ export class StepCage {
           }
           result = await active.host.query(args[0]);
           break;
-        case "wasm":
-          if (args.length !== 2 || typeof args[0] !== "string") {
+        case "wasm": {
+          if ((args.length !== 2 && args.length !== 3) || typeof args[0] !== "string") {
             throw new TypeError("invalid wasm arguments");
           }
-          result = await active.host.wasm(args[0], args[1]);
+          const select = normalizeSelect(args[2]);
+          result = await active.host.wasm(args[0], args[1], select);
           break;
-        case "wasmFromQuery":
+        }
+        case "wasmFromQuery": {
           if (
-            args.length !== 3 || typeof args[0] !== "string" ||
+            (args.length !== 3 && args.length !== 4) || typeof args[0] !== "string" ||
             !args[2] || typeof args[2].sql !== "string" ||
             typeof args[2].orderBy !== "string" ||
             !Array.isArray(args[2].path) ||
@@ -130,8 +143,10 @@ export class StepCage {
           ) {
             throw new TypeError("invalid wasmFromQuery arguments");
           }
-          result = await active.host.wasmFromQuery(args[0], args[1], args[2]);
+          const select = normalizeSelect(args[3]);
+          result = await active.host.wasmFromQuery(args[0], args[1], args[2], select);
           break;
+        }
         default:
           throw new TypeError(`unknown step host method ${method}`);
       }

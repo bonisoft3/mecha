@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { StepCage, type StepHost } from "./step-cage.ts";
+import { Runner } from "./workers.ts";
 
 const host: StepHost = {
   seed: 7,
@@ -146,4 +147,75 @@ Deno.test("step cage bounds checkpoint, output and wasm messages", async () => {
     Error,
     "16 MiB",
   );
+});
+
+Deno.test("step cage forwards concurrency and output field selection, and Runner pools WASI workers with deduplicated caching", async () => {
+  using worker = cage(`
+    const [a, b] = await Promise.all([
+      host.wasm("kernel", { id: 1 }, ["rps"]),
+      host.wasmFromQuery("kernel", { id: 2 }, { sql: "select 1", path: ["games"], orderBy: "id" }, ["rps", "extra"]),
+    ]);
+    return { checkpoint: { concurrency: host.concurrency, a, b }, writes: {}, done: true };
+  `);
+  assertEquals(
+    await worker.advance({
+      seed: 11,
+      concurrency: 4,
+      query: () => Promise.resolve([]),
+      wasm: (_name, input, select) => Promise.resolve({ input, select }),
+      wasmFromQuery: (_name, input, _query, select) => Promise.resolve({ input, select }),
+    }, {}),
+    {
+      checkpoint: {
+        concurrency: 4,
+        a: { input: { id: 1 }, select: ["rps"] },
+        b: { input: { id: 2 }, select: ["rps", "extra"] },
+      },
+      writes: {},
+      done: true,
+    },
+  );
+
+  // Echo stdin JSON to stdout so Runner executes multiple WASI jobs across its pool.
+  const echoHex =
+    "0061736d01000000010c0260047f7f7f7f017f60000002440216776173695f736e617073686f745f70726576696577310766645f72656164000016776173695f736e617073686f745f70726576696577310866645f77726974650000030201010503010001071302066d656d6f72790200065f737461727400020a33013100410041103602004104418020360200410041004101410810001a41044108280200360200410141004101410c10011a0b";
+  const echoBytes = new Uint8Array(echoHex.match(/../g)!.map((h) => parseInt(h, 16)));
+  const stored = new Map<string, string>();
+  let puts = 0;
+  using runner = await Runner.cached(
+    { echo: echoBytes },
+    {
+      get: (keys) => Promise.resolve(new Map(keys.filter((k) => stored.has(k)).map((k) => [k, stored.get(k)!]))),
+      put: (k, v) => {
+        puts++;
+        stored.set(k, v);
+        return Promise.resolve();
+      },
+    },
+    { concurrency: 4 },
+  );
+  const jobs = Array.from({ length: 8 }, (_, i) => ({
+    wasm: "echo",
+    input: JSON.stringify({ rps: i % 4, discard: "y".repeat(64) }),
+    select: ["rps"],
+  }));
+  const first = await runner.run(jobs);
+  assertEquals(first, Array.from({ length: 8 }, (_, i) => ({ rps: i % 4 })));
+  assertEquals(puts, 4);
+  const second = await runner.run(jobs);
+  assertEquals(second, first);
+  assertEquals(puts, 4);
+
+  // Closing Runner while a WASM job is executing in a worker settles its promise instead of hanging.
+  const loopHex =
+    "0061736d01000000010401600000030201000503010001071302066d656d6f72790200065f737461727400000a0901070003400c000b0b";
+  const loopModule = await WebAssembly.compile(
+    new Uint8Array(loopHex.match(/../g)!.map((h) => parseInt(h, 16))),
+  );
+  const closingRunner = new Runner({ spin: loopModule }, { concurrency: 1 });
+  const inFlight = closingRunner.run([{ wasm: "spin", input: "{}" }]);
+  const closedPromise = assertRejects(() => inFlight, Error, "WASM runner is closed");
+  await new Promise((r) => setTimeout(r, 40));
+  closingRunner.close();
+  await closedPromise;
 });

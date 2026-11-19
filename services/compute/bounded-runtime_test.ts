@@ -724,6 +724,57 @@ Deno.test("bounded sink batches preserve JSON strings and replace keys only acro
 	}
 });
 
+Deno.test("bounded step WASM ceiling is hardware-independent across 1, 2, and 8 workers", async () => {
+	const directory = await Deno.makeTempDir();
+	try {
+		const base = options(directory);
+		base.spec.wasm = ["kernel.wasm"];
+		base.queries = {};
+		base.source = `export const reads=[]; export const queries={}; export const finish=()=>({});
+      export async function plan(host){
+        const out = await Promise.all(Array.from({length: host.maxJobs}, (_, i) => host.wasm('kernel',{id:String(i)})));
+        return {checkpoint:host.maxJobs,writes:{sink:out},done:true};
+      }`;
+		let expected: unknown[] | undefined;
+		for (const concurrency of [1, 2, 8] as const) {
+			const runtime = await BoundedRuntime.create({
+				...base,
+				runner: {
+					concurrency,
+					run: (jobs: { input: string }[]) =>
+						Promise.resolve(jobs.map((j) => JSON.parse(j.input))),
+				},
+			});
+			const capture = await runtime.capture();
+			const output = await runtime.calculate(capture);
+			const rows = [];
+			for await (const page of runtime.pages(output, "sink")) rows.push(...page);
+			assertEquals(rows.length, 64);
+			expected ??= rows;
+			assertEquals(rows, expected);
+			await runtime.release(capture, output);
+		}
+
+		const overflow = await BoundedRuntime.create({
+			...base,
+			runner: {
+				concurrency: 2,
+				run: (jobs: { input: string }[]) =>
+					Promise.resolve(jobs.map((j) => JSON.parse(j.input))),
+			},
+			source: base.source.replace("host.maxJobs", "host.maxJobs + 1"),
+		});
+		const cap2 = await overflow.capture();
+		await assertRejects(
+			() => overflow.calculate(cap2),
+			Error,
+			"a bounded step runs at most 64 WASM jobs",
+		);
+	} finally {
+		await Deno.remove(directory, { recursive: true });
+	}
+});
+
 pgTest(
 	"bounded persistent replica seeds once and applies LSN-fenced WAL deltas and duckpipe tables",
 	async () => {

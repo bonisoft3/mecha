@@ -45,6 +45,7 @@
           "services/compute/endowments.ts",
           "services/compute/language.ts",
           "services/compute/workers.ts",
+          "services/compute/wasm-select.ts",
           "services/compute/query-stages.ts"
         ],
         "dst": "/app/compute/",
@@ -95,6 +96,7 @@
       "services/compute/endowments.ts",
       "services/compute/language.ts",
       "services/compute/workers.ts",
+      "services/compute/wasm-select.ts",
       "services/compute/query-stages.ts"
     ],
     "exclude": []
@@ -207,6 +209,7 @@
           "services/compute/endowments.ts",
           "services/compute/language.ts",
           "services/compute/workers.ts",
+          "services/compute/wasm-select.ts",
           "services/compute/query-stages.ts"
         ],
         "exclude": []
@@ -266,6 +269,7 @@
           "services/compute/endowments.ts",
           "services/compute/language.ts",
           "services/compute/workers.ts",
+          "services/compute/wasm-select.ts",
           "services/compute/query-stages.ts"
         ],
         "exclude": [],
@@ -316,6 +320,7 @@
           "services/compute/endowments.ts",
           "services/compute/language.ts",
           "services/compute/workers.ts",
+          "services/compute/wasm-select.ts",
           "services/compute/query-stages.ts"
         ],
         "exclude": [],

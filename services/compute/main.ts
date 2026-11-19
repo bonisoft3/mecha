@@ -96,7 +96,7 @@ import {
   stringFromValue,
 } from "npm:@duckdb/node-api@1.5.6-r.1";
 import type { ModuleSource } from "npm:@endo/module-source@1.4.0";
-import { admit, Cage, IDENTIFIER, type Job, Runner, strictJson } from "./workers.ts";
+import { admit, Cage, IDENTIFIER, type Job, normalizeSelect, Runner, strictJson } from "./workers.ts";
 
 const RPC_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
 
@@ -413,7 +413,13 @@ export class Computation implements Runnable {
     let { jobs } = await cage.ask({ inputs, seed: this.seed });
     while (true) {
       const planned = this.jobs(jobs);
-      if (ran.some((job, i) => job.wasm !== planned[i]?.wasm || job.input !== planned[i].input)) {
+      if (
+        ran.some((job, i) =>
+          job.wasm !== planned[i]?.wasm ||
+          job.input !== planned[i].input ||
+          !isDeepStrictEqual(job.select, planned[i].select)
+        )
+      ) {
         throw new Error(`computation ${this.name}: plan changed the jobs it was answered`);
       }
       if (planned.length === ran.length) break;
@@ -476,7 +482,8 @@ export class Computation implements Runnable {
       if (typeof job !== "object" || job === null || !this.wasm.has(job.wasm) || !("input" in job)) {
         throw new Error(`computation ${this.name}: a job is no {wasm, input} of ${[...this.wasm]}`);
       }
-      return { wasm: job.wasm, input: strictJson(job.input) };
+      const select = normalizeSelect((job as { select?: unknown }).select);
+      return select ? { wasm: job.wasm, input: strictJson(job.input), select } : { wasm: job.wasm, input: strictJson(job.input) };
     });
   }
 }
@@ -726,10 +733,12 @@ async function main() {
   const stems = files.map(stem);
   if (new Set(stems).size !== stems.length) throw new Error(`two wasm modules share a name: ${files}`);
   const databaseUrl = need("DATABASE_URL");
+  const configuredWorkers = Deno.env.get("COMPUTE_WASM_WORKERS");
+  const concurrency = configuredWorkers ? Number(configuredWorkers) : undefined;
   await using jobCache = await PostgresJobCache.open(databaseUrl);
   using runner = await Runner.cached(Object.fromEntries(
     await Promise.all(files.map(async (f) => [stem(f), await Deno.readFile(f)])),
-  ), jobCache);
+  ), jobCache, concurrency === undefined ? {} : { concurrency });
   const computations: Computation[] = [];
   for (const spec of specs) computations.push(await Computation.load(spec, runner));
   const jwt = Deno.env.get("SERVICE_JWT");

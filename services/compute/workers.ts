@@ -1,10 +1,12 @@
 // The workers a computation runs in: a fresh cage (cage.ts) per run for its
-// module, and one runner (job.ts) for every wasm job, all without permissions;
-// and the module's admission, compiled once and loaded in a cage.
+// module, and a bounded worker pool (job.ts) for wasm jobs, all without
+// permissions; and the module's admission, compiled once and loaded in a cage.
 
 import { validateQueryStages, type StagedQueries } from "./query-stages.ts";
 import { ModuleSource } from "npm:@endo/module-source@1.4.0";
 import { endowable } from "./language.ts";
+import { normalizeSelect } from "./wasm-select.ts";
+export { normalizeSelect } from "./wasm-select.ts";
 
 const sha256 = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
@@ -12,22 +14,24 @@ const sha256 = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
 const hashText = (text: string) => sha256(new TextEncoder().encode(text));
 
 export async function executionVersion(): Promise<string> {
-  const host = await Promise.all(["./workers.ts", "./job.ts", "./wasi.ts", "./query-stages.ts"].map(async (file) =>
+  const host = await Promise.all(["./job.ts", "./wasm-select.ts", "./wasi.ts"].map(async (file) =>
     await sha256(await Deno.readFile(new URL(file, import.meta.url)))
   ));
-  return await hashText(JSON.stringify({ protocol: 1, host, runtime: Deno.version, target: Deno.build.target }));
+  return await hashText(JSON.stringify({ protocol: 2, host, runtime: Deno.version, target: Deno.build.target }));
 }
 
 /** A job as the runner takes it: the wasm module's name and its stdin, JSON. */
-export type Job = { wasm: string; input: string };
+export type Job = { wasm: string; input: string; select?: readonly string[] };
 
 export interface JobCache {
   get(keys: string[]): Promise<Map<string, string>>;
   put(key: string, result: string): Promise<void>;
 }
 
-export const jobKey = (version: string, job: Job): Promise<string> =>
-  hashText(JSON.stringify([version, job.wasm, job.input]));
+export const jobKey = (version: string, job: Job): Promise<string> => {
+  const select = normalizeSelect(job.select);
+  return hashText(JSON.stringify(select ? [version, job.wasm, job.input, select] : [version, job.wasm, job.input]));
+};
 
 const NONE = { type: "module", deno: { permissions: "none" } } as const;
 
@@ -125,17 +129,41 @@ export async function admit(file: string, endowments: string[]): Promise<Admitte
   return { compiled, reads, queries: queries as Record<string, string>, ...(queryStages ? { queryStages } : {}) };
 }
 
-/** The worker running wasm jobs, one at a time, each in a fresh instance.
- * Outputs are in job order. */
+function defaultConcurrency(): number {
+  const available = typeof navigator !== "undefined" && Number.isSafeInteger(navigator.hardwareConcurrency)
+    ? navigator.hardwareConcurrency
+    : 1;
+  return Math.max(1, Math.min(16, available));
+}
+
+/** Bounded worker pool running pure wasm jobs, each in a fresh WASI instance.
+ * Outputs are returned in job order. */
 export class Runner {
-  private worker = new Worker(new URL("./job.ts", import.meta.url), NONE);
+  readonly concurrency: number;
+  private allWorkers = new Set<Worker>();
+  private idle: Worker[] = [];
+  private busy = new Map<Worker, (error: Error) => void>();
+  private waiters: { resolve: (worker: Worker) => void; reject: (error: Error) => void }[] = [];
+  private inflight = new Map<string, Promise<string>>();
+  private closed = false;
   private memo?: { cache: JobCache; versions: Record<string, string> };
 
-  constructor(modules: Record<string, WebAssembly.Module>) {
-    this.worker.postMessage({ modules });
+  constructor(
+    private modules: Record<string, WebAssembly.Module>,
+    options: { concurrency?: number } = {},
+  ) {
+    const concurrency = options.concurrency ?? defaultConcurrency();
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+      throw new Error("Runner concurrency must be a positive safe integer");
+    }
+    this.concurrency = concurrency;
   }
 
-  static async cached(modules: Record<string, Uint8Array<ArrayBuffer>>, cache: JobCache): Promise<Runner> {
+  static async cached(
+    modules: Record<string, Uint8Array<ArrayBuffer>>,
+    cache: JobCache,
+    options: { concurrency?: number } = {},
+  ): Promise<Runner> {
     const engine = await executionVersion();
     const entries = await Promise.all(Object.entries(modules).map(async ([name, bytes]) => {
       const source = bytes.slice();
@@ -145,42 +173,118 @@ export class Runner {
         version: await hashText(JSON.stringify([engine, await sha256(source)])),
       };
     }));
-    const runner = new Runner(Object.fromEntries(entries.map(({ name, module }) => [name, module])));
+    const runner = new Runner(Object.fromEntries(entries.map(({ name, module }) => [name, module])), options);
     runner.memo = { cache, versions: Object.fromEntries(entries.map(({ name, version }) => [name, version])) };
     return runner;
   }
 
+  private spawn(): Worker {
+    const worker = new Worker(new URL("./job.ts", import.meta.url), NONE);
+    worker.postMessage({ modules: this.modules });
+    this.allWorkers.add(worker);
+    return worker;
+  }
+
+  private acquire(): Promise<Worker> {
+    if (this.closed) return Promise.reject(new Error("WASM runner is closed"));
+    const ready = this.idle.pop();
+    if (ready) return Promise.resolve(ready);
+    if (this.allWorkers.size < this.concurrency) {
+      return Promise.resolve(this.spawn());
+    }
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
+    });
+  }
+
+  private release(worker: Worker, healthy: boolean) {
+    if (!healthy || this.closed) {
+      this.allWorkers.delete(worker);
+      worker.terminate();
+      if (!this.closed && this.waiters.length > 0 && this.allWorkers.size < this.concurrency) {
+        this.waiters.shift()!.resolve(this.spawn());
+      }
+      return;
+    }
+    const next = this.waiters.shift();
+    if (next) next.resolve(worker);
+    else this.idle.push(worker);
+  }
+
+  private async execute(job: Job, index: number): Promise<string> {
+    const select = normalizeSelect(job.select);
+    const worker = await this.acquire();
+    let healthy = false;
+    try {
+      const answer = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const settle = (fn: () => void) => {
+          this.busy.delete(worker);
+          worker.onmessage = null;
+          worker.onerror = null;
+          fn();
+        };
+        this.busy.set(worker, (err) => settle(() => reject(err)));
+        worker.onmessage = (e) => settle(() => resolve(e.data));
+        worker.onerror = (e) => {
+          e.preventDefault();
+          settle(() => reject(new Error(e.message)));
+        };
+        worker.postMessage(select ? { wasm: job.wasm, input: job.input, select } : { wasm: job.wasm, input: job.input });
+      });
+      healthy = true;
+      if ("error" in answer) throw new Error(`job ${index} (${job.wasm}): ${answer.error}`);
+      return answer.json as string;
+    } finally {
+      this.release(worker, healthy);
+    }
+  }
+
   async run(jobs: Job[]): Promise<unknown[]> {
+    if (this.closed) throw new Error("WASM runner is closed");
+    if (jobs.length === 0) return [];
     const memo = this.memo;
     const keys = memo ? await Promise.all(jobs.map((job) => {
       const version = memo.versions[job.wasm];
       if (!version) throw new Error(`no WASM execution identity for ${job.wasm}`);
-      // argv[0] and the exact stdin bytes are observable by a WASI command.
+      // argv[0], stdin bytes, and any output field projection determine the answer.
       return jobKey(version, job);
     })) : [];
-    const retained = memo ? await memo.cache.get(keys) : new Map<string, string>();
-    const outputs: unknown[] = [];
-    for (const [index, job] of jobs.entries()) {
+    const retained = memo ? await memo.cache.get([...new Set(keys)]) : new Map<string, string>();
+    const jsons = await Promise.all(jobs.map(async (job, index) => {
+      if (!memo) return await this.execute(job, index);
       const key = keys[index];
-      if (retained.has(key)) {
-        outputs.push(JSON.parse(retained.get(key)!));
-        continue;
+      const hit = retained.get(key);
+      if (hit !== undefined) return hit;
+      let pending = this.inflight.get(key);
+      if (!pending) {
+        pending = (async () => {
+          try {
+            const json = await this.execute(job, index);
+            await memo.cache.put(key, json);
+            return json;
+          } finally {
+            this.inflight.delete(key);
+          }
+        })();
+        this.inflight.set(key, pending);
       }
-      const answer = await reply(this.worker, job);
-      if ("error" in answer) throw new Error(`job ${index} (${job.wasm}): ${answer.error}`);
-      const json = answer.json as string;
-      const output = JSON.parse(json);
-      if (memo) {
-        await memo.cache.put(key, json);
-        retained.set(key, json);
-      }
-      outputs.push(output);
-    }
-    return outputs;
+      return await pending;
+    }));
+    return jsons.map((json) => JSON.parse(json));
   }
 
   close() {
-    this.worker.terminate();
+    if (this.closed) return;
+    this.closed = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.reject(new Error("WASM runner is closed"));
+    }
+    for (const reject of [...this.busy.values()]) {
+      reject(new Error("WASM runner is closed"));
+    }
+    this.idle.length = 0;
+    for (const worker of this.allWorkers) worker.terminate();
+    this.allWorkers.clear();
   }
 
   [Symbol.dispose]() {

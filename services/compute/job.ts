@@ -3,6 +3,7 @@
 // message, each in a fresh instance (wasi.ts), and answers with what the job
 // wrote, parsed.
 
+import { projectOutput } from "./wasm-select.ts";
 import { runWasm } from "./wasi.ts";
 
 let modules: Record<string, WebAssembly.Module>;
@@ -14,11 +15,16 @@ self.addEventListener("message", (event) => {
     return;
   }
   try {
-    const out = runWasm(modules[data.wasm], new TextEncoder().encode(data.input), data.wasm);
-    const json = new TextDecoder().decode(out);
-    JSON.parse(json);
+    const out = runWasm(
+      modules[data.wasm],
+      new TextEncoder().encode(data.input),
+      data.wasm,
+    );
+    const json = projectOutput(new TextDecoder().decode(out), data.select);
     self.postMessage({ json });
   } catch (e) {
-    self.postMessage({ error: e instanceof Error ? e.stack ?? e.message : String(e) });
+    self.postMessage({
+      error: e instanceof Error ? e.stack ?? e.message : String(e),
+    });
   }
 });

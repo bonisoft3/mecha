@@ -36,6 +36,7 @@ const hosts = [
   "endowments.ts",
   "crypto.ts",
   "job.ts",
+  "wasm-select.ts",
   "wasi.ts",
   "deno.json",
   "deno.lock",

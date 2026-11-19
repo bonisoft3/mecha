@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from '@simplewebauthn/server/helpers'
-import { encodeBase64Url, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
+import { encodeBase64Url, randomToken, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
 import { providersFrom, SESSION_COOKIE, sha256url, STATE_COOKIE } from '../../../services/auth/oidc.ts'
 import { createEdgeCluster } from '../src/cluster.ts'
 
 type Cbor = Parameters<typeof isoCBOR.encode>[0]
+type CeremonyStart = { challenge: string; state: string }
+type AuthSession = { token: string; refresh_token: string; user: { id: string; handle: string; guest?: boolean; name?: string; email?: string } }
 
 async function makePasskey(rpId = 'test.local') {
   const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
@@ -95,7 +97,7 @@ Deno.test({
       const freshPasskey = await makePasskey(rpId)
       const regStartRes = await cluster.handle(new Request(`${origin}/auth/register/start`, { method: 'POST' }))
       assert.equal(regStartRes.status, 200)
-      const regStart = (await regStartRes.json()) as any
+      const regStart = (await regStartRes.json()) as CeremonyStart
       assert.ok(regStart.challenge)
       assert.ok(regStart.state)
 
@@ -110,8 +112,9 @@ Deno.test({
         }),
       )
       assert.equal(regVerifyRes.status, 200)
-      const regVerified = (await regVerifyRes.json()) as any
+      const regVerified = (await regVerifyRes.json()) as AuthSession
       assert.ok(regVerified.token)
+      assert.ok(regVerified.refresh_token)
       assert.equal((await verifyJwt(secret, regVerified.token))?.guest, false)
       assert.ok(regVerified.user?.id)
       assert.ok(regVerified.user?.handle)
@@ -119,7 +122,7 @@ Deno.test({
       // 2. Authentication with the registered passkey
       const loginStartRes = await cluster.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))
       assert.equal(loginStartRes.status, 200)
-      const loginStart = (await loginStartRes.json()) as any
+      const loginStart = (await loginStartRes.json()) as CeremonyStart
       assert.ok(loginStart.challenge)
       assert.ok(loginStart.state)
 
@@ -134,16 +137,18 @@ Deno.test({
         }),
       )
       assert.equal(loginVerifyRes.status, 200)
-      const loggedIn = (await loginVerifyRes.json()) as any
+      const loggedIn = (await loginVerifyRes.json()) as AuthSession
       assert.equal(loggedIn.user.id, regVerified.user.id)
+      assert.ok(loggedIn.refresh_token)
       assert.equal((await verifyJwt(secret, loggedIn.token))?.guest, false)
       assert.equal(loggedIn.user.handle, regVerified.user.handle)
 
       // 3. Guest minting and promotion to passkey
       const guestRes = await cluster.handle(new Request(`${origin}/auth/guest`, { method: 'POST' }))
       assert.equal(guestRes.status, 200)
-      const guest = (await guestRes.json()) as any
+      const guest = (await guestRes.json()) as AuthSession
       assert.ok(guest.token)
+      assert.ok(guest.refresh_token)
       assert.ok(guest.user.guest)
 
       const promoPasskey = await makePasskey(rpId)
@@ -154,7 +159,7 @@ Deno.test({
         }),
       )
       assert.equal(promoStartRes.status, 200)
-      const promoStart = (await promoStartRes.json()) as any
+      const promoStart = (await promoStartRes.json()) as CeremonyStart
 
       const promoVerifyRes = await cluster.handle(
         new Request(`${origin}/auth/register/verify`, {
@@ -167,7 +172,7 @@ Deno.test({
         }),
       )
       assert.equal(promoVerifyRes.status, 200)
-      const promoted = (await promoVerifyRes.json()) as any
+      const promoted = (await promoVerifyRes.json()) as AuthSession
       assert.equal((await verifyJwt(secret, promoted.token))?.guest, false)
       // Retains guest ID and handle
       assert.equal(promoted.user.id, guest.user.id)
@@ -175,7 +180,7 @@ Deno.test({
 
       // 4. Login with promoted passkey succeeds
       const promoLoginStartRes = await cluster.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))
-      const promoLoginStart = (await promoLoginStartRes.json()) as any
+      const promoLoginStart = (await promoLoginStartRes.json()) as CeremonyStart
       const promoLoginVerifyRes = await cluster.handle(
         new Request(`${origin}/auth/login/verify`, {
           method: 'POST',
@@ -187,7 +192,7 @@ Deno.test({
         }),
       )
       assert.equal(promoLoginVerifyRes.status, 200)
-      const promoLoggedIn = (await promoLoginVerifyRes.json()) as any
+      const promoLoggedIn = (await promoLoginVerifyRes.json()) as AuthSession
       assert.equal(promoLoggedIn.user.id, guest.user.id)
 
       // 5. Already promoted / non-guest account cannot re-register
@@ -344,14 +349,14 @@ Deno.test({
       const config = { db, tables: ['note', 'board'], secret, origin, rpId, log: () => {}, fail: (e: unknown) => { throw e } }
       const first = await createEdgeCluster(config)
       const passkey = await makePasskey(rpId)
-      const start = (await (await first.handle(new Request(`${origin}/auth/register/start`, { method: 'POST' }))).json()) as any
+      const start = (await (await first.handle(new Request(`${origin}/auth/register/start`, { method: 'POST' }))).json()) as CeremonyStart
       const registered = await first.handle(new Request(`${origin}/auth/register/verify`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ state: start.state, response: passkey.register(start.challenge, origin) }),
       }))
       assert.equal(registered.status, 200)
-      const user = ((await registered.json()) as any).user
+      const user = ((await registered.json()) as AuthSession).user
       // The layout an earlier release left: the table in public, granted to app_user.
       await db.exec(`
         DROP VIEW public.webauthn_credential;
@@ -360,14 +365,14 @@ Deno.test({
       `)
 
       const next = await createEdgeCluster(config)
-      const login = (await (await next.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))).json()) as any
+      const login = (await (await next.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))).json()) as CeremonyStart
       const signedIn = await next.handle(new Request(`${origin}/auth/login/verify`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ state: login.state, response: await passkey.login(login.challenge, origin) }),
       }))
       assert.equal(signedIn.status, 200)
-      assert.equal(((await signedIn.json()) as any).user.id, user.id)
+      assert.equal(((await signedIn.json()) as AuthSession).user.id, user.id)
       const after = await db.query<{ table: string | null; view: string; granted: boolean; rows: number }>(
         `SELECT to_regclass('mecha_auth.webauthn_credential')::text AS table,
                 (SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.webauthn_credential')) AS view,
@@ -535,6 +540,246 @@ Deno.test({
         new Request(`${origin}/auth/oidc/session`, { method: 'POST', headers: { cookie: clearedCookie } }),
       )
       assert.equal(afterSignout.status, 401)
+    } finally {
+      await db.close()
+    }
+  },
+})
+
+Deno.test({
+  name: 'mecha-edge Android APK WebAuthn origins, native OIDC PKCE + guest adoption, rotating refresh, and account deletion',
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const origin = 'https://test.local'
+    const rpId = 'test.local'
+    const issuer = 'https://accounts.google.com'
+    const secret = 'edge-auth-secret'
+    const apkHash = await sha256url('snapcards-android-signing-cert')
+    const unlistedHash = await sha256url('other-android-signing-cert')
+    const apkOrigin = `android:apk-key-hash:${apkHash}`
+
+    const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+    const jwk = { ...(await crypto.subtle.exportKey('jwk', keys.publicKey)), kid: 'k1' }
+    const codes = new Map<string, { client: string; redirect: string; challenge: string; nonce: string }>()
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input)
+      if (url === `${issuer}/.well-known/openid-configuration`) {
+        return Response.json({
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          jwks_uri: `${issuer}/jwks`,
+        })
+      }
+      if (url === `${issuer}/jwks`) return Response.json({ keys: [jwk] })
+      if (url === `${issuer}/token`) {
+        const form = new URLSearchParams(String(init?.body))
+        const grant = codes.get(form.get('code') ?? '')
+        codes.delete(form.get('code') ?? '')
+        if (!grant || (await sha256url(form.get('code_verifier') ?? '')) !== grant.challenge) {
+          return Response.json({ error: 'invalid_grant' }, { status: 400 })
+        }
+        const b64 = (s: string) => encodeBase64Url(new TextEncoder().encode(s))
+        const head = b64(JSON.stringify({ alg: 'ES256', kid: 'k1', typ: 'JWT' }))
+        const body = b64(JSON.stringify({
+          iss: issuer,
+          aud: grant.client,
+          sub: 'edge-native-sub-1',
+          name: 'Edge Alice',
+          email: 'edge.alice@example.test',
+          email_verified: true,
+          nonce: grant.nonce,
+          exp: Math.floor(Date.now() / 1000) + 300,
+        }))
+        const sig = new Uint8Array(
+          await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, new TextEncoder().encode(`${head}.${body}`)),
+        )
+        return Response.json({ id_token: `${head}.${body}.${encodeBase64Url(sig)}` })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }
+
+    const db = await PGlite.create()
+    try {
+      await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+      await db.exec(await Deno.readTextFile(new URL('fixture.sql', import.meta.url)))
+      await db.exec(`
+        CREATE TABLE deck (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          owner uuid NOT NULL DEFAULT auth_uid() REFERENCES app_user(id) ON DELETE CASCADE,
+          title text NOT NULL,
+          scope_id text GENERATED ALWAYS AS ('user:' || owner) STORED NOT NULL
+        );
+        CALL rls_protect('deck');
+        CREATE POLICY own_deck ON deck FOR ALL USING (owner = auth_uid()) WITH CHECK (owner = auth_uid());
+        GRANT SELECT, INSERT, UPDATE, DELETE ON deck TO app_user;
+      `)
+
+      const providers = providersFrom((k) => ({ OIDC_PROVIDERS: 'google', OIDC_GOOGLE_CLIENT_ID: 'origin' }[k]))
+      const cluster = await createEdgeCluster({
+        db,
+        tables: ['note', 'board', 'deck'],
+        secret,
+        origin,
+        rpId,
+        androidApkKeyHashes: apkHash,
+        nativeSchemes: 'snapcards',
+        providers,
+        fetcher,
+        log: (line) => { console.error('CLUSTER LOG:', line) },
+        fail: (e) => { throw e },
+      })
+
+      // 1. Android APK key hash WebAuthn registration + login
+      const androidPasskey = await makePasskey(rpId)
+      const regStart = (await (await cluster.handle(new Request(`${origin}/auth/register/start`, { method: 'POST' }))).json()) as CeremonyStart
+      const unlistedReg = await cluster.handle(
+        new Request(`${origin}/auth/register/verify`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ state: regStart.state, response: androidPasskey.register(regStart.challenge, `android:apk-key-hash:${unlistedHash}`) }),
+        }),
+      )
+      assert.equal(unlistedReg.status, 401)
+
+      const androidRegRes = await cluster.handle(
+        new Request(`${origin}/auth/register/verify`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ state: regStart.state, response: androidPasskey.register(regStart.challenge, apkOrigin) }),
+        }),
+      )
+      assert.equal(androidRegRes.status, 200)
+      const androidReg = (await androidRegRes.json()) as AuthSession
+
+      const loginStart = (await (await cluster.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))).json()) as CeremonyStart
+      const androidLoginRes = await cluster.handle(
+        new Request(`${origin}/auth/login/verify`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ state: loginStart.state, response: await androidPasskey.login(loginStart.challenge, apkOrigin) }),
+        }),
+      )
+      assert.equal(androidLoginRes.status, 200)
+      assert.equal(((await androidLoginRes.json()) as AuthSession).user.id, androidReg.user.id)
+
+      // 2. Native OIDC PKCE ticket flow + guest promotion + account merge
+      const runNativeOidc = async (extraQuery = '') => {
+        const verifier = randomToken(32)
+        const challenge = await sha256url(verifier)
+        const startRes = await cluster.handle(
+          new Request(`${origin}/auth/oidc/google/start?return=native&code_challenge=${challenge}${extraQuery}`),
+        )
+        assert.equal(startRes.status, 303)
+        assert.deepEqual(startRes.headers.getSetCookie(), [])
+        const authUrl = new URL(startRes.headers.get('location')!)
+        const code = crypto.randomUUID()
+        codes.set(code, {
+          client: authUrl.searchParams.get('client_id')!,
+          redirect: authUrl.searchParams.get('redirect_uri')!,
+          challenge: authUrl.searchParams.get('code_challenge')!,
+          nonce: authUrl.searchParams.get('nonce')!,
+        })
+        const cbRes = await cluster.handle(
+          new Request(`${origin}/auth/oidc/google/callback?code=${code}&state=${encodeURIComponent(authUrl.searchParams.get('state')!)}`),
+        )
+        assert.equal(cbRes.status, 303)
+        const loc = new URL(cbRes.headers.get('location')!)
+        assert.equal(`${loc.protocol}//${loc.host}${loc.pathname}`, 'snapcards://auth/callback')
+        return { ticket: loc.searchParams.get('ticket')!, verifier }
+      }
+
+      const guest1 = (await (await cluster.handle(new Request(`${origin}/auth/guest`, { method: 'POST' }))).json()) as AuthSession
+      await cluster.handle(new Request(`${origin}/crud/deck`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${guest1.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'First Guest Deck' }),
+      }))
+
+      const native1 = await runNativeOidc(`&promote_token=${encodeURIComponent(guest1.token)}`)
+      const session1Res = await cluster.handle(new Request(`${origin}/auth/oidc/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ticket: native1.ticket, code_verifier: native1.verifier }),
+      }))
+      assert.equal(session1Res.status, 200)
+      const session1 = (await session1Res.json()) as AuthSession
+      assert.equal(session1.user.id, guest1.user.id)
+      assert.equal(session1.user.name, 'Edge Alice')
+
+      // Second guest writes a note (DEFAULT auth_uid()) and a deck, then signs into the same OIDC account -> merged!
+      const guest2 = (await (await cluster.handle(new Request(`${origin}/auth/guest`, { method: 'POST' }))).json()) as AuthSession
+      await cluster.handle(new Request(`${origin}/crud/note`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${guest2.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ body: 'offline guest note' }),
+      }))
+      await cluster.handle(new Request(`${origin}/crud/deck`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${guest2.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'Second Guest Deck' }),
+      }))
+      const native2 = await runNativeOidc(`&promote_token=${encodeURIComponent(guest2.token)}`)
+      const session2 = (await (await cluster.handle(new Request(`${origin}/auth/oidc/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ticket: native2.ticket, code_verifier: native2.verifier }),
+      }))).json()) as AuthSession
+      assert.equal(session2.user.id, guest1.user.id)
+
+      const mergedDecks = (await (await cluster.handle(new Request(`${origin}/crud/deck?select=title&order=title.asc`, {
+        headers: { authorization: `Bearer ${session2.token}` },
+      }))).json()) as Array<{ title: string }>
+      assert.deepEqual(mergedDecks.map((d) => d.title), ['First Guest Deck', 'Second Guest Deck'])
+      const mergedNotes = (await (await cluster.handle(new Request(`${origin}/crud/note?select=body`, {
+        headers: { authorization: `Bearer ${session2.token}` },
+      }))).json()) as Array<{ body: string }>
+      assert.deepEqual(mergedNotes.map((n) => n.body), ['offline guest note'])
+
+      // 3. Rotating POST /auth/refresh + replay family revocation
+      const rot1Res = await cluster.handle(new Request(`${origin}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ refresh_token: session2.refresh_token }),
+      }))
+      assert.equal(rot1Res.status, 200)
+      const rot1 = (await rot1Res.json()) as AuthSession
+      assert.equal(rot1.user.id, guest1.user.id)
+      assert.notEqual(rot1.refresh_token, session2.refresh_token)
+
+      // Replaying session2.refresh_token revokes the family so rot1.refresh_token is also dead.
+      const replayRes = await cluster.handle(new Request(`${origin}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ refresh_token: session2.refresh_token }),
+      }))
+      assert.equal(replayRes.status, 401)
+      const revokedChild = await cluster.handle(new Request(`${origin}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rot1.refresh_token }),
+      }))
+      assert.equal(revokedChild.status, 401)
+
+      // 4. DELETE /auth/account cascades credentials, links, refresh tokens, and ON DELETE CASCADE rows
+      const delRes = await cluster.handle(new Request(`${origin}/auth/account`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${rot1.token}` },
+      }))
+      assert.equal(delRes.status, 200)
+      assert.deepEqual(await delRes.json(), { deleted: true })
+      const remainingDecks = await db.query('SELECT 1 FROM deck WHERE owner = $1', [guest1.user.id])
+      assert.equal(remainingDecks.rows.length, 0)
+      const remainingLinks = await db.query('SELECT 1 FROM mecha_auth.identity_link WHERE user_id = $1', [guest1.user.id])
+      assert.equal(remainingLinks.rows.length, 0)
+
+      // Auth tables and compatibility views pass rls_unprotected with zero flags
+      const unprotected = await db.query(
+        `SELECT * FROM mecha.rls_unprotected
+         WHERE table_name LIKE 'mecha_auth.%' OR table_name IN ('public.webauthn_credential', 'public.identity_link')`,
+      )
+      assert.deepEqual(unprotected.rows, [])
     } finally {
       await db.close()
     }

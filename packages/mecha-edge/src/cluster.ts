@@ -3,9 +3,9 @@
 // transaction (postgrest-js), and Electric's shape protocol answered for the
 // subject a shape token names (mecha-browser's shapes.ts), and the app's
 // drains called as their tables change (mecha-browser's drains.ts).
-// Routes: /auth/guest, /auth/whoami, /auth/shape, /auth/register/start,
-// /auth/register/verify, /auth/login/start, /auth/login/verify, /auth/oidc/*,
-// /crud/*, /electric/v1/shape.
+// Routes: /auth/guest, /auth/refresh, /auth/account, /auth/whoami, /auth/shape,
+// /auth/register/start, /auth/register/verify, /auth/login/start,
+// /auth/login/verify, /auth/oidc/*, /crud/*, /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
 import {
   generateAuthenticationOptions,
@@ -14,9 +14,30 @@ import {
   verifyRegistrationResponse,
 } from '@simplewebauthn/server'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
-import { isSession, PUBLIC_WHERE, shapeWhere, signJwt, STACK_ISSUER, verifyJwt } from '../../../services/auth/jwt.ts'
-import { oidc, type Links, type Profile, type Provider } from '../../../services/auth/oidc.ts'
-import { prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
+import {
+  androidOrigins,
+  isSession,
+  nativeSchemesFrom,
+  PUBLIC_WHERE,
+  randomToken,
+  sha256url,
+  shapeWhere,
+  signJwt,
+  STACK_ISSUER,
+  verifyJwt,
+} from '../../../services/auth/jwt.ts'
+import {
+  HINT_COOKIE,
+  oidc,
+  PREFIX as OIDC_PREFIX,
+  PromoteError,
+  SESSION_COOKIE,
+  type Links,
+  type Profile,
+  type Provider,
+  type Tickets,
+} from '../../../services/auth/oidc.ts'
+import { AUTH_TABLES, prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, PUBLIC_SNAPSHOT_LIMIT, type PublicSnapshot } from './public-snapshot.ts'
@@ -40,6 +61,8 @@ export interface EdgeClusterConfig {
   compute?: { computations: Computation[]; machine: BatchMachine; retainSnapshot?(identity: SnapshotIdentity): Promise<void>; execute?(snapshot: Snapshot): Promise<Output>; changed(): void }
   rpId?: string
   origin?: string
+  androidApkKeyHashes?: string | readonly string[]
+  nativeSchemes?: string | readonly string[]
   providers?: Record<string, Provider>
   fetcher?: typeof fetch
 }
@@ -64,6 +87,7 @@ export interface EdgeCluster {
 
 // The auth service's lifetimes (services/auth/main.ts).
 const USER_TOKEN_TTL_S = 7 * 24 * 3600
+const REFRESH_TOKEN_TTL_S = 90 * 24 * 3600
 const SHAPE_TOKEN_TTL_S = 900
 const STATE_TTL_S = 300
 
@@ -101,6 +125,8 @@ const now = () => Math.floor(Date.now() / 1000)
 
 export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeCluster> {
   const { db, secret, log } = cfg
+  const allowedAndroidOrigins = androidOrigins(cfg.androidApkKeyHashes)
+  const allowedNativeSchemes = nativeSchemesFrom(cfg.nativeSchemes)
   const lane = lanes()
   // Interactive API work takes the api lane, a shape's reach among it: a screen mounts only once
   // its shapes answer, and in the low lane that waited behind every render and background drain.
@@ -159,9 +185,9 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   // public alone.
   const createAuthTables = async () => {
     await db.transaction(async (tx) => {
-      await tx.exec(prepareAuthTables(['webauthn_credential', 'identity_link']))
+      await tx.exec(prepareAuthTables(AUTH_TABLES))
       await tx.exec(`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text, ADD COLUMN IF NOT EXISTS email text`)
-      await tx.exec(sealAuthTables(['webauthn_credential', 'identity_link']))
+      await tx.exec(sealAuthTables(AUTH_TABLES))
     })
   }
   const ensureAuthTables = () => authTablesReady ??= serialize(createAuthTables).catch((e) => {
@@ -221,15 +247,167 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     return isSession(claims) ? claims : null
   }
 
+  async function insertRefreshToken(userId: string): Promise<string> {
+    const raw = randomToken(32)
+    const hash = await sha256url(raw)
+    await db.query(
+      `INSERT INTO mecha_auth.auth_refresh_token (token_hash, user_id, family_id, expires_at)
+       VALUES ($1, $2, $3, now() + make_interval(secs => $4))`,
+      [hash, userId, crypto.randomUUID(), REFRESH_TOKEN_TTL_S],
+    )
+    return raw
+  }
+
+  async function issueRefreshToken(userId: string): Promise<string> {
+    await ensureAuthTables()
+    return await serialize(() => insertRefreshToken(userId))
+  }
+
+  function issueUserJwt(
+    id: string,
+    handle: string,
+    guest = false,
+    profile?: { name?: string | null; email?: string | null },
+  ): Promise<string> {
+    return signJwt(secret, {
+      iss: STACK_ISSUER,
+      role: 'app_user',
+      sub: id,
+      handle,
+      guest,
+      ...(profile?.name ? { name: profile.name } : {}),
+      ...(profile?.email ? { email: profile.email } : {}),
+      exp: now() + USER_TOKEN_TTL_S,
+    })
+  }
+
   async function guest(): Promise<Response> {
+    await ensureAuthTables()
     const id = crypto.randomUUID()
     const initHandle = guestHandle(id)
-    const { rows } = await serialize(() =>
-      db.query<{ handle: string }>('INSERT INTO app_user (id, handle) VALUES ($1, $2) RETURNING handle', [id, initHandle]),
-    )
-    const handle = rows[0]?.handle ?? initHandle
-    const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: id, handle, guest: true, exp: now() + USER_TOKEN_TTL_S })
-    return json(200, { token, user: { id, handle, guest: true } })
+    const { handle, refreshToken } = await serialize(async () => {
+      const { rows } = await db.query<{ handle: string }>(
+        'INSERT INTO app_user (id, handle) VALUES ($1, $2) RETURNING handle',
+        [id, initHandle],
+      )
+      const refreshToken = await insertRefreshToken(id)
+      return { handle: rows[0]?.handle ?? initHandle, refreshToken }
+    })
+    const token = await issueUserJwt(id, handle, true)
+    return json(200, { token, refresh_token: refreshToken, user: { id, handle, guest: true } })
+  }
+
+  async function refresh(req: Request): Promise<Response> {
+    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body || typeof body.refresh_token !== 'string' || body.refresh_token === '') {
+      return json(400, { error: 'refresh_token required' })
+    }
+    await ensureAuthTables()
+    const hash = await sha256url(body.refresh_token)
+    const nextRaw = randomToken(32)
+    const nextHash = await sha256url(nextRaw)
+    const rotated = await serialize(async () => {
+      await db.query('BEGIN')
+      try {
+        const { rows: [row] } = await db.query<{
+          user_id: string
+          family_id: string
+          expired: boolean
+          replaced_by: string | null
+          revoked_at: string | null
+        }>(
+          `SELECT user_id, family_id, expires_at <= now() AS expired, replaced_by, revoked_at
+           FROM mecha_auth.auth_refresh_token WHERE token_hash = $1 FOR UPDATE`,
+          [hash],
+        )
+        if (!row) {
+          await db.query('COMMIT')
+          return null
+        }
+        if (row.replaced_by !== null) {
+          await db.query(
+            `UPDATE mecha_auth.auth_refresh_token
+             SET revoked_at = coalesce(revoked_at, now())
+             WHERE family_id = $1`,
+            [row.family_id],
+          )
+          await db.query('COMMIT')
+          return null
+        }
+        if (row.revoked_at !== null || row.expired) {
+          await db.query('COMMIT')
+          return null
+        }
+        const { rows: [u] } = await db.query<{
+          id: string
+          handle: string
+          has_passkey: boolean
+          has_oidc: boolean
+          name: string | null
+          email: string | null
+        }>(
+          `SELECT u.id, u.handle,
+             EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = u.id) AS has_passkey,
+             l.provider IS NOT NULL AS has_oidc,
+             l.name, l.email
+           FROM app_user u
+           LEFT JOIN LATERAL (
+             SELECT provider, name, email FROM mecha_auth.identity_link
+             WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1
+           ) l ON true
+           WHERE u.id = $1`,
+          [row.user_id],
+        )
+        if (!u) {
+          await db.query('COMMIT')
+          return null
+        }
+        await db.query(
+          'UPDATE mecha_auth.auth_refresh_token SET replaced_by = $1 WHERE token_hash = $2',
+          [nextHash, hash],
+        )
+        await db.query(
+          `INSERT INTO mecha_auth.auth_refresh_token (token_hash, user_id, family_id, expires_at)
+           VALUES ($1, $2, $3, now() + make_interval(secs => $4))`,
+          [nextHash, row.user_id, row.family_id, REFRESH_TOKEN_TTL_S],
+        )
+        await db.query('COMMIT')
+        return {
+          id: u.id,
+          handle: u.handle,
+          guest: !u.has_passkey && !u.has_oidc,
+          name: u.name,
+          email: u.email,
+        }
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
+    })
+    if (rotated === null) return json(401, { error: 'invalid refresh token' })
+    const token = await issueUserJwt(rotated.id, rotated.handle, rotated.guest, rotated)
+    const user = rotated.guest
+      ? { id: rotated.id, handle: rotated.handle, guest: true }
+      : {
+        id: rotated.id,
+        handle: rotated.handle,
+        ...(rotated.name ? { name: rotated.name } : {}),
+        ...(rotated.email ? { email: rotated.email } : {}),
+      }
+    return json(200, { token, refresh_token: nextRaw, user })
+  }
+
+  async function deleteAccount(req: Request): Promise<Response> {
+    const claims = await session(req)
+    if (!claims) return json(401, { error: 'invalid token' })
+    await ensureAuthTables()
+    await serialize(() => db.query('DELETE FROM app_user WHERE id = $1', [claims.sub]))
+    const doorOrigin = cfg.origin ?? new URL(req.url).origin
+    const secure = doorOrigin.startsWith('https://') ? '; Secure' : ''
+    const headers = new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })
+    headers.append('set-cookie', `${SESSION_COOKIE}=; Path=${OIDC_PREFIX}; HttpOnly; SameSite=Lax${secure}; Max-Age=0`)
+    headers.append('set-cookie', `${HINT_COOKIE}=; Path=/; SameSite=Lax${secure}; Max-Age=0`)
+    return new Response(JSON.stringify({ deleted: true }), { status: 200, headers })
   }
 
   async function whoami(req: Request): Promise<Response> {
@@ -287,7 +465,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         // deno-lint-ignore no-explicit-any
         response: body.response as any,
         expectedChallenge: st.challenge as string,
-        expectedOrigin: origin,
+        expectedOrigin: [origin, ...allowedAndroidOrigins],
         expectedRPID: rpId,
         requireUserVerification: false,
       })
@@ -301,23 +479,26 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     const userId = st.userId as string
     await ensureAuthTables()
     if (st.promote === true) {
-      const added = await serialize(() =>
-        db.query(
+      const refreshToken = await serialize(async () => {
+        const added = await db.query(
           `INSERT INTO mecha_auth.webauthn_credential (id, user_id, public_key, counter)
            SELECT $1, $2, $3, $4
-           WHERE NOT EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = $2)`,
+           WHERE NOT EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = $2)
+             AND NOT EXISTS (SELECT 1 FROM mecha_auth.identity_link WHERE user_id = $2)`,
           [credentialID, userId, credentialPublicKey, counter],
-        ),
-      )
-      if (added.affectedRows === 0) return json(409, { error: 'already an account' })
-      const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: userId, handle: st.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
-      return json(200, { token, user: { id: userId, handle: st.handle } })
+        )
+        if (added.affectedRows === 0) return null
+        return await insertRefreshToken(userId)
+      })
+      if (refreshToken === null) return json(409, { error: 'already an account' })
+      const token = await issueUserJwt(userId, st.handle as string, false)
+      return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle: st.handle } })
     }
     let handle = st.handle as string
-    let inserted = false
-    for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+    let refreshToken: string | null = null
+    for (let attempt = 0; attempt < 3 && refreshToken === null; attempt++) {
       try {
-        await serialize(async () => {
+        refreshToken = await serialize(async () => {
           await db.query('BEGIN')
           try {
             await db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [userId, handle])
@@ -325,13 +506,14 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
               'INSERT INTO mecha_auth.webauthn_credential (id, user_id, public_key, counter) VALUES ($1, $2, $3, $4)',
               [credentialID, userId, credentialPublicKey, counter],
             )
+            const issued = await insertRefreshToken(userId)
             await db.query('COMMIT')
+            return issued
           } catch (e) {
             await db.query('ROLLBACK')
             throw e
           }
         })
-        inserted = true
       } catch (e) {
         if (typeof e === 'object' && e !== null && 'code' in e && (e as { code: string }).code === '23505') {
           handle = generateHandle()
@@ -340,9 +522,9 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         }
       }
     }
-    if (!inserted) return json(500, { error: 'could not allocate identity' })
-    const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: userId, handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
-    return json(200, { token, user: { id: userId, handle } })
+    if (refreshToken === null) return json(500, { error: 'could not allocate identity' })
+    const token = await issueUserJwt(userId, handle, false)
+    return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle } })
   }
 
   async function loginStart(req: Request): Promise<Response> {
@@ -387,7 +569,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
         // deno-lint-ignore no-explicit-any
         response: body.response as any,
         expectedChallenge: st.challenge as string,
-        expectedOrigin: origin,
+        expectedOrigin: [origin, ...allowedAndroidOrigins],
         expectedRPID: rpId,
         requireUserVerification: false,
         authenticator: {
@@ -400,31 +582,76 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       return json(401, { error: 'authentication verification failed' })
     }
     if (!verification.verified) return json(401, { error: 'authentication verification failed' })
-    await serialize(() =>
-      db.query('UPDATE mecha_auth.webauthn_credential SET counter = $1 WHERE id = $2', [
+    const refreshToken = await serialize(async () => {
+      await db.query('UPDATE mecha_auth.webauthn_credential SET counter = $1 WHERE id = $2', [
         verification.authenticationInfo.newCounter,
         cred.id,
-      ]),
-    )
-    const token = await signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: cred.user_id, handle: cred.handle, guest: false, exp: now() + USER_TOKEN_TTL_S })
-    return json(200, { token, user: { id: cred.user_id, handle: cred.handle } })
+      ])
+      return await insertRefreshToken(cred.user_id)
+    })
+    const token = await issueUserJwt(cred.user_id, cred.handle, false)
+    return json(200, { token, refresh_token: refreshToken, user: { id: cred.user_id, handle: cred.handle } })
   }
 
   const links: Links = {
-    async userFor(p: Profile) {
+    async canPromote(userId: string) {
+      await ensureAuthTables()
+      const { rows: [u] } = await serialize(() =>
+        db.query<{ linked: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = u.id)
+               OR EXISTS (SELECT 1 FROM mecha_auth.identity_link WHERE user_id = u.id) AS linked
+           FROM app_user u WHERE u.id = $1`,
+          [userId],
+        ),
+      )
+      if (!u) return 'absent'
+      return u.linked ? 'already_account' : 'ok'
+    },
+    async userFor(p: Profile, promoteUserId?: string | null) {
       await ensureAuthTables()
       return await serialize(async () => {
         await db.query('BEGIN')
         try {
+          let guestHandleToKeep: string | null = null
+          if (promoteUserId) {
+            const { rows: [g] } = await db.query<{
+              handle: string
+              has_passkey: boolean
+              linked_to: string | null
+            }>(
+              `SELECT u.handle,
+                 EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = u.id) AS has_passkey,
+                 (SELECT provider || ':' || issuer || ':' || sub FROM mecha_auth.identity_link WHERE user_id = u.id) AS linked_to
+               FROM app_user u WHERE u.id = $1 FOR UPDATE`,
+              [promoteUserId],
+            )
+            if (!g) throw new PromoteError(401, 'invalid token')
+            if (g.has_passkey || (g.linked_to !== null && g.linked_to !== `${p.provider}:${p.issuer}:${p.sub}`)) {
+              throw new PromoteError(409, 'already an account')
+            }
+            guestHandleToKeep = g.handle
+          }
           const { rows: [link] } = await db.query<{ user_id: string }>(
             `UPDATE mecha_auth.identity_link SET name = $1, picture = $2, email = $3
              WHERE provider = $4 AND issuer = $5 AND sub = $6 RETURNING user_id`,
             [p.name, p.picture, p.email, p.provider, p.issuer, p.sub],
           )
           if (link) {
+            if (promoteUserId && promoteUserId !== link.user_id) {
+              await db.query('SELECT mecha_auth.adopt_guest($1::uuid, $2::uuid)', [promoteUserId, link.user_id])
+            }
             const { rows: [u] } = await db.query<{ handle: string }>('SELECT handle FROM app_user WHERE id = $1', [link.user_id])
             await db.query('COMMIT')
             return { id: link.user_id, handle: u.handle, name: p.name, email: p.email }
+          }
+          if (promoteUserId && guestHandleToKeep !== null) {
+            await db.query(
+              `INSERT INTO mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture, email)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [p.provider, p.issuer, p.sub, promoteUserId, p.name, p.picture, p.email],
+            )
+            await db.query('COMMIT')
+            return { id: promoteUserId, handle: guestHandleToKeep, name: p.name, email: p.email }
           }
           const id = crypto.randomUUID()
           for (let attempt = 0; attempt < 3; attempt++) {
@@ -467,14 +694,59 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     },
   }
 
+  const tickets: Tickets = {
+    async issue(t) {
+      await ensureAuthTables()
+      await serialize(async () => {
+        await db.query('BEGIN')
+        try {
+          await db.query('DELETE FROM mecha_auth.auth_native_ticket WHERE expires_at <= now()')
+          await db.query(
+            `INSERT INTO mecha_auth.auth_native_ticket (id, user_id, provider, issuer, code_challenge, expires_at)
+             VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))`,
+            [t.id, t.userId, t.provider, t.issuer, t.codeChallenge, t.ttlSeconds],
+          )
+          await db.query('COMMIT')
+        } catch (e) {
+          await db.query('ROLLBACK')
+          throw e
+        }
+      })
+    },
+    async consume(id) {
+      await ensureAuthTables()
+      const { rows: [row] } = await serialize(() =>
+        db.query<{ user_id: string; provider: string; issuer: string; code_challenge: string }>(
+          `DELETE FROM mecha_auth.auth_native_ticket
+           WHERE id = $1 AND expires_at > now()
+           RETURNING user_id, provider, issuer, code_challenge`,
+          [id],
+        ),
+      )
+      if (!row) return null
+      return {
+        userId: row.user_id,
+        provider: row.provider,
+        issuer: row.issuer,
+        codeChallenge: row.code_challenge,
+      }
+    },
+  }
+
   const providerSignIn = oidc({
     secret,
     origin: (req) => cfg.origin ?? new URL(req.url).origin,
     providers: cfg.providers ?? {},
     links,
-    // The link's name and email ride in the token: the chrome shows the name
-    // over the handle, and a checkout starts from the email.
-    issue: (user) => signJwt(secret, { iss: STACK_ISSUER, role: 'app_user', sub: user.id, handle: user.handle, ...(user.name ? { name: user.name } : {}), ...(user.email ? { email: user.email } : {}), exp: now() + USER_TOKEN_TTL_S }),
+    tickets,
+    nativeSchemes: allowedNativeSchemes,
+    issue: async (user) => {
+      const [token, refreshToken] = await Promise.all([
+        issueUserJwt(user.id, user.handle, false, user),
+        issueRefreshToken(user.id),
+      ])
+      return { token, refresh_token: refreshToken }
+    },
     fetcher: cfg.fetcher,
   })
 
@@ -580,6 +852,8 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       const signedIn = providerSignIn(req)
       if (signedIn !== null) return await signedIn
       if (req.method === 'POST' && path === '/auth/guest') return await guest()
+      if (req.method === 'POST' && path === '/auth/refresh') return await refresh(req)
+      if (req.method === 'DELETE' && path === '/auth/account') return await deleteAccount(req)
       if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)
       if (req.method === 'POST' && path === '/auth/register/start') return await registerStart(req)

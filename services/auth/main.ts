@@ -1,11 +1,9 @@
-// Auth service: WebAuthn passkey ceremonies, provider sign-in (oidc.ts) and a
-// guest mint. The token
+// Auth service: WebAuthn passkey ceremonies, provider sign-in (oidc.ts),
+// rotating refresh tokens, account deletion, and a guest mint. The token
 // contract three components share is README.md; endpoints are mounted WITH
-// the /auth prefix (Caddy strips nothing). Stateless: the
-// WebAuthn challenge travels in a short-lived HS256 `state` JWT instead of
-// server-side sessions. app_user is a program entity created by the database
-// migrations; this service only self-migrates webauthn_credential and
-// identity_link, in its own schema (schema.ts).
+// the /auth prefix (Caddy strips nothing). app_user is a program entity
+// created by database migrations; this service self-migrates its own tables in
+// mecha_auth (schema.ts).
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -14,9 +12,13 @@ import {
 } from "@simplewebauthn/server";
 import postgres from "postgres";
 import {
+  androidOrigins,
   isSession,
   isSubsetWhere,
+  nativeSchemesFrom,
   PUBLIC_WHERE,
+  randomToken,
+  sha256url,
   SHAPE_FIXED_PARAMS,
   shapeWhere,
   signJwt as sign,
@@ -27,9 +29,20 @@ import {
   subsetParams,
   verifyJwt as verify,
 } from "./jwt.ts";
-import { type Links, oidc, type Profile, providersFrom } from "./oidc.ts";
-import { prepareAuthTables, sealAuthTables } from "./schema.ts";
-export { shapeWhere };
+import {
+  HINT_COOKIE,
+  type Links,
+  oidc,
+  PREFIX as OIDC_PREFIX,
+  type Profile,
+  PromoteError,
+  type Provider,
+  providersFrom,
+  SESSION_COOKIE,
+  type Tickets,
+} from "./oidc.ts";
+import { AUTH_TABLES, prepareAuthTables, sealAuthTables } from "./schema.ts";
+export { androidOrigins, nativeSchemesFrom, shapeWhere };
 
 function required(name: string): string {
   const value = Deno.env.get(name);
@@ -79,6 +92,8 @@ export function admittedOrigin(rpId: string, origin: string): string {
 
 const RP_ID = required("WEBAUTHN_RP_ID");
 const ORIGIN = admittedOrigin(RP_ID, required("WEBAUTHN_ORIGIN"));
+const ANDROID_ORIGINS = androidOrigins(Deno.env.get("ANDROID_APK_KEY_HASHES"));
+const NATIVE_SCHEMES = nativeSchemesFrom(Deno.env.get("NATIVE_SCHEMES"));
 const OIDC_PROVIDERS = providersFrom((name) => Deno.env.get(name));
 
 /**
@@ -93,7 +108,16 @@ export function ceremonyOrigin(configured: string, host: string | null): string 
   return host !== null && /^localhost(:\d+)?$/.test(host) ? `https://${host}` : configured;
 }
 
+export function ceremonyOrigins(
+  configured: string,
+  host: string | null,
+  android: readonly string[] = ANDROID_ORIGINS,
+): string[] {
+  return [ceremonyOrigin(configured, host), ...android];
+}
+
 const USER_TOKEN_TTL_S = 7 * 24 * 3600;
+export const REFRESH_TOKEN_TTL_S = 90 * 24 * 3600;
 // A shape token outlives one long-poll cycle and little else: Electric holds a
 // request open for 300s, so a token shorter than that expires mid-stream, and a
 // long one is a scope set that cannot be revoked.
@@ -107,7 +131,7 @@ export async function migrate(): Promise<void> {
   // each step below. Where the tables live and why: schema.ts.
   await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtext('mecha auth: migrate'))`;
-    await tx.unsafe(prepareAuthTables(["webauthn_credential", "identity_link"]));
+    await tx.unsafe(prepareAuthTables(AUTH_TABLES));
     await tx`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS issuer text,
       ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text,
       ADD COLUMN IF NOT EXISTS email text`;
@@ -124,7 +148,7 @@ export async function migrate(): Promise<void> {
         ALTER TABLE mecha_auth.identity_link ADD PRIMARY KEY (provider, issuer, sub);
       END IF;
     END $$`;
-    await tx.unsafe(sealAuthTables(["webauthn_credential", "identity_link"]));
+    await tx.unsafe(sealAuthTables(AUTH_TABLES));
   });
 }
 
@@ -475,155 +499,79 @@ function generateHandle(id = crypto.randomUUID()): string {
   return guestHandle(id);
 }
 
-async function registerStart(req: Request): Promise<Response> {
-  const subject = await subjectOf(req);
-  if (subject === "refused") return jsonError(401, "invalid token");
-  const claims = subject.claims;
-  // Only a guest is promoted, keeping its handle and every row it wrote: a
-  // passkey added to an account on the strength of a bearer token would
-  // outlive the token and its sign-out. With no session, a new identity —
-  // usernameless by doctrine: no identifier is ever collected.
-  if (claims !== null && claims.guest !== true) return jsonError(409, "already an account");
-  const promote = claims !== null;
-  const handle = claims ? claims.handle as string : generateHandle();
-  const userId = claims ? claims.sub as string : crypto.randomUUID();
-  const options = await generateRegistrationOptions({
-    rpName: RP_ID,
-    rpID: RP_ID,
-    userName: handle,
-    userID: enc.encode(userId),
-    authenticatorSelection: {
-      residentKey: "required",
-      userVerification: "preferred",
-    },
-  });
-  const state = await signJwt({
-    purpose: "register",
-    handle,
-    userId,
-    promote,
-    challenge: options.challenge,
-    exp: Math.floor(Date.now() / 1000) + STATE_TTL_S,
-  });
-  return json(200, { ...options, state });
+export async function issueRefreshToken(userId: string, ttlSeconds = REFRESH_TOKEN_TTL_S): Promise<string> {
+  const raw = randomToken(32);
+  const hash = await sha256url(raw);
+  const familyId = crypto.randomUUID();
+  await sql`insert into mecha_auth.auth_refresh_token (token_hash, user_id, family_id, expires_at)
+    values (${hash}, ${userId}, ${familyId}, now() + make_interval(secs => ${ttlSeconds}))`;
+  return raw;
 }
 
-async function registerVerify(req: Request): Promise<Response> {
+async function refresh(req: Request): Promise<Response> {
   const body = await readBody(req);
-  if (!body) return jsonError(400, "invalid json body");
-  const st = await readState(body, "register");
-  if (!st) return jsonError(401, "invalid state");
-  let verification;
-  try {
-    verification = await verifyRegistrationResponse({
-      // deno-lint-ignore no-explicit-any
-      response: body.response as any,
-      expectedChallenge: st.challenge as string,
-      expectedOrigin: ceremonyOrigin(ORIGIN, req.headers.get("host")),
-      expectedRPID: RP_ID,
-      requireUserVerification: false,
-    });
-  } catch {
-    return jsonError(401, "registration verification failed");
+  if (!body || typeof body.refresh_token !== "string" || body.refresh_token === "") {
+    return jsonError(400, "refresh_token required");
   }
-  if (!verification.verified || !verification.registrationInfo) {
-    return jsonError(401, "registration verification failed");
-  }
-  const { credentialID, credentialPublicKey, counter } =
-    verification.registrationInfo;
-  const userId = st.userId as string;
-  if (st.promote === true) {
-    // The guest becomes an account once: a guest token that outlives its
-    // promotion is still a guest's, and adds no second way in.
-    const added = await sql`insert into mecha_auth.webauthn_credential (id, user_id, public_key, counter)
-      select ${credentialID}, ${userId}, ${credentialPublicKey}, ${counter}
-      where not exists (select 1 from mecha_auth.webauthn_credential where user_id = ${userId})`;
-    if (added.count === 0) return jsonError(409, "already an account");
-    const token = await issueUserToken(userId, st.handle as string);
-    return json(200, { token, user: { id: userId, handle: st.handle } });
-  }
-  // Generated handles can collide; regenerate and retry — never a user error.
-  let handle = st.handle as string;
-  let inserted = false;
-  for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
-    try {
-      await sql.begin(async (tx) => {
-        await tx`insert into app_user (id, handle) values (${userId}, ${handle})`;
-        await tx`insert into mecha_auth.webauthn_credential (id, user_id, public_key, counter)
-          values (${credentialID}, ${userId}, ${credentialPublicKey}, ${counter})`;
-      });
-      inserted = true;
-    } catch (e) {
-      if ((e as { code?: string }).code === "23505") handle = generateHandle();
-      else throw e;
+  const hash = await sha256url(body.refresh_token);
+  const nextRaw = randomToken(32);
+  const nextHash = await sha256url(nextRaw);
+  const rotated = await sql.begin(async (tx) => {
+    const [row] = await tx`select user_id, family_id, expires_at <= now() as expired, replaced_by, revoked_at
+      from mecha_auth.auth_refresh_token where token_hash = ${hash} for update`;
+    if (!row) return null;
+    if (row.replaced_by !== null) {
+      await tx`update mecha_auth.auth_refresh_token
+        set revoked_at = coalesce(revoked_at, now())
+        where family_id = ${row.family_id}`;
+      return null;
     }
-  }
-  if (!inserted) return jsonError(500, "could not allocate identity");
-  const token = await issueUserToken(userId, handle);
-  return json(200, { token, user: { id: userId, handle } });
+    if (row.revoked_at !== null || row.expired) return null;
+    const [u] = await tx`select u.id, u.handle,
+      exists (select 1 from mecha_auth.webauthn_credential where user_id = u.id) as has_passkey,
+      l.provider is not null as has_oidc,
+      l.name, l.email
+      from app_user u
+      left join lateral (
+        select provider, name, email from mecha_auth.identity_link
+        where user_id = u.id order by created_at desc limit 1
+      ) l on true
+      where u.id = ${row.user_id}`;
+    if (!u) return null;
+    await tx`update mecha_auth.auth_refresh_token set replaced_by = ${nextHash} where token_hash = ${hash}`;
+    await tx`insert into mecha_auth.auth_refresh_token (token_hash, user_id, family_id, expires_at)
+      values (${nextHash}, ${row.user_id}, ${row.family_id}, now() + make_interval(secs => ${REFRESH_TOKEN_TTL_S}))`;
+    return {
+      id: u.id as string,
+      handle: u.handle as string,
+      guest: !u.has_passkey && !u.has_oidc,
+      name: (u.name as string | null) ?? null,
+      email: (u.email as string | null) ?? null,
+    };
+  });
+  if (rotated === null) return jsonError(401, "invalid refresh token");
+  const token = await issueUserToken(rotated.id, rotated.handle, rotated.guest, rotated);
+  const user = rotated.guest
+    ? { id: rotated.id, handle: rotated.handle, guest: true }
+    : {
+      id: rotated.id,
+      handle: rotated.handle,
+      ...(rotated.name ? { name: rotated.name } : {}),
+      ...(rotated.email ? { email: rotated.email } : {}),
+    };
+  return json(200, { token, refresh_token: nextRaw, user });
 }
 
-async function loginStart(_req: Request): Promise<Response> {
-  // Usernameless by doctrine: allowCredentials is empty so the authenticator
-  // surfaces its discoverable (resident) credentials for this RP.
-  const options = await generateAuthenticationOptions({
-    rpID: RP_ID,
-    allowCredentials: [],
-  });
-  const state = await signJwt({
-    purpose: "login",
-    challenge: options.challenge,
-    exp: Math.floor(Date.now() / 1000) + STATE_TTL_S,
-  });
-  return json(200, { ...options, state });
-}
-
-async function loginVerify(req: Request): Promise<Response> {
-  const body = await readBody(req);
-  if (!body) return jsonError(400, "invalid json body");
-  const st = await readState(body, "login");
-  if (!st) return jsonError(401, "invalid state");
-  const response = body.response as { id?: string } | undefined;
-  if (!response || typeof response.id !== "string") {
-    return jsonError(401, "authentication verification failed");
-  }
-  // The credential identifies the user (resident key).
-  const creds = await sql`
-    select c.id, c.public_key, c.counter, c.user_id, u.handle
-    from mecha_auth.webauthn_credential c join app_user u on u.id = c.user_id
-    where c.id = ${response.id}`;
-  if (creds.length === 0) {
-    return json(401, { error: "authentication verification failed", unknownCredential: true });
-  }
-  const cred = creds[0];
-  let verification;
-  try {
-    verification = await verifyAuthenticationResponse({
-      // deno-lint-ignore no-explicit-any
-      response: body.response as any,
-      expectedChallenge: st.challenge as string,
-      expectedOrigin: ceremonyOrigin(ORIGIN, req.headers.get("host")),
-      expectedRPID: RP_ID,
-      requireUserVerification: false,
-      authenticator: {
-        credentialID: cred.id as string,
-        credentialPublicKey: new Uint8Array(cred.public_key as Uint8Array),
-        counter: Number(cred.counter),
-      },
-    });
-  } catch {
-    return jsonError(401, "authentication verification failed");
-  }
-  if (!verification.verified) {
-    return jsonError(401, "authentication verification failed");
-  }
-  await sql`update mecha_auth.webauthn_credential
-    set counter = ${verification.authenticationInfo.newCounter}
-    where id = ${cred.id as string}`;
-  const userId = cred.user_id as string;
-  const handle = cred.handle as string;
-  const token = await issueUserToken(userId, handle);
-  return json(200, { token, user: { id: userId, handle } });
+async function deleteAccount(req: Request, doorOrigin: string): Promise<Response> {
+  const subject = await subjectOf(req);
+  if (subject === "refused" || subject.claims === null) return jsonError(401, "invalid token");
+  const sub = subject.claims.sub as string;
+  await sql`delete from app_user where id = ${sub}`;
+  const secure = doorOrigin.startsWith("https://") ? "; Secure" : "";
+  const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
+  headers.append("set-cookie", `${SESSION_COOKIE}=; Path=${OIDC_PREFIX}; HttpOnly; SameSite=Lax${secure}; Max-Age=0`);
+  headers.append("set-cookie", `${HINT_COOKIE}=; Path=/; SameSite=Lax${secure}; Max-Age=0`);
+  return new Response(JSON.stringify({ deleted: true }), { status: 200, headers });
 }
 
 async function guest(_req: Request): Promise<Response> {
@@ -643,9 +591,12 @@ async function guest(_req: Request): Promise<Response> {
     }
   }
   if (!inserted) return jsonError(500, "could not allocate identity");
-  const token = await issueUserToken(userId, handle, true);
-  // A guest is told so: it is the one session a passkey can still promote.
-  return json(200, { token, user: { id: userId, handle, guest: true } });
+  const [token, refreshToken] = await Promise.all([
+    issueUserToken(userId, handle, true),
+    issueRefreshToken(userId),
+  ]);
+  // A guest is told so: it is the one session a passkey or OIDC provider can still promote.
+  return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle, guest: true } });
 }
 
 async function whoami(req: Request): Promise<Response> {
@@ -661,16 +612,45 @@ async function whoami(req: Request): Promise<Response> {
 }
 
 export const links: Links = {
-  userFor(p: Profile) {
+  async canPromote(userId: string) {
+    const [u] = await sql`select
+      exists (select 1 from mecha_auth.webauthn_credential where user_id = u.id) or
+      exists (select 1 from mecha_auth.identity_link where user_id = u.id) as linked
+      from app_user u where u.id = ${userId}`;
+    if (!u) return "absent";
+    return u.linked ? "already_account" : "ok";
+  },
+  userFor(p: Profile, promoteUserId?: string | null) {
     return sql.begin(async (tx) => {
       // One sign-in at a time per subject, so two tabs signing in at once make
       // one person, not two.
       await tx`select pg_advisory_xact_lock(hashtext(${JSON.stringify([p.provider, p.issuer, p.sub])}))`;
+      let guestHandleToKeep: string | null = null;
+      if (promoteUserId) {
+        const [g] = await tx`select u.handle,
+          exists (select 1 from mecha_auth.webauthn_credential where user_id = u.id) as has_passkey,
+          (select provider || ':' || issuer || ':' || sub from mecha_auth.identity_link where user_id = u.id) as linked_to
+          from app_user u where u.id = ${promoteUserId} for update`;
+        if (!g) throw new PromoteError(401, "invalid token");
+        if (g.has_passkey || (g.linked_to !== null && g.linked_to !== `${p.provider}:${p.issuer}:${p.sub}`)) {
+          throw new PromoteError(409, "already an account");
+        }
+        guestHandleToKeep = g.handle as string;
+      }
       const [link] = await tx`update mecha_auth.identity_link set name = ${p.name}, picture = ${p.picture}, email = ${p.email}
         where provider = ${p.provider} and issuer = ${p.issuer} and sub = ${p.sub} returning user_id`;
       if (link) {
-        const [u] = await tx`select handle from app_user where id = ${link.user_id}`;
-        return { id: link.user_id as string, handle: u.handle as string, name: p.name, email: p.email };
+        const existingId = link.user_id as string;
+        if (promoteUserId && promoteUserId !== existingId) {
+          await tx`select mecha_auth.adopt_guest(${promoteUserId}::uuid, ${existingId}::uuid)`;
+        }
+        const [u] = await tx`select handle from app_user where id = ${existingId}`;
+        return { id: existingId, handle: u.handle as string, name: p.name, email: p.email };
+      }
+      if (promoteUserId && guestHandleToKeep !== null) {
+        await tx`insert into mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture, email)
+          values (${p.provider}, ${p.issuer}, ${p.sub}, ${promoteUserId}, ${p.name}, ${p.picture}, ${p.email})`;
+        return { id: promoteUserId, handle: guestHandleToKeep, name: p.name, email: p.email };
       }
       const id = crypto.randomUUID();
       // Generated handles can collide; regenerate and retry — never a user error.
@@ -697,49 +677,270 @@ export const links: Links = {
   },
 };
 
-const providerSignIn = oidc({
-  secret: JWT_SECRET,
-  origin: (req) => ceremonyOrigin(ORIGIN, req.headers.get("host")),
-  providers: OIDC_PROVIDERS,
-  links,
-  issue: (user) => issueUserToken(user.id, user.handle, false, user),
-});
+export const tickets: Tickets = {
+  async issue(t) {
+    await sql.begin(async (tx) => {
+      await tx`delete from mecha_auth.auth_native_ticket where expires_at <= now()`;
+      await tx`insert into mecha_auth.auth_native_ticket (id, user_id, provider, issuer, code_challenge, expires_at)
+        values (${t.id}, ${t.userId}, ${t.provider}, ${t.issuer}, ${t.codeChallenge}, now() + make_interval(secs => ${t.ttlSeconds}))`;
+    });
+  },
+  async consume(id) {
+    const [row] = await sql`delete from mecha_auth.auth_native_ticket
+      where id = ${id} and expires_at > now()
+      returning user_id, provider, issuer, code_challenge`;
+    if (!row) return null;
+    return {
+      userId: row.user_id as string,
+      provider: row.provider as string,
+      issuer: row.issuer as string,
+      codeChallenge: row.code_challenge as string,
+    };
+  },
+};
 
-export async function handler(req: Request): Promise<Response> {
-  const path = new URL(req.url).pathname;
-  try {
-    const signedIn = providerSignIn(req);
-    if (signedIn !== null) return await signedIn;
-    if (req.method === "POST" && path === "/auth/register/start") {
-      return await registerStart(req);
-    }
-    if (req.method === "POST" && path === "/auth/register/verify") {
-      return await registerVerify(req);
-    }
-    if (req.method === "POST" && path === "/auth/login/start") {
-      return await loginStart(req);
-    }
-    if (req.method === "POST" && path === "/auth/login/verify") {
-      return await loginVerify(req);
-    }
-    if (req.method === "POST" && path === "/auth/guest") {
-      return await guest(req);
-    }
-    if (req.method === "GET" && path === "/auth/whoami") {
-      return await whoami(req);
-    }
-    if (req.method === "POST" && path === "/auth/shape") {
-      return await shapeToken(req);
-    }
-    if (req.method === "GET" && path === "/auth/shape/verify") {
-      return await shapeVerify(req);
-    }
-    return jsonError(404, "not found");
-  } catch (e) {
-    console.error(e);
-    return jsonError(500, "internal error");
+export type AuthHandlerOptions = {
+  rpId?: string;
+  origin?: string;
+  androidApkKeyHashes?: string | readonly string[];
+  nativeSchemes?: string | readonly string[];
+  providers?: Record<string, Provider>;
+  fetcher?: typeof fetch;
+};
+
+export function createHandler(opts: AuthHandlerOptions = {}): (req: Request) => Promise<Response> {
+  const rpId = opts.rpId ?? RP_ID;
+  const configuredOrigin = opts.origin !== undefined ? admittedOrigin(rpId, opts.origin) : ORIGIN;
+  const allowedAndroidOrigins = opts.androidApkKeyHashes !== undefined
+    ? androidOrigins(opts.androidApkKeyHashes)
+    : ANDROID_ORIGINS;
+  const allowedNativeSchemes = opts.nativeSchemes !== undefined
+    ? nativeSchemesFrom(opts.nativeSchemes)
+    : NATIVE_SCHEMES;
+  const providers = opts.providers ?? OIDC_PROVIDERS;
+
+  async function registerStart(req: Request): Promise<Response> {
+    const subject = await subjectOf(req);
+    if (subject === "refused") return jsonError(401, "invalid token");
+    const claims = subject.claims;
+    // Only a guest is promoted, keeping its handle and every row it wrote: a
+    // passkey added to an account on the strength of a bearer token would
+    // outlive the token and its sign-out. With no session, a new identity —
+    // usernameless by doctrine: no identifier is ever collected.
+    if (claims !== null && claims.guest !== true) return jsonError(409, "already an account");
+    const promote = claims !== null;
+    const handle = claims ? claims.handle as string : generateHandle();
+    const userId = claims ? claims.sub as string : crypto.randomUUID();
+    const options = await generateRegistrationOptions({
+      rpName: rpId,
+      rpID: rpId,
+      userName: handle,
+      userID: enc.encode(userId),
+      authenticatorSelection: {
+        residentKey: "required",
+        userVerification: "preferred",
+      },
+    });
+    const state = await signJwt({
+      purpose: "register",
+      handle,
+      userId,
+      promote,
+      challenge: options.challenge,
+      exp: Math.floor(Date.now() / 1000) + STATE_TTL_S,
+    });
+    return json(200, { ...options, state });
   }
+
+  async function registerVerify(req: Request): Promise<Response> {
+    const body = await readBody(req);
+    if (!body) return jsonError(400, "invalid json body");
+    const st = await readState(body, "register");
+    if (!st) return jsonError(401, "invalid state");
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        // deno-lint-ignore no-explicit-any
+        response: body.response as any,
+        expectedChallenge: st.challenge as string,
+        expectedOrigin: ceremonyOrigins(configuredOrigin, req.headers.get("host"), allowedAndroidOrigins),
+        expectedRPID: rpId,
+        requireUserVerification: false,
+      });
+    } catch {
+      return jsonError(401, "registration verification failed");
+    }
+    if (!verification.verified || !verification.registrationInfo) {
+      return jsonError(401, "registration verification failed");
+    }
+    const { credentialID, credentialPublicKey, counter } =
+      verification.registrationInfo;
+    const userId = st.userId as string;
+    if (st.promote === true) {
+      // The guest becomes an account once: a guest token that outlives its
+      // promotion is still a guest's, and adds no second way in.
+      const added = await sql`insert into mecha_auth.webauthn_credential (id, user_id, public_key, counter)
+        select ${credentialID}, ${userId}, ${credentialPublicKey}, ${counter}
+        where not exists (select 1 from mecha_auth.webauthn_credential where user_id = ${userId})
+          and not exists (select 1 from mecha_auth.identity_link where user_id = ${userId})`;
+      if (added.count === 0) return jsonError(409, "already an account");
+      const [token, refreshToken] = await Promise.all([
+        issueUserToken(userId, st.handle as string),
+        issueRefreshToken(userId),
+      ]);
+      return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle: st.handle } });
+    }
+    // Generated handles can collide; regenerate and retry — never a user error.
+    let handle = st.handle as string;
+    let inserted = false;
+    for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+      try {
+        await sql.begin(async (tx) => {
+          await tx`insert into app_user (id, handle) values (${userId}, ${handle})`;
+          await tx`insert into mecha_auth.webauthn_credential (id, user_id, public_key, counter)
+            values (${credentialID}, ${userId}, ${credentialPublicKey}, ${counter})`;
+        });
+        inserted = true;
+      } catch (e) {
+        if ((e as { code?: string }).code === "23505") handle = generateHandle();
+        else throw e;
+      }
+    }
+    if (!inserted) return jsonError(500, "could not allocate identity");
+    const [token, refreshToken] = await Promise.all([
+      issueUserToken(userId, handle),
+      issueRefreshToken(userId),
+    ]);
+    return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle } });
+  }
+
+  async function loginStart(_req: Request): Promise<Response> {
+    // Usernameless by doctrine: allowCredentials is empty so the authenticator
+    // surfaces its discoverable (resident) credentials for this RP.
+    const options = await generateAuthenticationOptions({
+      rpID: rpId,
+      allowCredentials: [],
+    });
+    const state = await signJwt({
+      purpose: "login",
+      challenge: options.challenge,
+      exp: Math.floor(Date.now() / 1000) + STATE_TTL_S,
+    });
+    return json(200, { ...options, state });
+  }
+
+  async function loginVerify(req: Request): Promise<Response> {
+    const body = await readBody(req);
+    if (!body) return jsonError(400, "invalid json body");
+    const st = await readState(body, "login");
+    if (!st) return jsonError(401, "invalid state");
+    const response = body.response as { id?: string } | undefined;
+    if (!response || typeof response.id !== "string") {
+      return jsonError(401, "authentication verification failed");
+    }
+    // The credential identifies the user (resident key).
+    const creds = await sql`
+      select c.id, c.public_key, c.counter, c.user_id, u.handle
+      from mecha_auth.webauthn_credential c join app_user u on u.id = c.user_id
+      where c.id = ${response.id}`;
+    if (creds.length === 0) {
+      return json(401, { error: "authentication verification failed", unknownCredential: true });
+    }
+    const cred = creds[0];
+    let verification;
+    try {
+      verification = await verifyAuthenticationResponse({
+        // deno-lint-ignore no-explicit-any
+        response: body.response as any,
+        expectedChallenge: st.challenge as string,
+        expectedOrigin: ceremonyOrigins(configuredOrigin, req.headers.get("host"), allowedAndroidOrigins),
+        expectedRPID: rpId,
+        requireUserVerification: false,
+        authenticator: {
+          credentialID: cred.id as string,
+          credentialPublicKey: new Uint8Array(cred.public_key as Uint8Array),
+          counter: Number(cred.counter),
+        },
+      });
+    } catch {
+      return jsonError(401, "authentication verification failed");
+    }
+    if (!verification.verified) {
+      return jsonError(401, "authentication verification failed");
+    }
+    await sql`update mecha_auth.webauthn_credential
+      set counter = ${verification.authenticationInfo.newCounter}
+      where id = ${cred.id as string}`;
+    const userId = cred.user_id as string;
+    const handle = cred.handle as string;
+    const [token, refreshToken] = await Promise.all([
+      issueUserToken(userId, handle),
+      issueRefreshToken(userId),
+    ]);
+    return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle } });
+  }
+
+  const providerSignIn = oidc({
+    secret: JWT_SECRET,
+    origin: (req) => ceremonyOrigin(configuredOrigin, req.headers.get("host")),
+    providers,
+    links,
+    tickets,
+    nativeSchemes: allowedNativeSchemes,
+    issue: async (user) => {
+      const [token, refreshToken] = await Promise.all([
+        issueUserToken(user.id, user.handle, false, user),
+        issueRefreshToken(user.id),
+      ]);
+      return { token, refresh_token: refreshToken };
+    },
+    fetcher: opts.fetcher,
+  });
+
+  return async function handle(req: Request): Promise<Response> {
+    const path = new URL(req.url).pathname;
+    try {
+      const signedIn = providerSignIn(req);
+      if (signedIn !== null) return await signedIn;
+      if (req.method === "POST" && path === "/auth/register/start") {
+        return await registerStart(req);
+      }
+      if (req.method === "POST" && path === "/auth/register/verify") {
+        return await registerVerify(req);
+      }
+      if (req.method === "POST" && path === "/auth/login/start") {
+        return await loginStart(req);
+      }
+      if (req.method === "POST" && path === "/auth/login/verify") {
+        return await loginVerify(req);
+      }
+      if (req.method === "POST" && path === "/auth/guest") {
+        return await guest(req);
+      }
+      if (req.method === "POST" && path === "/auth/refresh") {
+        return await refresh(req);
+      }
+      if (req.method === "DELETE" && path === "/auth/account") {
+        return await deleteAccount(req, ceremonyOrigin(configuredOrigin, req.headers.get("host")));
+      }
+      if (req.method === "GET" && path === "/auth/whoami") {
+        return await whoami(req);
+      }
+      if (req.method === "POST" && path === "/auth/shape") {
+        return await shapeToken(req);
+      }
+      if (req.method === "GET" && path === "/auth/shape/verify") {
+        return await shapeVerify(req);
+      }
+      return jsonError(404, "not found");
+    } catch (e) {
+      console.error(e);
+      return jsonError(500, "internal error");
+    }
+  };
 }
+
+export const handler = createHandler();
 
 if (import.meta.main) {
   await migrate();

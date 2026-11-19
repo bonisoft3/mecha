@@ -9,10 +9,26 @@ import {
   assertRejects,
   assertStringIncludes,
   assertThrows,
+// deno-lint-ignore no-import-prefix
 } from "jsr:@std/assert@1.0.13";
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from "@simplewebauthn/server/helpers";
-import { admittedOrigin, ceremonyOrigin, handler, issueUserToken, links, migrate, signJwt, sql, verifyJwt } from "./main.ts";
-import { PUBLIC_WHERE } from "./jwt.ts";
+import {
+  admittedOrigin,
+  androidOrigins,
+  ceremonyOrigin,
+  ceremonyOrigins,
+  createHandler,
+  handler,
+  issueUserToken,
+  links,
+  migrate,
+  REFRESH_TOKEN_TTL_S,
+  signJwt,
+  sql,
+  verifyJwt,
+} from "./main.ts";
+import { encodeBase64Url, PUBLIC_WHERE, randomToken, sha256url } from "./jwt.ts";
+import { providersFrom } from "./oidc.ts";
 import { PUBLIC_WHERE as CLIENT_PUBLIC_WHERE } from "../../packages/client/src/public-where.ts";
 
 await sql`CREATE TABLE IF NOT EXISTS app_user (
@@ -1172,6 +1188,358 @@ Deno.test("a provider named without its client is refused at startup", async () 
   }).output();
   assert(!success);
   assertStringIncludes(new TextDecoder().decode(stderr), "OIDC_GOOGLE_CLIENT_ID is required");
+});
+
+Deno.test({
+  name: "ANDROID_APK_KEY_HASHES normalizes bare and prefixed hashes, verifies Android ceremonies, and refuses bad hashes",
+  ...opts,
+  async fn() {
+    const hashA = await sha256url("release-signing-cert-a");
+    const hashB = await sha256url("debug-signing-cert-b");
+    const hashUnlisted = await sha256url("attacker-signing-cert");
+    assertEquals(
+      androidOrigins(`${hashA}, android:apk-key-hash:${hashB}, ${hashA}=`),
+      [`android:apk-key-hash:${hashA}`, `android:apk-key-hash:${hashB}`],
+    );
+    assertEquals(
+      ceremonyOrigins("https://snapcards.fun", null, androidOrigins(hashA)),
+      ["https://snapcards.fun", `android:apk-key-hash:${hashA}`],
+    );
+    for (const bad of ["not-a-sha256", "ab+cd/ef".padEnd(43, "a"), "a".repeat(42)]) {
+      assertThrows(() => androidOrigins(bad), Error, "not a base64url SHA-256 hash", bad);
+    }
+    const { success, stderr } = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "--frozen", fileURLToPath(new URL("./main.ts", import.meta.url))],
+      env: { WEBAUTHN_RP_ID: "localhost", WEBAUTHN_ORIGIN: "https://localhost:*", ANDROID_APK_KEY_HASHES: "bad-hash" },
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(!success);
+    assertStringIncludes(new TextDecoder().decode(stderr), "ANDROID_APK_KEY_HASHES");
+
+    const androidServe = createHandler({
+      rpId: "localhost",
+      origin: "https://localhost:54321",
+      androidApkKeyHashes: `${hashA},android:apk-key-hash:${hashB}`,
+    });
+    const apkOrigin = `android:apk-key-hash:${hashA}`;
+    const key = await passkey();
+
+    const reg = await (await androidServe(post("/auth/register/start", {}))).json();
+    // Unlisted APK signing key is refused.
+    const badReg = await androidServe(
+      post("/auth/register/verify", { state: reg.state, response: key.register(reg.challenge, `android:apk-key-hash:${hashUnlisted}`) }),
+    );
+    assertEquals(badReg.status, 401);
+
+    const made = await androidServe(
+      post("/auth/register/verify", { state: reg.state, response: key.register(reg.challenge, apkOrigin) }),
+    );
+    assertEquals(made.status, 200, await made.clone().text());
+    const registered = await made.json();
+    assertEquals(typeof registered.refresh_token, "string");
+
+    const login = await (await androidServe(post("/auth/login/start", {}))).json();
+    const badLogin = await androidServe(
+      post("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, `android:apk-key-hash:${hashUnlisted}`) }),
+    );
+    assertEquals(badLogin.status, 401);
+
+    const signed = await androidServe(
+      post("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, apkOrigin) }),
+    );
+    assertEquals(signed.status, 200, await signed.clone().text());
+    const loggedIn = await signed.json();
+    assertEquals(loggedIn.user, registered.user);
+    assertEquals(typeof loggedIn.refresh_token, "string");
+  },
+});
+
+Deno.test({
+  name: "POST /auth/refresh rotates refresh tokens across guest and account sessions and revokes the family on replay",
+  ...opts,
+  async fn() {
+    assertEquals((await handler(post("/auth/refresh", {}))).status, 400);
+    assertEquals((await handler(post("/auth/refresh", { refresh_token: "unknown-token" }))).status, 401);
+
+    // Guest session mints an opaque refresh_token stored hashed in mecha_auth.auth_refresh_token.
+    const guest1 = await (await handler(post("/auth/guest", {}))).json();
+    assertEquals(typeof guest1.refresh_token, "string");
+    const hash1 = await sha256url(guest1.refresh_token);
+    const [stored1] = await sql`select family_id, expires_at, replaced_by, revoked_at
+      from mecha_auth.auth_refresh_token where token_hash = ${hash1}`;
+    assert(stored1 !== undefined);
+    assertEquals(stored1.replaced_by, null);
+    assertEquals(stored1.revoked_at, null);
+    const ttlSeconds = Math.round((new Date(stored1.expires_at as Date).getTime() - Date.now()) / 1000);
+    assert(Math.abs(ttlSeconds - REFRESH_TOKEN_TTL_S) < 120, `expected ~90d TTL, got ${ttlSeconds}s`);
+
+    // Rotating a guest refresh token preserves guest: true and user.id.
+    const rot1Res = await handler(post("/auth/refresh", { refresh_token: guest1.refresh_token }));
+    assertEquals(rot1Res.status, 200);
+    const rot1 = await rot1Res.json();
+    assertEquals(rot1.user, guest1.user);
+    assertEquals((await verifyJwt(rot1.token))?.guest, true);
+    assert(rot1.refresh_token !== guest1.refresh_token);
+
+    // Rotating a second time advances the chain inside the same family.
+    const rot2Res = await handler(post("/auth/refresh", { refresh_token: rot1.refresh_token }));
+    assertEquals(rot2Res.status, 200);
+    const rot2 = await rot2Res.json();
+    assertEquals(rot2.user, guest1.user);
+
+    // Replaying the already-rotated first token revokes the entire family, including rot2.refresh_token.
+    const replay = await handler(post("/auth/refresh", { refresh_token: guest1.refresh_token }));
+    assertEquals(replay.status, 401);
+    const descendant = await handler(post("/auth/refresh", { refresh_token: rot2.refresh_token }));
+    assertEquals(descendant.status, 401);
+    const family = await sql`select count(*)::int as total, count(revoked_at)::int as revoked
+      from mecha_auth.auth_refresh_token where family_id = ${stored1.family_id}`;
+    assertEquals(family[0].total, 3);
+    assertEquals(family[0].revoked, 3);
+
+    // Expired refresh token is refused.
+    const guest2 = await (await handler(post("/auth/guest", {}))).json();
+    await sql`update mecha_auth.auth_refresh_token set expires_at = now() - interval '1 second'
+      where token_hash = ${await sha256url(guest2.refresh_token)}`;
+    assertEquals((await handler(post("/auth/refresh", { refresh_token: guest2.refresh_token }))).status, 401);
+  },
+});
+
+Deno.test({
+  name: "native OIDC PKCE ticket flow, guest-to-OIDC promotion, account merge, and DELETE /auth/account",
+  ...opts,
+  async fn() {
+    await sql`CREATE TABLE IF NOT EXISTS owned_deck (
+      id uuid primary key default gen_random_uuid(),
+      owner uuid not null references app_user(id) on delete cascade,
+      title text not null,
+      scope_id text generated always as ('public:') stored not null
+    )`;
+    await sql`CREATE TABLE IF NOT EXISTS owned_fav (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references app_user(id) on delete cascade,
+      slug text not null,
+      scope_id text generated always as ('user:' || user_id) stored not null,
+      unique (user_id, slug)
+    )`;
+    await sql`CALL rls_protect('owned_deck')`;
+    await sql`CALL rls_protect('owned_fav')`;
+
+    const issuer = "https://accounts.google.com";
+    const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    const jwk = { ...(await crypto.subtle.exportKey("jwk", keys.publicKey)), kid: "k1" };
+    const codes = new Map<string, { client: string; redirect: string; challenge: string; nonce: string }>();
+    let currentSub = "oidc-native-1";
+    let currentName = "Native Alice";
+    let currentEmail = "native.alice@example.test";
+
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url === `${issuer}/.well-known/openid-configuration`) {
+        return Response.json({
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          jwks_uri: `${issuer}/jwks`,
+        });
+      }
+      if (url === `${issuer}/jwks`) return Response.json({ keys: [jwk] });
+      if (url === `${issuer}/token`) {
+        const form = new URLSearchParams(String(init?.body));
+        const grant = codes.get(form.get("code") ?? "");
+        codes.delete(form.get("code") ?? "");
+        if (!grant || (await sha256url(form.get("code_verifier") ?? "")) !== grant.challenge) {
+          return Response.json({ error: "invalid_grant" }, { status: 400 });
+        }
+        const b64 = (s: string) => encodeBase64Url(new TextEncoder().encode(s));
+        const head = b64(JSON.stringify({ alg: "ES256", kid: "k1", typ: "JWT" }));
+        const payload = b64(JSON.stringify({
+          iss: issuer,
+          aud: grant.client,
+          sub: currentSub,
+          name: currentName,
+          email: currentEmail,
+          email_verified: true,
+          nonce: grant.nonce,
+          exp: Math.floor(Date.now() / 1000) + 300,
+        }));
+        const sig = new Uint8Array(
+          await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, keys.privateKey, new TextEncoder().encode(`${head}.${payload}`)),
+        );
+        return Response.json({ id_token: `${head}.${payload}.${encodeBase64Url(sig)}` });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+
+    const providers = providersFrom((k) => ({ OIDC_PROVIDERS: "google", OIDC_GOOGLE_CLIENT_ID: "origin" }[k]));
+    const serve = createHandler({
+      rpId: "localhost",
+      origin: "https://localhost:54321",
+      nativeSchemes: "snapcards",
+      providers,
+      fetcher,
+    });
+
+    const nativeSignIn = async (queryExtra = "", headers: Record<string, string> = {}) => {
+      const verifier = randomToken(32);
+      const challenge = await sha256url(verifier);
+      const startRes = await serve(
+        new Request(`https://localhost:54321/auth/oidc/google/start?return=native&code_challenge=${challenge}${queryExtra}`, { headers }),
+      );
+      assertEquals(startRes.status, 303);
+      assertEquals(startRes.headers.getSetCookie(), []);
+      const authUrl = new URL(startRes.headers.get("location")!);
+      const code = crypto.randomUUID();
+      codes.set(code, {
+        client: authUrl.searchParams.get("client_id")!,
+        redirect: authUrl.searchParams.get("redirect_uri")!,
+        challenge: authUrl.searchParams.get("code_challenge")!,
+        nonce: authUrl.searchParams.get("nonce")!,
+      });
+      const cbRes = await serve(
+        new Request(`https://localhost:54321/auth/oidc/google/callback?code=${code}&state=${encodeURIComponent(authUrl.searchParams.get("state")!)}`),
+      );
+      assertEquals(cbRes.status, 303);
+      assertEquals(cbRes.headers.getSetCookie(), []);
+      const loc = new URL(cbRes.headers.get("location")!);
+      assertEquals(`${loc.protocol}//${loc.host}${loc.pathname}`, "snapcards://auth/callback");
+      return { ticket: loc.searchParams.get("ticket")!, verifier };
+    };
+
+    // 1. Guest promotes onto an unlinked OIDC identity: keeps guest UUID, handle, and all owned rows.
+    const guestA = await (await serve(post("/auth/guest", {}))).json();
+    await sql`insert into owned_deck (owner, title) values (${guestA.user.id}, 'Birds of Brazil')`;
+    await sql`insert into owned_fav (user_id, slug) values (${guestA.user.id}, 'deck-shared'), (${guestA.user.id}, 'deck-a')`;
+
+    const flow1 = await nativeSignIn(`&promote_token=${encodeURIComponent(guestA.token)}`);
+    const redeemed1 = await serve(
+      new Request("https://localhost:54321/auth/oidc/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: flow1.ticket, code_verifier: flow1.verifier }),
+      }),
+    );
+    assertEquals(redeemed1.status, 200);
+    const sessionA = await redeemed1.json();
+    assertEquals(sessionA.user, {
+      id: guestA.user.id,
+      handle: guestA.user.handle,
+      name: "Native Alice",
+      email: "native.alice@example.test",
+    });
+    assertEquals((await verifyJwt(sessionA.token))?.guest, false);
+    assertEquals(typeof sessionA.refresh_token, "string");
+    // Ticket row was atomically deleted on consumption; replay fails.
+    assertEquals((await sql`select count(*)::int as n from mecha_auth.auth_native_ticket where id = ${flow1.ticket}`)[0].n, 0);
+    const replayRes = await serve(
+      new Request("https://localhost:54321/auth/oidc/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: flow1.ticket, code_verifier: flow1.verifier }),
+      }),
+    );
+    assertEquals(replayRes.status, 401);
+
+    // Refreshing an OIDC-promoted account preserves non-guest claims and profile fields.
+    const refreshedA = await (await serve(post("/auth/refresh", { refresh_token: sessionA.refresh_token }))).json();
+    assertEquals(refreshedA.user, sessionA.user);
+    assertEquals((await verifyJwt(refreshedA.token))?.guest, false);
+    assertEquals((await verifyJwt(refreshedA.token))?.email, "native.alice@example.test");
+
+    // Stale guestA token can no longer promote via OIDC or passkey.
+    const staleOidc = await serve(
+      new Request(`https://localhost:54321/auth/oidc/google/start?return=native&code_challenge=${await sha256url(randomToken(32))}`, {
+        headers: { authorization: `Bearer ${guestA.token}` },
+      }),
+    );
+    assertEquals(staleOidc.status, 409);
+
+    // 2. Second guest promotes into the SAME existing OIDC identity: owned rows merge into guestA.user.id,
+    //    unique favorite collisions drop cleanly, and the transient guest row is removed.
+    const guestB = await (await serve(post("/auth/guest", {}))).json();
+    await sql`insert into owned_deck (owner, title) values (${guestB.user.id}, 'Offline Trees')`;
+    await sql`insert into owned_fav (user_id, slug) values (${guestB.user.id}, 'deck-shared'), (${guestB.user.id}, 'deck-b')`;
+
+    const flow2 = await nativeSignIn("", { authorization: `Bearer ${guestB.token}` });
+    const sessionB = await (await serve(
+      new Request("https://localhost:54321/auth/oidc/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: flow2.ticket, code_verifier: flow2.verifier }),
+      }),
+    )).json();
+    assertEquals(sessionB.user.id, guestA.user.id);
+    assertEquals((await sql`select count(*)::int as n from app_user where id = ${guestB.user.id}`)[0].n, 0);
+    const decks = await sql`select title from owned_deck where owner = ${guestA.user.id} order by 1`;
+    assertEquals(decks.map((d) => d.title), ["Birds of Brazil", "Offline Trees"]);
+    const favs = await sql`select slug from owned_fav where user_id = ${guestA.user.id} order by 1`;
+    assertEquals(favs.map((f) => f.slug), ["deck-a", "deck-b", "deck-shared"]);
+
+    // 3. Wrong code_verifier and expired ticket in Postgres are both refused with 401.
+    currentSub = "oidc-native-2";
+    currentName = "Bob";
+    currentEmail = "bob@example.test";
+    const flowWrong = await nativeSignIn();
+    const wrongRes = await serve(
+      new Request("https://localhost:54321/auth/oidc/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: flowWrong.ticket, code_verifier: randomToken(32) }),
+      }),
+    );
+    assertEquals(wrongRes.status, 401);
+    assertEquals((await sql`select count(*)::int as n from mecha_auth.auth_native_ticket where id = ${flowWrong.ticket}`)[0].n, 0);
+
+    const flowExpired = await nativeSignIn();
+    await sql`update mecha_auth.auth_native_ticket set expires_at = now() - interval '1 second' where id = ${flowExpired.ticket}`;
+    const expiredRes = await serve(
+      new Request("https://localhost:54321/auth/oidc/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: flowExpired.ticket, code_verifier: flowExpired.verifier }),
+      }),
+    );
+    assertEquals(expiredRes.status, 401);
+
+    // 4. DELETE /auth/account requires an app_user bearer token and cascades credentials, links, refresh tokens, and owned rows.
+    assertEquals((await serve(new Request("https://localhost:54321/auth/account", { method: "DELETE" }))).status, 401);
+    const shapeOnly = await signJwt({ typ: "shape", table: "article", where: PUBLIC_WHERE, sub: guestA.user.id, exp: Math.floor(Date.now() / 1000) + 60 });
+    assertEquals(
+      (await serve(new Request("https://localhost:54321/auth/account", {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${shapeOnly}` },
+      }))).status,
+      401,
+    );
+
+    const delRes = await serve(
+      new Request("https://localhost:54321/auth/account", {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${refreshedA.token}` },
+      }),
+    );
+    assertEquals(delRes.status, 200);
+    assertEquals(await delRes.json(), { deleted: true });
+    assertEquals((await sql`select count(*)::int as n from app_user where id = ${guestA.user.id}`)[0].n, 0);
+    assertEquals((await sql`select count(*)::int as n from mecha_auth.identity_link where user_id = ${guestA.user.id}`)[0].n, 0);
+    assertEquals((await sql`select count(*)::int as n from mecha_auth.auth_refresh_token where user_id = ${guestA.user.id}`)[0].n, 0);
+    assertEquals((await sql`select count(*)::int as n from owned_deck where owner = ${guestA.user.id}`)[0].n, 0);
+    assertEquals((await sql`select count(*)::int as n from owned_fav where user_id = ${guestA.user.id}`)[0].n, 0);
+    assertEquals((await serve(post("/auth/refresh", { refresh_token: refreshedA.refresh_token }))).status, 401);
+
+    // New auth tables and adopt_guest function are sealed in mecha_auth and exempt in rls_exempt.
+    for (const rel of ["mecha_auth.auth_native_ticket", "mecha_auth.auth_refresh_token"]) {
+      const [acl] = await sql`select has_table_privilege('app_user', ${rel}, 'select, insert, update, delete') as granted,
+        exists (select 1 from mecha.rls_exempt where table_name = ${rel}) as exempt`;
+      assertEquals(acl.granted, false, rel);
+      assertEquals(acl.exempt, true, rel);
+    }
+    const [fnAcl] = await sql`select has_function_privilege('app_user', 'mecha_auth.adopt_guest(uuid, uuid)', 'execute') as exec`;
+    assertEquals(fnAcl.exec, false);
+
+    await sql`DROP TABLE owned_fav, owned_deck`;
+  },
 });
 
 // Last, and it has to be: Deno runs tests in source order, and this closes the

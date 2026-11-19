@@ -2,28 +2,30 @@
 // PKCE, by redirect, so no provider script runs in any page the door serves and
 // the terminal's CSP is untouched. The service is the client, found by the
 // provider's discovery document: Google by default, or any issuer a deployment
-// names in its place. A state JWT and a cookie holding the PKCE verifier tie
-// the callback to the browser that started it, and the code is redeemed by
-// this service alone. A signed-in person is an app_user linked to the
-// provider's subject (identity_link), and the session is the one a passkey
-// mints. Who a guest becomes on signing in is no concern of this service: a
-// subject signs into its own account, made the first time.
+// names in its place.
 //
-// The tab's session lives in sessionStorage, which a redirect cannot write, so
-// the callback leaves an HttpOnly cookie and the terminal exchanges it at
-// /auth/oidc/session. The cookie outlives the tab, so a tab opened later
-// adopts the same sign-in; a readable hint cookie says one may be there.
+// Browser sessions bind the callback with a PKCE cookie and leave an HttpOnly
+// session cookie redeemed at /auth/oidc/session. Native hosts (?return=native),
+// whose auth sheet shares no cookie jar with the app's HTTP client, send their
+// own PKCE S256 challenge at /start, receive a 60-second single-use ticket on
+// <scheme>://auth/callback, and redeem { ticket, code_verifier } at
+// /auth/oidc/session. An unlinked guest session passed on /start promotes in
+// place onto a new link or merges its owned rows into an existing linked user.
 //
-// Pure but for what Config hands it — the origin, the links, the network — so
-// oidc_test.ts drives every refusal against a provider of its own.
-import { decodeBase64Url, encodeBase64Url, signJwt, verifyJwt } from "./jwt.ts";
+// Pure but for what Config hands it — the origin, the links, the tickets, the
+// network — so oidc_test.ts drives every refusal against a provider of its own.
+import { decodeBase64Url, encodeBase64Url, randomToken, sha256url, signJwt, verifyJwt } from "./jwt.ts";
+export { sha256url };
 
 export const PREFIX = "/auth/oidc";
 export const SESSION_COOKIE = "mecha_oidc";
 export const STATE_COOKIE = "mecha_oidc_state";
 export const HINT_COOKIE = "mecha_oidc_hint";
+export const NATIVE_TICKET_TTL_S = 60;
 const STATE_TTL_S = 600;
 const COOKIE_TTL_S = 30 * 24 * 3600;
+const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
+const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 /** The client id that stands for the door a request came through. */
 export const ORIGIN_CLIENT = "origin";
 
@@ -37,6 +39,12 @@ export const PRESETS: Record<string, Preset> = {
     issuers: ["https://accounts.google.com", "accounts.google.com"],
     scope: "openid profile email",
     params: { prompt: "select_account" },
+  },
+  apple: {
+    issuer: "https://appleid.apple.com",
+    issuers: ["https://appleid.apple.com", "appleid.apple.com"],
+    scope: "openid",
+    params: {},
   },
 };
 
@@ -143,14 +151,46 @@ export type Profile = { provider: string; issuer: string; sub: string; name: str
  * email while a provider vouches for them. */
 export type User = { id: string; handle: string; name?: string | null; email?: string | null };
 
+export class PromoteError extends Error {
+  constructor(readonly status: 401 | 409, message: string) {
+    super(message);
+  }
+}
+
+export type NativeTicket = {
+  id: string;
+  userId: string;
+  provider: string;
+  issuer: string;
+  codeChallenge: string;
+  ttlSeconds: number;
+};
+
+export type ConsumedTicket = {
+  userId: string;
+  provider: string;
+  issuer: string;
+  codeChallenge: string;
+};
+
+export interface Tickets {
+  issue(ticket: NativeTicket): Promise<void>;
+  consume(id: string): Promise<ConsumedTicket | null>;
+}
+
+export type IssuedSession = string | { token: string; refresh_token?: string };
+
 /** What the service needs of Postgres. */
 export interface Links {
   /** The user linked to this subject, made with its link when there is none;
-   * the link's name and picture refreshed either way. */
-  userFor(p: Profile): Promise<User>;
+   * when `promoteUserId` names an unlinked guest, promotes that guest onto a
+   * fresh link or merges its owned rows into an existing linked user. */
+  userFor(p: Profile, promoteUserId?: string | null): Promise<User>;
   /** The user, with the link's name and email, while a link of `provider`
    * still names them. */
   handleOf(provider: string, issuer: string, id: string): Promise<Omit<User, "id"> | null>;
+  /** Checks whether `userId` is an existing unlinked guest `app_user`. */
+  canPromote?(userId: string): Promise<"ok" | "already_account" | "absent">;
 }
 
 export type Config = {
@@ -159,15 +199,47 @@ export type Config = {
   origin: (req: Request) => string;
   providers: Record<string, Provider>;
   links: Links;
-  issue: (user: User) => Promise<string>;
+  issue: (user: User) => Promise<IssuedSession>;
+  nativeSchemes?: readonly string[];
+  tickets?: Tickets;
   fetcher?: typeof fetch;
 };
 
 const dec = new TextDecoder();
 const enc = new TextEncoder();
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const random = (bytes: number) => encodeBase64Url(crypto.getRandomValues(new Uint8Array(bytes)));
-export const sha256url = async (text: string) => encodeBase64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(text))));
+const random = (bytes: number) => randomToken(bytes);
+
+const sealKeys = new Map<string, Promise<CryptoKey>>();
+function sealKey(secret: string): Promise<CryptoKey> {
+  let k = sealKeys.get(secret);
+  if (k === undefined) {
+    k = crypto.subtle.digest("SHA-256", enc.encode(`oidc-state-seal:${secret}`))
+      .then((raw) => crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]));
+    sealKeys.set(secret, k);
+  }
+  return k;
+}
+
+async function sealVerifier(secret: string, verifier: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await sealKey(secret), enc.encode(verifier)));
+  const packed = new Uint8Array(iv.length + ct.length);
+  packed.set(iv, 0);
+  packed.set(ct, iv.length);
+  return encodeBase64Url(packed);
+}
+
+async function openVerifier(secret: string, sealed: string): Promise<string | null> {
+  try {
+    const packed = decodeBase64Url(sealed);
+    if (packed.length <= 12) return null;
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: packed.slice(0, 12) }, await sealKey(secret), packed.slice(12));
+    return dec.decode(pt);
+  } catch {
+    return null;
+  }
+}
 
 const ALGS = {
   RS256: { kty: "RSA", import: { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, verify: { name: "RSASSA-PKCS1-v1_5" } },
@@ -264,17 +336,87 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
   // top-level GET.
   const stateCookie = (origin: string, name: string, value: string, age: number) =>
     `${STATE_COOKIE}=${value}; Path=${PREFIX}/${name}/callback; HttpOnly; SameSite=Lax${secure(origin)}; Max-Age=${age}`;
+  const sessionBody = async (user: User) => {
+    const issued = await cfg.issue(user);
+    return typeof issued === "string"
+      ? { token: issued, user }
+      : { token: issued.token, ...(issued.refresh_token ? { refresh_token: issued.refresh_token } : {}), user };
+  };
+
+  async function promoteSubject(req: Request, q: URLSearchParams): Promise<string | Response | undefined> {
+    const auth = req.headers.get("authorization");
+    let headerToken: string | null = null;
+    if (auth !== null) {
+      if (!auth.startsWith("Bearer ") || auth.length <= "Bearer ".length) return refuse(401, "invalid token");
+      headerToken = auth.slice("Bearer ".length);
+    }
+    const queryToken = q.get("promote_token");
+    if (queryToken === "") return refuse(401, "invalid token");
+    if (headerToken !== null && queryToken !== null && headerToken !== queryToken) {
+      return refuse(400, "conflicting promote token");
+    }
+    const raw = headerToken ?? queryToken;
+    if (raw === null) return undefined;
+    const claims = await verifyJwt(cfg.secret, raw);
+    if (!claims || claims.role !== "app_user" || typeof claims.sub !== "string") return refuse(401, "invalid token");
+    if (claims.guest !== true) return refuse(409, "already an account");
+    if (cfg.links.canPromote) {
+      const status = await cfg.links.canPromote(claims.sub);
+      if (status === "absent") return refuse(401, "invalid token");
+      if (status === "already_account") return refuse(409, "already an account");
+    }
+    return claims.sub;
+  }
 
   async function start(req: Request, name: string): Promise<Response> {
     const p = cfg.providers[name];
     const origin = cfg.origin(req);
+    const q = new URL(req.url).searchParams;
+    const promote = await promoteSubject(req, q);
+    if (promote instanceof Response) return promote;
     const verifier = random(32);
     const nonce = random(16);
     const challenge = await sha256url(verifier);
-    const ret = safeReturn(new URL(req.url).searchParams.get("return"));
-    // The verifier stays in this browser's cookie; the state, which the
-    // provider sees, carries only its hash.
-    const state = await signJwt(cfg.secret, { purpose: "oidc", provider: name, issuer: p.issuer, nonce, bind: challenge, ret, exp: now() + STATE_TTL_S });
+    let state: string;
+    let cookies: string[];
+    if (q.get("return") === "native") {
+      if (!cfg.tickets) return refuse(400, "native sign-in is not configured");
+      const allowed = cfg.nativeSchemes ?? [];
+      const requestedScheme = q.get("scheme");
+      if (requestedScheme !== null ? !allowed.includes(requestedScheme) : allowed.length === 0) {
+        return refuse(400, "unknown native scheme");
+      }
+      const scheme = requestedScheme ?? allowed[0];
+      const appChallenge = q.get("code_challenge");
+      if (appChallenge === null || !PKCE_CHALLENGE.test(appChallenge)) {
+        return refuse(400, "invalid code_challenge");
+      }
+      const seal = await sealVerifier(cfg.secret, verifier);
+      state = await signJwt(cfg.secret, {
+        purpose: "oidc",
+        provider: name,
+        issuer: p.issuer,
+        nonce,
+        seal,
+        native: { scheme, challenge: appChallenge },
+        ...(promote ? { promote } : {}),
+        exp: now() + STATE_TTL_S,
+      });
+      cookies = [];
+    } else {
+      const ret = safeReturn(q.get("return"));
+      state = await signJwt(cfg.secret, {
+        purpose: "oidc",
+        provider: name,
+        issuer: p.issuer,
+        nonce,
+        bind: challenge,
+        ret,
+        ...(promote ? { promote } : {}),
+        exp: now() + STATE_TTL_S,
+      });
+      cookies = [stateCookie(origin, name, verifier, STATE_TTL_S)];
+    }
     const to = new URL((await endpoints(p)).authorize);
     to.search = new URLSearchParams({
       ...p.params,
@@ -287,7 +429,7 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
       code_challenge: challenge,
       code_challenge_method: "S256",
     }).toString();
-    return redirect(to.toString(), [stateCookie(origin, name, verifier, STATE_TTL_S)]);
+    return redirect(to.toString(), cookies);
   }
 
   async function callback(req: Request, name: string): Promise<Response> {
@@ -302,8 +444,21 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     if (state === null || state.purpose !== "oidc" || state.provider !== name || state.issuer !== p.issuer || typeof state.nonce !== "string") {
       return refuse(400, "invalid state");
     }
-    const verifier = cookieOf(req, STATE_COOKIE);
-    if (verifier === null || (await sha256url(verifier)) !== state.bind) return refuse(400, "state is another browser's");
+    const native = isObject(state.native) ? state.native : null;
+    let verifier: string | null;
+    if (native !== null) {
+      if (
+        !cfg.tickets || typeof native.scheme !== "string" || !(cfg.nativeSchemes ?? []).includes(native.scheme) ||
+        typeof native.challenge !== "string" || !PKCE_CHALLENGE.test(native.challenge) || typeof state.seal !== "string"
+      ) {
+        return refuse(400, "invalid state");
+      }
+      verifier = await openVerifier(cfg.secret, state.seal);
+      if (verifier === null) return refuse(400, "invalid state");
+    } else {
+      verifier = cookieOf(req, STATE_COOKIE);
+      if (verifier === null || (await sha256url(verifier)) !== state.bind) return refuse(400, "state is another browser's");
+    }
     const client = clientOf(p, origin);
     const ends = await endpoints(p);
     const exchanged = await fetcher(ends.token, {
@@ -323,7 +478,25 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     if (typeof idToken !== "string") return refuse(401, "no id token");
     const profile = await verifyIdToken(name, idToken, (kid) => keys(ends.jwks, kid), { issuer: p.issuer, issuers: p.issuers, client, nonce: state.nonce });
     if (profile === null) return refuse(401, "id token refused");
-    const user = await cfg.links.userFor(profile);
+    let user: User;
+    try {
+      user = await cfg.links.userFor(profile, typeof state.promote === "string" ? state.promote : null);
+    } catch (e) {
+      if (e instanceof PromoteError) return refuse(e.status, e.message);
+      throw e;
+    }
+    if (native !== null) {
+      const ticket = random(32);
+      await cfg.tickets!.issue({
+        id: ticket,
+        userId: user.id,
+        provider: name,
+        issuer: p.issuer,
+        codeChallenge: native.challenge as string,
+        ttlSeconds: NATIVE_TICKET_TTL_S,
+      });
+      return redirect(`${native.scheme as string}://auth/callback?ticket=${encodeURIComponent(ticket)}`, []);
+    }
     const session = await signJwt(cfg.secret, { purpose: "oidc-session", provider: name, issuer: p.issuer, sub: user.id, exp: now() + COOKIE_TTL_S });
     return redirect(safeReturn(typeof state.ret === "string" ? state.ret : null), [
       `${SESSION_COOKIE}=${session}; Path=${PREFIX}; HttpOnly; SameSite=Lax${secure(origin)}; Max-Age=${COOKIE_TTL_S}`,
@@ -332,11 +505,40 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     ]);
   }
 
-  // The cookie as this tab's session. A cross-site POST carries no Lax
-  // cookie, and the Origin a browser sends is checked besides.
   async function session(req: Request): Promise<Response> {
     const origin = req.headers.get("origin");
     if (origin !== null && origin !== cfg.origin(req)) return refuse(403, "another origin");
+    const rawBody = await req.text();
+    if (rawBody.trim() !== "") {
+      let body: unknown;
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        return refuse(400, "invalid json body");
+      }
+      if (!isObject(body)) return refuse(400, "invalid json body");
+      if ("ticket" in body || "code_verifier" in body) {
+        if (!cfg.tickets) return refuse(400, "native sign-in is not configured");
+        if (typeof body.ticket !== "string" || body.ticket === "" || typeof body.code_verifier !== "string" || body.code_verifier === "") {
+          return refuse(400, "ticket and code_verifier required");
+        }
+        const consumed = await cfg.tickets.consume(body.ticket);
+        if (consumed === null) return refuse(401, "invalid ticket");
+        if (!PKCE_VERIFIER.test(body.code_verifier) || (await sha256url(body.code_verifier)) !== consumed.codeChallenge) {
+          return refuse(401, "invalid code_verifier");
+        }
+        if (!Object.hasOwn(cfg.providers, consumed.provider) || cfg.providers[consumed.provider].issuer !== consumed.issuer) {
+          return refuse(401, "not signed in");
+        }
+        const who = await cfg.links.handleOf(consumed.provider, consumed.issuer, consumed.userId);
+        if (who === null) return refuse(401, "not signed in");
+        const user: User = { id: consumed.userId, ...who };
+        return new Response(JSON.stringify(await sessionBody(user)), {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        });
+      }
+    }
     const raw = cookieOf(req, SESSION_COOKIE);
     if (raw === null) return refuse(401, "not signed in");
     const c = await verifyJwt(cfg.secret, raw);
@@ -349,7 +551,7 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     const who = await cfg.links.handleOf(c.provider, c.issuer, c.sub);
     if (who === null) return refuse(401, "not signed in");
     const user: User = { id: c.sub, ...who };
-    return new Response(JSON.stringify({ token: await cfg.issue(user), user }), {
+    return new Response(JSON.stringify(await sessionBody(user)), {
       status: 200,
       headers: { "content-type": "application/json", "cache-control": "no-store" },
     });

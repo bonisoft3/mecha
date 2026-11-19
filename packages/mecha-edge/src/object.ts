@@ -53,6 +53,8 @@ export interface EdgeEnv {
   BLOB_URL?: string
   AIRLOCK_QUEUE?: { send(body: DispatchedRun): Promise<unknown> }
   AIRLOCK_SEAL_PUBLIC?: string
+  ANDROID_APK_KEY_HASHES?: string
+  NATIVE_SCHEMES?: string
 }
 
 export interface EdgeOptions {
@@ -161,6 +163,8 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
         })
         const cluster = await createEdgeCluster({
           db, tables, schema, secret: this.env.JWT_SECRET, log: console.error, drains, providers,
+          androidApkKeyHashes: env('ANDROID_APK_KEY_HASHES'),
+          nativeSchemes: env('NATIVE_SCHEMES'),
           ...(compute ? { compute: {
             ...compute,
             ...(compute.physicalSnapshots ? { retainSnapshot: async identity => {

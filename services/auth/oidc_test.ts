@@ -5,19 +5,24 @@
 // no secret, signing with ES256, reached inside the cluster at another
 // address. Each case is a way a sign-in could be forged, replayed or
 // misdirected.
+// deno-lint-ignore no-import-prefix
 import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1.0.13";
-import { encodeBase64Url, signJwt } from "./jwt.ts";
+import { encodeBase64Url, nativeSchemesFrom, randomToken, signJwt, STACK_ISSUER } from "./jwt.ts";
 import {
-  HINT_COOKIE,
+  type ConsumedTicket,
   discovery,
+  HINT_COOKIE,
   type Links,
+  type NativeTicket,
   oidc,
+  PromoteError,
   type Provider,
   providersFrom,
   safeReturn,
   SESSION_COOKIE,
   sha256url,
   STATE_COOKIE,
+  type Tickets,
   type User,
 } from "./oidc.ts";
 
@@ -434,4 +439,286 @@ Deno.test("Service-Worker-Navigation-Preload and prefetch GETs neither overwrite
   const done = await s.serve(callback({ code, state }, verifier));
   assertEquals(done.status, 303);
   assertEquals(s.links.users.size, 1);
+});
+
+function memoryTickets() {
+  const held = new Map<string, NativeTicket & { expiresAt: number }>();
+  const tickets: Tickets = {
+    issue(t) {
+      held.set(t.id, { ...t, expiresAt: Date.now() + t.ttlSeconds * 1000 });
+      return Promise.resolve();
+    },
+    consume(id): Promise<ConsumedTicket | null> {
+      const hit = held.get(id);
+      held.delete(id);
+      if (!hit || hit.expiresAt <= Date.now()) return Promise.resolve(null);
+      return Promise.resolve({
+        userId: hit.userId,
+        provider: hit.provider,
+        issuer: hit.issuer,
+        codeChallenge: hit.codeChallenge,
+      });
+    },
+  };
+  return {
+    tickets,
+    held,
+    expire(id: string) {
+      const hit = held.get(id);
+      if (hit) hit.expiresAt = Date.now() - 1;
+    },
+  };
+}
+
+async function setupNative(schemes: readonly string[] = ["snapcards", "snapcards-dev"]) {
+  const providers = providersFrom((name) => GOOGLE[name]);
+  const idp = await provider({ issuer: "https://accounts.google.com", iss: "accounts.google.com", alg: "RS256", secret: "shh" });
+  const guests = new Map<string, { handle: string; linked: boolean }>();
+  const users = new Map<string, User & { name: string | null; email: string | null }>();
+  const links: Links = {
+    canPromote(userId) {
+      const g = guests.get(userId);
+      if (!g) return Promise.resolve("absent");
+      return Promise.resolve(g.linked ? "already_account" : "ok");
+    },
+    userFor(p, promoteUserId) {
+      const key = `${p.provider}:${p.issuer}:${p.sub}`;
+      if (promoteUserId) {
+        const g = guests.get(promoteUserId);
+        if (!g) return Promise.reject(new PromoteError(401, "invalid token"));
+        if (g.linked) return Promise.reject(new PromoteError(409, "already an account"));
+        g.linked = true;
+        const existing = users.get(key);
+        if (existing) {
+          existing.name = p.name;
+          existing.email = p.email;
+          guests.delete(promoteUserId);
+          return Promise.resolve({ id: existing.id, handle: existing.handle, name: p.name, email: p.email });
+        }
+        const promoted = { id: promoteUserId, handle: g.handle, name: p.name, email: p.email };
+        users.set(key, promoted);
+        return Promise.resolve(promoted);
+      }
+      const u = users.get(key) ?? { id: crypto.randomUUID(), handle: `h-${users.size}`, name: p.name, email: p.email };
+      u.name = p.name;
+      u.email = p.email;
+      users.set(key, u);
+      return Promise.resolve({ id: u.id, handle: u.handle, name: u.name, email: u.email });
+    },
+    handleOf(prov, issuer, id) {
+      const hit = [...users.entries()].find(([k, u]) => u.id === id && k.startsWith(`${prov}:${issuer}:`));
+      return Promise.resolve(hit ? { handle: hit[1].handle, name: hit[1].name, email: hit[1].email } : null);
+    },
+  };
+  const store = memoryTickets();
+  const routes = oidc({
+    secret: SECRET,
+    origin: () => ORIGIN,
+    providers,
+    links,
+    tickets: store.tickets,
+    nativeSchemes: schemes,
+    issue: async (u) => ({
+      token: await signJwt(SECRET, { iss: STACK_ISSUER, role: "app_user", sub: u.id, handle: u.handle, guest: false, exp: now() + 60 }),
+      refresh_token: `rt-${u.id}`,
+    }),
+    fetcher: idp.fetcher as typeof fetch,
+  });
+  const serve = async (req: Request) => {
+    const res = routes(req);
+    assert(res !== null, `${req.method} ${req.url} is not a route`);
+    return await res;
+  };
+  return { idp, guests, users, store, serve };
+}
+
+Deno.test("native OIDC PKCE flow issues a cookie-free single-use ticket and redeems it with code_verifier", async () => {
+  const s = await setupNative();
+  const appVerifier = randomToken(32);
+  const appChallenge = await sha256url(appVerifier);
+
+  const startRes = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}&scheme=snapcards-dev`),
+  );
+  assertEquals(startRes.status, 303);
+  assertEquals(startRes.headers.getSetCookie(), []);
+  const to = new URL(startRes.headers.get("location")!);
+  const code = s.idp.authorize(to);
+  const state = to.searchParams.get("state")!;
+
+  const cbRes = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/callback?${new URLSearchParams({ code, state })}`));
+  assertEquals(cbRes.status, 303);
+  assertEquals(cbRes.headers.getSetCookie(), []);
+  const redirectUrl = new URL(cbRes.headers.get("location")!);
+  assertEquals(`${redirectUrl.protocol}//${redirectUrl.host}${redirectUrl.pathname}`, "snapcards-dev://auth/callback");
+  const ticket = redirectUrl.searchParams.get("ticket")!;
+  assert(ticket.length >= 43);
+
+  const sessionRes = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket, code_verifier: appVerifier }),
+    }),
+  );
+  assertEquals(sessionRes.status, 200);
+  const session = await sessionRes.json();
+  assertEquals(typeof session.token, "string");
+  assertEquals(session.refresh_token, `rt-${session.user.id}`);
+  assertEquals(session.user.name, "Alice");
+  assertEquals(session.user.email, "alice@example.test");
+
+  // Replaying an already-redeemed ticket is refused.
+  const replay = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket, code_verifier: appVerifier }),
+    }),
+  );
+  assertEquals(replay.status, 401);
+});
+
+Deno.test("native OIDC refuses unknown schemes, bad challenges, wrong verifiers, and expired tickets", async () => {
+  assertEquals(nativeSchemesFrom("snapcards, snapcards-dev, snapcards"), ["snapcards", "snapcards-dev"]);
+  for (const bad of ["https", "http", "javascript", "data", "Snapcards", "1app"]) {
+    assertThrows(() => nativeSchemesFrom(bad), Error, "not a custom URI scheme");
+  }
+
+  const s = await setupNative(["snapcards"]);
+  const appVerifier = randomToken(32);
+  const appChallenge = await sha256url(appVerifier);
+
+  // Unknown scheme -> 400.
+  assertEquals(
+    (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}&scheme=evil`))).status,
+    400,
+  );
+  // Unconfigured scheme allowlist -> 400.
+  const unconfigured = await setupNative([]);
+  assertEquals(
+    (await unconfigured.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}`))).status,
+    400,
+  );
+  // Missing / short / padded code_challenge -> 400.
+  for (const badChallenge of ["", "too-short", `${appChallenge}=`, "a".repeat(129)]) {
+    assertEquals(
+      (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${encodeURIComponent(badChallenge)}`))).status,
+      400,
+      badChallenge,
+    );
+  }
+
+  // Wrong code_verifier returns 401 and burns the single-use ticket immediately.
+  const mintTicket = async () => {
+    const startRes = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}`));
+    assertEquals(startRes.status, 303);
+    const to = new URL(startRes.headers.get("location")!);
+    const cbRes = await s.serve(
+      new Request(`${ORIGIN}/auth/oidc/google/callback?${new URLSearchParams({ code: s.idp.authorize(to), state: to.searchParams.get("state")! })}`),
+    );
+    assertEquals(cbRes.status, 303);
+    const loc = new URL(cbRes.headers.get("location")!);
+    assertEquals(loc.protocol, "snapcards:");
+    return loc.searchParams.get("ticket")!;
+  };
+
+  const t1 = await mintTicket();
+  const wrong = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket: t1, code_verifier: randomToken(32) }),
+    }),
+  );
+  assertEquals(wrong.status, 401);
+  // Even with the right verifier afterward, t1 was already consumed.
+  const afterWrong = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket: t1, code_verifier: appVerifier }),
+    }),
+  );
+  assertEquals(afterWrong.status, 401);
+
+  // Expired ticket -> 401.
+  const t2 = await mintTicket();
+  s.store.expire(t2);
+  const expired = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket: t2, code_verifier: appVerifier }),
+    }),
+  );
+  assertEquals(expired.status, 401);
+});
+
+Deno.test("guest promotion on OIDC start validates unlinked guest tokens and preserves guest identity", async () => {
+  const s = await setupNative(["snapcards"]);
+  const guestId = crypto.randomUUID();
+  s.guests.set(guestId, { handle: "mango-otter-1234", linked: false });
+  const guestToken = await signJwt(SECRET, {
+    iss: STACK_ISSUER,
+    role: "app_user",
+    sub: guestId,
+    handle: "mango-otter-1234",
+    guest: true,
+    exp: now() + 300,
+  });
+  const nonGuestToken = await signJwt(SECRET, {
+    iss: STACK_ISSUER,
+    role: "app_user",
+    sub: guestId,
+    handle: "mango-otter-1234",
+    guest: false,
+    exp: now() + 300,
+  });
+  const appVerifier = randomToken(32);
+  const appChallenge = await sha256url(appVerifier);
+
+  assertEquals(
+    (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}&promote_token=garbage`))).status,
+    401,
+  );
+  assertEquals(
+    (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}`, {
+      headers: { authorization: `Bearer ${nonGuestToken}` },
+    }))).status,
+    409,
+  );
+
+  // Promote via promote_token query parameter on native start.
+  const startRes = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}&promote_token=${encodeURIComponent(guestToken)}`),
+  );
+  assertEquals(startRes.status, 303);
+  const to = new URL(startRes.headers.get("location")!);
+  const cbRes = await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/google/callback?${new URLSearchParams({ code: s.idp.authorize(to), state: to.searchParams.get("state")! })}`),
+  );
+  assertEquals(cbRes.status, 303);
+  const ticket = new URL(cbRes.headers.get("location")!).searchParams.get("ticket")!;
+  const session = await (await s.serve(
+    new Request(`${ORIGIN}/auth/oidc/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket, code_verifier: appVerifier }),
+    }),
+  )).json();
+  assertEquals(session.user, {
+    id: guestId,
+    handle: "mango-otter-1234",
+    name: "Alice",
+    email: "alice@example.test",
+  });
+
+  // Once promoted, the old guest token cannot promote again.
+  assertEquals(
+    (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}`, {
+      headers: { authorization: `Bearer ${guestToken}` },
+    }))).status,
+    409,
+  );
 });

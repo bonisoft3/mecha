@@ -3,6 +3,8 @@
 // the incremental-view-maintenance surface taken from this package's own
 // exports, so the bundle never reaches past it into @tanstack/db.
 export { createMechaClient } from "./src/mecha-client.ts"
+export { createStorageAdapter, SqliteStorageAdapter } from "./src/storage.ts"
+export { SqliteShapeSnapshotStore } from "./src/shape-snapshot.ts"
 export {
 	and,
 	types,

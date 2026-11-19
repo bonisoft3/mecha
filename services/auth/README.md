@@ -29,9 +29,20 @@ tables with descendants retain the full subject scope set. Keyed shapes keep
 their row authorization; every request must still match its token's table and
 exact predicate.
 
-The alternative was server-side sessions. It was refused because the WebAuthn
-challenge is the only state a ceremony needs, and a short-lived `state` JWT
-carries it without giving the service anything to lose on restart.
+The WebAuthn challenge travels in a short-lived `state` JWT rather than a
+server-side ceremony store. Native Android passkey ceremonies verify against
+`WEBAUTHN_ORIGIN` plus any `android:apk-key-hash:<sha256-b64url>` entries from
+`ANDROID_APK_KEY_HASHES`.
+
+Every session-minting endpoint (`POST /auth/guest`, WebAuthn verify,
+`POST /auth/oidc/session`, and `POST /auth/refresh`) returns an opaque rotating
+`refresh_token` alongside `token` and `user`. `mecha_auth.auth_refresh_token`
+stores only the SHA-256 hash, `family_id`, expiry (90 days), and replacement
+pointer; replaying an already-rotated token revokes its entire family.
+
+`DELETE /auth/account` requires a valid `app_user` Bearer token and deletes the
+`app_user` row, cascading credentials, links, tickets, refresh tokens, and
+`ON DELETE CASCADE` owned rows.
 
 ## Provider sign-in
 
@@ -52,10 +63,12 @@ a page the door serves:
   leaves an HttpOnly `mecha_oidc` cookie on `/auth/oidc` and a readable
   `mecha_oidc_hint` naming the provider, and returns to `return`, a
   same-origin path.
-- `POST /auth/oidc/session` exchanges the cookie for a **user token**, guest
-  false, while the link still stands: the terminal keeps a tab's session in
-  sessionStorage, which a redirect cannot write, and a tab opened later adopts
-  the same sign-in this way. `POST /auth/oidc/signout` clears both cookies.
+- `POST /auth/oidc/session` exchanges the cookie — or, when `/start` ran with
+  `?return=native&code_challenge=<S256>[&scheme=<scheme>]` against an allowlisted
+  `NATIVE_SCHEMES` entry, atomically consumes the 60-second single-use ticket
+  from `<scheme>://auth/callback?ticket=<id>` against `{ ticket, code_verifier }`
+  — for `{ token, refresh_token, user }` (`guest: false`). `POST /auth/oidc/signout`
+  clears both browser cookies.
 
 A provider is found by its discovery document. Each setting is `signIn`'s
 default for the provider (`issuer`, `internal`, `client`, `scope`, `params`),
@@ -71,10 +84,14 @@ and a provider whose client neither gives refuses to start:
 | `OIDC_<NAME>_SCOPE` | `openid`, or the preset's |
 | `OIDC_<NAME>_AUTHORIZE_PARAMS` | further authorization parameters, URL-encoded; never one the flow sets |
 
-The service holds no account policy: a subject signs into its own account,
-made the first time, and a guest who signs in through a provider leaves the
-guest behind. A person signed in through a provider and one holding a passkey
-are two `app_user`s.
+Without a guest token on `/start`, a subject signs into its own account, made
+the first time. Passing an unlinked guest's token (`Authorization: Bearer <jwt>`
+or `promote_token`) on `/auth/oidc/<provider>/start` promotes that guest onto a
+fresh provider link in place, or reassigns the guest's owned rows in `public`
+into an already-linked `app_user` before deleting the guest row.
+
+All auth tables (`webauthn_credential`, `identity_link`, `auth_native_ticket`,
+`auth_refresh_token`) live in `mecha_auth`, which no app role may use.
 
 `identity_link` is `(provider, issuer, sub, user_id unique, created_at)`, with the
 provider's `name`, `picture` and verified `email` where it gives them, refreshed

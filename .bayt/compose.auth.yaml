@@ -29,6 +29,8 @@ services:
       PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-https://localhost:*}
+      ANDROID_APK_KEY_HASHES: ${ANDROID_APK_KEY_HASHES:-}
+      NATIVE_SCHEMES: ${NATIVE_SCHEMES:-}
       OIDC_PROVIDERS: ""
     image: bayt-libraries_mecha-auth:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
     networks:

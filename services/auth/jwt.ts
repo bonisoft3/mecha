@@ -28,6 +28,65 @@ export function decodeBase64Url(text: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(s, (c) => c.charCodeAt(0));
 }
 
+export const randomToken = (bytes = 32): string => encodeBase64Url(crypto.getRandomValues(new Uint8Array(bytes)));
+export const sha256url = async (text: string): Promise<string> =>
+  encodeBase64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(text))));
+
+const ANDROID_APK_PREFIX = "android:apk-key-hash:";
+const FORBIDDEN_NATIVE_SCHEMES = new Set([
+  "http",
+  "https",
+  "ws",
+  "wss",
+  "javascript",
+  "data",
+  "file",
+  "about",
+  "blob",
+  "vbscript",
+]);
+
+function splitList(raw: string | readonly string[] | undefined): string[] {
+  if (raw === undefined) return [];
+  const items = typeof raw === "string" ? raw.split(",") : raw;
+  return items.map((s) => s.trim()).filter((s) => s !== "");
+}
+
+/** Android CredentialManager WebAuthn origins (`android:apk-key-hash:<sha256-b64url>`)
+ * from a comma-separated list of bare or prefixed SHA-256 hashes. */
+export function androidOrigins(raw: string | readonly string[] | undefined): string[] {
+  const origins = new Set<string>();
+  for (const item of splitList(raw)) {
+    const hash = item.startsWith(ANDROID_APK_PREFIX) ? item.slice(ANDROID_APK_PREFIX.length) : item;
+    const unpadded = hash.replace(/=+$/, "");
+    let valid = /^[A-Za-z0-9_-]{43}=?$/.test(hash);
+    if (valid) {
+      try {
+        valid = decodeBase64Url(unpadded).length === 32;
+      } catch {
+        valid = false;
+      }
+    }
+    if (!valid) {
+      throw new Error(`ANDROID_APK_KEY_HASHES entry ${item} is not a base64url SHA-256 hash`);
+    }
+    origins.add(`${ANDROID_APK_PREFIX}${unpadded}`);
+  }
+  return [...origins];
+}
+
+/** Custom URI schemes admitted as native OIDC redirect targets (`<scheme>://auth/callback`). */
+export function nativeSchemesFrom(raw: string | readonly string[] | undefined): string[] {
+  const schemes = new Set<string>();
+  for (const item of splitList(raw)) {
+    if (!/^[a-z][a-z0-9+.-]*$/.test(item) || FORBIDDEN_NATIVE_SCHEMES.has(item)) {
+      throw new Error(`NATIVE_SCHEMES entry ${item} is not a custom URI scheme`);
+    }
+    schemes.add(item);
+  }
+  return [...schemes];
+}
+
 const keys = new Map<string, Promise<CryptoKey>>();
 function key(secret: string): Promise<CryptoKey> {
   let k = keys.get(secret);

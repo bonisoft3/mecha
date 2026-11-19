@@ -157,9 +157,11 @@ processes:
     availability:
       exit_on_skipped: true
     environment:
+    - ANDROID_APK_KEY_HASHES=${ANDROID_APK_KEY_HASHES:-}
     - AUTH_STATEMENT_TIMEOUT_MS=5000
     - >-
       DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@127.0.0.1:${DATABASE_PG_PORT:-17726}/${POSTGRES_DB:-mecha}
+    - NATIVE_SCHEMES=${NATIVE_SCHEMES:-}
     - OIDC_PROVIDERS=
     - PGRST_JWT_SECRET=${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}
     - PORT=${AUTH_HTTP_PORT:-20440}

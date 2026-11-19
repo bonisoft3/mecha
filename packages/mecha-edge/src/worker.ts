@@ -298,6 +298,16 @@ export const edgeWorker = {
         return res
       }
     }
+    if (req.method === 'DELETE' && path === '/auth/account' && session) {
+      const res = await object().fetch(req)
+      if (res.ok) {
+        const reset = (await (await cache.match(keyOf(version, 'reset')))?.text()) ?? '0'
+        const now = String(Date.now())
+        await cache.put(keyOf(version, reset, 'writes', claims.sub as string), new Response(now, { headers: { 'cache-control': `max-age=${OWN_WRITE_KEEP_S}` } }))
+        await cache.put(keyOf(version, reset, 'writes', 'public'), new Response(now, { headers: { 'cache-control': 'max-age=86400' } }))
+      }
+      return res
+    }
     return entityRead ? forwardRead(object, req) : object().fetch(req)
   },
 

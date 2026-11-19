@@ -4,6 +4,10 @@ export { electricCollectionOptions } from "./electric-collection.js"
 export type { ElectricCollectionConfig } from "./electric-collection.js"
 export { createMechaClient } from "./mecha-client.js"
 export type { InvalidationChange, InvalidationListener, MechaClient, MechaClientConfig, MechaTable, SyncPhase } from "./mecha-client.js"
+export { createStorageAdapter, MemoryStorageAdapter, ResilientIndexedDBAdapter, SqliteStorageAdapter } from "./storage.js"
+export type { SqlBridge, StorageAdapter } from "./storage.js"
+export { SqliteShapeSnapshotStore } from "./shape-snapshot.js"
+export type { ShapeSnapshot, ShapeSnapshotOp, ShapeSnapshotStore } from "./shape-snapshot.js"
 export { types, carriers } from "./types.js"
 export type {
   CarrierCheck, CarrierEntry, CarrierField, Carriers, CarrierSource, CarrierTable, CarrierType,

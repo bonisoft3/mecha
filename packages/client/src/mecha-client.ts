@@ -3,7 +3,7 @@ import { createCollection, IR } from "@tanstack/db"
 import { ShapeStream } from "@electric-sql/client"
 import type { Collection, LoadSubsetOptions } from "@tanstack/db"
 import { electricCollectionOptions } from "@tanstack/electric-db-collection"
-import { BroadcastChannelLeader, NonRetriableError, startOfflineExecutor, WebLocksLeader } from "@tanstack/offline-transactions"
+import { BroadcastChannelLeader, NonRetriableError, startOfflineExecutor, WebLocksLeader, WebOnlineDetector } from "@tanstack/offline-transactions"
 import type { LeaderElection } from "@tanstack/offline-transactions"
 import { localOnlyCollectionOptions } from "@tanstack/db"
 import { idempotentSink } from "./sync-sink.js"
@@ -11,6 +11,9 @@ import { unionCollectionOptions } from "./union.js"
 import { carriers, types } from "./types.js"
 import type { CarrierField, Carriers, CarrierTable, TypeField, Types, TypeTable } from "./types.js"
 import { createStorageAdapter } from "./storage.js"
+import type { SqlBridge, StorageAdapter } from "./storage.js"
+import { SqliteShapeSnapshotStore } from "./shape-snapshot.js"
+import type { ShapeSnapshotOp, ShapeSnapshotStore } from "./shape-snapshot.js"
 import { PUBLIC_WHERE } from "./public-where.js"
 
 /**
@@ -135,6 +138,16 @@ export interface MechaClientConfig {
   authUrl: string
   /** The signed-in subject, which is what a grant is addressed to. */
   subject?: () => string | null
+  /** Native SQLite bridge backing both the offline outbox and Electric cold-boot snapshots. */
+  sql?: SqlBridge
+  /** Explicit outbox storage adapter override. */
+  storage?: StorageAdapter
+  /** Explicit Electric shape snapshot store override for offline cold boot. */
+  snapshots?: ShapeSnapshotStore
+  /** Key-value store for `device` durability collections when `localStorage` is absent. */
+  deviceStorage?: Pick<Storage, "getItem" | "setItem">
+  /** True while the current subject is a locally minted offline-first-boot provisional UUID awaiting `/auth/guest`. */
+  provisional?: () => boolean
 }
 
 // A shape token is re-minted before it dies, not after. Electric holds a live
@@ -268,6 +281,12 @@ export interface MechaClient {
    * family has been used, an account change needs a new client.
    */
   subscribeInvalidation(tableId: string, listener: InvalidationListener): () => void
+  /**
+   * Re-binds queued offline-first-boot outbox transactions and optimistic private
+   * rows from `fromSubject` (or `null`) to `toSubject` once `/auth/guest` resolves.
+   */
+  adoptProvisionalSubject(fromSubject: string | null, toSubject?: string): Promise<number>
+  dispose(): void
 }
 
 /** A row a dependency change named: its value after the change, before it, or
@@ -464,9 +483,12 @@ function withDefaults(fields: readonly TypeField[] | undefined, row: Record<stri
   return filled
 }
 
-function deviceCollection(t: { id: string; key: string; fields?: readonly TypeField[] }): Collection<any, any, any> {
+function deviceCollection(
+  t: { id: string; key: string; fields?: readonly TypeField[] },
+  customStorage?: Pick<Storage, "getItem" | "setItem">,
+): Collection<any, any, any> {
   const storageKey = `mecha:${t.id}`
-  const storage = (globalThis as { localStorage?: Storage }).localStorage
+  const storage = customStorage ?? (globalThis as { localStorage?: Storage }).localStorage
   const read = (): Map<unknown, Record<string, unknown>> => {
     const raw = storage?.getItem(storageKey) ?? null
     const parsed = raw === null ? {} : JSON.parse(raw)
@@ -599,6 +621,14 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   }
   const gcTime = config.shapeIdleMs ?? SHAPE_IDLE_MS
   const identity = () => config.subject ? config.subject() : config.token?.()
+  const sqlBridge = config.sql ?? (globalThis as { __mechaSql?: SqlBridge }).__mechaSql
+  const snapshotStore = config.snapshots ?? (sqlBridge ? new SqliteShapeSnapshotStore(sqlBridge) : undefined)
+  const outboxStorage = createStorageAdapter({ storage: config.storage, sql: sqlBridge })
+  let disposed = false
+  const isTransientError = (e: any): boolean => {
+    const status = e?.status
+    return status === undefined || status === 408 || status === 429 || status >= 500
+  }
   // Unions and their nested shapes outlive readers; their account cannot be
   // rebound safely while retained rows or optimistic writes still use them.
   let familyAccount: { subject: ReturnType<typeof identity> } | undefined
@@ -614,6 +644,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   function shape(t: Table, key?: RowKey) {
     const getKey = (item: any) => item[t.key]
     const onDemand = t.sync === "on-demand"
+    const shapeId = key ? `${t.id}@${key.column}=${key.value}` : t.id
     const shapeOptions = {
         url: `${electricUrl}/v1/shape`,
         // Typed as a string upstream, resolved as a supplier at runtime like
@@ -629,6 +660,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         // else stops the stream, as it would unhandled.
         onError: (e: any) => {
           if (e?.status === 401 && shapes.forget(t.table, key)) return {}
+          if (snapshotStore !== undefined && !onDemand && isTransientError(e)) return {}
           throw e
         },
         // Every column a field declares arrives as Postgres's text and is
@@ -639,7 +671,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
         parser: parserOf(t),
     }
     const options = electricCollectionOptions({
-      id: key ? `mecha:${t.id}@${key.column}=${key.value}` : `mecha:${t.id}`,
+      id: `mecha:${shapeId}`,
       getKey,
       syncMode: t.sync,
       shapeOptions,
@@ -665,33 +697,135 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       const controller = new AbortController()
       shapeOptions.fetchClient = (input, init) => subsetFetch(input, init, controller.signal)
       const sink = idempotentSink(params, getKey)
-      // Electric's parsers run per SQL type, while a carrier belongs to a
-      // column. Normalize here, where both the message and its field list are
-      // present; this is also before a synced row can become an optimistic
-      // mutation original or reach the durable outbox.
+      if (snapshotStore === undefined || onDemand) {
+        // Electric's parsers run per SQL type, while a carrier belongs to a
+        // column. Normalize here, where both the message and its field list are
+        // present; this is also before a synced row can become an optimistic
+        // mutation original or reach the durable outbox.
+        const result = inner({
+          ...sink,
+          write: (message: any) =>
+            sink.write(
+              message.value === undefined
+                ? message
+                : { ...message, value: normalizeRow(t.fields, message.value, "electric") },
+            ),
+        })
+        const load = (result as any)?.loadSubset as ((opts: LoadSubsetOptions) => true | Promise<void>) | undefined
+        if (!onDemand || load === undefined) return result
+        return {
+          ...(result as object),
+          cleanup: () => { controller.abort(); (result as any)?.cleanup?.() },
+          loadSubset: coalescedLoad((opts: LoadSubsetOptions) => {
+            return scheduleSubset(() => { const result = load(parenthesizedLoad(opts)); return result === true ? undefined : result }, controller.signal, () => undefined).catch((error) => {
+              // A subset's request carries the stream's header but not its
+              // onError, so a refused token is forgotten here as it is there.
+              if ((error as { status?: number })?.status === 401) shapes.forget(t.table, key)
+              for (const fn of failureListeners) fn(error)
+              throw error
+            })
+          }),
+        }
+      }
+
+      const activeSubject = t.access?.scope === "public" ? "" : (identity() ?? "")
+      let persistChain: Promise<void> = Promise.resolve()
+      let batchOps: ShapeSnapshotOp[] = []
+      let hydrating = true
+      let liveReady = false
+      const queuedCalls: Array<() => void> = []
+
+      const enqueuePersist = (step: () => Promise<void>) => {
+        const safeStep = () => (disposed || controller.signal.aborted ? Promise.resolve() : step())
+        persistChain = persistChain.then(safeStep, safeStep).catch(() => {})
+      }
+
+      const applyBegin = (opts?: { immediate?: boolean }) => {
+        batchOps = []
+        sink.begin(opts)
+      }
+      const applyWrite = (message: any) => {
+        const normalized = message.value === undefined
+          ? message
+          : { ...message, value: normalizeRow(t.fields, message.value, "electric") }
+        if (normalized.type === "delete") {
+          const delKey = normalized.key ?? (normalized.value !== undefined ? getKey(normalized.value) : undefined)
+          if (delKey !== undefined) batchOps.push({ type: "delete", key: String(delKey) })
+        } else if (normalized.value !== undefined) {
+          batchOps.push({ type: "upsert", key: String(getKey(normalized.value)), value: normalized.value })
+        }
+        sink.write(normalized)
+      }
+      const applyCommit = () => {
+        const ops = batchOps
+        batchOps = []
+        sink.commit()
+        if (ops.length > 0) {
+          enqueuePersist(() => snapshotStore.applyBatch(shapeId, activeSubject, ops, false))
+        }
+      }
+      const applyMarkReady = () => {
+        liveReady = true
+        sink.markReady()
+        enqueuePersist(() => snapshotStore.applyBatch(shapeId, activeSubject, [], true))
+      }
+      const applyTruncate = () => {
+        batchOps = []
+        sink.truncate()
+        enqueuePersist(() => snapshotStore.truncate(shapeId, activeSubject))
+      }
+
+      if (disposed) {
+        return () => controller.abort()
+      }
+
+      void snapshotStore.load(shapeId, activeSubject).then((snap) => {
+        if (disposed || controller.signal.aborted) return
+        hydrating = false
+        const hasRestoredOptimistic = ((collections[t.id] as any)?._state?.transactions?.size ?? 0) > 0
+        if ((snap.ready || Boolean(config.provisional?.()) || hasRestoredOptimistic) && !liveReady && queuedCalls.length === 0) {
+          sink.begin()
+          for (const row of snap.rows) {
+            sink.write({ type: "insert", value: row })
+          }
+          sink.commit()
+          sink.markReady()
+        }
+        for (const call of queuedCalls.splice(0)) call()
+      }, (err) => {
+        hydrating = false
+        for (const call of queuedCalls.splice(0)) call()
+        if (disposed || controller.signal.aborted) return
+        queueMicrotask(() => { throw err })
+      })
+
+      const runOrQueue = (fn: () => void) => {
+        if (disposed || controller.signal.aborted) return
+        if (hydrating) queuedCalls.push(fn)
+        else fn()
+      }
+
       const result = inner({
         ...sink,
-        write: (message: any) =>
-          sink.write(
-            message.value === undefined
-              ? message
-              : { ...message, value: normalizeRow(t.fields, message.value, "electric") },
-          ),
+        begin: (opts?: { immediate?: boolean }) => runOrQueue(() => applyBegin(opts)),
+        write: (message: any) => runOrQueue(() => applyWrite(message)),
+        commit: () => runOrQueue(() => applyCommit()),
+        markReady: () => runOrQueue(() => applyMarkReady()),
+        truncate: () => runOrQueue(() => applyTruncate()),
       })
-      const load = (result as any)?.loadSubset as ((opts: LoadSubsetOptions) => true | Promise<void>) | undefined
-      if (!onDemand || load === undefined) return result
+      if (typeof result === "function") {
+        return () => {
+          controller.abort()
+          result()
+        }
+      }
+      const stop = (result as any)?.cleanup
       return {
-        ...(result as object),
-        cleanup: () => { controller.abort(); (result as any)?.cleanup?.() },
-        loadSubset: coalescedLoad((opts: LoadSubsetOptions) => {
-          return scheduleSubset(() => { const result = load(parenthesizedLoad(opts)); return result === true ? undefined : result }, controller.signal, () => undefined).catch((error) => {
-            // A subset's request carries the stream's header but not its
-            // onError, so a refused token is forgotten here as it is there.
-            if ((error as { status?: number })?.status === 401) shapes.forget(t.table, key)
-            for (const fn of failureListeners) fn(error)
-            throw error
-          })
-        }),
+        ...(typeof result === "object" && result !== null ? result : {}),
+        cleanup: () => {
+          controller.abort()
+          if (typeof stop === "function") stop()
+        },
       }
     }
     return createCollection({
@@ -758,7 +892,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   for (const t of byId.values()) {
     if (isLocal(t)) {
       collections[t.id] = t.durability === "device"
-        ? deviceCollection(t)
+        ? deviceCollection(t, config.deviceStorage)
         : createCollection(localOnlyCollectionOptions({ id: `mecha:${t.id}`, getKey: (item: any) => item[t.key] }))
       continue
     }
@@ -1085,13 +1219,27 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     }
     return out
   }
+  const rebindOwner = (t: Table, row: any, meta: any) => {
+    if (!row || typeof row !== "object" || meta?.adoptedFrom === undefined || !meta?.subject) return row
+    const ownerCols = ownerColumnsOf(t)
+    if (ownerCols.length === 0) return row
+    const isPriv = t.access?.scope === "private"
+    let next = row
+    for (const col of ownerCols) {
+      const cur = next[col]
+      if (cur === meta.adoptedFrom || (isPriv && (cur === undefined || cur === null || cur === ""))) {
+        next = { ...next, [col]: meta.subject }
+      }
+    }
+    return next
+  }
   for (const t of byId.values()) {
     // Local tiers take no mutation handlers — see `durability`.
     if (isLocal(t)) continue
     mutationFns[`insert:${t.id}`] = async ({ transaction, idempotencyKey }: any) => {
       const release = await mutationLease(t.id)
       try {
-        const row = transaction.mutations[0].modified
+        const row = rebindOwner(t, transaction.mutations[0].modified, transaction.metadata)
         const res = await doFetch(`${crudUrl}/${t.table}`, {
           method: "POST",
           headers: headers({ Prefer: "return=representation", "Idempotency-Key": idempotencyKey }),
@@ -1109,10 +1257,13 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
       try {
         const m = transaction.mutations[0]
         const key = m.key ?? m.original?.[t.key]
+        const changes = m.changes && t.access?.scope === "private" && transaction.metadata?.adoptedFrom !== undefined && m.changes[t.access.owner] === transaction.metadata.adoptedFrom
+          ? { ...m.changes, [t.access.owner]: transaction.metadata.subject }
+          : m.changes
         const res = await doFetch(`${crudUrl}/${t.table}?${t.key}=eq.${encodeURIComponent(key)}`, {
           method: "PATCH",
           headers: headers({ Prefer: "return=representation" }),
-          body: JSON.stringify(cleanRow(m.changes)),
+          body: JSON.stringify(cleanRow(changes)),
         })
         await requireOk(res, `update ${t.table}`)
         await confirmWrite(t.id, res, `update ${t.table}`, key)
@@ -1139,21 +1290,50 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     }
   }
 
-  const leader = typeof window === "undefined" ? electLeader() : pageLeader(window, electLeader())
+  const leader = snapshotStore !== undefined
+    ? soleLeader()
+    : (typeof window === "undefined" ? electLeader() : pageLeader(window, electLeader()))
+  const baseOnlineDetector = snapshotStore !== undefined ? new WebOnlineDetector() : undefined
+  const onlineDetector = baseOnlineDetector !== undefined
+    ? {
+      subscribe: (cb: () => void) => baseOnlineDetector.subscribe(cb),
+      notifyOnline: () => baseOnlineDetector.notifyOnline(),
+      isOnline: () =>
+        typeof navigator !== "undefined" && typeof navigator.onLine === "boolean"
+          ? navigator.onLine
+          : true,
+      dispose: () => baseOnlineDetector.dispose(),
+    }
+    : undefined
   const executor = startOfflineExecutor({
     collections,
     mutationFns,
-    storage: createStorageAdapter(),
+    storage: outboxStorage,
     jitter: true,
     leaderElection: leader,
+    ...(onlineDetector ? { onlineDetector } : {}),
     // A queued write replays only under the subject that made it: another
     // account's, or one made before its database was recreated, is refused by
     // row security, and replaying it as this reader's would be wrong anyway.
-    // A write queued before subjects were recorded names none, and is dropped.
+    // A write queued before subjects were recorded names none, and is dropped,
+    // except one explicitly marked provisional during an offline first boot.
     beforeRetry: (txs: any[]) => {
       const cutoff = Date.now() - maxAge
       const subject = identity() ?? null
-      return txs.filter((tx) => tx.createdAt.getTime() > cutoff && tx.metadata?.subject === subject)
+      return txs.filter((tx) => {
+        if (tx.createdAt.getTime() <= cutoff) return false
+        if (tx.metadata?.subject === subject) return true
+        if (subject !== null && !config.provisional?.() && tx.metadata?.provisional === true) {
+          tx.metadata = {
+            ...tx.metadata,
+            adoptedFrom: tx.metadata.subject ?? null,
+            subject,
+            provisional: false,
+          }
+          return true
+        }
+        return false
+      })
     },
   })
 
@@ -1184,9 +1364,120 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
     for (const phaseKey of phaseKeys) setPhase(phaseKey, "queued")
     // autoCommit off: mutate() would otherwise self-commit and race the
     // explicit commit below into "no longer pending".
-    const tx = executor.createOfflineTransaction({ mutationFnName, autoCommit: false, metadata: { subject: identity() ?? null } })
+    const isProv = Boolean(config.provisional?.())
+    const tx = executor.createOfflineTransaction({
+      mutationFnName,
+      autoCommit: false,
+      metadata: { subject: identity() ?? null, ...(isProv ? { provisional: true } : {}) },
+    })
     tx.mutate(mutate)
     return tx.commit().then(() => undefined)
+  }
+
+  function ownerColumnsOf(t: Table | undefined): string[] {
+    if (!t) return []
+    const cols = new Set<string>()
+    if (t.access?.scope === "private") cols.add(t.access.owner)
+    for (const f of t.fields ?? []) {
+      const def = (f as { default?: string }).default
+      if (def === "auth_uid()" || (f.type === "uuid" && (f.name === "owner" || f.name === "user_id"))) {
+        cols.add(f.name)
+      }
+    }
+    return [...cols]
+  }
+
+  function rewriteMutationOwners(
+    mutations: any[] | undefined,
+    ownerCols: string[],
+    isPrivate: boolean,
+    fromId: string | null,
+    toSubject: string,
+  ): void {
+    if (!Array.isArray(mutations) || ownerCols.length === 0) return
+    for (const m of mutations) {
+      if (!m || typeof m !== "object") continue
+      for (const ownerCol of ownerCols) {
+        if (m.modified && typeof m.modified === "object") {
+          if (m.modified[ownerCol] === fromId || (isPrivate && !m.modified[ownerCol])) {
+            m.modified = { ...m.modified, [ownerCol]: toSubject }
+          }
+        }
+        if (m.changes && typeof m.changes === "object" && m.changes[ownerCol] === fromId) {
+          m.changes = { ...m.changes, [ownerCol]: toSubject }
+        }
+      }
+    }
+  }
+
+  async function adoptProvisionalSubject(fromSubjectOrNext: string | null, maybeToSubject?: string): Promise<number> {
+    const fromSubject = maybeToSubject === undefined ? null : fromSubjectOrNext
+    const toSubject = maybeToSubject === undefined ? (fromSubjectOrNext ?? "") : maybeToSubject
+    if (!toSubject) throw new Error("adoptProvisionalSubject requires a non-empty target subject")
+    await executor.waitForInit()
+    const keys = await outboxStorage.keys()
+    let adopted = 0
+    const adoptedFromById = new Map<string, string | null>()
+    for (const key of keys) {
+      const raw = await outboxStorage.get(key)
+      if (!raw) continue
+      const parsed = JSON.parse(raw)
+      const meta = parsed?.metadata
+      if (!meta || (meta.provisional !== true && (fromSubject === null || meta.subject !== fromSubject))) continue
+      const effectiveFrom: string | null = meta.subject ?? fromSubject
+      parsed.metadata = {
+        ...meta,
+        adoptedFrom: meta.adoptedFrom !== undefined ? meta.adoptedFrom : effectiveFrom,
+        subject: toSubject,
+        provisional: false,
+      }
+      const tableId = typeof parsed.mutationFnName === "string" ? parsed.mutationFnName.replace(/^(insert|update|delete):/, "") : ""
+      const t = byId.get(tableId)
+      rewriteMutationOwners(parsed.mutations, ownerColumnsOf(t), t?.access?.scope === "private", effectiveFrom, toSubject)
+      await outboxStorage.set(key, JSON.stringify(parsed))
+      if (typeof parsed.id === "string") adoptedFromById.set(parsed.id, effectiveFrom)
+      adopted++
+    }
+    if (adopted > 0) {
+      const scheduler = (executor as any).scheduler
+      const pending: any[] = scheduler?.getAllPendingTransactions?.() ?? []
+      if (pending.length > 0) {
+        const touchedCollections = new Set<any>()
+        const updated = pending.map((tx) => {
+          if (!adoptedFromById.has(tx.id)) return tx
+          const effectiveFrom = adoptedFromById.get(tx.id) ?? fromSubject
+          const tableId = typeof tx.mutationFnName === "string" ? tx.mutationFnName.replace(/^(insert|update|delete):/, "") : ""
+          const t = byId.get(tableId)
+          const ownerCols = ownerColumnsOf(t)
+          const isPriv = t?.access?.scope === "private"
+          rewriteMutationOwners(tx.mutations, ownerCols, isPriv, effectiveFrom, toSubject)
+          const restTx = (executor as any).restorationTransactions?.get?.(tx.id)
+          if (restTx?.mutations) {
+            rewriteMutationOwners(restTx.mutations, ownerCols, isPriv, effectiveFrom, toSubject)
+            for (const m of restTx.mutations) {
+              if (m?.collection) touchedCollections.add(m.collection)
+            }
+          }
+          return {
+            ...tx,
+            nextAttemptAt: Date.now(),
+            metadata: {
+              ...tx.metadata,
+              adoptedFrom: tx.metadata?.adoptedFrom !== undefined ? tx.metadata.adoptedFrom : effectiveFrom,
+              subject: toSubject,
+              provisional: false,
+            },
+          }
+        })
+        scheduler.updateTransactions?.(updated)
+        for (const col of touchedCollections) {
+          col._state?.recomputeOptimisticState?.(true)
+        }
+      }
+      ;(executor.getOnlineDetector?.() as any)?.notifyOnline?.()
+      void (executor as any).executor?.executeAll?.()?.catch?.(() => {})
+    }
+    return adopted
   }
 
   type Invalidation = { listeners: Set<InvalidationListener>; stop: () => void; ready: boolean; checkScope: () => void }
@@ -1310,6 +1601,12 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   return {
     collections,
     subscribeInvalidation,
+    adoptProvisionalSubject,
+    dispose() {
+      disposed = true
+      ;(executor as any).executor?.clear?.()
+      executor.dispose()
+    },
     ready: executor.waitForInit().then(() => undefined),
     insert(tableId, rows) {
       const t = byId.get(tableId)

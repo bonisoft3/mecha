@@ -641,15 +641,18 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// A secret is the deployment's alone. A provider signs a person in, so
 		// it presupposes `auth`.
 		signIn: {
-			[!="google"]~(K,_): error("signIn.\(K): field not allowed")
-			google?: {
-				[!~"^(issuer|internal|client|scope|params)$"]~(K,_): error("signIn.google.\(K): field not allowed")
-				issuer?:                                             string & !="" & !~"[$}]"
-				internal?:                                           string & !="" & !~"[$}]"
-				client?:                                             string & !="" & !~"[$}]"
-				scope?:                                              string & !="" & !~"[$}]"
-				params?:                                             string & !="" & !~"[$}]"
-			}
+			[!~"^(google|apple)$"]~(K,_): error("signIn.\(K): field not allowed")
+			google?: _#SignInProvider & {_name: "google"}
+			apple?:  _#SignInProvider & {_name: "apple"}
+		}
+		_#SignInProvider: {
+			_name: string
+			[!~"^(_name|issuer|internal|client|scope|params)$"]~(K,_): error("signIn.\(_name).\(K): field not allowed")
+			issuer?:   string & !="" & !~"[$}]"
+			internal?: string & !="" & !~"[$}]"
+			client?:   string & !="" & !~"[$}]"
+			scope?:    string & !="" & !~"[$}]"
+			params?:   string & !="" & !~"[$}]"
 		}
 		if len(signIn) > 0 {
 			auth: true
@@ -1217,8 +1220,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							WEBAUTHN_RP_ID:            "${WEBAUTHN_RP_ID:-localhost}"
 							// The door's port is the host's pick; auth reads this
 							// default as whichever port the request came through.
-							WEBAUTHN_ORIGIN: "${WEBAUTHN_ORIGIN:-https://localhost:*}"
-							OIDC_PROVIDERS:  strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
+							WEBAUTHN_ORIGIN:        "${WEBAUTHN_ORIGIN:-https://localhost:*}"
+							ANDROID_APK_KEY_HASHES: "${ANDROID_APK_KEY_HASHES:-}"
+							NATIVE_SCHEMES:         "${NATIVE_SCHEMES:-}"
+							OIDC_PROVIDERS:         strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
 							for p, d in X.capabilities.signIn {
 								let k = "OIDC_\(strings.ToUpper(p))_CLIENT_ID"
 								if d.client == _|_ {

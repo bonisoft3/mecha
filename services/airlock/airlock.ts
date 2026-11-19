@@ -282,16 +282,22 @@ export async function journaled(a: Airlock, job: ReadJob): Promise<ReadSettled |
 /** A machine's read run once: asked of the sink, its answer delivered. A run
  * with no answer is retried on Graphile's backoff; the last one delivers
  * `failed`, since a GET that never answered changed nothing. One that could
- * not be asked (the row's input makes no request) or whose answer cannot be
- * read (JSON that is not) is failed at once: asking again changes neither,
- * and the unreadable answer leaves the cache. In replay the journal answers
- * instead, and a request it never answered stops the run. */
+ * not be asked (the row's input makes no request, or its bridge is not
+ * deployed on this target) or whose answer cannot be read (JSON that is not)
+ * is failed at once: asking again changes neither, and the unreadable answer
+ * leaves the cache. In replay the journal answers instead, and a request it
+ * never answered stops the run. */
 export async function performRead(a: Airlock, job: ReadJob, last: boolean): Promise<void> {
   const read = a.reads?.[job.effect] ?? die(`read ${job.effect} is invoked by no machine in effects.json`);
   if (a.replay) {
     const recorded = await journaled(a, job);
     if (recorded === undefined) throw new ReadDiverged(`read ${job.key}: the journal holds no answer, so this history diverged from the recorded one`);
     await deliverRead(a, job, recorded);
+    return;
+  }
+  const absent = undeployed({ bridge: read.bridge, onError: read.invoke.onError }, a.target);
+  if (absent !== null) {
+    await deliverRead(a, job, { target: absent.target, kind: absent.kind, data: absent.data });
     return;
   }
   let settled: ReadSettled;

@@ -19,7 +19,7 @@ import got from "got";
 import http from "node:http";
 import QuickLRU from "quick-lru";
 import { sinkPath } from "./handler.ts";
-import { CREDENTIAL, credentialChecked } from "./reentry.ts";
+import { BRIDGE, bridgeChecked, CREDENTIAL, credentialChecked, type Effect } from "./reentry.ts";
 
 /** got's retry, as far as JSON spells it (got's RetryOptions). */
 export type Retry = { limit?: number; statusCodes?: number[]; errorCodes?: string[]; backoffLimit?: number; noise?: number; maxRetryAfter?: number };
@@ -40,6 +40,10 @@ export type Read = {
   cacheControl?: string;
   got?: { retry?: Retry; timeout?: Timeout };
   credential?: { header: string; scheme?: string; secret: string };
+  /** Where its sink is a bridge, on this target or another: the bridge, the
+   * release targets where the read's sink is reachable, and whether the local
+   * stack calls it, as a write's (reentry.ts). */
+  bridge?: Effect["bridge"];
 };
 
 /** A couple of quick retries; a request well inside the read's own bound. */
@@ -137,7 +141,7 @@ export function parseReads(text: string): Record<string, Read> {
       throw new Error(`effects.json: read ${name}: ${why}`);
     };
     if (!NAME.test(name)) bad("the name is not a DNS label");
-    const known = ["request", "invoke", "cacheControl", "got", "credential"];
+    const known = ["request", "invoke", "cacheControl", "got", "credential", "bridge"];
     for (const k of Object.keys(r)) if (!known.includes(k)) bad(`${k} is no word of a read`);
     if (r.request?.method !== "GET" || typeof r.request.path !== "string" || !TEMPLATE.test(r.request.path) || Object.keys(r.request).length !== 2) {
       bad("request is not {method: GET, path}: an absolute path in plain characters with RFC 6570 {var} and {?var} expressions");
@@ -161,6 +165,7 @@ export function parseReads(text: string): Record<string, Read> {
       }
     }
     if (r.credential !== undefined && !credentialChecked(r.credential)) bad(CREDENTIAL);
+    if (r.bridge !== undefined && !bridgeChecked(r.bridge)) bad(BRIDGE);
   }
   return reads as Record<string, Read>;
 }

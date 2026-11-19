@@ -172,7 +172,9 @@ by writing the row whose state invokes it, and sees the answer land in that row.
 - The path is an RFC 6570 template over the input: `{var}` a path segment, its value
   percent-encoded and refused where an octet would decode to `/`, `\`, `.` or `%`, and
   `{?a,b}` and `{&a,b}` the query. It is sent as `GET /v1.0/invoke/<read>/method<path>` to
-  the airlock's daprd, the effect's `credential` added as a write's is.
+  the airlock's daprd, the effect's `credential` added as a write's is. The endpoint's
+  `baseUrl` is the read's sink on the target, an origin or a bridge's container, which
+  is sent the same request and header.
 - got sends it, with a fresh connection per read: on a kept-alive socket Deno's
   `node:http` sent a timed-out GET twice and got's timeout never fired. `got` in the
   manifest is got's own `retry` and `timeout` options, as far as JSON spells them; absent,
@@ -182,7 +184,13 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   thousand answers holding 64 MiB together at most, the least recently used dropped
   first, none over 1 MiB and none without a `Content-Length`, each exact path
   in a partition of its own (got's key is the URL as normalize-url rewrites it, with no
-  `utm_` parameter and a space as `+`), so a credential is never part of a key. As a
+  `utm_` parameter and a space as `+`), so a credential is never part of a key. The
+  cache does not know where an endpoint leads, so a process does not outlive its
+  endpoints once a release settles: compose restarts the airlock with its daprd, the
+  docker appliance is one image, and the k8s release rolls the airlock by its endpoints'
+  digest. While a release changes where a read is sent, the running airlock may still
+  deliver an answer it cached from the previous sink, for at most that answer's
+  freshness. As a
   shared cache it keeps no `private` answer and no answer to an authorized request unless
   the answer says `public`, `s-maxage` or `must-revalidate` (RFC 9111 §3.5).
   `cacheControl` is applied, in got's `beforeCache` hook, to an answer with neither
@@ -198,7 +206,9 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   a run with no answer throws, and the last delivers `failed` with the error. A run
   that cannot be asked (the input makes no path) or whose answer cannot be read (it says
   JSON and is not) delivers `failed` with the error at once, since asking again changes
-  neither, and the unreadable answer leaves the cache. A job
+  neither, and the unreadable answer leaves the cache. A read whose `bridge` is
+  [not deployed](#a-bridge-not-deployed) on the airlock's target delivers `failed` with
+  `{bridge, target, reason: "not deployed"}` at once too, asking nothing. A job
   Graphile gave up on is delivered `failed` with its last error at the next sweep, and
   completed.
 - Delivery (`deliverRead` in [airlock.ts](airlock.ts)) is one transaction: it sets
@@ -281,7 +291,8 @@ cloudflare or k8s, carries where it can be called in `effects.json`
 is reachable, which are those the bridge's container is deployed on and
 those where the effect names an origin or another deployed bridge in its
 place, and whether the local stack calls it, an origin or a bridge it runs a
-simulator of. The
+simulator of. A read whose sink is a bridge carries the same in `reads`, the
+bridge it names for the compose stack counted too. The
 airlock knows its own target: `AIRLOCK_TARGET` in a cluster, which compose sets to
 `local`, and `cloudflare` at the edge. An airlock told none refuses to start
 where any bridge names its targets. Locally a bridge is deployed as its
@@ -293,7 +304,10 @@ binding
 Where it is not, a claimed effect settles at once, before its run is counted:
 outcome `failed`, data `{bridge, target, reason: "not deployed"}`, target
 `onError`. Neither handler nor sink is called, the ledger's `entered` stays 0
-and no dead letter follows (`undeployed` in [reentry.ts](reentry.ts)).
+and no dead letter follows (`undeployed` in [reentry.ts](reentry.ts)). A read
+settles the same outcome on its first run, through its delivery: the row moves
+on the entry it waits on, the outcome is journaled, and a replay answers it
+from the journal.
 
 ## After a crash
 

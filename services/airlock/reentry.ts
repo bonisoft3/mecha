@@ -100,7 +100,7 @@ export const LOCAL = "local";
  * call, so it spends no run and leaves no dead letter. On the local stack a
  * bridge is deployed as its simulator; on a release target, where it names
  * that target. */
-export function undeployed(effect: Effect, target: string | undefined): Outcome | null {
+export function undeployed(effect: Pick<Effect, "bridge" | "onError">, target: string | undefined): Outcome | null {
   if (effect.bridge === undefined) return null;
   if (target === undefined) throw new Error(`the bridge ${effect.bridge.name} names its targets, and this airlock is told none`);
   if (target === LOCAL ? effect.bridge.simulated : effect.bridge.targets.includes(target)) return null;
@@ -199,15 +199,7 @@ export function parseManifest(text: string): Record<string, Effect> {
     }
     if (!Number.isInteger(e.attempts) || e.attempts < 1) bad("attempts is not a positive integer");
     if (e.endowments !== undefined) endowable(e.endowments, `effects.json: effect ${name}`);
-    if (e.bridge !== undefined) {
-      const b = e.bridge;
-      if (
-        typeof b !== "object" || b === null || !ENDPOINT.test(b.name) || typeof b.simulated !== "boolean" ||
-        !Array.isArray(b.targets) || !b.targets.every((t) => typeof t === "string" && ENDPOINT.test(t) && t !== LOCAL)
-      ) {
-        bad("bridge is not {name, targets, simulated}: DNS labels, release targets only, and a boolean");
-      }
-    }
+    if (e.bridge !== undefined && !bridgeChecked(e.bridge)) bad(BRIDGE);
     if (e.secrets !== undefined && (!Array.isArray(e.secrets) || !e.secrets.every((s) => typeof s === "string" && SECRET.test(s)))) {
       bad("secrets is not a list of environment variables' names");
     }
@@ -232,6 +224,17 @@ export function parseManifest(text: string): Record<string, Effect> {
     if (e.credential !== undefined && !credentialChecked(e.credential)) bad(CREDENTIAL);
   }
   return effects;
+}
+
+export const BRIDGE = "bridge is not {name, targets, simulated}: DNS labels, release targets only, and a boolean";
+
+/** Where an effect's bridge can be called as the manifest spells it, for
+ * writes and reads alike. */
+export function bridgeChecked(b: unknown): b is NonNullable<Effect["bridge"]> {
+  if (typeof b !== "object" || b === null) return false;
+  const { name, targets, simulated } = b as Record<string, unknown>;
+  return typeof name === "string" && ENDPOINT.test(name) && typeof simulated === "boolean" &&
+    Array.isArray(targets) && targets.every((t) => typeof t === "string" && ENDPOINT.test(t) && t !== LOCAL);
 }
 
 export const CREDENTIAL = "credential is not {header, scheme?, secret}: a header name daprd forwards (uppercase first) that is neither the host's nor HTTP's own, a scheme word and an environment variable's name";

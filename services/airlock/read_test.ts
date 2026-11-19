@@ -54,6 +54,8 @@ Deno.test("a manifest's read the airlock would misread is refused", () => {
   const manifest = (r: Record<string, unknown>) => JSON.stringify({ effects: {}, reads: { rate: r } });
   assertEquals(Object.keys(parseReads(manifest(rate as unknown as Record<string, unknown>))), ["rate"]);
   assertEquals(parseReads(JSON.stringify({ effects: {} })), {});
+  const bridge = { name: "rates", targets: ["k8s"], simulated: true };
+  assertEquals(parseReads(manifest({ ...rate, bridge })).rate.bridge, bridge);
   for (
     const [r, why] of [
       [{ ...rate, request: { method: "POST", path: "/rates" } }, "request"],
@@ -69,6 +71,8 @@ Deno.test("a manifest's read the airlock would misread is refused", () => {
       [{ ...rate, got: { retry: { calculateDelay: 1 } } }, "got"],
       [{ ...rate, got: { hooks: {} } }, "got"],
       [{ ...rate, credential: { header: "Authorization", secret: "lower" } }, "credential"],
+      [{ ...rate, bridge: { name: "rates", targets: ["local"], simulated: true } }, "bridge"],
+      [{ ...rate, bridge: { name: "rates", targets: [] } }, "bridge"],
     ] as const
   ) {
     assertThrows(() => parseReads(manifest(r as Record<string, unknown>)), Error, why);
@@ -285,6 +289,39 @@ Deno.test("a read with no answer is retried, and on its last run is failed into 
     const last = JSON.parse(queries.at(-5)!.values![0] as string);
     assertEquals([last.target, last.kind], ["unpriced", "failed"]);
     assertExists(last.data.error);
+  } finally {
+    await s.close();
+  }
+});
+
+// A bridge the target does not run answers nothing however often it is
+// asked: the read is failed on its first run, through the delivery every
+// answer takes, so the row moves on the entry it waits on and replay finds
+// the outcome in the journal.
+Deno.test("a read whose bridge is not deployed on this target is failed at once, delivered and journaled, and its sink never asked", async () => {
+  const s = sink(() => Response.json({ usd: 5.3 }));
+  try {
+    const bridged = { ...rate, got: fast, bridge: { name: "rates", targets: ["k8s"], simulated: false } };
+    const absent = { target: "unpriced", kind: "failed", data: { bridge: "rates", target: "local", reason: "not deployed" } };
+    const { queries, db } = recordingDb();
+    const a = { db, reads: { rate: bridged }, headers: {}, mesh: s.base, target: "local" } as unknown as Airlock;
+    await performRead(a, job, false);
+    assertEquals(s.asked.length, 0);
+    assertEquals(verbs(queries), ["BEGIN", "SELECT", "UPDATE", "INSERT", "DELETE", "COMMIT"]);
+    assertEquals(JSON.parse(queries[1].values![0] as string), { effect: "rate", row: { id: "e1" }, incarnation: "i1", n: 3, ...absent });
+    assertEquals(queries[3].values!.at(-1), JSON.stringify(absent));
+    // On a release target, where the bridge names it: asked. Locally, where
+    // the stack runs its simulator: asked.
+    await performRead({ ...a, target: "k8s" } as Airlock, job, false);
+    await performRead({ ...a, reads: { rate: { ...bridged, bridge: { ...bridged.bridge, simulated: true } } } } as Airlock, job, false);
+    assertEquals(s.asked.map((q) => q.path), ["/rates/USD", "/rates/USD"]);
+    // A bridge that names its targets cannot be judged by an airlock told none.
+    await assertRejects(() => performRead({ ...a, target: undefined } as Airlock, job, true), Error, "told none");
+    // Replay answers from the journal where the bridge is deployed or not.
+    const replayed = recordingDb(1, { "rate:e1:i1:3": { digest: "d1", outcome: absent } });
+    await performRead({ ...a, db: replayed.db, target: "k8s", replay: true } as unknown as Airlock, job, false);
+    assertEquals(JSON.parse(replayed.queries.find((q) => q.text.startsWith("SELECT set_config"))!.values![0] as string).data, absent.data);
+    assertEquals(s.asked.length, 2);
   } finally {
     await s.close();
   }

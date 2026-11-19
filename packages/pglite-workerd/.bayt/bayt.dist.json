@@ -9,9 +9,9 @@
     "add": [
       {
         "dest": "/src/",
-        "sha256": "b731a69c8fac3b5610c3ae96c3f0ddebfa85ecfc537cf2acbdc4daa81a0e60f9",
+        "sha256": "10b24517c31d23bbe952fa8cf9810952cd69cc72e8527f842b23125967dbf72c",
         "unpack": true,
-        "url": "https://github.com/neondatabase/electric-pglite/archive/ae182ff8bd5ba4acb887d6c925d607a1498aa0b5.tar.gz"
+        "url": "https://github.com/electric-sql/pglite/archive/ae182ff8bd5ba4acb887d6c925d607a1498aa0b5.tar.gz"
       }
     ],
     "mounts": [],
@@ -186,7 +186,7 @@
       "name": "patch",
       "shell": "sh",
       "dockerfile": {
-        "do": "git -C /src/electric-pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 apply \"$PWD/patches/pglite.patch\" && cp -R release /src/electric-pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/release"
+        "do": "git -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 apply \"$PWD/patches/pglite.patch\" && cp -R release /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/release"
       },
       "stop": false
     },
@@ -217,7 +217,7 @@
       },
       "name": "install",
       "dockerfile": {
-        "do": "pnpm -C /src/electric-pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 install --prefer-offline --frozen-lockfile --package-import-method copy --filter @electric-sql/pglite...",
+        "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 install --prefer-offline --frozen-lockfile --package-import-method copy --filter @electric-sql/pglite...",
         "mounts": [
           {
             "type": "cache",
@@ -242,7 +242,7 @@
       "name": "builtin",
       "shell": "sh",
       "dockerfile": {
-        "do": "pnpm -C /src/electric-pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 -r --filter @electric-sql/pglite... build && cp -R /src/electric-pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/dist dist"
+        "do": "pnpm -C /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5 -r --filter @electric-sql/pglite... build && cp -R /src/pglite-ae182ff8bd5ba4acb887d6c925d607a1498aa0b5/packages/pglite/dist dist"
       },
       "stop": false
     }

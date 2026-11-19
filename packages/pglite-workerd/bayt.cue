@@ -12,12 +12,10 @@ import (
 )
 
 // @electric-sql/pglite@0.5.8 and the postgres-pglite commit it pins, as
-// GitHub's archives of those commits. pglite's repository is
-// neondatabase/electric-pglite, and the archive's root directory carries
-// that name.
+// GitHub's archives of those commits.
 _pglite: {
 	commit: "ae182ff8bd5ba4acb887d6c925d607a1498aa0b5"
-	sha256: "b731a69c8fac3b5610c3ae96c3f0ddebfa85ecfc537cf2acbdc4daa81a0e60f9"
+	sha256: "10b24517c31d23bbe952fa8cf9810952cd69cc72e8527f842b23125967dbf72c"
 }
 _postgresPglite: {
 	commit: "b133782cd759f08b3aeb263b80a963b39c7b7af1"
@@ -84,10 +82,10 @@ _build: bayt.#project & {
 			deps: [":wasm:outs"]
 			srcs: globs: ["patches/pglite.patch"]
 			outs: globs: ["dist/**"]
-			_tree: "/src/electric-pglite-\(_pglite.commit)"
+			_tree: "/src/pglite-\(_pglite.commit)"
 			dockerfile: {
 				from: name: _node
-				add: [_archive & {_owner: "neondatabase", _repo: "electric-pglite", _pin: _pglite}]
+				add: [_archive & {_repo: "pglite", _pin: _pglite}]
 			}
 			cmd: {
 				"patch": {

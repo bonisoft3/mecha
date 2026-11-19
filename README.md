@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="mecha" width="360">
+  </picture>
+</p>
+
 # Mecha
 
 Mecha is a **schema-driven backend meta-architecture** that generates a complete CRUD + CDC + real-time sync stack from entity definitions. Given a schema, mecha generates the database tables, and the REST API, change data capture and real-time sync follow from those tables; stream queries and object storage bindings are written beside them.

@@ -21,7 +21,7 @@ Deno.test({
       file,
       `services:
   postgres:
-    image: bonitao/mecha-database:0.26.0@sha256:bc17c811912900b9ed4ba691167be6dc56f961b437dd765bebd4e53148aa92ec
+    image: bonitao/mecha-database:0.27.0@sha256:8e0d0c44adbf836f3d9c93eb829d7e764b7c0d272b0a8494b9d8c81f486141f0
     command: [postgres, -c, wal_level=logical, -c, max_replication_slots=20]
     environment: {POSTGRES_PASSWORD: spike, POSTGRES_DB: spike}
     ports: ["127.0.0.1::5432"]

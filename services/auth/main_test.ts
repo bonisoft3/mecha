@@ -1454,7 +1454,7 @@ Deno.test({
       if (probe.includes("mecha_auth.")) assertEquals(outcome, "permission denied for schema mecha_auth", probe);
       else assert(outcome.startsWith("permission denied for "), `${probe}: ${outcome}`);
     }
-    const left = await sql`select c.relname, c.relkind, c.reloptions from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    const left = await sql`select c.relname, c.relkind, to_jsonb(c.reloptions) as reloptions from pg_class c join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and c.relname in ('identity_link', 'webauthn_credential') order by 1`;
     assertEquals(left.map((r) => [r.relname, r.relkind, r.reloptions]), [
       ["identity_link", "v", ["security_invoker=true"]],
@@ -1968,6 +1968,16 @@ Deno.test({
   },
 });
 
+
+Deno.test({
+  name: "a connection runs no query of its own, so a statement timeout can only fail a request, not end the process",
+  ...opts,
+  fn: () => {
+    // Regression: the array-type fetch postgres.js runs on connect timed out
+    // under load, its rejection unhandled, and the auth service exited.
+    assertEquals(sql.options.fetch_types, false);
+  },
+});
 
 Deno.test({
   name: "teardown",

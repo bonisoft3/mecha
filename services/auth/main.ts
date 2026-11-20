@@ -103,7 +103,10 @@ export function ceremonyOrigins(
 // long one is a scope set that cannot be revoked.
 const SHAPE_TOKEN_TTL_S = 900;
 
-export const sql = postgres(DATABASE_URL, { connection: { statement_timeout: STATEMENT_TIMEOUT_MS } });
+// No array types fetched on connect: postgres.js runs that query of its own
+// from a handler that drops its promise, so a statement timeout there is an
+// unhandled rejection that ends the process. An array is read as JSON instead.
+export const sql = postgres(DATABASE_URL, { fetch_types: false, connection: { statement_timeout: STATEMENT_TIMEOUT_MS } });
 
 export async function migrate(): Promise<void> {
   // One instance at a time: replicas starting together (a rollout) would race
@@ -163,7 +166,7 @@ async function tableScope(table: string): Promise<{ floored: boolean; publicOnly
 }
 
 async function subjectScopes(uid: string | null): Promise<string[]> {
-  const rows = await sql`SELECT public.subject_scopes(${uid}) AS scopes`;
+  const rows = await sql`SELECT to_jsonb(public.subject_scopes(${uid})) AS scopes`;
   return rows[0].scopes as string[];
 }
 

@@ -13,7 +13,7 @@ WORKDIR /monorepo/libraries/mecha
 COPY --parents services/airlock/deno.json services/airlock/deno.lock services/airlock/main.ts services/airlock/airlock.ts services/airlock/handler.ts services/airlock/cage.ts services/airlock/reentry.ts services/airlock/read.ts services/airlock/blobs.ts services/airlock/seal.ts services/airlock/seal-tables.ts services/airlock/pdf.ts services/airlock/xlsx.ts services/airlock/tsbifrost.ts services/airlock/ai-models.ts services/airlock/white-background.ts services/airlock/package.json services/airlock/dapr.yaml services/compute/compartment.ts services/compute/realm.ts services/compute/crypto.ts services/compute/cheerio.ts services/compute/endowments.ts services/compute/language.ts services/compute/workers.ts services/compute/wasm-select.ts services/compute/query-stages.ts ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha && mv /.bayt-clamp/w /monorepo/libraries/mecha; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
 FROM scratch AS airlock-image_srcs
 COPY --from=airlock-image_ctxs /monorepo /monorepo
 
@@ -22,6 +22,6 @@ WORKDIR /monorepo/libraries/mecha
 COPY --parents .bayt/compose.airlock-image.yaml .bayt/Dockerfile.airlock-image .bayt/bayt.airlock-image.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/process-compose.yaml ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha && mv /.bayt-clamp/w /monorepo/libraries/mecha; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
 FROM scratch AS airlock-image_bayt
 COPY --from=airlock-image_bayt_ctxs /monorepo /monorepo

@@ -11,7 +11,7 @@ COPY --parents services/database/pljs/pins.cue ./
 COPY --from=libraries_mecha-extensions-build_srcs /monorepo /monorepo
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha && mv /.bayt-clamp/w /monorepo/libraries/mecha; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
 FROM scratch AS extensions-image_srcs
 COPY --from=extensions-image_ctxs /monorepo /monorepo
 
@@ -21,6 +21,6 @@ COPY --parents .bayt/compose.extensions-image.yaml .bayt/Dockerfile.extensions-i
 COPY --from=libraries_mecha-extensions-build_bayt /monorepo /monorepo
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha && mv /.bayt-clamp/w /monorepo/libraries/mecha; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
 FROM scratch AS extensions-image_bayt
 COPY --from=extensions-image_bayt_ctxs /monorepo /monorepo

@@ -15,7 +15,7 @@ WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
 COPY --parents patches/pglite.patch ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha/packages/pglite-workerd -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha/packages/pglite-workerd /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha/packages/pglite-workerd && mv /.bayt-clamp/w /monorepo/libraries/mecha/packages/pglite-workerd; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
 FROM scratch AS dist_srcs
 COPY --from=dist_ctxs /monorepo /monorepo
 
@@ -34,6 +34,6 @@ COPY --parents .bayt/compose.dist.yaml .bayt/Dockerfile.dist .bayt/bayt.dist.jso
 COPY --from=libraries_mecha_packages_pglite-workerd-wasm_bayt /monorepo /monorepo
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha/packages/pglite-workerd -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha/packages/pglite-workerd /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha/packages/pglite-workerd && mv /.bayt-clamp/w /monorepo/libraries/mecha/packages/pglite-workerd; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
 FROM scratch AS dist_bayt
 COPY --from=dist_bayt_ctxs /monorepo /monorepo

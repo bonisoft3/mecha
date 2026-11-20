@@ -24,7 +24,7 @@ WORKDIR /monorepo/libraries/mecha
 COPY --parents services/database/rls/rls.sql services/database/role_passwords.sh services/ticker/schedule.sql services/durex/graphile.sql services/airlock/airlock.sql services/airlock/job_key.sql services/migrate/migrate.sh ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha && mv /.bayt-clamp/w /monorepo/libraries/mecha; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
 FROM scratch AS database-image_srcs
 COPY --from=database-image_ctxs /monorepo /monorepo
 
@@ -33,6 +33,6 @@ WORKDIR /monorepo/libraries/mecha
 COPY --parents .bayt/compose.database-image.yaml .bayt/Dockerfile.database-image .bayt/bayt.database-image.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/process-compose.yaml ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha && mv /.bayt-clamp/w /monorepo/libraries/mecha; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries; fi
 FROM scratch AS database-image_bayt
 COPY --from=database-image_bayt_ctxs /monorepo /monorepo

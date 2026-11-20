@@ -19,6 +19,6 @@ WORKDIR /monorepo/libraries/mecha/packages/pglite-workerd
 COPY --parents .bayt/compose.icu.yaml .bayt/Dockerfile.icu .bayt/bayt.icu.json .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml ./
 ARG SOURCE_DATE_EPOCH
 ARG BAYT_CLAMP=1
-RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
+RUN if [ "${BAYT_CLAMP:-1}" != 0 ]; then mkdir -p /.bayt-clamp && find /monorepo/libraries/mecha/packages/pglite-workerd -exec getfattr -dh {} + > /.bayt-clamp/x && if [ ! -s /.bayt-clamp/x ]; then cd / && cp -a /monorepo/libraries/mecha/packages/pglite-workerd /.bayt-clamp/w && rm -rf /monorepo/libraries/mecha/packages/pglite-workerd && mv /.bayt-clamp/w /monorepo/libraries/mecha/packages/pglite-workerd; fi && rm -rf /.bayt-clamp && find /monorepo/libraries/mecha/packages/pglite-workerd -exec touch -hd @${SOURCE_DATE_EPOCH:-0} {} + && touch -hd @${SOURCE_DATE_EPOCH:-0} /monorepo /monorepo/libraries /monorepo/libraries/mecha /monorepo/libraries/mecha/packages; fi
 FROM scratch AS icu_bayt
 COPY --from=icu_bayt_ctxs /monorepo /monorepo

@@ -41,7 +41,7 @@ const HYBRID_SERIALIZABLE_MACHINE_HASH = "57057ef2d61cf7f7615f134b81822ae725a9b6
 // The machine whose rules took positional arguments, before a rule was
 // XState's one argument.
 const POSITIONAL_RULES_MACHINE_HASH = "a71706b579d917082c9384ff022500ee5b36994bffd336895834f414df2f7154";
-const MECHA_MACHINE_HASH = "4561094321ad5f888b33b5ad92b495dd6e84a6857249f3a20e52f3cd549cd985";
+const MECHA_MACHINE_HASH = "8b69d1417198756355c94505226ce60a00cc3f8b413b3479f7367002b9ad0a43";
 
 function captureDigest(value: unknown): string | null {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {

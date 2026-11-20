@@ -32,6 +32,7 @@
 //   client holds back `up-to-date` for 60 s from any response whose cursor
 //   matches the previous session's.
 import { isSession, PUBLIC_WHERE, verifyJwt } from '../../../services/auth/jwt.ts'
+import { isGuest } from '../../../services/auth/claims.ts'
 import type { EdgeEnv } from './object.ts'
 import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
 import { pokeCluster } from './clock.ts'
@@ -242,7 +243,7 @@ export const edgeWorker = {
     }
 
     const session = isSession(claims)
-    const guest = session && claims.guest === true
+    const guest = session && isGuest(claims)
     const entityRead = req.method === 'GET' && /^\/crud\/(?!rpc$)[a-zA-Z_][a-zA-Z0-9_]*$/.test(path)
     if (path.startsWith('/crud/') && session) {
       const reset = (await (await cache.match(keyOf(version, 'reset')))?.text()) ?? '0'

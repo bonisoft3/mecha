@@ -8,23 +8,23 @@
 // deno-lint-ignore no-import-prefix
 import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1.0.13";
 import { encodeBase64Url, nativeSchemesFrom, randomToken, signJwt, STACK_ISSUER } from "./jwt.ts";
+import { GUEST_ACR, sessionClaims } from "./claims.ts";
 import {
   type ConsumedTicket,
   discovery,
-  HINT_COOKIE,
   type Links,
   type NativeTicket,
   oidc,
-  PromoteError,
   type Provider,
   providersFrom,
+  providerStill,
   safeReturn,
-  SESSION_COOKIE,
   sha256url,
   STATE_COOKIE,
   type Tickets,
   type User,
 } from "./oidc.ts";
+import { deviceSession, HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
 
 const ORIGIN = "https://app.test";
 const SECRET = "a-test-secret-that-is-at-least-32-chars";
@@ -101,13 +101,20 @@ async function provider(p: { issuer: string; reachedAt?: string; alg: Alg; clien
   };
 }
 
-function memory(): Links & { users: Map<string, User & { name: string | null; email: string | null }> } {
+/** Links in memory, and the guests the test has minted, each one a guest
+ * while no subject is linked to it. */
+function memory(): Links & { users: Map<string, User & { name: string | null; email: string | null }>; guests: Map<string, string> } {
   const users = new Map<string, User & { name: string | null; email: string | null }>();
+  const guests = new Map<string, string>();
   return {
     users,
-    userFor(p) {
+    guests,
+    userFor(p, guest) {
       const key = `${p.provider}:${p.issuer}:${p.sub}`;
-      const u = users.get(key) ?? { id: crypto.randomUUID(), handle: `h-${users.size}`, name: p.name, email: p.email };
+      const held = users.get(key);
+      if (held && guest !== null && guest !== held.id) return Promise.resolve({ taken: { id: held.id, handle: held.handle, name: held.name, email: held.email } });
+      const promoted = !held && guest !== null && guests.has(guest) && ![...users.values()].some((u) => u.id === guest);
+      const u = held ?? (promoted ? { id: guest!, handle: guests.get(guest!)!, name: p.name, email: p.email } : { id: crypto.randomUUID(), handle: `h-${users.size}`, name: p.name, email: p.email });
       u.name = p.name;
       u.email = p.email;
       users.set(key, u);
@@ -131,6 +138,17 @@ const BROKERED: Record<string, string> = {
   OIDC_GOOGLE_AUTHORIZE_PARAMS: "provider=google",
 };
 
+/** The device session over these providers' links: a provider's way alone. */
+const deviceFor = (providers: Record<string, Provider>, links: Links) => {
+  const stands = providerStill(providers, links);
+  return deviceSession({
+    secret: SECRET,
+    origin: () => ORIGIN,
+    still: (way, sub) => way.kind === "provider" ? stands(way, sub) : Promise.resolve(null),
+    issue: (u, proof) => signJwt(SECRET, sessionClaims(ORIGIN, u, proof, now() + 60)),
+  });
+};
+
 async function setup(env = GOOGLE, links = memory()) {
   const providers = providersFrom((name) => env[name]);
   const issuer = env.OIDC_GOOGLE_ISSUER ?? "https://accounts.google.com";
@@ -140,16 +158,10 @@ async function setup(env = GOOGLE, links = memory()) {
       ? { issuer, reachedAt: env.OIDC_GOOGLE_INTERNAL || issuer, alg: "ES256" }
       : { issuer: "https://accounts.google.com", iss: "accounts.google.com", alg: "RS256", secret: "shh" },
   );
-  const routes = oidc({
-    secret: SECRET,
-    origin: () => ORIGIN,
-    providers,
-    links,
-    issue: (u) => signJwt(SECRET, { role: "app_user", sub: u.id, handle: u.handle, guest: false, exp: now() + 60 }),
-    fetcher: idp.fetcher as typeof fetch,
-  });
+  const device = deviceFor(providers, links);
+  const routes = oidc({ secret: SECRET, origin: () => ORIGIN, providers, links, device, fetcher: idp.fetcher as typeof fetch });
   const serve = async (req: Request) => {
-    const res = routes(req);
+    const res = routes(req) ?? device.route(req);
     assert(res !== null, `${req.method} ${req.url} is not a route`);
     return await res;
   };
@@ -178,7 +190,7 @@ async function signIn(s: Awaited<ReturnType<typeof setup>>) {
 }
 
 const exchange = (session: string, origin: string | null = ORIGIN) =>
-  new Request(`${ORIGIN}/auth/oidc/session`, {
+  new Request(`${ORIGIN}/auth/session`, {
     method: "POST",
     headers: { cookie: `${SESSION_COOKIE}=${session}`, ...(origin === null ? {} : { origin }) },
   });
@@ -201,7 +213,7 @@ Deno.test("Google signs a person in by code and PKCE, and the cookie becomes a n
   assertEquals(done.status, 303);
   assertEquals(done.headers.get("location"), "/chapter/8");
   const back = jar(done);
-  assertEquals(back[HINT_COOKIE], "google");
+  assertEquals(back[HINT_COOKIE], "1");
   assertEquals(back[STATE_COOKIE], "");
   assertEquals(s.links.users.get("google:https://accounts.google.com:alice-sub")?.name, "Alice");
   // The address as the provider vouched for it, folded for the checkout to start from.
@@ -336,7 +348,7 @@ Deno.test("a discovery document naming another issuer is refused", async () => {
     origin: () => ORIGIN,
     providers: providersFrom((name) => ({ ...GOOGLE, OIDC_GOOGLE_ISSUER: "https://not-google.test", OIDC_GOOGLE_INTERNAL: "https://accounts.google.com" })[name]),
     links: s.links,
-    issue: () => Promise.resolve(""),
+    device: deviceFor({}, s.links),
     fetcher: s.idp.fetcher as typeof fetch,
   });
   await assertRejects(() => routes(new Request(`${ORIGIN}/auth/oidc/google/start`))!, Error, "names the issuer https://accounts.google.com");
@@ -346,8 +358,8 @@ Deno.test("the session exchange is refused from another origin, without the cook
   const s = await setup();
   const session = jar(await signIn(s))[SESSION_COOKIE];
   assertEquals((await s.serve(exchange(session, "https://evil.test"))).status, 403);
-  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/session`, { method: "POST" }))).status, 401);
-  const notOurs = await signJwt(SECRET, { purpose: "oidc", provider: "google", sub: s.links.users.get("google:https://accounts.google.com:alice-sub")!.id, exp: now() + 60 });
+  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/session`, { method: "POST" }))).status, 401);
+  const notOurs = await signJwt(SECRET, { purpose: "oidc", way: { kind: "provider", provider: "google", issuer: "https://accounts.google.com" }, auth_time: now(), sub: s.links.users.get("google:https://accounts.google.com:alice-sub")!.id, exp: now() + 60 });
   assertEquals((await s.serve(exchange(notOurs))).status, 401);
   assertEquals((await s.serve(exchange(session, null))).status, 200);
   s.links.users.clear();
@@ -356,10 +368,106 @@ Deno.test("the session exchange is refused from another origin, without the cook
 
 Deno.test("sign-out clears the session and its hint, and only from this origin", async () => {
   const s = await setup();
-  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/signout`, { method: "POST", headers: { origin: "https://evil.test" } }))).status, 403);
-  const res = await s.serve(new Request(`${ORIGIN}/auth/oidc/signout`, { method: "POST", headers: { origin: ORIGIN } }));
+  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/signout`, { method: "POST", headers: { origin: "https://evil.test" } }))).status, 403);
+  const res = await s.serve(new Request(`${ORIGIN}/auth/signout`, { method: "POST", headers: { origin: ORIGIN } }));
   assertEquals(res.status, 204);
-  assertEquals(jar(res), { [SESSION_COOKIE]: "", [HINT_COOKIE]: "" });
+  assertEquals(jar(res), { [SESSION_COOKIE]: "", [HELD_COOKIE]: "", [HINT_COOKIE]: "" });
+});
+
+/** A guest the test mints, and its token. */
+async function guestOf(s: Awaited<ReturnType<typeof setup>>, handle = "mango-otter-3fa2") {
+  const id = crypto.randomUUID();
+  s.links.guests.set(id, handle);
+  return { id, token: await signJwt(SECRET, sessionClaims(ORIGIN, { id, handle }, { acr: GUEST_ACR, auth_time: now() }, now() + 60)) };
+}
+
+/** A guest's start: a POST from this origin carrying its token. */
+const hintedStart = (token: string, origin: string | null = ORIGIN, ret = "/chapter/8") =>
+  new Request(`${ORIGIN}/auth/oidc/google/start`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", ...(origin === null ? {} : { origin }) },
+    body: new URLSearchParams({ id_token_hint: token, return: ret }),
+  });
+
+async function hintedSignIn(s: Awaited<ReturnType<typeof setup>>, token: string) {
+  const res = await s.serve(hintedStart(token));
+  assertEquals(res.status, 303);
+  const to = new URL(res.headers.get("location")!);
+  // The provider is asked as any reader would be: the guest is the state's, signed.
+  assert(!to.toString().includes(token));
+  return await s.serve(callback({ code: s.idp.authorize(to), state: to.searchParams.get("state")! }, jar(res)[STATE_COOKIE]));
+}
+
+const claimsOf = (token: string) => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(token.split(".")[1].replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0))));
+
+Deno.test("a guest that signs in with a subject no account holds becomes it, keeping its id and handle", async () => {
+  const s = await setup();
+  const guest = await guestOf(s);
+  const done = await hintedSignIn(s, guest.token);
+  assertEquals(done.status, 303);
+  assertEquals(done.headers.get("location"), "/chapter/8");
+  const session = await s.serve(exchange(jar(done)[SESSION_COOKIE]));
+  const body = await session.json();
+  assertEquals(body.user.id, guest.id);
+  assertEquals(body.user.handle, "mango-otter-3fa2");
+  const claims = claimsOf(body.token);
+  assertEquals([claims.iss, claims.sub, claims.acr], [ORIGIN, guest.id, undefined]);
+  // The provider said nothing of when its person signed in, so neither does the session.
+  assertEquals(claims.auth_time, undefined);
+});
+
+Deno.test("a guest that signs in with a subject another account holds is held, not switched, until it takes it", async () => {
+  const s = await setup();
+  await signIn(s);
+  const owner = s.links.users.get("google:https://accounts.google.com:alice-sub")!;
+  const guest = await guestOf(s);
+  const done = await hintedSignIn(s, guest.token);
+  assertEquals(done.status, 303);
+  const back = jar(done);
+  // No session: the guest stays the device's.
+  assertEquals(back[SESSION_COOKIE], undefined);
+  // The guest's own hint is left as it was.
+  assertEquals(back[HINT_COOKIE], undefined);
+  assert(done.headers.getSetCookie().some((c) => c.startsWith(`${HELD_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/auth;")));
+  const held = new Request(`${ORIGIN}/auth/session`, { method: "POST", headers: { cookie: `${HELD_COOKIE}=${back[HELD_COOKIE]}`, origin: ORIGIN } });
+  const asked = await s.serve(held);
+  assertEquals(asked.status, 409);
+  const offer = await asked.json();
+  assertEquals([offer.error, offer.user, typeof offer.offer], ["login_required", { handle: owner.handle, name: "Alice" }, "string"]);
+  // Taking it from another origin is refused; from this one, naming the offer, it is the session.
+  const take = (origin: string) =>
+    new Request(`${ORIGIN}/auth/session/switch`, { method: "POST", headers: { cookie: `${HELD_COOKIE}=${back[HELD_COOKIE]}`, origin }, body: JSON.stringify({ offer: offer.offer }) });
+  assertEquals((await s.serve(take("https://evil.test"))).status, 403);
+  const taken = await s.serve(take(ORIGIN));
+  assertEquals(taken.status, 200);
+  assertEquals((await taken.json()).user.id, owner.id);
+  const after = jar(taken);
+  assertEquals(after[HELD_COOKIE], "");
+  assertEquals((await s.serve(exchange(after[SESSION_COOKIE]))).status, 200);
+  // The guest never held the subject.
+  assertEquals(s.links.users.size, 1);
+});
+
+Deno.test("a guest's start fetched answers where to go, since a page's CSP refuses a form's redirect to the provider", async () => {
+  const s = await setup();
+  const guest = await guestOf(s);
+  const req = hintedStart(guest.token);
+  req.headers.set("accept", "application/json");
+  const res = await s.serve(req);
+  assertEquals(res.status, 200);
+  const { to } = await res.json();
+  assertEquals(new URL(to).searchParams.get("code_challenge_method"), "S256");
+  assert(res.headers.getSetCookie().some((c) => c.startsWith(`${STATE_COOKIE}=`)), "the state cookie binds the callback to this browser");
+});
+
+Deno.test("a guest's start is refused from another origin, and for a token that is no guest's", async () => {
+  const s = await setup();
+  const guest = await guestOf(s);
+  // Another origin would give its guest this reader's subject.
+  assertEquals((await s.serve(hintedStart(guest.token, "https://evil.test"))).status, 403);
+  const person = await signJwt(SECRET, sessionClaims(ORIGIN, { id: crypto.randomUUID(), handle: "p" }, { acr: "phr", auth_time: now() }, now() + 60));
+  assertEquals((await s.serve(hintedStart(person))).status, 400);
+  assertEquals((await s.serve(hintedStart(await signJwt("another-secret-of-at-least-32-chars", { role: "app_user", sub: guest.id, acr: GUEST_ACR, exp: now() + 60 })))).status, 400);
 });
 
 Deno.test("a provider the deployment did not enable, and every other path, is not a route", async () => {
@@ -415,8 +523,7 @@ Deno.test("replacing an issuer cannot inherit its subject or its browser session
 Deno.test("disabling a provider also refuses its browser session", async () => {
   const s = await setup();
   const cookie = jar(await signIn(s))[SESSION_COOKIE];
-  const disabled = oidc({ secret: SECRET, origin: () => ORIGIN, providers: {}, links: s.links, issue: () => Promise.resolve("unused") });
-  assertEquals((await disabled(exchange(cookie))!).status, 401);
+  assertEquals((await deviceFor({}, s.links).route(exchange(cookie))!).status, 401);
 });
 
 Deno.test("Service-Worker-Navigation-Preload and prefetch GETs neither overwrite PKCE state nor spend a single-use code", async () => {
@@ -457,6 +564,8 @@ function memoryTickets() {
         provider: hit.provider,
         issuer: hit.issuer,
         codeChallenge: hit.codeChallenge,
+        proof: hit.proof,
+        held: hit.held,
       });
     },
   };
@@ -476,25 +585,15 @@ async function setupNative(schemes: readonly string[] = ["snapcards", "snapcards
   const guests = new Map<string, { handle: string; linked: boolean }>();
   const users = new Map<string, User & { name: string | null; email: string | null }>();
   const links: Links = {
-    canPromote(userId) {
-      const g = guests.get(userId);
-      if (!g) return Promise.resolve("absent");
-      return Promise.resolve(g.linked ? "already_account" : "ok");
-    },
     userFor(p, promoteUserId) {
       const key = `${p.provider}:${p.issuer}:${p.sub}`;
-      if (promoteUserId) {
-        const g = guests.get(promoteUserId);
-        if (!g) return Promise.reject(new PromoteError(401, "invalid token"));
-        if (g.linked) return Promise.reject(new PromoteError(409, "already an account"));
+      const existing = users.get(key);
+      if (existing && promoteUserId && promoteUserId !== existing.id) {
+        return Promise.resolve({ taken: { id: existing.id, handle: existing.handle, name: p.name, email: p.email } });
+      }
+      if (promoteUserId && !existing) {
+        const g = guests.get(promoteUserId)!;
         g.linked = true;
-        const existing = users.get(key);
-        if (existing) {
-          existing.name = p.name;
-          existing.email = p.email;
-          guests.delete(promoteUserId);
-          return Promise.resolve({ id: existing.id, handle: existing.handle, name: p.name, email: p.email });
-        }
         const promoted = { id: promoteUserId, handle: g.handle, name: p.name, email: p.email };
         users.set(key, promoted);
         return Promise.resolve(promoted);
@@ -516,10 +615,11 @@ async function setupNative(schemes: readonly string[] = ["snapcards", "snapcards
     origin: () => ORIGIN,
     providers,
     links,
+    device: deviceFor(providers, links),
     tickets: store.tickets,
     nativeSchemes: schemes,
-    issue: async (u) => ({
-      token: await signJwt(SECRET, { iss: STACK_ISSUER, role: "app_user", sub: u.id, handle: u.handle, guest: false, exp: now() + 60 }),
+    issue: async (u, proof) => ({
+      token: await signJwt(SECRET, sessionClaims(STACK_ISSUER, u, proof, now() + 60)),
       refresh_token: `rt-${u.id}`,
     }),
     fetcher: idp.fetcher as typeof fetch,
@@ -664,7 +764,8 @@ Deno.test("guest promotion on OIDC start validates unlinked guest tokens and pre
     role: "app_user",
     sub: guestId,
     handle: "mango-otter-1234",
-    guest: true,
+    acr: GUEST_ACR,
+    auth_time: now(),
     exp: now() + 300,
   });
   const nonGuestToken = await signJwt(SECRET, {
@@ -672,7 +773,8 @@ Deno.test("guest promotion on OIDC start validates unlinked guest tokens and pre
     role: "app_user",
     sub: guestId,
     handle: "mango-otter-1234",
-    guest: false,
+    acr: "phr",
+    auth_time: now(),
     exp: now() + 300,
   });
   const appVerifier = randomToken(32);
@@ -714,11 +816,12 @@ Deno.test("guest promotion on OIDC start validates unlinked guest tokens and pre
     email: "alice@example.test",
   });
 
-  // Once promoted, the old guest token cannot promote again.
+  // Once promoted, the old guest token starts as a browser's hint does: the
+  // provider's answer decides, not the token.
   assertEquals(
     (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=native&code_challenge=${appChallenge}`, {
       headers: { authorization: `Bearer ${guestToken}` },
     }))).status,
-    409,
+    303,
   );
 });

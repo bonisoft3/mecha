@@ -196,10 +196,14 @@
         "globs": [
           "services/auth/deno.json",
           "services/auth/deno.lock",
+          "services/auth/claims.ts",
+          "services/auth/core.ts",
+          "services/auth/handles.ts",
           "services/auth/jwt.ts",
           "services/auth/main.ts",
           "services/auth/oidc.ts",
-          "services/auth/schema.ts"
+          "services/auth/schema.ts",
+          "services/auth/session.ts"
         ],
         "exclude": []
       },
@@ -218,10 +222,14 @@
             "globs": [
               "services/auth/deno.json",
               "services/auth/deno.lock",
+              "services/auth/claims.ts",
+              "services/auth/core.ts",
+              "services/auth/handles.ts",
               "services/auth/jwt.ts",
               "services/auth/main.ts",
               "services/auth/oidc.ts",
-              "services/auth/schema.ts"
+              "services/auth/schema.ts",
+              "services/auth/session.ts"
             ],
             "exclude": []
           }

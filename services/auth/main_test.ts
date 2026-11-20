@@ -28,8 +28,14 @@ import {
   verifyJwt,
 } from "./main.ts";
 import { encodeBase64Url, PUBLIC_WHERE, randomToken, sha256url } from "./jwt.ts";
-import { providersFrom } from "./oidc.ts";
+import { HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
+import { nameHandle } from "./handles.ts";
+import { type Profile, providersFrom, type User } from "./oidc.ts";
 import { PUBLIC_WHERE as CLIENT_PUBLIC_WHERE } from "../../packages/client/src/public-where.ts";
+
+/** An account's session, as a passkey would sign it in. */
+const accountToken = (id: string, handle: string, profile: { name?: string; email?: string } = {}) =>
+  issueUserToken({ id, handle, ...profile }, { acr: "phr", amr: ["swk"], auth_time: Math.floor(Date.now() / 1000) });
 
 await sql`CREATE TABLE IF NOT EXISTS app_user (
   id uuid primary key,
@@ -139,13 +145,14 @@ Deno.test({
     const body = await res.json();
     assertEquals(typeof body.challenge, "string");
     assertEquals(body.rp.id, "localhost");
-    assert(/^[a-z]+-[a-z]+-[0-9a-f]{4}$/.test(body.user.name), `generated handle, got ${body.user.name}`);
+    // The passkey manager names the account by its words, without the suffix others see.
+    assert(/^[a-z]+ [a-z]+$/.test(body.user.name) && body.user.displayName === body.user.name, `the generated name, got ${body.user.name}`);
     assertEquals(body.authenticatorSelection.residentKey, "required");
     assert(Array.isArray(body.pubKeyCredParams) && body.pubKeyCredParams.length > 0);
     const st = await verifyJwt(body.state);
     assert(st !== null);
     assertEquals(st.purpose, "register");
-    assertEquals(st.handle, body.user.name);
+    assertEquals(String(st.handle).replace(/-[0-9a-f]{4}$/, "").replaceAll("-", " "), body.user.name);
     assertEquals(st.challenge, body.challenge);
     assertEquals(typeof st.userId, "string");
   },
@@ -185,10 +192,11 @@ Deno.test({
   ...opts,
   async fn() {
     const guest = await (await handler(post("/auth/guest", {}))).json();
-    assertEquals([(await verifyJwt(guest.token))?.guest, guest.user.guest], [true, true]);
-    // Stated either way: a policy that admits only `guest = false` refuses a
-    // token minted before the claim existed rather than taking it for an account.
-    assertEquals((await verifyJwt(await issueUserToken(guest.user.id, guest.user.handle)))?.guest, false);
+    assertEquals([(await verifyJwt(guest.token))?.acr, guest.user.guest], ["0", true]);
+    // Every session says when it was signed in, so a policy can refuse a token
+    // that says nothing rather than take it for an account.
+    const account = await verifyJwt(await accountToken(guest.user.id, guest.user.handle));
+    assertEquals([account?.acr, typeof account?.auth_time, account?.guest], ["phr", "number", undefined]);
   },
 });
 
@@ -197,7 +205,7 @@ Deno.test({
   ...opts,
   async fn() {
     const guest = await (await handler(post("/auth/guest", {}))).json();
-    const account = await issueUserToken(guest.user.id, guest.user.handle);
+    const account = await accountToken(guest.user.id, guest.user.handle);
     const res = await handler(post("/auth/register/start", {}, account));
     assertEquals(res.status, 409);
     await res.body?.cancel();
@@ -244,7 +252,8 @@ Deno.test({
       post("/auth/login/verify", { state, response: { id: "dGVzdC1jcmVk" } }),
     );
     assertEquals(res.status, 401);
-    assertEquals((await res.json()).error, "authentication verification failed");
+    // The browser signals the credential unknown, so the authenticator stops offering it.
+    assertEquals(await res.json(), { error: "authentication verification failed", unknownCredential: true });
   },
 });
 
@@ -263,7 +272,8 @@ Deno.test({
   ...opts,
   fn: async () => {
     const id = crypto.randomUUID();
-    const token = await issueUserToken(id, "alice");
+    await sql`insert into app_user (id, handle) values (${id}, ${`alice-${id.slice(-4)}`})`;
+    const token = await accountToken(id, "alice");
     const claims = await verifyJwt(token);
     assert(claims !== null);
     assertEquals(claims.role, "app_user");
@@ -279,6 +289,9 @@ Deno.test({
     );
     assertEquals(res.status, 200);
     assertEquals(await res.json(), { id, handle: "alice" });
+    // A token outlives its account's deletion; whoami does not answer for it.
+    await sql`delete from app_user where id = ${id}`;
+    assertEquals((await handler(new Request("http://auth:9999/auth/whoami", { headers: { authorization: `Bearer ${token}` } }))).status, 401);
   },
 });
 
@@ -323,7 +336,7 @@ function shapeReq(token: string, uri: string, method = "GET"): Request {
 async function mint(table: string) {
   const user = await sql`INSERT INTO app_user (id, handle)
     VALUES (gen_random_uuid(), ${"gk-" + crypto.randomUUID().slice(0, 8)}) RETURNING id, handle`;
-  const userToken = await issueUserToken(user[0].id, user[0].handle);
+  const userToken = await accountToken(user[0].id, user[0].handle);
   const res = await handler(
     new Request("http://auth:9999/auth/shape", {
       method: "POST",
@@ -874,6 +887,7 @@ async function passkey() {
     return new Uint8Array([0x30, body.length, ...body]);
   };
   return {
+    id: b64(id),
     register(challenge: string, origin: string) {
       const key = isoCBOR.encode(
         new Map<number, Cbor>([[1, 2], [3, -7], [-1, 1], [-2, raw.slice(1, 33)], [-3, raw.slice(33)]]),
@@ -897,8 +911,10 @@ async function passkey() {
         clientExtensionResults: {},
       };
     },
-    async login(challenge: string, origin: string) {
-      const authData = isoUint8Array.concat([rpIdHash, new Uint8Array([0x01, 0, 0, 0, 1])]);
+    /** An assertion: user present (0x01), and verified too (0x05) where
+     * `flags` says; a synced passkey's counter stays 0. */
+    async login(challenge: string, origin: string, { flags = 0x01, counter = 1 } = {}) {
+      const authData = isoUint8Array.concat([rpIdHash, new Uint8Array([flags, 0, 0, 0, counter])]);
       const data = clientData("webauthn.get", challenge, origin);
       const signed = isoUint8Array.concat([authData, await toHash(data)]);
       const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new Uint8Array(signed)));
@@ -913,13 +929,316 @@ async function passkey() {
   };
 }
 
-function atDoor(path: string, body: unknown, host: string): Request {
+function atDoor(path: string, body: unknown, host: string, token?: string, jar?: Record<string, string>, origin?: string): Request {
   return new Request(`http://auth:9999${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", host },
+    headers: {
+      "content-type": "application/json",
+      host,
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(jar ? { cookie: Object.entries(jar).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${v}`).join("; ") } : {}),
+      ...(origin ? { origin } : {}),
+    },
     body: JSON.stringify(body),
   });
 }
+/** The cookies a response sets, by name. */
+const cookies = (res: Response) =>
+  Object.fromEntries(res.headers.getSetCookie().map((c) => c.split(";")[0].split("=")).map(([k, ...v]) => [k, v.join("=")]));
+
+const door = "localhost:54321";
+/** A passkey registered at the door, under `token`'s session and with `name`
+ * when given. */
+async function enroll(key: Awaited<ReturnType<typeof passkey>>, token?: string, name?: string) {
+  const start = await (await handler(atDoor("/auth/register/start", name === undefined ? {} : { name }, door, token))).json();
+  const res = await handler(
+    atDoor("/auth/register/verify", { state: start.state, response: key.register(start.challenge, `https://${door}`) }, door),
+  );
+  assertEquals(res.status, 200, await res.clone().text());
+  return { start, made: await res.json(), key };
+}
+async function signIn(key: Awaited<ReturnType<typeof passkey>>) {
+  const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+  const res = await handler(
+    atDoor("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, `https://${door}`) }, door),
+  );
+  assertEquals(res.status, 200, await res.clone().text());
+  return await res.json();
+}
+// The user handle a credential was made under, as the Signal API takes it.
+const userHandle = (id: string) => isoBase64URL.fromBuffer(new TextEncoder().encode(id));
+
+Deno.test({
+  name: "a guest is promoted once: its token adds no second passkey after",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const promoted = await enroll(await passkey(), guest.token);
+    assertEquals(promoted.made.user, { id: guest.user.id, handle: guest.user.handle });
+    // The Signal API's user handle is the one the authenticator stored, the
+    // bytes register/start sent as user.id.
+    assertEquals(promoted.made.passkey, { rpId: "localhost", userId: promoted.start.user.id });
+    assertEquals(promoted.start.user.id, userHandle(guest.user.id));
+    assertEquals((await signIn(promoted.key)).passkey, promoted.made.passkey);
+    const start = await (await handler(atDoor("/auth/register/start", {}, door, guest.token))).json();
+    const res = await handler(
+      atDoor("/auth/register/verify", { state: start.state, response: (await passkey()).register(start.challenge, `https://${door}`) }, door),
+    );
+    assertEquals(res.status, 409);
+    assertEquals(await res.json(), { error: "already an account" });
+  },
+});
+
+Deno.test({
+  name: "tokens say how they were signed in: a guest at acr 0, a passkey at phr, its binding as the authenticator reports it",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(atDoor("/auth/guest", {}, door))).json();
+    const g = await verifyJwt(guest.token);
+    assertEquals([g?.iss, g?.acr, g?.guest, g?.amr], ["mecha:stack", "0", undefined, undefined]);
+    assert(typeof g?.auth_time === "number");
+    // The test's authenticator sets no backup-eligible flag: a single-device passkey.
+    const a = await verifyJwt((await enroll(await passkey(), guest.token)).made.token);
+    assertEquals([a?.iss, a?.sub, a?.acr, a?.amr, a?.guest], ["mecha:stack", guest.user.id, "phr", ["pop"], undefined]);
+  },
+});
+
+Deno.test({
+  name: "a passkey unlocked by its person is two factors: amr says mfa only when the authenticator verified the user",
+  ...opts,
+  async fn() {
+    const { key } = await enroll(await passkey());
+    const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+    const res = await handler(
+      atDoor("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, `https://${door}`, { flags: 0x05 }) }, door),
+    );
+    assertEquals(res.status, 200);
+    assertEquals((await verifyJwt((await res.json()).token))?.amr, ["pop", "mfa"]);
+  },
+});
+
+Deno.test({
+  name: "a passkey's answer signs in once: replayed within its challenge's life it is refused, though a synced passkey's counter never climbs",
+  ...opts,
+  async fn() {
+    const { key } = await enroll(await passkey());
+    const answer = async () => {
+      const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+      return { state: login.state, response: await key.login(login.challenge, `https://${door}`, { counter: 0 }) };
+    };
+    const first = await answer();
+    const signed = await handler(atDoor("/auth/login/verify", first, door));
+    assertEquals(signed.status, 200);
+    await signed.body?.cancel();
+    const replayed = await handler(atDoor("/auth/login/verify", first, door));
+    assertEquals([replayed.status, await replayed.json()], [401, { error: "authentication verification failed" }]);
+    // A new challenge answered at the same counter is the synced passkey's next sign-in.
+    const again = await handler(atDoor("/auth/login/verify", await answer(), door));
+    assertEquals(again.status, 200);
+    await again.body?.cancel();
+  },
+});
+
+Deno.test({
+  name: "a guest's passkey sign-in into another account is login_required, holding that account for the reader to take or leave",
+  ...opts,
+  async fn() {
+    const owner = await enroll(await passkey());
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+    const res = await handler(
+      atDoor("/auth/login/verify", { state: login.state, response: await owner.key.login(login.challenge, `https://${door}`) }, door, guest.token),
+    );
+    assertEquals(res.status, 409);
+    // No token: the guest stays the device's until the reader takes the account.
+    const refused = await res.json();
+    assertEquals([refused.error, refused.user, typeof refused.offer], ["login_required", { handle: owner.made.user.handle }, "string"]);
+    const held = cookies(res);
+    assertEquals(held[SESSION_COOKIE], undefined);
+    const asked = await handler(atDoor("/auth/session", {}, door, undefined, held));
+    assertEquals([asked.status, (await asked.json()).error], [409, "login_required"]);
+    // Taking names the offer: another tab's older one answers the current offer.
+    const stale = await handler(atDoor("/auth/session/switch", { offer: "another" }, door, undefined, held));
+    assertEquals([stale.status, (await stale.json()).offer], [409, refused.offer]);
+    const taken = await handler(atDoor("/auth/session/switch", { offer: refused.offer }, door, undefined, held));
+    assertEquals(taken.status, 200);
+    const session = await taken.json();
+    assertEquals([session.user, (await verifyJwt(session.token))?.amr], [owner.made.user, ["pop"]]);
+    const after = cookies(taken);
+    assertEquals(after[HELD_COOKIE], "");
+    assertEquals((await (await handler(atDoor("/auth/session", {}, door, undefined, after))).json()).user, owner.made.user);
+  },
+});
+
+Deno.test({
+  name: "a passkey's sign-in is the device's session: the cookie takes it up again until the passkey is gone",
+  ...opts,
+  async fn() {
+    const { key, made } = await enroll(await passkey());
+    const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+    const res = await handler(
+      atDoor("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, `https://${door}`) }, door),
+    );
+    assertEquals(res.status, 200);
+    await res.body?.cancel();
+    const jar = cookies(res);
+    assert(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/auth;")));
+    assertEquals(jar[HINT_COOKIE], "1");
+    const again = await handler(atDoor("/auth/session", {}, door, undefined, jar));
+    assertEquals(again.status, 200);
+    const session = await again.json();
+    assertEquals(session.user, made.user);
+    const claims = await verifyJwt(session.token);
+    assertEquals([claims?.sub, claims?.acr], [made.user.id, "phr"]);
+    // From another origin the cookie is nobody's.
+    const foreign = await handler(atDoor("/auth/session", {}, door, undefined, jar, "https://evil.test"));
+    assertEquals(foreign.status, 403);
+    await foreign.body?.cancel();
+    // The passkey removed, the session is over.
+    await sql`delete from mecha_auth.webauthn_credential where user_id = ${made.user.id}`;
+    const gone = await handler(atDoor("/auth/session", {}, door, undefined, jar));
+    assertEquals(gone.status, 401);
+    await gone.body?.cancel();
+    // Signing out clears the cookies.
+    const out = await handler(atDoor("/auth/signout", {}, door, undefined, jar));
+    assertEquals([out.status, cookies(out)], [204, { [SESSION_COOKIE]: "", [HELD_COOKIE]: "", [HINT_COOKIE]: "" }]);
+  },
+});
+
+Deno.test({
+  name: "a guest's mint is the device's session while it is a guest; promoted, its cookie takes up nothing",
+  ...opts,
+  async fn() {
+    const minted = await handler(atDoor("/auth/guest", {}, door));
+    const guest = await minted.json();
+    const jar = cookies(minted);
+    const again = await handler(atDoor("/auth/session", {}, door, undefined, jar));
+    const session = await again.json();
+    assertEquals(session.user, { id: guest.user.id, handle: guest.user.handle, guest: true });
+    assertEquals((await verifyJwt(session.token))?.acr, "0");
+    await enroll(await passkey(), guest.token);
+    const promoted = await handler(atDoor("/auth/session", {}, door, undefined, jar));
+    assertEquals(promoted.status, 401);
+    await promoted.body?.cancel();
+  },
+});
+
+Deno.test({
+  name: "a guest takes a provider's subject no account holds, once; one another account holds is taken",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const promoted = await signInAs({ ...alice, sub: "g-promote" }, guest.user.id);
+    // It keeps its id and suffix and takes the provider's name.
+    assertEquals(promoted, { id: guest.user.id, handle: `Alice-${guest.user.handle.slice(-4)}`, name: "Alice", email: "alice@example.test" });
+    // Promoted, the guest's token adds no passkey.
+    const start = await (await handler(atDoor("/auth/register/start", {}, door, guest.token))).json();
+    const res = await handler(
+      atDoor("/auth/register/verify", { state: start.state, response: (await passkey()).register(start.challenge, `https://${door}`) }, door),
+    );
+    assertEquals(res.status, 409);
+    await res.body?.cancel();
+
+    const other = await (await handler(post("/auth/guest", {}))).json();
+    assertEquals(await links.userFor({ ...alice, sub: "g-promote" }, other.user.id), { taken: promoted });
+    assertEquals((await sql`select count(*)::int as n from mecha_auth.identity_link where user_id = ${other.user.id}`)[0].n, 0);
+  },
+});
+
+Deno.test({
+  name: "a name given with the passkey is the handle's, ending in the account's own suffix",
+  ...opts,
+  async fn() {
+    const made = await enroll(await passkey(), undefined, "  Ana  Maria ");
+    assertEquals(made.made.user.handle, `Ana-Maria-${made.made.user.id.replaceAll("-", "").slice(-4)}`);
+    // A guest named so keeps its id and suffix and takes the name.
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const promoted = await enroll(await passkey(), guest.token, "Davi");
+    assertEquals(promoted.made.user, { id: guest.user.id, handle: `Davi-${guest.user.handle.slice(-4)}` });
+    // The passkey is made under the name alone: the authenticator shows it.
+    assertEquals([promoted.start.user.name, promoted.start.user.displayName], ["Davi", "Davi"]);
+    // Nothing of a name left is no name.
+    const empty = await handler(atDoor("/auth/register/start", { name: "🎉 !!" }, door));
+    assertEquals([empty.status, await empty.json()], [400, { error: "a name needs a letter or a digit" }]);
+  },
+});
+
+Deno.test({
+  name: "a rename keeps the suffix and how the session was signed in; a name another account holds is refused",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const before = await verifyJwt(guest.token);
+    const res = await handler(post("/auth/rename", { name: "Mango Lover" }, guest.token));
+    assertEquals(res.status, 200);
+    const renamed = await res.json();
+    const suffix = guest.user.handle.slice(-4);
+    assertEquals(renamed.user, { id: guest.user.id, handle: `Mango-Lover-${suffix}`, guest: true });
+    const after = await verifyJwt(renamed.token);
+    // Renaming renews nothing: the session ends when it was going to.
+    assertEquals([after?.handle, after?.acr, after?.auth_time, after?.exp], [`Mango-Lover-${suffix}`, before?.acr, before?.auth_time, before?.exp]);
+    assertEquals((await sql`select handle from app_user where id = ${guest.user.id}`)[0].handle, `Mango-Lover-${suffix}`);
+    // Only an account with the same suffix can collide, and then it is said.
+    await sql`insert into app_user (id, handle) values (gen_random_uuid(), ${`Taken-${suffix}`})`;
+    const taken = await handler(post("/auth/rename", { name: "Taken" }, renamed.token));
+    assertEquals([taken.status, await taken.json()], [409, { error: "name taken" }]);
+    const blank = await handler(post("/auth/rename", { name: "  " }, renamed.token));
+    assertEquals(blank.status, 400);
+    await blank.body?.cancel();
+    const nobody = await handler(post("/auth/rename", { name: "X" }));
+    assertEquals(nobody.status, 401);
+    await nobody.body?.cancel();
+  },
+});
+
+Deno.test({
+  name: "a guest's token outlives its promotion and renames nothing: it is no way into the account it became",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const promoted = await enroll(await passkey(), guest.token, "Davi");
+    const res = await handler(post("/auth/rename", { name: "Mallory" }, guest.token));
+    assertEquals([res.status, await res.json()], [409, { error: "already an account" }]);
+    assertEquals((await sql`select handle from app_user where id = ${guest.user.id}`)[0].handle, promoted.made.user.handle);
+  },
+});
+
+Deno.test({
+  name: "a provider's first name names a new account, and the guest it promotes",
+  ...opts,
+  async fn() {
+    const made = await signInAs({ ...alice, sub: "g-named", given: "Alice", name: "Alice Liddell" });
+    assertEquals(made.handle, `Alice-${made.id.replaceAll("-", "").slice(-4)}`);
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const promoted = await signInAs({ ...alice, sub: "g-named-guest", given: null, name: "Bea Lima" }, guest.user.id);
+    assertEquals(promoted.handle, `Bea-Lima-${guest.user.handle.slice(-4)}`);
+    // Signing in again leaves the name the person chose since.
+    await handler(post("/auth/rename", { name: "Bia" }, await accountToken(promoted.id, promoted.handle)));
+    assertEquals((await signInAs({ ...alice, sub: "g-named-guest", given: null, name: "Bea Lima" })).handle, `Bia-${guest.user.handle.slice(-4)}`);
+    // An account a provider made under a drawn name takes the provider's on
+    // its next session, and keeps one it was renamed to.
+    const drawn = (await (await handler(post("/auth/guest", {}))).json()).user;
+    await sql`insert into mecha_auth.identity_link (provider, issuer, sub, user_id, name) values ('google', ${alice.issuer}, 'g-drawn', ${drawn.id}, 'Caio Prado')`;
+    assertEquals((await links.handleOf("google", alice.issuer, drawn.id))?.handle, `Caio-Prado-${drawn.handle.slice(-4)}`);
+  },
+});
+
+// Regression: two promotions racing on one guest token both found it without
+// a passkey, and the guest ended with two ways in.
+Deno.test({
+  name: "a guest's racing promotions make one passkey",
+  ...opts,
+  async fn() {
+    const guest = await (await handler(post("/auth/guest", {}))).json();
+    const starts = await Promise.all([0, 1].map(async () => await (await handler(atDoor("/auth/register/start", {}, door, guest.token))).json()));
+    const keys = await Promise.all(starts.map(() => passkey()));
+    const results = await Promise.all(starts.map((start, i) =>
+      handler(atDoor("/auth/register/verify", { state: start.state, response: keys[i].register(start.challenge, `https://${door}`) }, door))
+    ));
+    assertEquals(results.map((r) => r.status).sort(), [200, 409]);
+    assertEquals(await sql`select count(*)::int as n from mecha_auth.webauthn_credential where user_id = ${guest.user.id}`.then((r) => r[0].n), 1);
+  },
+});
 
 Deno.test({
   name: "a passkey made at the dev door registers and signs in, whatever port the host gave the door",
@@ -928,7 +1247,6 @@ Deno.test({
     // The door publishes on an ephemeral port while the expected origin named
     // 8443, so every ceremony on a cluster launched without the port pinned
     // failed its origin check.
-    const door = "localhost:54321";
     const key = await passkey();
     const reg = await (await handler(atDoor("/auth/register/start", {}, door))).json();
     const made = await handler(
@@ -1020,7 +1338,12 @@ Deno.test("a configured origin is exact, and only localhost stands for the dev d
   assert(ceremonyOrigin("https://localhost:*", null).endsWith("*"));
 });
 
-const alice = {
+/** A provider's sign-in, hinted at a guest or not. */
+const signInAs = (p: Profile, guest: string | null = null) => links.userFor(p, guest) as Promise<User>;
+
+const alice: Profile = {
+  proof: { auth_time: Math.floor(Date.now() / 1000) },
+  given: null,
   provider: "google",
   issuer: "https://accounts.google.com",
   sub: "g-alice",
@@ -1037,14 +1360,14 @@ Deno.test({
     // before the others have connected, and nothing races.
     await Promise.all(Array.from({ length: 8 }, () => sql`select pg_sleep(0.05)`));
     for (const sub of ["g-race-1", "g-race-2", "g-race-3"]) {
-      const racers = await Promise.all(Array.from({ length: 8 }, () => links.userFor({ ...alice, sub })));
+      const racers = await Promise.all(Array.from({ length: 8 }, () => signInAs({ ...alice, sub })));
       assertEquals(new Set(racers.map((u) => u.id)).size, 1, sub);
     }
-    const users = [await links.userFor(alice)];
+    const users = [await signInAs(alice)];
     const [link] = await sql`select user_id, email from mecha_auth.identity_link where provider = 'google' and sub = 'g-alice'`;
     assertEquals(link.user_id, users[0].id);
     assertEquals(link.email, "alice@example.test");
-    await links.userFor({ ...alice, name: "Alice B.", email: "alice.b@example.test" });
+    await signInAs({ ...alice, name: "Alice B.", email: "alice.b@example.test" });
     assertEquals((await sql`select name, email from mecha_auth.identity_link where sub = 'g-alice'`)[0], {
       name: "Alice B.",
       email: "alice.b@example.test",
@@ -1054,7 +1377,7 @@ Deno.test({
       name: "Alice B.",
       email: "alice.b@example.test",
     });
-    const token = await issueUserToken(users[0].id, users[0].handle, false, { name: "Alice B.", email: "alice.b@example.test" });
+    const token = await accountToken(users[0].id, users[0].handle, { name: "Alice B.", email: "alice.b@example.test" });
     const who = await handler(new Request("http://auth:9999/auth/whoami", { headers: { authorization: `Bearer ${token}` } }));
     assertEquals(who.status, 200);
     assertEquals(await who.json(), { id: users[0].id, handle: users[0].handle, name: "Alice B.", email: "alice.b@example.test" });
@@ -1067,7 +1390,7 @@ Deno.test({
   fn: async () => {
     const guest = (await (await handler(post("/auth/guest", {}))).json()).user;
     assertEquals(await links.handleOf("google", alice.issuer, guest.id), null);
-    const u = await links.userFor({ ...alice, sub: "g-revoked" });
+    const u = await signInAs({ ...alice, sub: "g-revoked" });
     await sql`delete from mecha_auth.identity_link where sub = 'g-revoked'`;
     assertEquals(await links.handleOf("google", alice.issuer, u.id), null);
   },
@@ -1090,8 +1413,8 @@ Deno.test({
     await sql`alter table identity_link add column issuer text`;
     await sql`update identity_link set issuer = ${alice.issuer}`;
     await migrate();
-    assertEquals((await links.userFor({ ...alice, sub: "pairwise-1", name: null, picture: null, email: null })).id, guest.id);
-    const replacement = await links.userFor({ ...alice, issuer: "https://broker.test", sub: "pairwise-1" });
+    assertEquals((await signInAs({ ...alice, sub: "pairwise-1", name: null, picture: null, email: null })).id, guest.id);
+    const replacement = await signInAs({ ...alice, issuer: "https://broker.test", sub: "pairwise-1" });
     assert(replacement.id !== guest.id);
     assertEquals(await links.handleOf("google", "https://broker.test", guest.id), null);
     assertEquals(await links.handleOf("google", alice.issuer, guest.id), { handle: guest.handle, name: null, email: null });
@@ -1105,7 +1428,7 @@ Deno.test({
   name: "no app grant reaches the links or the passkeys",
   ...opts,
   fn: async () => {
-    const owner = await links.userFor({ ...alice, sub: "g-closed" });
+    const owner = await signInAs({ ...alice, sub: "g-closed" });
     const rollback = new Error("rolled back");
     const tried = await sql.begin(async (tx) => {
       await tx`DO $$ BEGIN
@@ -1137,7 +1460,7 @@ Deno.test({
       ["identity_link", "v", ["security_invoker=true"]],
       ["webauthn_credential", "v", ["security_invoker=true"]],
     ]);
-    assertEquals((await links.userFor({ ...alice, sub: "g-closed", name: "Still Alice" })).id, owner.id);
+    assertEquals((await signInAs({ ...alice, sub: "g-closed", name: "Still Alice" })).id, owner.id);
   },
 });
 
@@ -1149,7 +1472,7 @@ Deno.test({
   name: "tables an earlier release made in public move with their rows and none of public's grants",
   ...opts,
   fn: async () => {
-    const owner = await links.userFor({ ...alice, sub: "g-moved" });
+    const owner = await signInAs({ ...alice, sub: "g-moved" });
     await sql`insert into mecha_auth.webauthn_credential (id, user_id, public_key) values ('moved', ${owner.id}, '\\x01')`;
     for (const table of ["webauthn_credential", "identity_link"]) {
       await sql.unsafe(`drop view public.${table}`);
@@ -1172,7 +1495,7 @@ Deno.test({
 
     }
     assertEquals((await sql`select user_id from mecha_auth.webauthn_credential where id = 'moved'`)[0].user_id, owner.id);
-    assertEquals((await links.userFor({ ...alice, sub: "g-moved" })).id, owner.id);
+    assertEquals((await signInAs({ ...alice, sub: "g-moved" })).id, owner.id);
     await sql`insert into webauthn_credential (id, user_id, public_key) values ('through-view', ${owner.id}, '\\x02')`;
     assertEquals((await sql`select count(*)::int as n from mecha_auth.webauthn_credential where id = 'through-view'`)[0].n, 1);
     await assertRejects(() => sql`ALTER TABLE identity_link ADD COLUMN IF NOT EXISTS issuer text`, Error, "cannot be performed on relation");
@@ -1233,7 +1556,7 @@ Deno.test({
     assertEquals(badReg.status, 401);
 
     const made = await androidServe(
-      post("/auth/register/verify", { state: reg.state, response: key.register(reg.challenge, apkOrigin) }),
+      post("/auth/register/verify", { state: reg.state, response: key.register(reg.challenge, apkOrigin), refresh: true }),
     );
     assertEquals(made.status, 200, await made.clone().text());
     const registered = await made.json();
@@ -1246,7 +1569,7 @@ Deno.test({
     assertEquals(badLogin.status, 401);
 
     const signed = await androidServe(
-      post("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, apkOrigin) }),
+      post("/auth/login/verify", { state: login.state, response: await key.login(login.challenge, apkOrigin), refresh: true }),
     );
     assertEquals(signed.status, 200, await signed.clone().text());
     const loggedIn = await signed.json();
@@ -1263,7 +1586,9 @@ Deno.test({
     assertEquals((await handler(post("/auth/refresh", { refresh_token: "unknown-token" }))).status, 401);
 
     // Guest session mints an opaque refresh_token stored hashed in mecha_auth.auth_refresh_token.
-    const guest1 = await (await handler(post("/auth/guest", {}))).json();
+    // A browser renews by its cookie and is given no refresh token; a native host asks.
+    assertEquals((await (await handler(post("/auth/guest", {}))).json()).refresh_token, undefined);
+    const guest1 = await (await handler(post("/auth/guest", { refresh: true }))).json();
     assertEquals(typeof guest1.refresh_token, "string");
     const hash1 = await sha256url(guest1.refresh_token);
     const [stored1] = await sql`select family_id, expires_at, replaced_by, revoked_at
@@ -1274,12 +1599,15 @@ Deno.test({
     const ttlSeconds = Math.round((new Date(stored1.expires_at as Date).getTime() - Date.now()) / 1000);
     assert(Math.abs(ttlSeconds - REFRESH_TOKEN_TTL_S) < 120, `expected ~90d TTL, got ${ttlSeconds}s`);
 
-    // Rotating a guest refresh token preserves guest: true and user.id.
+    // Rotating a guest refresh token keeps the user and how it signed in: a
+    // renewal is no new sign-in.
     const rot1Res = await handler(post("/auth/refresh", { refresh_token: guest1.refresh_token }));
     assertEquals(rot1Res.status, 200);
     const rot1 = await rot1Res.json();
     assertEquals(rot1.user, guest1.user);
-    assertEquals((await verifyJwt(rot1.token))?.guest, true);
+    const [first, renewed] = [await verifyJwt(guest1.token), await verifyJwt(rot1.token)];
+    assertEquals(renewed?.acr, "0");
+    assertEquals(renewed?.auth_time, first?.auth_time);
     assert(rot1.refresh_token !== guest1.refresh_token);
 
     // Rotating a second time advances the chain inside the same family.
@@ -1299,7 +1627,7 @@ Deno.test({
     assertEquals(family[0].revoked, 3);
 
     // Expired refresh token is refused.
-    const guest2 = await (await handler(post("/auth/guest", {}))).json();
+    const guest2 = await (await handler(post("/auth/guest", { refresh: true }))).json();
     await sql`update mecha_auth.auth_refresh_token set expires_at = now() - interval '1 second'
       where token_hash = ${await sha256url(guest2.refresh_token)}`;
     assertEquals((await handler(post("/auth/refresh", { refresh_token: guest2.refresh_token }))).status, 401);
@@ -1307,7 +1635,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "native OIDC PKCE ticket flow, guest-to-OIDC promotion, account merge, and DELETE /auth/account",
+  name: "native OIDC PKCE ticket flow, guest-to-OIDC promotion, a second guest held and never merged, and DELETE /auth/account",
   ...opts,
   async fn() {
     await sql`CREATE TABLE IF NOT EXISTS owned_deck (
@@ -1407,7 +1735,8 @@ Deno.test({
       return { ticket: loc.searchParams.get("ticket")!, verifier };
     };
 
-    // 1. Guest promotes onto an unlinked OIDC identity: keeps guest UUID, handle, and all owned rows.
+    // 1. Guest promotes onto an unlinked OIDC identity: keeps guest UUID and all owned rows, and takes
+    //    the provider's name, as a browser's guest does.
     const guestA = await (await serve(post("/auth/guest", {}))).json();
     await sql`insert into owned_deck (owner, title) values (${guestA.user.id}, 'Birds of Brazil')`;
     await sql`insert into owned_fav (user_id, slug) values (${guestA.user.id}, 'deck-shared'), (${guestA.user.id}, 'deck-a')`;
@@ -1424,11 +1753,11 @@ Deno.test({
     const sessionA = await redeemed1.json();
     assertEquals(sessionA.user, {
       id: guestA.user.id,
-      handle: guestA.user.handle,
+      handle: nameHandle("Native Alice", guestA.user.id),
       name: "Native Alice",
       email: "native.alice@example.test",
     });
-    assertEquals((await verifyJwt(sessionA.token))?.guest, false);
+    assert((await verifyJwt(sessionA.token))?.acr !== "0", "a promoted guest's session is no guest's");
     assertEquals(typeof sessionA.refresh_token, "string");
     // Ticket row was atomically deleted on consumption; replay fails.
     assertEquals((await sql`select count(*)::int as n from mecha_auth.auth_native_ticket where id = ${flow1.ticket}`)[0].n, 0);
@@ -1444,37 +1773,44 @@ Deno.test({
     // Refreshing an OIDC-promoted account preserves non-guest claims and profile fields.
     const refreshedA = await (await serve(post("/auth/refresh", { refresh_token: sessionA.refresh_token }))).json();
     assertEquals(refreshedA.user, sessionA.user);
-    assertEquals((await verifyJwt(refreshedA.token))?.guest, false);
+    assert((await verifyJwt(refreshedA.token))?.acr !== "0", "its renewal neither");
     assertEquals((await verifyJwt(refreshedA.token))?.email, "native.alice@example.test");
 
-    // Stale guestA token can no longer promote via OIDC or passkey.
-    const staleOidc = await serve(
-      new Request(`https://localhost:54321/auth/oidc/google/start?return=native&code_challenge=${await sha256url(randomToken(32))}`, {
-        headers: { authorization: `Bearer ${guestA.token}` },
-      }),
-    );
-    assertEquals(staleOidc.status, 409);
+    // guestA's token outlived its promotion: it is no way into the account it became, so it
+    // deletes nothing.
+    const staleDelete = await serve(new Request("https://localhost:54321/auth/account", {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${guestA.token}` },
+    }));
+    assertEquals(staleDelete.status, 409);
+    assertEquals((await sql`select count(*)::int as n from app_user where id = ${guestA.user.id}`)[0].n, 1);
 
-    // 2. Second guest promotes into the SAME existing OIDC identity: owned rows merge into guestA.user.id,
-    //    unique favorite collisions drop cleanly, and the transient guest row is removed.
+    // 2. A second guest signing in to the subject guestA's account holds is login_required, as in a browser:
+    //    nothing moves between them, and switching is the ticket the refusal hands back.
     const guestB = await (await serve(post("/auth/guest", {}))).json();
     await sql`insert into owned_deck (owner, title) values (${guestB.user.id}, 'Offline Trees')`;
     await sql`insert into owned_fav (user_id, slug) values (${guestB.user.id}, 'deck-shared'), (${guestB.user.id}, 'deck-b')`;
 
     const flow2 = await nativeSignIn("", { authorization: `Bearer ${guestB.token}` });
-    const sessionB = await (await serve(
-      new Request("https://localhost:54321/auth/oidc/session", {
+    const redeem = (ticket: string, verifier: string) =>
+      serve(new Request("https://localhost:54321/auth/oidc/session", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ticket: flow2.ticket, code_verifier: flow2.verifier }),
-      }),
-    )).json();
-    assertEquals(sessionB.user.id, guestA.user.id);
-    assertEquals((await sql`select count(*)::int as n from app_user where id = ${guestB.user.id}`)[0].n, 0);
-    const decks = await sql`select title from owned_deck where owner = ${guestA.user.id} order by 1`;
-    assertEquals(decks.map((d) => d.title), ["Birds of Brazil", "Offline Trees"]);
+        body: JSON.stringify({ ticket, code_verifier: verifier }),
+      }));
+    const heldRes = await redeem(flow2.ticket, flow2.verifier);
+    assertEquals(heldRes.status, 409);
+    const held = await heldRes.json();
+    assertEquals(held.error, "login_required");
+    assertEquals(held.user.handle, sessionA.user.handle);
+    const titles = async (owner: string) => (await sql`select title from owned_deck where owner = ${owner} order by 1`).map((d) => d.title);
+    assertEquals(await titles(guestA.user.id), ["Birds of Brazil"]);
+    assertEquals(await titles(guestB.user.id), ["Offline Trees"]);
     const favs = await sql`select slug from owned_fav where user_id = ${guestA.user.id} order by 1`;
-    assertEquals(favs.map((f) => f.slug), ["deck-a", "deck-b", "deck-shared"]);
+    assertEquals(favs.map((f) => f.slug), ["deck-a", "deck-shared"]);
+    const switched = await (await redeem(held.ticket, flow2.verifier)).json();
+    assertEquals(switched.user.id, guestA.user.id);
+    assertEquals((await sql`select count(*)::int as n from app_user where id = ${guestB.user.id}`)[0].n, 1);
 
     // 3. Wrong code_verifier and expired ticket in Postgres are both refused with 401.
     currentSub = "oidc-native-2";
@@ -1528,15 +1864,15 @@ Deno.test({
     assertEquals((await sql`select count(*)::int as n from owned_fav where user_id = ${guestA.user.id}`)[0].n, 0);
     assertEquals((await serve(post("/auth/refresh", { refresh_token: refreshedA.refresh_token }))).status, 401);
 
-    // New auth tables and adopt_guest function are sealed in mecha_auth and exempt in rls_exempt.
+    // New auth tables are sealed in mecha_auth and exempt in rls_exempt; nothing merges a guest.
     for (const rel of ["mecha_auth.auth_native_ticket", "mecha_auth.auth_refresh_token"]) {
       const [acl] = await sql`select has_table_privilege('app_user', ${rel}, 'select, insert, update, delete') as granted,
         exists (select 1 from mecha.rls_exempt where table_name = ${rel}) as exempt`;
       assertEquals(acl.granted, false, rel);
       assertEquals(acl.exempt, true, rel);
     }
-    const [fnAcl] = await sql`select has_function_privilege('app_user', 'mecha_auth.adopt_guest(uuid, uuid)', 'execute') as exec`;
-    assertEquals(fnAcl.exec, false);
+    const [merge] = await sql`select to_regprocedure('mecha_auth.adopt_guest(uuid, uuid)') is null as gone`;
+    assertEquals(merge.gone, true);
 
     await sql`DROP TABLE owned_fav, owned_deck`;
   },
@@ -1544,6 +1880,95 @@ Deno.test({
 
 // Last, and it has to be: Deno runs tests in source order, and this closes the
 // pool every test above it queries through.
+Deno.test({
+  name: "a page elsewhere may mint a guest for its own token, never this browser's session",
+  ...opts,
+  async fn() {
+    const foreign = await handler(atDoor("/auth/guest", {}, door, undefined, undefined, "https://evil.test"));
+    assertEquals(foreign.status, 200);
+    assertEquals(typeof (await foreign.json()).token, "string");
+    assertEquals(foreign.headers.getSetCookie(), []);
+    const own = await handler(atDoor("/auth/guest", {}, door, undefined, undefined, `https://${door}`));
+    assert(cookies(own)[SESSION_COOKIE], "the door's own page is given the device's session");
+    // Minted ahead of the reader, it waits to be adopted: a sign-in finished meanwhile keeps the device.
+    const ahead = await handler(atDoor("/auth/guest", { cookie: false }, door, undefined, undefined, `https://${door}`));
+    assertEquals(ahead.headers.getSetCookie(), []);
+    const kept = await ahead.json();
+    const adopted = await handler(atDoor("/auth/session/adopt", {}, door, kept.token, undefined, `https://${door}`));
+    assertEquals([adopted.status, Boolean(cookies(adopted)[SESSION_COOKIE])], [200, true]);
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, kept.token, cookies(adopted), `https://${door}`))).status, 409);
+  },
+});
+
+Deno.test({
+  name: "a registration's answer makes one account, once, even after that account is deleted",
+  ...opts,
+  async fn() {
+    const key = await passkey();
+    const start = await (await handler(atDoor("/auth/register/start", {}, door))).json();
+    const answer = { state: start.state, response: key.register(start.challenge, `https://${door}`) };
+    const made = await (await handler(atDoor("/auth/register/verify", answer, door))).json();
+    const gone = await handler(new Request("http://auth:9999/auth/account", { method: "DELETE", headers: { authorization: `Bearer ${made.token}` } }));
+    assertEquals(gone.status, 200);
+    assertEquals((await handler(atDoor("/auth/register/verify", answer, door))).status, 401);
+    assertEquals((await sql`select count(*)::int as n from app_user where id = ${made.user.id}`)[0].n, 0);
+  },
+});
+
+Deno.test({
+  name: "a native host's refresh family renews only while the passkey it signed in with is the account's",
+  ...opts,
+  async fn() {
+    const key = await passkey();
+    const start = await (await handler(atDoor("/auth/register/start", {}, door))).json();
+    const made = await (await handler(
+      atDoor("/auth/register/verify", { state: start.state, response: key.register(start.challenge, `https://${door}`), refresh: true }, door),
+    )).json();
+    const renewed = await (await handler(post("/auth/refresh", { refresh_token: made.refresh_token }))).json();
+    assertEquals(renewed.user.id, made.user.id);
+    await sql`delete from mecha_auth.webauthn_credential where user_id = ${made.user.id}`;
+    assertEquals((await handler(post("/auth/refresh", { refresh_token: renewed.refresh_token }))).status, 401);
+  },
+});
+
+Deno.test({
+  name: "a counter that climbed is not reset by a zero: 0 follows only 0",
+  ...opts,
+  async fn() {
+    const owner = await enroll(await passkey());
+    const answer = async (counter: number) => {
+      const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+      return await handler(atDoor("/auth/login/verify", { state: login.state, response: await owner.key.login(login.challenge, `https://${door}`, { counter }) }, door));
+    };
+    assertEquals((await answer(5)).status, 200);
+    assertEquals((await answer(0)).status, 401);
+    assertEquals((await answer(6)).status, 200);
+  },
+});
+
+Deno.test({
+  name: "a guest a tab kept from before sessions said how they were signed in becomes this device's session, once",
+  ...opts,
+  async fn() {
+    const id = crypto.randomUUID();
+    await sql`insert into app_user (id, handle) values (${id}, ${`fig-ibis-${id.slice(-4)}`})`;
+    const legacy = await signJwt({ iss: "mecha:stack", role: "app_user", sub: id, handle: `fig-ibis-${id.slice(-4)}`, guest: true, exp: Math.floor(Date.now() / 1000) + 600 });
+    const up = await handler(atDoor("/auth/session/adopt", {}, door, legacy));
+    assertEquals(up.status, 200, await up.clone().text());
+    const body = await up.json();
+    assertEquals([body.user.id, body.user.guest, (await verifyJwt(body.token))?.acr], [id, true, "0"]);
+    const jar = cookies(up);
+    assert(jar[SESSION_COOKIE]);
+    // Once: a browser holding a session takes up no earlier guest over it.
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, legacy, jar))).status, 409);
+    // And only a guest's: an account's session is no such token.
+    const key = await passkey();
+    const person = (await enroll(key)).made;
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, person.token))).status, 400);
+  },
+});
+
+
 Deno.test({
   name: "teardown",
   ...opts,

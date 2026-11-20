@@ -15,9 +15,11 @@ async function output(cmd: string, args: string[], env?: Record<string, string>)
 
 const { wrangler, env } = await wranglerTools()
 // A Worker here bundles mecha's edge sources, whose clock reads cron through
-// the ticker's node_modules (services/ticker/deno.json): wrangler's bundler
-// resolves no npm: specifier, and the release's edge.ts installs it the same way.
+// the ticker's node_modules (services/ticker/deno.json) and whose auth routes
+// reach WebAuthn through auth's: wrangler's bundler resolves no npm: specifier,
+// and the release's edge.ts installs them the same way.
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/ticker/deno.json`])
+await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/auth/deno.json`])
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../../services/airlock/deno.json`])
 await output(Deno.execPath(), ['install', '--frozen', '--config', `${here}../mecha-edge/deno.json`], { DENO_NO_PACKAGE_JSON: '1' })
 

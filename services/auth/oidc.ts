@@ -2,28 +2,36 @@
 // PKCE, by redirect, so no provider script runs in any page the door serves and
 // the terminal's CSP is untouched. The service is the client, found by the
 // provider's discovery document: Google by default, or any issuer a deployment
-// names in its place.
+// names in its place. A state JWT and a cookie holding the PKCE verifier tie
+// the callback to the browser that started it, and the code is redeemed by
+// this service alone. A signed-in person is an app_user linked to the
+// provider's subject (identity_link), and the session is the one a passkey
+// mints. A guest signs in with its token as `id_token_hint`: a subject no
+// account holds becomes the guest's, and one another account holds is OpenID
+// Connect's `login_required`, held for the reader to take or leave — never a
+// merge. A redirect cannot write the page's storage, so the callback leaves
+// the device's session, or the account held, in session.ts's cookies.
 //
-// Browser sessions bind the callback with a PKCE cookie and leave an HttpOnly
-// session cookie redeemed at /auth/oidc/session. Native hosts (?return=native),
-// whose auth sheet shares no cookie jar with the app's HTTP client, send their
-// own PKCE S256 challenge at /start, receive a 60-second single-use ticket on
-// <scheme>://auth/callback, and redeem { ticket, code_verifier } at
-// /auth/oidc/session. An unlinked guest session passed on /start promotes in
-// place onto a new link or merges its owned rows into an existing linked user.
+// Native hosts (?return=native), whose auth sheet shares no cookie jar with
+// the app's HTTP client, send their own PKCE S256 challenge at /start, receive
+// a 60-second single-use ticket on <scheme>://auth/callback, and redeem
+// { ticket, code_verifier } at /auth/oidc/session. A guest's token passed on a
+// native start is the browser's id_token_hint: a subject no account holds
+// becomes the guest's, and one another account holds is login_required, its
+// ticket held, so redeeming it answers the account and a ticket that switches
+// to it — never a merge, on a page or in an app.
 //
 // Pure but for what Config hands it — the origin, the links, the tickets, the
 // network — so oidc_test.ts drives every refusal against a provider of its own.
-import { decodeBase64Url, encodeBase64Url, randomToken, sha256url, signJwt, verifyJwt } from "./jwt.ts";
+import { isGuest, providerProof, type Proof } from "./claims.ts";
+import { decodeBase64Url, encodeBase64Url, isSession, randomToken, sha256url, signJwt, verifyJwt } from "./jwt.ts";
+import { cookieOf, type Device, type Way } from "./session.ts";
 export { sha256url };
 
 export const PREFIX = "/auth/oidc";
-export const SESSION_COOKIE = "mecha_oidc";
 export const STATE_COOKIE = "mecha_oidc_state";
-export const HINT_COOKIE = "mecha_oidc_hint";
-export const NATIVE_TICKET_TTL_S = 60;
 const STATE_TTL_S = 600;
-const COOKIE_TTL_S = 30 * 24 * 3600;
+export const NATIVE_TICKET_TTL_S = 60;
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 /** The client id that stands for the door a request came through. */
@@ -146,16 +154,25 @@ export function keySource(fetcher: typeof fetch = fetch): (jwks: string, kid: st
   };
 }
 
-export type Profile = { provider: string; issuer: string; sub: string; name: string | null; picture: string | null; email: string | null };
+/** A provider's subject and what it says of the person: `given` is the first
+ * name (OpenID Connect's given_name), `name` the whole one. */
+export type Profile = {
+  provider: string;
+  issuer: string;
+  sub: string;
+  given: string | null;
+  name: string | null;
+  picture: string | null;
+  email: string | null;
+  proof: Proof;
+};
 /** The person as the app shows them: the handle always, the link's name and
  * email while a provider vouches for them. */
 export type User = { id: string; handle: string; name?: string | null; email?: string | null };
 
-export class PromoteError extends Error {
-  constructor(readonly status: 401 | 409, message: string) {
-    super(message);
-  }
-}
+/** What a sign-in hinted at a guest finds: the guest itself, now holding the
+ * subject, or the account that already does. */
+export type Found = User | { taken: User };
 
 export type NativeTicket = {
   id: string;
@@ -163,34 +180,28 @@ export type NativeTicket = {
   provider: string;
   issuer: string;
   codeChallenge: string;
+  proof: Proof;
+  /** An account another holds, found for a guest: redeemed, it is offered. */
+  held: boolean;
   ttlSeconds: number;
 };
 
-export type ConsumedTicket = {
-  userId: string;
-  provider: string;
-  issuer: string;
-  codeChallenge: string;
-};
+export type ConsumedTicket = Omit<NativeTicket, "id" | "ttlSeconds">;
 
 export interface Tickets {
   issue(ticket: NativeTicket): Promise<void>;
   consume(id: string): Promise<ConsumedTicket | null>;
 }
 
-export type IssuedSession = string | { token: string; refresh_token?: string };
-
-/** What the service needs of Postgres. */
 export interface Links {
-  /** The user linked to this subject, made with its link when there is none;
-   * when `promoteUserId` names an unlinked guest, promotes that guest onto a
-   * fresh link or merges its owned rows into an existing linked user. */
-  userFor(p: Profile, promoteUserId?: string | null): Promise<User>;
+  /** The user linked to this subject, the link's name and picture refreshed.
+   * With none, the subject is linked to `guest` while it is still a guest —
+   * no passkey, no link — and otherwise to an account made for it. A subject
+   * another account holds is `taken` when a guest was hinted. */
+  userFor(p: Profile, guest: string | null): Promise<Found>;
   /** The user, with the link's name and email, while a link of `provider`
    * still names them. */
   handleOf(provider: string, issuer: string, id: string): Promise<Omit<User, "id"> | null>;
-  /** Checks whether `userId` is an existing unlinked guest `app_user`. */
-  canPromote?(userId: string): Promise<"ok" | "already_account" | "absent">;
 }
 
 export type Config = {
@@ -199,17 +210,33 @@ export type Config = {
   origin: (req: Request) => string;
   providers: Record<string, Provider>;
   links: Links;
-  issue: (user: User) => Promise<IssuedSession>;
+  device: Device;
+  /** A native host's session, with the refresh token it renews by while `way` stands. */
+  issue?: (user: User, proof: Proof, way: Way) => Promise<{ token: string; refresh_token: string }>;
   nativeSchemes?: readonly string[];
   tickets?: Tickets;
   fetcher?: typeof fetch;
 };
+
+/** A provider's way while it still signs `sub` in: the provider enabled
+ * under the same issuer, so a replacement cannot inherit the previous
+ * issuer's sessions, and the link still there, so one removed is a sign-in
+ * revoked. */
+export function providerStill(providers: Record<string, Provider>, links: Links) {
+  return async (way: Extract<Way, { kind: "provider" }>, sub: string): Promise<User | null> => {
+    if (!Object.hasOwn(providers, way.provider) || providers[way.provider].issuer !== way.issuer) return null;
+    const who = await links.handleOf(way.provider, way.issuer, sub);
+    return who === null ? null : { id: sub, ...who };
+  };
+}
 
 const dec = new TextDecoder();
 const enc = new TextEncoder();
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const random = (bytes: number) => randomToken(bytes);
 
+// A native start has no cookie to keep its PKCE verifier in, so the state the
+// provider sees carries it sealed.
 const sealKeys = new Map<string, Promise<CryptoKey>>();
 function sealKey(secret: string): Promise<CryptoKey> {
   let k = sealKeys.get(secret);
@@ -287,10 +314,11 @@ export async function verifyIdToken(
   if (p.nonce === "" || c.nonce !== p.nonce) return null;
   if (typeof c.sub !== "string" || c.sub === "" || c.sub.length > 255) return null;
   const name = typeof c.name === "string" && c.name.trim() !== "" ? c.name.trim().slice(0, 120) : null;
+  const given = typeof c.given_name === "string" && c.given_name.trim() !== "" ? c.given_name.trim().slice(0, 120) : null;
   const picture = typeof c.picture === "string" && c.picture.startsWith("https://") ? c.picture : null;
   // An address the provider has not verified is nobody's to prefill.
   const email = typeof c.email === "string" && c.email_verified === true && c.email.includes("@") ? c.email.trim().toLowerCase().slice(0, 254) : null;
-  return { provider, issuer: p.issuer, sub: c.sub, name, picture, email };
+  return { provider, issuer: p.issuer, sub: c.sub, given, name, picture, email, proof: providerProof(c, Math.floor(Date.now() / 1000)) };
 }
 
 /** A same-origin path to come back to, or the root: never another origin, and
@@ -299,14 +327,6 @@ export function safeReturn(raw: string | null): string {
   if (raw === null || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\") || raw.startsWith("/auth/")) return "/";
   if ([...raw].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f)) return "/";
   return raw;
-}
-
-function cookieOf(req: Request, name: string): string | null {
-  for (const part of (req.headers.get("cookie") ?? "").split(";")) {
-    const [k, ...v] = part.trim().split("=");
-    if (k === name) return v.join("=");
-  }
-  return null;
 }
 
 const redirect = (to: string, cookies: string[]) => {
@@ -336,13 +356,29 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
   // top-level GET.
   const stateCookie = (origin: string, name: string, value: string, age: number) =>
     `${STATE_COOKIE}=${value}; Path=${PREFIX}/${name}/callback; HttpOnly; SameSite=Lax${secure(origin)}; Max-Age=${age}`;
-  const sessionBody = async (user: User) => {
-    const issued = await cfg.issue(user);
-    return typeof issued === "string"
-      ? { token: issued, user }
-      : { token: issued.token, ...(issued.refresh_token ? { refresh_token: issued.refresh_token } : {}), user };
+  // A cross-site POST carries no Lax cookie, and the Origin a browser sends
+  // is checked besides.
+  const foreign = (req: Request) => {
+    const origin = req.headers.get("origin");
+    return origin !== null && origin !== cfg.origin(req);
   };
 
+  /** The guest a POSTed start names by its token, as OpenID Connect's
+   * `id_token_hint`; null with none, "refused" for a token that is no
+   * guest's session. */
+  async function hintedGuest(req: Request): Promise<{ guest: string | null; ret: string | null } | "refused"> {
+    if (req.method === "GET") return { guest: null, ret: new URL(req.url).searchParams.get("return") };
+    const form = await req.formData();
+    const ret = form.get("return");
+    const hint = form.get("id_token_hint");
+    if (hint === null) return { guest: null, ret: typeof ret === "string" ? ret : null };
+    const claims = typeof hint === "string" ? await verifyJwt(cfg.secret, hint) : null;
+    if (!isSession(claims) || !isGuest(claims)) return "refused";
+    return { guest: claims.sub, ret: typeof ret === "string" ? ret : null };
+  }
+
+  /** The guest a native start promotes, by a bearer header or `promote_token`;
+   * undefined with neither. */
   async function promoteSubject(req: Request, q: URLSearchParams): Promise<string | Response | undefined> {
     const auth = req.headers.get("authorization");
     let headerToken: string | null = null;
@@ -358,65 +394,44 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     const raw = headerToken ?? queryToken;
     if (raw === null) return undefined;
     const claims = await verifyJwt(cfg.secret, raw);
-    if (!claims || claims.role !== "app_user" || typeof claims.sub !== "string") return refuse(401, "invalid token");
-    if (claims.guest !== true) return refuse(409, "already an account");
-    if (cfg.links.canPromote) {
-      const status = await cfg.links.canPromote(claims.sub);
-      if (status === "absent") return refuse(401, "invalid token");
-      if (status === "already_account") return refuse(409, "already an account");
-    }
+    if (!isSession(claims) || claims.role !== "app_user") return refuse(401, "invalid token");
+    if (!isGuest(claims)) return refuse(409, "already an account");
     return claims.sub;
   }
 
-  async function start(req: Request, name: string): Promise<Response> {
-    const p = cfg.providers[name];
-    const origin = cfg.origin(req);
-    const q = new URL(req.url).searchParams;
+  async function nativeStart(req: Request, name: string, q: URLSearchParams): Promise<Response> {
+    if (!cfg.tickets || !cfg.issue) return refuse(400, "native sign-in is not configured");
     const promote = await promoteSubject(req, q);
     if (promote instanceof Response) return promote;
+    const allowed = cfg.nativeSchemes ?? [];
+    const requestedScheme = q.get("scheme");
+    if (requestedScheme !== null ? !allowed.includes(requestedScheme) : allowed.length === 0) {
+      return refuse(400, "unknown native scheme");
+    }
+    const scheme = requestedScheme ?? allowed[0];
+    const appChallenge = q.get("code_challenge");
+    if (appChallenge === null || !PKCE_CHALLENGE.test(appChallenge)) {
+      return refuse(400, "invalid code_challenge");
+    }
+    const p = cfg.providers[name];
+    const origin = cfg.origin(req);
     const verifier = random(32);
     const nonce = random(16);
     const challenge = await sha256url(verifier);
-    let state: string;
-    let cookies: string[];
-    if (q.get("return") === "native") {
-      if (!cfg.tickets) return refuse(400, "native sign-in is not configured");
-      const allowed = cfg.nativeSchemes ?? [];
-      const requestedScheme = q.get("scheme");
-      if (requestedScheme !== null ? !allowed.includes(requestedScheme) : allowed.length === 0) {
-        return refuse(400, "unknown native scheme");
-      }
-      const scheme = requestedScheme ?? allowed[0];
-      const appChallenge = q.get("code_challenge");
-      if (appChallenge === null || !PKCE_CHALLENGE.test(appChallenge)) {
-        return refuse(400, "invalid code_challenge");
-      }
-      const seal = await sealVerifier(cfg.secret, verifier);
-      state = await signJwt(cfg.secret, {
-        purpose: "oidc",
-        provider: name,
-        issuer: p.issuer,
-        nonce,
-        seal,
-        native: { scheme, challenge: appChallenge },
-        ...(promote ? { promote } : {}),
-        exp: now() + STATE_TTL_S,
-      });
-      cookies = [];
-    } else {
-      const ret = safeReturn(q.get("return"));
-      state = await signJwt(cfg.secret, {
-        purpose: "oidc",
-        provider: name,
-        issuer: p.issuer,
-        nonce,
-        bind: challenge,
-        ret,
-        ...(promote ? { promote } : {}),
-        exp: now() + STATE_TTL_S,
-      });
-      cookies = [stateCookie(origin, name, verifier, STATE_TTL_S)];
-    }
+    const state = await signJwt(cfg.secret, {
+      purpose: "oidc",
+      provider: name,
+      issuer: p.issuer,
+      nonce,
+      seal: await sealVerifier(cfg.secret, verifier),
+      native: { scheme, challenge: appChallenge },
+      ...(promote ? { promote } : {}),
+      exp: now() + STATE_TTL_S,
+    });
+    return redirect(await authorizeUrl(p, origin, name, state, nonce, challenge), []);
+  }
+
+  async function authorizeUrl(p: Provider, origin: string, name: string, state: string, nonce: string, challenge: string) {
     const to = new URL((await endpoints(p)).authorize);
     to.search = new URLSearchParams({
       ...p.params,
@@ -429,7 +444,46 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
       code_challenge: challenge,
       code_challenge_method: "S256",
     }).toString();
-    return redirect(to.toString(), cookies);
+    return to.toString();
+  }
+
+  async function start(req: Request, name: string): Promise<Response> {
+    const q = new URL(req.url).searchParams;
+    if (req.method === "GET" && q.get("return") === "native") return nativeStart(req, name, q);
+    // A guest's start is a POST, so its token leaves no trace in a URL; one
+    // from another origin would give that origin's guest this reader's
+    // subject.
+    if (req.method === "POST" && foreign(req)) return refuse(403, "another origin");
+    const hinted = await hintedGuest(req);
+    if (hinted === "refused") return refuse(400, "id_token_hint is no guest's session");
+    const p = cfg.providers[name];
+    const origin = cfg.origin(req);
+    const verifier = random(32);
+    const nonce = random(16);
+    const challenge = await sha256url(verifier);
+    const ret = safeReturn(hinted.ret);
+    // The verifier stays in this browser's cookie; the state, which the
+    // provider sees, carries only its hash.
+    const state = await signJwt(cfg.secret, {
+      purpose: "oidc",
+      provider: name,
+      issuer: p.issuer,
+      nonce,
+      bind: challenge,
+      ret,
+      ...(hinted.guest === null ? {} : { guest: hinted.guest }),
+      exp: now() + STATE_TTL_S,
+    });
+    const to = await authorizeUrl(p, origin, name, state, nonce, challenge);
+    const cookies = [stateCookie(origin, name, verifier, STATE_TTL_S)];
+    // A guest's start, fetched: a form's redirect to the provider is one a
+    // page's CSP (form-action 'self') refuses, so the page goes there itself.
+    if (req.method === "POST" && (req.headers.get("accept") ?? "").includes("application/json")) {
+      const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
+      for (const c of cookies) headers.append("set-cookie", c);
+      return new Response(JSON.stringify({ to }), { status: 200, headers });
+    }
+    return redirect(to, cookies);
   }
 
   async function callback(req: Request, name: string): Promise<Response> {
@@ -478,101 +532,76 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     if (typeof idToken !== "string") return refuse(401, "no id token");
     const profile = await verifyIdToken(name, idToken, (kid) => keys(ends.jwks, kid), { issuer: p.issuer, issuers: p.issuers, client, nonce: state.nonce });
     if (profile === null) return refuse(401, "id token refused");
-    let user: User;
-    try {
-      user = await cfg.links.userFor(profile, typeof state.promote === "string" ? state.promote : null);
-    } catch (e) {
-      if (e instanceof PromoteError) return refuse(e.status, e.message);
-      throw e;
-    }
     if (native !== null) {
+      const found = await cfg.links.userFor(profile, typeof state.promote === "string" ? state.promote : null);
       const ticket = random(32);
       await cfg.tickets!.issue({
         id: ticket,
-        userId: user.id,
+        userId: "taken" in found ? found.taken.id : found.id,
         provider: name,
         issuer: p.issuer,
         codeChallenge: native.challenge as string,
+        proof: profile.proof,
+        held: "taken" in found,
         ttlSeconds: NATIVE_TICKET_TTL_S,
       });
       return redirect(`${native.scheme as string}://auth/callback?ticket=${encodeURIComponent(ticket)}`, []);
     }
-    const session = await signJwt(cfg.secret, { purpose: "oidc-session", provider: name, issuer: p.issuer, sub: user.id, exp: now() + COOKIE_TTL_S });
-    return redirect(safeReturn(typeof state.ret === "string" ? state.ret : null), [
-      `${SESSION_COOKIE}=${session}; Path=${PREFIX}; HttpOnly; SameSite=Lax${secure(origin)}; Max-Age=${COOKIE_TTL_S}`,
-      `${HINT_COOKIE}=${name}; Path=/; SameSite=Lax${secure(origin)}; Max-Age=${COOKIE_TTL_S}`,
-      stateCookie(origin, name, "", 0),
-    ]);
+    const found = await cfg.links.userFor(profile, typeof state.guest === "string" ? state.guest : null);
+    const back = safeReturn(typeof state.ret === "string" ? state.ret : null);
+    const way: Way = { kind: "provider", provider: name, issuer: p.issuer };
+    // Held, not signed in: the guest stays this device's until the reader
+    // takes the account.
+    const cookies = "taken" in found
+      ? (await cfg.device.held(req, found.taken.id, way, profile.proof)).cookies
+      : await cfg.device.signedIn(req, found.id, way, profile.proof);
+    return redirect(back, [...cookies, stateCookie(origin, name, "", 0)]);
   }
 
-  async function session(req: Request): Promise<Response> {
-    const origin = req.headers.get("origin");
-    if (origin !== null && origin !== cfg.origin(req)) return refuse(403, "another origin");
-    const rawBody = await req.text();
-    if (rawBody.trim() !== "") {
-      let body: unknown;
-      try {
-        body = JSON.parse(rawBody);
-      } catch {
-        return refuse(400, "invalid json body");
-      }
-      if (!isObject(body)) return refuse(400, "invalid json body");
-      if ("ticket" in body || "code_verifier" in body) {
-        if (!cfg.tickets) return refuse(400, "native sign-in is not configured");
-        if (typeof body.ticket !== "string" || body.ticket === "" || typeof body.code_verifier !== "string" || body.code_verifier === "") {
-          return refuse(400, "ticket and code_verifier required");
-        }
-        const consumed = await cfg.tickets.consume(body.ticket);
-        if (consumed === null) return refuse(401, "invalid ticket");
-        if (!PKCE_VERIFIER.test(body.code_verifier) || (await sha256url(body.code_verifier)) !== consumed.codeChallenge) {
-          return refuse(401, "invalid code_verifier");
-        }
-        if (!Object.hasOwn(cfg.providers, consumed.provider) || cfg.providers[consumed.provider].issuer !== consumed.issuer) {
-          return refuse(401, "not signed in");
-        }
-        const who = await cfg.links.handleOf(consumed.provider, consumed.issuer, consumed.userId);
-        if (who === null) return refuse(401, "not signed in");
-        const user: User = { id: consumed.userId, ...who };
-        return new Response(JSON.stringify(await sessionBody(user)), {
-          status: 200,
-          headers: { "content-type": "application/json", "cache-control": "no-store" },
-        });
-      }
+  // A native host's ticket, with the verifier only it holds, for its session.
+  async function nativeSession(req: Request): Promise<Response> {
+    if (foreign(req)) return refuse(403, "another origin");
+    if (!cfg.tickets || !cfg.issue) return refuse(400, "native sign-in is not configured");
+    let body: unknown;
+    try {
+      body = JSON.parse(await req.text());
+    } catch {
+      return refuse(400, "invalid json body");
     }
-    const raw = cookieOf(req, SESSION_COOKIE);
-    if (raw === null) return refuse(401, "not signed in");
-    const c = await verifyJwt(cfg.secret, raw);
-    if (c === null || c.purpose !== "oidc-session" || typeof c.sub !== "string" || typeof c.provider !== "string" || typeof c.issuer !== "string") {
-      return refuse(401, "not signed in");
+    if (!isObject(body) || typeof body.ticket !== "string" || body.ticket === "" || typeof body.code_verifier !== "string" || body.code_verifier === "") {
+      return refuse(400, "ticket and code_verifier required");
     }
-    // An issuer replacement cannot inherit the previous issuer's sessions.
-    if (!Object.hasOwn(cfg.providers, c.provider) || cfg.providers[c.provider].issuer !== c.issuer) return refuse(401, "not signed in");
-    // A link removed since is a sign-in revoked.
-    const who = await cfg.links.handleOf(c.provider, c.issuer, c.sub);
-    if (who === null) return refuse(401, "not signed in");
-    const user: User = { id: c.sub, ...who };
-    return new Response(JSON.stringify(await sessionBody(user)), {
+    const consumed = await cfg.tickets.consume(body.ticket);
+    if (consumed === null) return refuse(401, "invalid ticket");
+    if (!PKCE_VERIFIER.test(body.code_verifier) || (await sha256url(body.code_verifier)) !== consumed.codeChallenge) {
+      return refuse(401, "invalid code_verifier");
+    }
+    const way = { kind: "provider" as const, provider: consumed.provider, issuer: consumed.issuer };
+    const user = await providerStill(cfg.providers, cfg.links)(way, consumed.userId);
+    if (user === null) return refuse(401, "not signed in");
+    // Held: the app offers the account, and the ticket answered switches to it
+    // with the same verifier; left alone, it expires and the guest stays.
+    if (consumed.held) {
+      const ticket = random(32);
+      await cfg.tickets.issue({ ...consumed, id: ticket, held: false, ttlSeconds: NATIVE_TICKET_TTL_S });
+      return new Response(JSON.stringify({ error: "login_required", user: { handle: user.handle, ...(user.name ? { name: user.name } : {}) }, ticket }), {
+        status: 409,
+        headers: { "content-type": "application/json", "cache-control": "no-store" },
+      });
+    }
+    return new Response(JSON.stringify({ ...(await cfg.issue(user, consumed.proof, way)), user }), {
       status: 200,
       headers: { "content-type": "application/json", "cache-control": "no-store" },
     });
   }
 
-  function signout(req: Request): Response {
-    const origin = req.headers.get("origin");
-    if (origin !== null && origin !== cfg.origin(req)) return refuse(403, "another origin");
-    const door = cfg.origin(req);
-    const headers = new Headers({ "cache-control": "no-store" });
-    headers.append("set-cookie", `${SESSION_COOKIE}=; Path=${PREFIX}; HttpOnly; SameSite=Lax${secure(door)}; Max-Age=0`);
-    headers.append("set-cookie", `${HINT_COOKIE}=; Path=/; SameSite=Lax${secure(door)}; Max-Age=0`);
-    return new Response(null, { status: 204, headers });
-  }
-
   return (req) => {
     const path = new URL(req.url).pathname;
-    if (req.method === "POST" && path === `${PREFIX}/session`) return session(req);
-    if (req.method === "POST" && path === `${PREFIX}/signout`) return Promise.resolve(signout(req));
+    if (req.method === "POST" && path === `${PREFIX}/session`) return nativeSession(req);
     const m = /^\/auth\/oidc\/([a-z][a-z0-9]*)\/(start|callback)$/.exec(path);
-    if (m === null || !Object.hasOwn(cfg.providers, m[1]) || req.method !== "GET") return null;
+    if (m === null || !Object.hasOwn(cfg.providers, m[1])) return null;
+    if (m[2] === "start" && req.method === "POST") return start(req, m[1]);
+    if (req.method !== "GET") return null;
     if (speculative(req)) return Promise.resolve(refuse(400, "not a navigation"));
     return m[2] === "start" ? start(req, m[1]) : callback(req, m[1]);
   };

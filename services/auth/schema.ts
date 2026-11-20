@@ -18,12 +18,14 @@
 export type AuthTable =
   | "webauthn_credential"
   | "identity_link"
+  | "webauthn_challenge"
   | "auth_native_ticket"
   | "auth_refresh_token";
 
 export const AUTH_TABLES: AuthTable[] = [
   "webauthn_credential",
   "identity_link",
+  "webauthn_challenge",
   "auth_native_ticket",
   "auth_refresh_token",
 ];
@@ -47,18 +49,27 @@ const columns: Record<AuthTable, string> = {
     email text,
     created_at timestamptz not null default now(),
     primary key (provider, issuer, sub)`,
+  // A sign-in's challenge, spent: its state token is stateless, so a passkey's
+  // answer to it would sign in again until the token expires.
+  webauthn_challenge: `
+    challenge text primary key,
+    expires_at timestamptz not null`,
   auth_native_ticket: `
     id text primary key,
     user_id uuid not null references public.app_user(id) on delete cascade,
     provider text not null,
     issuer text not null,
     code_challenge text not null,
+    proof jsonb,
+    held boolean not null default false,
     expires_at timestamptz not null,
     created_at timestamptz not null default now()`,
   auth_refresh_token: `
     token_hash text primary key,
     user_id uuid not null references public.app_user(id) on delete cascade,
     family_id uuid not null,
+    proof jsonb,
+    way jsonb,
     expires_at timestamptz not null,
     replaced_by text,
     revoked_at timestamptz,
@@ -66,72 +77,17 @@ const columns: Record<AuthTable, string> = {
 };
 
 const list = (tables: AuthTable[]) => `ARRAY[${tables.map((t) => `'${t}'`).join(", ")}]::text[]`;
-
-/** Reassigns rows owned by `guest_id` across public tables referencing `app_user(id)`
- * (or defaulting a uuid owner column to `auth_uid()`) onto `target_id`, dropping
- * unique collisions `target_id` already holds before removing the guest row. */
-const ADOPT_GUEST_SQL = `
-CREATE OR REPLACE FUNCTION mecha_auth.adopt_guest(guest_id uuid, target_id uuid) RETURNS void
-  LANGUAGE plpgsql
-  SET search_path = pg_catalog, public
-AS $adopt$
-DECLARE
-  r record;
-  dup record;
-BEGIN
-  IF guest_id IS NULL OR target_id IS NULL OR guest_id = target_id THEN
-    RETURN;
-  END IF;
-  FOR r IN
-    SELECT DISTINCT c.relname AS tbl, a.attname AS col
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    JOIN pg_attribute a ON a.attrelid = c.oid
-    LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
-    WHERE n.nspname = 'public'
-      AND c.relkind IN ('r', 'p')
-      AND c.relname <> 'app_user'
-      AND a.attnum > 0
-      AND NOT a.attisdropped
-      AND a.attgenerated = ''
-      AND (
-        EXISTS (
-          SELECT 1 FROM pg_constraint con
-          JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = con.confkey[1]
-          WHERE con.conrelid = c.oid
-            AND con.contype = 'f'
-            AND con.confrelid = to_regclass('public.app_user')
-            AND array_length(con.conkey, 1) = 1
-            AND con.conkey[1] = a.attnum
-            AND fa.attname = 'id'
-        )
-        OR (
-          a.atttypid = 'uuid'::regtype
-          AND d.oid IS NOT NULL
-          AND pg_get_expr(d.adbin, d.adrelid) LIKE '%auth_uid()%'
-        )
-      )
-    ORDER BY 1, 2
-  LOOP
-    BEGIN
-      EXECUTE format('UPDATE public.%I SET %I = $1 WHERE %I = $2', r.tbl, r.col, r.col)
-        USING target_id, guest_id;
-    EXCEPTION WHEN unique_violation THEN
-      FOR dup IN EXECUTE format('SELECT tableoid, ctid FROM public.%I WHERE %I = $1', r.tbl, r.col) USING guest_id LOOP
-        BEGIN
-          EXECUTE format('UPDATE public.%I SET %I = $1 WHERE tableoid = $2 AND ctid = $3', r.tbl, r.col)
-            USING target_id, dup.tableoid, dup.ctid;
-        EXCEPTION WHEN unique_violation THEN
-          EXECUTE format('DELETE FROM public.%I WHERE tableoid = $1 AND ctid = $2', r.tbl)
-            USING dup.tableoid, dup.ctid;
-        END;
-      END LOOP;
-    END;
-  END LOOP;
-  DELETE FROM public.app_user WHERE id = guest_id;
-END;
-$adopt$;
-`;
+/** Columns later releases added to tables an earlier one made: a profile's
+ * name, picture and address on a link; how a native ticket's or a refresh
+ * family's sign-in was made, and which way it came in by. A row from before
+ * them says none of it, and renews or redeems nothing. */
+export const EVOLVE_AUTH_TABLES = `
+ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS name text,
+  ADD COLUMN IF NOT EXISTS picture text, ADD COLUMN IF NOT EXISTS email text;
+ALTER TABLE mecha_auth.auth_refresh_token ADD COLUMN IF NOT EXISTS proof jsonb,
+  ADD COLUMN IF NOT EXISTS way jsonb;
+ALTER TABLE mecha_auth.auth_native_ticket ADD COLUMN IF NOT EXISTS proof jsonb,
+  ADD COLUMN IF NOT EXISTS held boolean NOT NULL DEFAULT false;`;
 
 /** Makes mecha_auth and the tables in it, moving any an earlier release left in public. */
 export function prepareAuthTables(tables: AuthTable[] = AUTH_TABLES): string {
@@ -164,7 +120,8 @@ BEGIN
   END LOOP;
 END $auth$;
 ${tables.map((t) => `CREATE TABLE IF NOT EXISTS mecha_auth.${t} (${columns[t]}\n);`).join("\n")}${indexes}
-${ADOPT_GUEST_SQL}`;
+-- A guest signing in to an account another holds is held, never merged.
+DROP FUNCTION IF EXISTS mecha_auth.adopt_guest(uuid, uuid);`
 }
 
 /**

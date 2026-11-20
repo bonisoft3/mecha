@@ -68,7 +68,7 @@ Deno.test('entity GET retries reset without retrying writes, RPCs or HTTP errors
       let calls = 0, stubs = 0
       const controller = new AbortController()
       const session = scenario === 'guest read'
-        ? await signJwt('secret', { role: 'app_user', sub: 'user', guest: true, exp: Math.floor(Date.now() / 1000) + 60 })
+        ? await signJwt('secret', { role: 'app_user', sub: 'user', acr: '0', exp: Math.floor(Date.now() / 1000) + 60 })
         : token
       const env = { JWT_SECRET: 'secret', IMPORT_TOKEN: 'secret', CF_VERSION_METADATA: { id: 'v1' }, CLUSTER: {
         idFromName: () => 'cluster', get: () => { stubs++; return { fetch: async () => {

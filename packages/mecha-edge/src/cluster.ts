@@ -3,41 +3,24 @@
 // transaction (postgrest-js), and Electric's shape protocol answered for the
 // subject a shape token names (mecha-browser's shapes.ts), and the app's
 // drains called as their tables change (mecha-browser's drains.ts).
-// Routes: /auth/guest, /auth/refresh, /auth/account, /auth/whoami, /auth/shape,
-// /auth/register/start, /auth/register/verify, /auth/login/start,
-// /auth/login/verify, /auth/oidc/*, /crud/*, /electric/v1/shape.
+// Routes: /auth/guest, /auth/refresh, /auth/account, /auth/rename, /auth/whoami,
+// /auth/shape, /auth/register/start, /auth/register/verify, /auth/login/start,
+// /auth/login/verify, /auth/oidc/*, /auth/session*, /auth/signout, /crud/*,
+// /electric/v1/shape.
 import type { PGlite } from '@electric-sql/pglite'
-import {
-  generateAuthenticationOptions,
-  generateRegistrationOptions,
-  verifyAuthenticationResponse,
-  verifyRegistrationResponse,
-} from '@simplewebauthn/server'
 import { createRestHandler, planRead, ReadQueryError, type ReadSchema } from '@mecha/postgrest-js'
+import { type AuthDb, authCore, type Row } from '../../../services/auth/core.ts'
 import {
   androidOrigins,
   isSession,
   nativeSchemesFrom,
   PUBLIC_WHERE,
-  randomToken,
-  sha256url,
   shapeWhere,
   signJwt,
-  STACK_ISSUER,
   verifyJwt,
 } from '../../../services/auth/jwt.ts'
-import {
-  HINT_COOKIE,
-  oidc,
-  PREFIX as OIDC_PREFIX,
-  PromoteError,
-  SESSION_COOKIE,
-  type Links,
-  type Profile,
-  type Provider,
-  type Tickets,
-} from '../../../services/auth/oidc.ts'
-import { AUTH_TABLES, prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
+import type { Provider } from '../../../services/auth/oidc.ts'
+import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, PUBLIC_SNAPSHOT_LIMIT, type PublicSnapshot } from './public-snapshot.ts'
@@ -92,33 +75,12 @@ const SHAPE_TOKEN_TTL_S = 900
 const STATE_TTL_S = 300
 
 const enc = new TextEncoder()
-const FRUITS = [
-  'acerola', 'amora', 'avocado', 'banana', 'caju', 'carambola', 'cherry', 'citrus',
-  'coconut', 'cupuacu', 'fig', 'guava', 'jabuticaba', 'jackfruit', 'kiwi', 'lemon',
-  'lime', 'lychee', 'mango', 'maracuja', 'melon', 'nectarine', 'olive', 'orange',
-  'papaya', 'peach', 'pear', 'persimmon', 'pineapple', 'pitanga', 'plum', 'tangerine',
-]
-const ANIMALS = [
-  'albatross', 'armadillo', 'badger', 'capybara', 'chameleon', 'condor', 'dolphin', 'falcon',
-  'flamingo', 'fox', 'gecko', 'heron', 'hummingbird', 'ibis', 'iguana', 'jaguar',
-  'kingfisher', 'koala', 'lemur', 'lynx', 'macaw', 'manatee', 'meerkat', 'ocelot',
-  'otter', 'owl', 'panda', 'pelican', 'penguin', 'quokka', 'tapir', 'toucan',
-]
-export function guestHandle(id: string): string {
-  const hex = id.replaceAll('-', '').toLowerCase()
-  const fruit = FRUITS[(parseInt(hex.slice(0, 2), 16) || 0) % FRUITS.length]
-  const animal = ANIMALS[(parseInt(hex.slice(2, 4), 16) || 0) % ANIMALS.length]
-  const slug = hex.slice(-4) || '0000'
-  return `${fruit}-${animal}-${slug}`
-}
-function generateHandle(id = crypto.randomUUID()): string {
-  return guestHandle(id)
-}
-
 type Claims = Record<string, unknown>
 
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+function json(status: number, body: unknown, cookies: string[] = []): Response {
+  const headers = new Headers({ 'content-type': 'application/json' })
+  for (const c of cookies) headers.append('set-cookie', c)
+  return new Response(JSON.stringify(body), { status, headers })
 }
 
 const now = () => Math.floor(Date.now() / 1000)
@@ -186,7 +148,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
   const createAuthTables = async () => {
     await db.transaction(async (tx) => {
       await tx.exec(prepareAuthTables(AUTH_TABLES))
-      await tx.exec(`ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS name text, ADD COLUMN IF NOT EXISTS picture text, ADD COLUMN IF NOT EXISTS email text`)
+      await tx.exec(EVOLVE_AUTH_TABLES)
       await tx.exec(sealAuthTables(AUTH_TABLES))
     })
   }
@@ -247,508 +209,46 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     return isSession(claims) ? claims : null
   }
 
-  async function insertRefreshToken(userId: string): Promise<string> {
-    const raw = randomToken(32)
-    const hash = await sha256url(raw)
-    await db.query(
-      `INSERT INTO mecha_auth.auth_refresh_token (token_hash, user_id, family_id, expires_at)
-       VALUES ($1, $2, $3, now() + make_interval(secs => $4))`,
-      [hash, userId, crypto.randomUUID(), REFRESH_TOKEN_TTL_S],
-    )
-    return raw
-  }
-
-  async function issueRefreshToken(userId: string): Promise<string> {
-    await ensureAuthTables()
-    return await serialize(() => insertRefreshToken(userId))
-  }
-
-  function issueUserJwt(
-    id: string,
-    handle: string,
-    guest = false,
-    profile?: { name?: string | null; email?: string | null },
-  ): Promise<string> {
-    return signJwt(secret, {
-      iss: STACK_ISSUER,
-      role: 'app_user',
-      sub: id,
-      handle,
-      guest,
-      ...(profile?.name ? { name: profile.name } : {}),
-      ...(profile?.email ? { email: profile.email } : {}),
-      exp: now() + USER_TOKEN_TTL_S,
-    })
-  }
-
-  async function guest(): Promise<Response> {
-    await ensureAuthTables()
-    const id = crypto.randomUUID()
-    const initHandle = guestHandle(id)
-    const { handle, refreshToken } = await serialize(async () => {
-      const { rows } = await db.query<{ handle: string }>(
-        'INSERT INTO app_user (id, handle) VALUES ($1, $2) RETURNING handle',
-        [id, initHandle],
-      )
-      const refreshToken = await insertRefreshToken(id)
-      return { handle: rows[0]?.handle ?? initHandle, refreshToken }
-    })
-    const token = await issueUserJwt(id, handle, true)
-    return json(200, { token, refresh_token: refreshToken, user: { id, handle, guest: true } })
-  }
-
-  async function refresh(req: Request): Promise<Response> {
-    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null
-    if (!body || typeof body.refresh_token !== 'string' || body.refresh_token === '') {
-      return json(400, { error: 'refresh_token required' })
-    }
-    await ensureAuthTables()
-    const hash = await sha256url(body.refresh_token)
-    const nextRaw = randomToken(32)
-    const nextHash = await sha256url(nextRaw)
-    const rotated = await serialize(async () => {
-      await db.query('BEGIN')
-      try {
-        const { rows: [row] } = await db.query<{
-          user_id: string
-          family_id: string
-          expired: boolean
-          replaced_by: string | null
-          revoked_at: string | null
-        }>(
-          `SELECT user_id, family_id, expires_at <= now() AS expired, replaced_by, revoked_at
-           FROM mecha_auth.auth_refresh_token WHERE token_hash = $1 FOR UPDATE`,
-          [hash],
-        )
-        if (!row) {
-          await db.query('COMMIT')
-          return null
-        }
-        if (row.replaced_by !== null) {
-          await db.query(
-            `UPDATE mecha_auth.auth_refresh_token
-             SET revoked_at = coalesce(revoked_at, now())
-             WHERE family_id = $1`,
-            [row.family_id],
-          )
-          await db.query('COMMIT')
-          return null
-        }
-        if (row.revoked_at !== null || row.expired) {
-          await db.query('COMMIT')
-          return null
-        }
-        const { rows: [u] } = await db.query<{
-          id: string
-          handle: string
-          has_passkey: boolean
-          has_oidc: boolean
-          name: string | null
-          email: string | null
-        }>(
-          `SELECT u.id, u.handle,
-             EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = u.id) AS has_passkey,
-             l.provider IS NOT NULL AS has_oidc,
-             l.name, l.email
-           FROM app_user u
-           LEFT JOIN LATERAL (
-             SELECT provider, name, email FROM mecha_auth.identity_link
-             WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1
-           ) l ON true
-           WHERE u.id = $1`,
-          [row.user_id],
-        )
-        if (!u) {
-          await db.query('COMMIT')
-          return null
-        }
-        await db.query(
-          'UPDATE mecha_auth.auth_refresh_token SET replaced_by = $1 WHERE token_hash = $2',
-          [nextHash, hash],
-        )
-        await db.query(
-          `INSERT INTO mecha_auth.auth_refresh_token (token_hash, user_id, family_id, expires_at)
-           VALUES ($1, $2, $3, now() + make_interval(secs => $4))`,
-          [nextHash, row.user_id, row.family_id, REFRESH_TOKEN_TTL_S],
-        )
-        await db.query('COMMIT')
-        return {
-          id: u.id,
-          handle: u.handle,
-          guest: !u.has_passkey && !u.has_oidc,
-          name: u.name,
-          email: u.email,
-        }
-      } catch (e) {
-        await db.query('ROLLBACK')
-        throw e
-      }
-    })
-    if (rotated === null) return json(401, { error: 'invalid refresh token' })
-    const token = await issueUserJwt(rotated.id, rotated.handle, rotated.guest, rotated)
-    const user = rotated.guest
-      ? { id: rotated.id, handle: rotated.handle, guest: true }
-      : {
-        id: rotated.id,
-        handle: rotated.handle,
-        ...(rotated.name ? { name: rotated.name } : {}),
-        ...(rotated.email ? { email: rotated.email } : {}),
-      }
-    return json(200, { token, refresh_token: nextRaw, user })
-  }
-
-  async function deleteAccount(req: Request): Promise<Response> {
-    const claims = await session(req)
-    if (!claims) return json(401, { error: 'invalid token' })
-    await ensureAuthTables()
-    await serialize(() => db.query('DELETE FROM app_user WHERE id = $1', [claims.sub]))
-    const doorOrigin = cfg.origin ?? new URL(req.url).origin
-    const secure = doorOrigin.startsWith('https://') ? '; Secure' : ''
-    const headers = new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })
-    headers.append('set-cookie', `${SESSION_COOKIE}=; Path=${OIDC_PREFIX}; HttpOnly; SameSite=Lax${secure}; Max-Age=0`)
-    headers.append('set-cookie', `${HINT_COOKIE}=; Path=/; SameSite=Lax${secure}; Max-Age=0`)
-    return new Response(JSON.stringify({ deleted: true }), { status: 200, headers })
-  }
-
-  async function whoami(req: Request): Promise<Response> {
-    const claims = await session(req)
-    if (!claims) return json(401, { error: 'invalid token' })
-    return json(200, { id: claims.sub, handle: claims.handle, ...(typeof claims.name === 'string' ? { name: claims.name } : {}), ...(typeof claims.email === 'string' ? { email: claims.email } : {}) })
-  }
-
-  async function readState(body: Record<string, unknown>, purpose: string): Promise<Record<string, unknown> | null> {
-    if (typeof body.state !== 'string') return null
-    const claims = await verifyJwt(secret, body.state)
-    return claims && claims.purpose === purpose ? claims : null
-  }
-
-  async function registerStart(req: Request): Promise<Response> {
-    const hasAuth = req.headers.has('authorization')
-    const claims = hasAuth ? await session(req) : null
-    if (hasAuth && !claims) return json(401, { error: 'invalid token' })
-    if (claims && claims.guest !== true) return json(409, { error: 'already an account' })
-    const promote = claims !== null
-    const handle = claims ? (claims.handle as string) : generateHandle()
-    const userId = claims ? (claims.sub as string) : crypto.randomUUID()
-    const rpId = cfg.rpId ?? new URL(req.url).hostname
-    const options = await generateRegistrationOptions({
-      rpName: rpId,
-      rpID: rpId,
-      userName: handle,
-      userID: enc.encode(userId),
-      authenticatorSelection: {
-        residentKey: 'required',
-        userVerification: 'preferred',
-      },
-    })
-    const state = await signJwt(secret, {
-      purpose: 'register',
-      handle,
-      userId,
-      promote,
-      challenge: options.challenge,
-      exp: now() + STATE_TTL_S,
-    })
-    return json(200, { ...options, state })
-  }
-
-  async function registerVerify(req: Request): Promise<Response> {
-    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null
-    if (!body) return json(400, { error: 'invalid json body' })
-    const st = await readState(body, 'register')
-    if (!st) return json(401, { error: 'invalid state' })
-    const rpId = cfg.rpId ?? new URL(req.url).hostname
-    const origin = cfg.origin ?? new URL(req.url).origin
-    let verification
-    try {
-      verification = await verifyRegistrationResponse({
-        // deno-lint-ignore no-explicit-any
-        response: body.response as any,
-        expectedChallenge: st.challenge as string,
-        expectedOrigin: [origin, ...allowedAndroidOrigins],
-        expectedRPID: rpId,
-        requireUserVerification: false,
-      })
-    } catch {
-      return json(401, { error: 'registration verification failed' })
-    }
-    if (!verification.verified || !verification.registrationInfo) {
-      return json(401, { error: 'registration verification failed' })
-    }
-    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo
-    const userId = st.userId as string
-    await ensureAuthTables()
-    if (st.promote === true) {
-      const refreshToken = await serialize(async () => {
-        const added = await db.query(
-          `INSERT INTO mecha_auth.webauthn_credential (id, user_id, public_key, counter)
-           SELECT $1, $2, $3, $4
-           WHERE NOT EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = $2)
-             AND NOT EXISTS (SELECT 1 FROM mecha_auth.identity_link WHERE user_id = $2)`,
-          [credentialID, userId, credentialPublicKey, counter],
-        )
-        if (added.affectedRows === 0) return null
-        return await insertRefreshToken(userId)
-      })
-      if (refreshToken === null) return json(409, { error: 'already an account' })
-      const token = await issueUserJwt(userId, st.handle as string, false)
-      return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle: st.handle } })
-    }
-    let handle = st.handle as string
-    let refreshToken: string | null = null
-    for (let attempt = 0; attempt < 3 && refreshToken === null; attempt++) {
-      try {
-        refreshToken = await serialize(async () => {
-          await db.query('BEGIN')
-          try {
-            await db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [userId, handle])
-            await db.query(
-              'INSERT INTO mecha_auth.webauthn_credential (id, user_id, public_key, counter) VALUES ($1, $2, $3, $4)',
-              [credentialID, userId, credentialPublicKey, counter],
-            )
-            const issued = await insertRefreshToken(userId)
-            await db.query('COMMIT')
-            return issued
-          } catch (e) {
-            await db.query('ROLLBACK')
-            throw e
-          }
-        })
-      } catch (e) {
-        if (typeof e === 'object' && e !== null && 'code' in e && (e as { code: string }).code === '23505') {
-          handle = generateHandle()
-        } else {
-          throw e
-        }
-      }
-    }
-    if (refreshToken === null) return json(500, { error: 'could not allocate identity' })
-    const token = await issueUserJwt(userId, handle, false)
-    return json(200, { token, refresh_token: refreshToken, user: { id: userId, handle } })
-  }
-
-  async function loginStart(req: Request): Promise<Response> {
-    const rpId = cfg.rpId ?? new URL(req.url).hostname
-    const options = await generateAuthenticationOptions({
-      rpID: rpId,
-      allowCredentials: [],
-    })
-    const state = await signJwt(secret, {
-      purpose: 'login',
-      challenge: options.challenge,
-      exp: now() + STATE_TTL_S,
-    })
-    return json(200, { ...options, state })
-  }
-
-  async function loginVerify(req: Request): Promise<Response> {
-    const body = (await req.json().catch(() => null)) as Record<string, unknown> | null
-    if (!body) return json(400, { error: 'invalid json body' })
-    const st = await readState(body, 'login')
-    if (!st) return json(401, { error: 'invalid state' })
-    const response = body.response as { id?: string } | undefined
-    if (!response || typeof response.id !== 'string') {
-      return json(401, { error: 'authentication verification failed' })
-    }
-    await ensureAuthTables()
-    const { rows: creds } = await serialize(() =>
-      db.query<{ id: string; public_key: Uint8Array; counter: number | bigint; user_id: string; handle: string }>(
-        `SELECT c.id, c.public_key, c.counter, c.user_id, u.handle
-         FROM mecha_auth.webauthn_credential c JOIN app_user u ON u.id = c.user_id
-         WHERE c.id = $1`,
-        [response.id],
-      ),
-    )
-    if (creds.length === 0) return json(401, { error: 'authentication verification failed', unknownCredential: true })
-    const cred = creds[0]
-    const rpId = cfg.rpId ?? new URL(req.url).hostname
-    const origin = cfg.origin ?? new URL(req.url).origin
-    let verification
-    try {
-      verification = await verifyAuthenticationResponse({
-        // deno-lint-ignore no-explicit-any
-        response: body.response as any,
-        expectedChallenge: st.challenge as string,
-        expectedOrigin: [origin, ...allowedAndroidOrigins],
-        expectedRPID: rpId,
-        requireUserVerification: false,
-        authenticator: {
-          credentialID: cred.id,
-          credentialPublicKey: cred.public_key instanceof Uint8Array ? cred.public_key : new Uint8Array(cred.public_key),
-          counter: Number(cred.counter),
-        },
-      })
-    } catch {
-      return json(401, { error: 'authentication verification failed' })
-    }
-    if (!verification.verified) return json(401, { error: 'authentication verification failed' })
-    const refreshToken = await serialize(async () => {
-      await db.query('UPDATE mecha_auth.webauthn_credential SET counter = $1 WHERE id = $2', [
-        verification.authenticationInfo.newCounter,
-        cred.id,
-      ])
-      return await insertRefreshToken(cred.user_id)
-    })
-    const token = await issueUserJwt(cred.user_id, cred.handle, false)
-    return json(200, { token, refresh_token: refreshToken, user: { id: cred.user_id, handle: cred.handle } })
-  }
-
-  const links: Links = {
-    async canPromote(userId: string) {
+  // The auth routes (services/auth/core.ts) on this cluster's PGlite: every
+  // statement takes the api lane, and a transaction holds it from BEGIN to its end.
+  const authDb: AuthDb = {
+    async query(text, params) {
       await ensureAuthTables()
-      const { rows: [u] } = await serialize(() =>
-        db.query<{ linked: boolean }>(
-          `SELECT EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = u.id)
-               OR EXISTS (SELECT 1 FROM mecha_auth.identity_link WHERE user_id = u.id) AS linked
-           FROM app_user u WHERE u.id = $1`,
-          [userId],
-        ),
-      )
-      if (!u) return 'absent'
-      return u.linked ? 'already_account' : 'ok'
+      return (await serialize(() => db.query<Row>(text, params))).rows
     },
-    async userFor(p: Profile, promoteUserId?: string | null) {
+    async tx(fn) {
       await ensureAuthTables()
       return await serialize(async () => {
         await db.query('BEGIN')
         try {
-          let guestHandleToKeep: string | null = null
-          if (promoteUserId) {
-            const { rows: [g] } = await db.query<{
-              handle: string
-              has_passkey: boolean
-              linked_to: string | null
-            }>(
-              `SELECT u.handle,
-                 EXISTS (SELECT 1 FROM mecha_auth.webauthn_credential WHERE user_id = u.id) AS has_passkey,
-                 (SELECT provider || ':' || issuer || ':' || sub FROM mecha_auth.identity_link WHERE user_id = u.id) AS linked_to
-               FROM app_user u WHERE u.id = $1 FOR UPDATE`,
-              [promoteUserId],
-            )
-            if (!g) throw new PromoteError(401, 'invalid token')
-            if (g.has_passkey || (g.linked_to !== null && g.linked_to !== `${p.provider}:${p.issuer}:${p.sub}`)) {
-              throw new PromoteError(409, 'already an account')
-            }
-            guestHandleToKeep = g.handle
-          }
-          const { rows: [link] } = await db.query<{ user_id: string }>(
-            `UPDATE mecha_auth.identity_link SET name = $1, picture = $2, email = $3
-             WHERE provider = $4 AND issuer = $5 AND sub = $6 RETURNING user_id`,
-            [p.name, p.picture, p.email, p.provider, p.issuer, p.sub],
-          )
-          if (link) {
-            if (promoteUserId && promoteUserId !== link.user_id) {
-              await db.query('SELECT mecha_auth.adopt_guest($1::uuid, $2::uuid)', [promoteUserId, link.user_id])
-            }
-            const { rows: [u] } = await db.query<{ handle: string }>('SELECT handle FROM app_user WHERE id = $1', [link.user_id])
-            await db.query('COMMIT')
-            return { id: link.user_id, handle: u.handle, name: p.name, email: p.email }
-          }
-          if (promoteUserId && guestHandleToKeep !== null) {
-            await db.query(
-              `INSERT INTO mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture, email)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-              [p.provider, p.issuer, p.sub, promoteUserId, p.name, p.picture, p.email],
-            )
-            await db.query('COMMIT')
-            return { id: promoteUserId, handle: guestHandleToKeep, name: p.name, email: p.email }
-          }
-          const id = crypto.randomUUID()
-          for (let attempt = 0; attempt < 3; attempt++) {
-            const handle = generateHandle()
-            await db.query('SAVEPOINT alloc')
-            try {
-              await db.query('INSERT INTO app_user (id, handle) VALUES ($1, $2)', [id, handle])
-              await db.query('RELEASE SAVEPOINT alloc')
-            } catch (e) {
-              await db.query('ROLLBACK TO SAVEPOINT alloc')
-              if (typeof e === 'object' && e !== null && 'code' in e && (e as { code: string }).code === '23505') continue
-              throw e
-            }
-            await db.query(
-              `INSERT INTO mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture, email)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-              [p.provider, p.issuer, p.sub, id, p.name, p.picture, p.email],
-            )
-            await db.query('COMMIT')
-            return { id, handle, name: p.name, email: p.email }
-          }
-          throw new Error('could not allocate identity')
-        } catch (e) {
-          await db.query('ROLLBACK')
-          throw e
-        }
-      })
-    },
-    async handleOf(provider: string, issuer: string, id: string) {
-      await ensureAuthTables()
-      const { rows: [u] } = await serialize(() =>
-        db.query<{ handle: string; name: string | null; email: string | null }>(
-          `SELECT u.handle, l.name, l.email FROM app_user u
-           JOIN mecha_auth.identity_link l ON l.user_id = u.id AND l.provider = $2 AND l.issuer = $3
-           WHERE u.id = $1`,
-          [id, provider, issuer],
-        ),
-      )
-      return u ? { handle: u.handle, name: u.name, email: u.email } : null
-    },
-  }
-
-  const tickets: Tickets = {
-    async issue(t) {
-      await ensureAuthTables()
-      await serialize(async () => {
-        await db.query('BEGIN')
-        try {
-          await db.query('DELETE FROM mecha_auth.auth_native_ticket WHERE expires_at <= now()')
-          await db.query(
-            `INSERT INTO mecha_auth.auth_native_ticket (id, user_id, provider, issuer, code_challenge, expires_at)
-             VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))`,
-            [t.id, t.userId, t.provider, t.issuer, t.codeChallenge, t.ttlSeconds],
-          )
+          const done = await fn(async (text, params) => (await db.query<Row>(text, params)).rows)
           await db.query('COMMIT')
+          return done
         } catch (e) {
           await db.query('ROLLBACK')
           throw e
         }
       })
     },
-    async consume(id) {
-      await ensureAuthTables()
-      const { rows: [row] } = await serialize(() =>
-        db.query<{ user_id: string; provider: string; issuer: string; code_challenge: string }>(
-          `DELETE FROM mecha_auth.auth_native_ticket
-           WHERE id = $1 AND expires_at > now()
-           RETURNING user_id, provider, issuer, code_challenge`,
-          [id],
-        ),
-      )
-      if (!row) return null
-      return {
-        userId: row.user_id,
-        provider: row.provider,
-        issuer: row.issuer,
-        codeChallenge: row.code_challenge,
-      }
-    },
   }
-
-  const providerSignIn = oidc({
+  const door = (req: Request) => cfg.origin ?? new URL(req.url).origin
+  const auth = authCore({
+    db: authDb,
     secret,
-    origin: (req) => cfg.origin ?? new URL(req.url).origin,
+    rpId: (req) => cfg.rpId ?? new URL(req.url).hostname,
+    origin: door,
+    ceremonyOrigins: (req) => [door(req), ...allowedAndroidOrigins],
     providers: cfg.providers ?? {},
-    links,
-    tickets,
     nativeSchemes: allowedNativeSchemes,
-    issue: async (user) => {
-      const [token, refreshToken] = await Promise.all([
-        issueUserJwt(user.id, user.handle, false, user),
-        issueRefreshToken(user.id),
-      ])
-      return { token, refresh_token: refreshToken }
-    },
     fetcher: cfg.fetcher,
   })
+
+  /** A session's subject while its account is there: a token outlives its
+   * account's deletion, and reaches nothing after it. */
+  async function live(claims: Claims): Promise<boolean> {
+    const { rows } = await serialize(() => db.query('SELECT 1 FROM app_user WHERE id = $1::uuid', [claims.sub]))
+    return rows.length === 1
+  }
 
   async function shapeToken(req: Request): Promise<Response> {
     const claims = await session(req)
@@ -805,7 +305,7 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
 
   async function crud(req: Request): Promise<Response> {
     const claims = await session(req)
-    if (!claims) return json(401, { error: 'invalid token' })
+    if (!claims || !(await live(claims))) return json(401, { error: 'invalid token' })
     const sub = claims.sub as string
     const u = new URL(req.url)
     u.pathname = u.pathname.replace(/^\/crud/, '')
@@ -849,17 +349,9 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
       await ensureShapes()
       await compute()
       await drains()
-      const signedIn = providerSignIn(req)
-      if (signedIn !== null) return await signedIn
-      if (req.method === 'POST' && path === '/auth/guest') return await guest()
-      if (req.method === 'POST' && path === '/auth/refresh') return await refresh(req)
-      if (req.method === 'DELETE' && path === '/auth/account') return await deleteAccount(req)
-      if (req.method === 'GET' && path === '/auth/whoami') return await whoami(req)
+      const answered = auth.route(req)
+      if (answered !== null) return await answered
       if (req.method === 'POST' && path === '/auth/shape') return await shapeToken(req)
-      if (req.method === 'POST' && path === '/auth/register/start') return await registerStart(req)
-      if (req.method === 'POST' && path === '/auth/register/verify') return await registerVerify(req)
-      if (req.method === 'POST' && path === '/auth/login/start') return await loginStart(req)
-      if (req.method === 'POST' && path === '/auth/login/verify') return await loginVerify(req)
       if (path.startsWith('/crud/')) return await crud(req)
       if (path === '/electric/v1/shape') return await shape(req)
       return json(404, { error: `no route for ${path}` })

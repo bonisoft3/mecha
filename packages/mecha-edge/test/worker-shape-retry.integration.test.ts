@@ -83,7 +83,7 @@ export default { fetch(req, env, ctx) {
     assert.equal(response.headers.get('cache-control'), 'no-store')
     assert.deepEqual(JSON.parse(body), [{ headers: { control: 'must-refetch' } }])
     for (const guest of [false, true]) {
-      const authorization = `Bearer ${await signJwt('test-secret', { role: 'app_user', sub: guest ? 'guest' : 'member', guest, exp: Math.floor(Date.now() / 1000) + 60 })}`
+      const authorization = `Bearer ${await signJwt('test-secret', { role: 'app_user', sub: guest ? 'guest' : 'member', ...(guest ? { acr: '0' } : {}), exp: Math.floor(Date.now() / 1000) + 60 })}`
       const arm = await fetch(`${worker.origin}/test/arm`, { method: 'POST', signal: AbortSignal.timeout(5_000) })
       assert.deepEqual(await arm.json(), { armed: true })
       const entity = await interruptedRead('/crud/app_user?select=id&id=eq.user', { authorization, 'x-test-request': 'preserved' })

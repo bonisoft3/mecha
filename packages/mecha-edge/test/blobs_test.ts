@@ -32,7 +32,7 @@ Deno.test({ name: 'a session writes only the blob keys it claimed, and the store
     await load(`${tmp}/pgdata`, (route, init) => fetch(`${worker.origin}/import/${route}`, {
       ...init, headers: { authorization: 'Bearer test-import' },
     }), { log: () => {} })
-    const session = async (sub: string) => ({ authorization: `Bearer ${await signJwt('test-secret', { role: 'app_user', sub, guest: true, exp: Math.floor(Date.now() / 1000) + 600 })}` })
+    const session = async (sub: string) => ({ authorization: `Bearer ${await signJwt('test-secret', { role: 'app_user', sub, acr: '0', exp: Math.floor(Date.now() / 1000) + 600 })}` })
     const one = await session('00000000-0000-0000-0000-000000000001')
     const two = await session('00000000-0000-0000-0000-000000000002')
     const status = async (path: string, init: RequestInit = {}) => {

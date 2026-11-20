@@ -2,12 +2,18 @@ import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
 import { isoBase64URL, isoCBOR, isoUint8Array, toHash } from '@simplewebauthn/server/helpers'
 import { encodeBase64Url, randomToken, signJwt, verifyJwt } from '../../../services/auth/jwt.ts'
-import { providersFrom, SESSION_COOKIE, sha256url, STATE_COOKIE } from '../../../services/auth/oidc.ts'
+import { providersFrom, sha256url, STATE_COOKIE } from '../../../services/auth/oidc.ts'
+import { HELD_COOKIE, SESSION_COOKIE } from '../../../services/auth/session.ts'
 import { createEdgeCluster } from '../src/cluster.ts'
 
 type Cbor = Parameters<typeof isoCBOR.encode>[0]
-type CeremonyStart = { challenge: string; state: string }
-type AuthSession = { token: string; refresh_token: string; user: { id: string; handle: string; guest?: boolean; name?: string; email?: string } }
+type CeremonyStart = { challenge: string; state: string; user: { id: string } }
+type AuthSession = {
+  token: string
+  refresh_token: string
+  user: { id: string; handle: string; guest?: boolean; name?: string; email?: string }
+  passkey?: { rpId: string; userId: string }
+}
 
 async function makePasskey(rpId = 'test.local') {
   const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
@@ -53,8 +59,10 @@ async function makePasskey(rpId = 'test.local') {
         clientExtensionResults: {},
       }
     },
-    async login(challenge: string, origin: string) {
-      const authData = isoUint8Array.concat([rpIdHash, new Uint8Array([0x01, 0, 0, 0, 1])])
+    // A signature counter above the last one the service saw, or it refuses
+    // the sign-in as a cloned authenticator's.
+    async login(challenge: string, origin: string, counter = 1, flags = 0x01) {
+      const authData = isoUint8Array.concat([rpIdHash, new Uint8Array([flags, 0, 0, 0, counter])])
       const data = clientData('webauthn.get', challenge, origin)
       const signed = isoUint8Array.concat([authData, await toHash(data)])
       const sig = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, new Uint8Array(signed)))
@@ -114,8 +122,9 @@ Deno.test({
       assert.equal(regVerifyRes.status, 200)
       const regVerified = (await regVerifyRes.json()) as AuthSession
       assert.ok(regVerified.token)
-      assert.ok(regVerified.refresh_token)
-      assert.equal((await verifyJwt(secret, regVerified.token))?.guest, false)
+      // A browser renews by its cookie: no refresh token unless a native host asks.
+      assert.equal(regVerified.refresh_token, undefined)
+      assert.equal((await verifyJwt(secret, regVerified.token))?.acr, 'phr')
       assert.ok(regVerified.user?.id)
       assert.ok(regVerified.user?.handle)
 
@@ -139,16 +148,50 @@ Deno.test({
       assert.equal(loginVerifyRes.status, 200)
       const loggedIn = (await loginVerifyRes.json()) as AuthSession
       assert.equal(loggedIn.user.id, regVerified.user.id)
-      assert.ok(loggedIn.refresh_token)
-      assert.equal((await verifyJwt(secret, loggedIn.token))?.guest, false)
+      assert.equal(loggedIn.refresh_token, undefined)
+      assert.equal((await verifyJwt(secret, loggedIn.token))?.acr, 'phr')
       assert.equal(loggedIn.user.handle, regVerified.user.handle)
+      // The Signal API's user handle is the bytes register/start sent as user.id.
+      assert.deepEqual(regVerified.passkey, { rpId, userId: regStart.user.id })
+      assert.deepEqual(loggedIn.passkey, regVerified.passkey)
+
+      // A synced passkey's counter stays 0, so only the spent challenge keeps
+      // its answer from signing in twice; one verified by its person is mfa.
+      const post = (path: string, body: unknown, token?: string) => cluster.handle(new Request(`${origin}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(body),
+      }))
+      const synced = await makePasskey(rpId)
+      const syncedStart = (await (await post('/auth/register/start', {})).json()) as any
+      assert.equal((await post('/auth/register/verify', { state: syncedStart.state, response: synced.register(syncedStart.challenge, origin) })).status, 200)
+      const syncedLogin = (await (await post('/auth/login/start', {})).json()) as any
+      const answer = { state: syncedLogin.state, response: await synced.login(syncedLogin.challenge, origin, 0, 0x05) }
+      const once = await post('/auth/login/verify', answer)
+      assert.equal(once.status, 200)
+      assert.deepEqual((await verifyJwt(secret, ((await once.json()) as any).token))?.amr, ['pop', 'mfa'])
+      const replayed = await post('/auth/login/verify', answer)
+      assert.equal(replayed.status, 401)
+      await replayed.body?.cancel()
+
+      // An unknown credential is said so, for the authenticator to stop offering it.
+      const strangerStart = (await (await cluster.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))).json()) as any
+      const strangerRes = await cluster.handle(
+        new Request(`${origin}/auth/login/verify`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ state: strangerStart.state, response: await (await makePasskey(rpId)).login(strangerStart.challenge, origin) }),
+        }),
+      )
+      assert.equal(strangerRes.status, 401)
+      assert.deepEqual(await strangerRes.json(), { error: 'authentication verification failed', unknownCredential: true })
 
       // 3. Guest minting and promotion to passkey
       const guestRes = await cluster.handle(new Request(`${origin}/auth/guest`, { method: 'POST' }))
       assert.equal(guestRes.status, 200)
       const guest = (await guestRes.json()) as AuthSession
       assert.ok(guest.token)
-      assert.ok(guest.refresh_token)
+      assert.equal(guest.refresh_token, undefined)
       assert.ok(guest.user.guest)
 
       const promoPasskey = await makePasskey(rpId)
@@ -173,10 +216,11 @@ Deno.test({
       )
       assert.equal(promoVerifyRes.status, 200)
       const promoted = (await promoVerifyRes.json()) as AuthSession
-      assert.equal((await verifyJwt(secret, promoted.token))?.guest, false)
+      assert.equal((await verifyJwt(secret, promoted.token))?.acr, 'phr')
       // Retains guest ID and handle
       assert.equal(promoted.user.id, guest.user.id)
       assert.equal(promoted.user.handle, guest.user.handle)
+      assert.deepEqual(promoted.passkey, { rpId, userId: promoStart.user.id })
 
       // 4. Login with promoted passkey succeeds
       const promoLoginStartRes = await cluster.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))
@@ -195,6 +239,30 @@ Deno.test({
       const promoLoggedIn = (await promoLoginVerifyRes.json()) as AuthSession
       assert.equal(promoLoggedIn.user.id, guest.user.id)
 
+      // A guest that signs in with another account's passkey is told so, the
+      // account held for it to take.
+      const otherGuest = (await (await cluster.handle(new Request(`${origin}/auth/guest`, { method: 'POST' }))).json()) as any
+      const takenStart = (await (await cluster.handle(new Request(`${origin}/auth/login/start`, { method: 'POST' }))).json()) as any
+      const takenRes = await cluster.handle(
+        new Request(`${origin}/auth/login/verify`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${otherGuest.token}` },
+          body: JSON.stringify({ state: takenStart.state, response: await promoPasskey.login(takenStart.challenge, origin, 2) }),
+        }),
+      )
+      assert.equal(takenRes.status, 409)
+      const taken = (await takenRes.json()) as any
+      assert.deepEqual([taken.error, taken.user, typeof taken.offer], ['login_required', { handle: promoted.user.handle }, 'string'])
+      const takenHeld = takenRes.headers.getSetCookie().find((c) => c.startsWith(`${HELD_COOKIE}=`))!.split(';')[0]
+      const switched = await cluster.handle(new Request(`${origin}/auth/session/switch`, { method: 'POST', headers: { cookie: takenHeld }, body: JSON.stringify({ offer: taken.offer }) }))
+      assert.equal(switched.status, 200)
+      assert.equal((await verifyJwt(secret, ((await switched.json()) as any).token))?.sub, guest.user.id)
+      // The device's session from now on, until its passkey is gone.
+      const switchedCookie = switched.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
+      const takenUp = await cluster.handle(new Request(`${origin}/auth/session`, { method: 'POST', headers: { cookie: switchedCookie } }))
+      assert.equal(takenUp.status, 200)
+      await takenUp.body?.cancel()
+
       // 5. Already promoted / non-guest account cannot re-register
       const blockedStartRes = await cluster.handle(
         new Request(`${origin}/auth/register/start`, {
@@ -203,6 +271,22 @@ Deno.test({
         }),
       )
       assert.equal(blockedStartRes.status, 409)
+      // Nor renames it, and a rename renews no session.
+      const staleRename = await cluster.handle(new Request(`${origin}/auth/rename`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${guest.token}` },
+        body: JSON.stringify({ name: 'Mallory' }),
+      }))
+      assert.equal(staleRename.status, 409)
+      await staleRename.body?.cancel()
+      const renameRes = await cluster.handle(new Request(`${origin}/auth/rename`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${promoted.token}` },
+        body: JSON.stringify({ name: 'Ada' }),
+      }))
+      assert.equal(renameRes.status, 200)
+      const renamedToken = ((await renameRes.json()) as any).token
+      assert.equal((await verifyJwt(secret, renamedToken))?.exp, (await verifyJwt(secret, promoted.token))?.exp)
 
       // 6. Expired or malformed bearer on register/start returns 401
       const expiredToken = await signJwt(secret, {
@@ -399,6 +483,7 @@ Deno.test({
     const jwk = { ...(await crypto.subtle.exportKey('jwk', keys.publicKey)), kid: 'k1' }
     const codes = new Map<string, { client: string; redirect: string; challenge: string; nonce: string }>()
     let profileName = 'Alice'
+    let profileSub = 'google-sub-1'
     const fetcher: typeof fetch = async (input, init) => {
       const url = String(input)
       if (url === `${issuer}/.well-known/openid-configuration`) {
@@ -422,7 +507,7 @@ Deno.test({
         const body = b64(JSON.stringify({
           iss: issuer,
           aud: grant.client,
-          sub: 'google-sub-1',
+          sub: profileSub,
           name: profileName,
           picture: 'https://pics.test/alice.png',
           email: 'alice@example.test',
@@ -484,7 +569,7 @@ Deno.test({
       const sessionCookie = cbRes.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
 
       const sessionRes = await cluster.handle(
-        new Request(`${origin}/auth/oidc/session`, {
+        new Request(`${origin}/auth/session`, {
           method: 'POST',
           headers: { cookie: sessionCookie },
         }),
@@ -512,7 +597,7 @@ Deno.test({
         }),
       )
       const sessionCookie2 = cb2.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
-      const session2 = (await (await cluster.handle(new Request(`${origin}/auth/oidc/session`, { method: 'POST', headers: { cookie: sessionCookie2 } }))).json()) as { user: { id: string } }
+      const session2 = (await (await cluster.handle(new Request(`${origin}/auth/session`, { method: 'POST', headers: { cookie: sessionCookie2 } }))).json()) as { user: { id: string } }
       assert.equal(session2.user.id, session.user.id)
       const stored = await db.query<{ name: string; email: string }>('SELECT name, email FROM mecha_auth.identity_link WHERE user_id = $1', [session.user.id])
       assert.equal(stored.rows[0].name, 'Alice Updated')
@@ -531,13 +616,49 @@ Deno.test({
       assert.equal(privs.rows[0].table_ok, false)
       assert.equal(privs.rows[0].exempt, true)
 
-      const signoutRes = await cluster.handle(new Request(`${origin}/auth/oidc/signout`, { method: 'POST' }))
+      // A guest signs in with its token: a subject no account holds becomes
+      // the guest's, and one another account holds is held, not switched.
+      const hinted = async (guestToken: string) => {
+        const start = await cluster.handle(new Request(`${origin}/auth/oidc/google/start`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded', origin },
+          body: new URLSearchParams({ id_token_hint: guestToken, return: '/explore' }),
+        }))
+        assert.equal(start.status, 303)
+        const to = new URL(start.headers.get('location')!)
+        const c = crypto.randomUUID()
+        codes.set(c, { client: to.searchParams.get('client_id')!, redirect: to.searchParams.get('redirect_uri')!, challenge: to.searchParams.get('code_challenge')!, nonce: to.searchParams.get('nonce')! })
+        return await cluster.handle(new Request(`${origin}/auth/oidc/google/callback?code=${c}&state=${encodeURIComponent(to.searchParams.get('state')!)}`, {
+          headers: { cookie: start.headers.get('set-cookie')!.split(';')[0] },
+        }))
+      }
+      const guestOf = async () => (await (await cluster.handle(new Request(`${origin}/auth/guest`, { method: 'POST' }))).json()) as { token: string; user: { id: string; handle: string } }
+      const heldGuest = await guestOf()
+      const held = await hinted(heldGuest.token)
+      assert.equal(held.status, 303)
+      assert.equal(held.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`)), false)
+      const heldCookie = held.headers.getSetCookie().find((c) => c.startsWith(`${HELD_COOKIE}=`))!.split(';')[0]
+      const asked = await cluster.handle(new Request(`${origin}/auth/session`, { method: 'POST', headers: { cookie: heldCookie } }))
+      assert.equal(asked.status, 409)
+      assert.equal(((await asked.json()) as { error: string }).error, 'login_required')
+      profileSub = 'google-sub-2'
+      const promotedGuest = await guestOf()
+      const promoted = await hinted(promotedGuest.token)
+      const promotedCookie = promoted.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
+      const promotedSession = (await (await cluster.handle(new Request(`${origin}/auth/session`, { method: 'POST', headers: { cookie: promotedCookie } }))).json()) as { token: string; user: { id: string; handle: string } }
+      // The guest becomes the provider's name, keeping its suffix.
+      assert.deepEqual([promotedSession.user.id, promotedSession.user.handle], [promotedGuest.user.id, `Alice-Updated-${promotedGuest.user.handle.slice(-4)}`])
+      const claims = await verifyJwt(secret, promotedSession.token)
+      // The provider said nothing of when its person signed in, so neither does the session.
+      assert.deepEqual([claims?.iss, claims?.acr, claims?.auth_time], ['mecha:stack', undefined, undefined])
+
+      const signoutRes = await cluster.handle(new Request(`${origin}/auth/signout`, { method: 'POST' }))
       assert.equal(signoutRes.status, 204)
       const cleared = signoutRes.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=;`))
       assert.ok(cleared?.includes('Max-Age=0'))
       const clearedCookie = cleared!.split(';')[0]
       const afterSignout = await cluster.handle(
-        new Request(`${origin}/auth/oidc/session`, { method: 'POST', headers: { cookie: clearedCookie } }),
+        new Request(`${origin}/auth/session`, { method: 'POST', headers: { cookie: clearedCookie } }),
       )
       assert.equal(afterSignout.status, 401)
     } finally {
@@ -664,7 +785,7 @@ Deno.test({
       assert.equal(androidLoginRes.status, 200)
       assert.equal(((await androidLoginRes.json()) as AuthSession).user.id, androidReg.user.id)
 
-      // 2. Native OIDC PKCE ticket flow + guest promotion + account merge
+      // 2. Native OIDC PKCE ticket flow + guest promotion + a second guest held, never merged
       const runNativeOidc = async (extraQuery = '') => {
         const verifier = randomToken(32)
         const challenge = await sha256url(verifier)
@@ -708,7 +829,8 @@ Deno.test({
       assert.equal(session1.user.id, guest1.user.id)
       assert.equal(session1.user.name, 'Edge Alice')
 
-      // Second guest writes a note (DEFAULT auth_uid()) and a deck, then signs into the same OIDC account -> merged!
+      // A second guest writes a note (DEFAULT auth_uid()) and a deck, then signs in to the account guest1 became:
+      // login_required, as in a browser, nothing moving between them, and the refusal's ticket switches.
       const guest2 = (await (await cluster.handle(new Request(`${origin}/auth/guest`, { method: 'POST' }))).json()) as AuthSession
       await cluster.handle(new Request(`${origin}/crud/note`, {
         method: 'POST',
@@ -721,21 +843,24 @@ Deno.test({
         body: JSON.stringify({ title: 'Second Guest Deck' }),
       }))
       const native2 = await runNativeOidc(`&promote_token=${encodeURIComponent(guest2.token)}`)
-      const session2 = (await (await cluster.handle(new Request(`${origin}/auth/oidc/session`, {
+      const redeem = (ticket: string) => cluster.handle(new Request(`${origin}/auth/oidc/session`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ticket: native2.ticket, code_verifier: native2.verifier }),
-      }))).json()) as AuthSession
+        body: JSON.stringify({ ticket, code_verifier: native2.verifier }),
+      }))
+      const heldRes = await redeem(native2.ticket)
+      assert.equal(heldRes.status, 409)
+      const held = (await heldRes.json()) as { error: string; user: { handle: string }; ticket: string }
+      assert.equal(held.error, 'login_required')
+      assert.equal(held.user.handle, session1.user.handle)
+      const session2 = (await (await redeem(held.ticket)).json()) as AuthSession
       assert.equal(session2.user.id, guest1.user.id)
 
-      const mergedDecks = (await (await cluster.handle(new Request(`${origin}/crud/deck?select=title&order=title.asc`, {
-        headers: { authorization: `Bearer ${session2.token}` },
-      }))).json()) as Array<{ title: string }>
-      assert.deepEqual(mergedDecks.map((d) => d.title), ['First Guest Deck', 'Second Guest Deck'])
-      const mergedNotes = (await (await cluster.handle(new Request(`${origin}/crud/note?select=body`, {
-        headers: { authorization: `Bearer ${session2.token}` },
-      }))).json()) as Array<{ body: string }>
-      assert.deepEqual(mergedNotes.map((n) => n.body), ['offline guest note'])
+      const read = async <T>(path: string, token: string) =>
+        (await (await cluster.handle(new Request(`${origin}/crud/${path}`, { headers: { authorization: `Bearer ${token}` } }))).json()) as T[]
+      assert.deepEqual((await read<{ title: string }>('deck?select=title&order=title.asc', session2.token)).map((d) => d.title), ['First Guest Deck'])
+      assert.deepEqual(await read<{ body: string }>('note?select=body', session2.token), [])
+      assert.deepEqual((await read<{ title: string }>('deck?select=title', guest2.token)).map((d) => d.title), ['Second Guest Deck'])
 
       // 3. Rotating POST /auth/refresh + replay family revocation
       const rot1Res = await cluster.handle(new Request(`${origin}/auth/refresh`, {

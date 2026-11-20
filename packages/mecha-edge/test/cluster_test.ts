@@ -219,8 +219,13 @@ Deno.test({ name: 'the edge cluster serves many subjects from one object', sanit
       assert.deepEqual(await publicLoading.json(), { loading: true })
       const done = await load(`${tmp}/pgdata`, send, { log: () => {} })
       assert.ok((done.chunksVerified ?? 0) > 0)
-      assert.deepEqual((await crud(alice.token, 'board?select=title')).rows, [{ title: 'Brasileirão 2026' }])
-      assert.equal((await crud(alice.token, 'note')).rows.length, 0)
+      // The new directory holds no account of alice's, so her token reaches nothing.
+      const gone = await fetch(at('/crud/note'), { headers: bearer(alice.token) })
+      await gone.body?.cancel()
+      assert.equal(gone.status, 401)
+      const carol = await guest()
+      assert.deepEqual((await crud(carol.token, 'board?select=title')).rows, [{ title: 'Brasileirão 2026' }])
+      assert.equal((await crud(carol.token, 'note')).rows.length, 0)
     })
   } finally {
     await worker.stop()

@@ -23,7 +23,8 @@ class, given PGlite's assets and the tables that carry shapes:
 | `POST /auth/guest` | a new `app_user` row and its session token | nothing |
 | `GET /auth/whoami` | the session's subject | a session |
 | `POST /auth/register/start`, `/auth/register/verify` | a passkey for a new account or for the session's guest | a session for a guest's |
-| `POST /auth/login/start`, `/auth/login/verify` | the passkey's account and its session token | a registered passkey |
+| `POST /auth/login/start`, `/auth/login/verify` | the passkey's account and its session token; with a guest's session, 409 `login_required` when the passkey is another account's, which is held | a registered passkey |
+| `POST /auth/session`, `/auth/session/switch`, `/auth/session/stay`, `/auth/signout` | the device's session from its cookie, the held account taken or let go, every cookie cleared ([device session](../../services/auth/README.md#device-session)) | this origin |
 | `POST /auth/shape` | a shape token naming the table and the `where` the client must send | a session |
 | `/crud/*` | postgrest-js, in a transaction carrying the subject's role, `app.scopes` and `request.jwt.claims` | a session |
 | `GET /electric/v1/shape` | Electric's shape protocol ([`shapes.ts`](../mecha-browser/shapes.ts)) | a shape token whose `table` and `where` the request repeats |

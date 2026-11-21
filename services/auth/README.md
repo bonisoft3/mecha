@@ -189,11 +189,23 @@ Browsers refuse `__Host-` without https, so plain http keeps the bare names. Eac
 cookie has a name of its own since they now share `Path=/`. `mecha_session_hint` holds no
 credential and keeps its name and `Path=/`.
 
-`OIDC_LEGACY_COOKIE` (default on) is the upgrade switch. Over https, a plain `mecha_session` is read
-only when no `__Host-` session exists, so a release does not sign everyone out; the next sign-in
-sets the prefixed one. A plain `mecha_session_held` is never read (an offer lasts five minutes).
-Set `OIDC_LEGACY_COOKIE=off` where no plain cookie of ours can exist (an origin new since, or once
-sessions have rolled over, 30 days): a plain one there could only be a sibling's. Sign-out clears both names.
+`OIDC_LEGACY_COOKIE` (`on`, the default, or `off`; anything else stops the service at startup) is the
+upgrade switch. Over https, a plain `mecha_session` is read only when no `__Host-` session exists, so
+a release does not sign everyone out; the next sign-in sets the prefixed one. Only a session minted
+before the prefix stands under the plain name: every session minted over https since carries
+`host: true`, and one read from the plain name is refused, since a sibling site could have planted it
+(its own sign-in, under `Domain=<parent>`). Sessions are never renewed, so legacy reads end by
+themselves within 30 days (the session's lifetime) of the release that brought the prefix; set
+`off` to end them at once, where no plain cookie of ours can exist (an origin new since). A plain
+`mecha_session_held` is never read (an offer lasts five minutes). Sign-out clears both names.
+
+Residual risks. A session from before the prefix, planted by a sibling during those 30 days, is
+still taken up while the switch is on. `Path=/` sends the session cookie on every route behind the
+door, so a proxy should drop `Cookie` on routes that serve no cookie (the bundled Caddyfile does for
+`/crud`, `/electric`, `/img` and `/poke`), and an app with a door of its own should do the same. Old
+browsers that do not implement cookie prefixes, or that accept a cookie with an empty name and a
+value spelling `__Host-...`, can still be spoofed; the prefix protects only where the browser
+enforces it.
 
 ## Provider settings
 - `POST /auth/oidc/session` serves a native host: when `/start` ran with
@@ -222,7 +234,7 @@ and a provider whose client neither gives refuses to start:
 | `OIDC_<NAME>_INTERNAL` | where this service reaches the issuer when the cluster's way differs from the reader's |
 | `OIDC_<NAME>_CLIENT_SECRET` | where the provider wants one; Google's code flow does |
 | `OIDC_<NAME>_SCOPE` | `openid`, or the preset's |
-| `OIDC_LEGACY_COOKIE` | `off` stops reading a plain `mecha_session` over https (see Cookie names); anything else reads it where no `__Host-` one exists |
+| `OIDC_LEGACY_COOKIE` | `on` (default) or `off`, else the service refuses to start: `off` stops reading a plain `mecha_session` over https (see Cookie names) |
 | `OIDC_<NAME>_AUTHORIZE_PARAMS` | further authorization parameters, URL-encoded; never one the flow sets |
 
 A person signed in through a provider and one holding a passkey are two

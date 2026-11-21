@@ -24,6 +24,12 @@ import { randomToken, signJwt, verifyJwt } from "./jwt.ts";
 
 export const SESSION_COOKIE = "__Host-mecha_session";
 export const HELD_COOKIE = "__Host-mecha_session_held";
+/** OIDC_LEGACY_COOKIE: `on` (the default, unset or empty) or `off`; anything else is a mistake that must not quietly read cookies. */
+export function legacyCookieFrom(value: string | undefined): boolean {
+  if (value === undefined || value === "" || value === "on") return true;
+  if (value === "off") return false;
+  throw new Error(`OIDC_LEGACY_COOKIE is ${JSON.stringify(value)}, not "on" or "off"`);
+}
 /** The names before the prefix: over plain http, and read over https only where `legacyCookie` allows. */
 export const LEGACY_SESSION_COOKIE = "mecha_session";
 export const LEGACY_HELD_COOKIE = "mecha_session_held";
@@ -52,7 +58,9 @@ export type DeviceConfig = {
   issue: (user: User, proof: Proof) => Promise<string>;
   /** Whether, over https, a session cookie from before the `__Host-` prefix is read where no prefixed
    * one exists. Default true, so an upgrade signs nobody out; false where only a sibling host could
-   * have left one. A held offer from before the prefix is never read: it lasts five minutes. */
+   * have left one. Only a token minted before the prefix stands under the plain name: every token
+   * minted over https since carries `host: true`, which a sibling could have planted under that name,
+   * so it is refused there. A held offer from before the prefix is never read: it lasts five minutes. */
   legacyCookie?: boolean;
 };
 
@@ -96,10 +104,10 @@ export function deviceSession(cfg: DeviceConfig): Device {
     `${NAMES[kind][https(req) ? 0 : 1]}=${value}; Path=${https(req) ? "/" : PATH}; HttpOnly; SameSite=Lax${secure(req)}; Max-Age=${age}`;
   // What a browser may still hold from before the prefix, as it was set.
   const legacy = (kind: Kind) => `${NAMES[kind][1]}=; Path=${PATH}; HttpOnly; SameSite=Lax; Secure; Max-Age=0`;
-  const read = (req: Request, kind: Kind) => {
+  const read = (req: Request, kind: Kind): { raw: string | null; legacy: boolean } => {
     const own = cookieOf(req, NAMES[kind][https(req) ? 0 : 1]);
-    if (own !== null || kind !== "session" || !https(req) || cfg.legacyCookie === false) return own;
-    return cookieOf(req, LEGACY_SESSION_COOKIE);
+    if (own !== null || kind !== "session" || !https(req) || cfg.legacyCookie === false) return { raw: own, legacy: false };
+    return { raw: cookieOf(req, LEGACY_SESSION_COOKIE), legacy: true };
   };
   const hint = (req: Request, age: number) => `${HINT_COOKIE}=${age > 0 ? "1" : ""}; Path=/; SameSite=Lax${secure(req)}; Max-Age=${age}`;
   // A cross-site POST carries no Lax cookie but still receives one, so the
@@ -112,7 +120,8 @@ export function deviceSession(cfg: DeviceConfig): Device {
   async function signedIn(req: Request, sub: string, way: Way, proof: Proof): Promise<string[]> {
     if (foreign(req)) return [];
     const exp = now() + SESSION_TTL_S;
-    const claims = { purpose: "device-session", sub, way, ...proofClaims(proof), exp };
+    // `host`: minted behind the __Host- name, so never taken up from the plain one (see `read`).
+    const claims = { purpose: "device-session", sub, way, ...proofClaims(proof), ...(https(req) ? { host: true } : {}), exp };
     return [
       cookie(req, "session", await signJwt(cfg.secret, claims), SESSION_TTL_S),
       hint(req, SESSION_TTL_S),
@@ -128,9 +137,12 @@ export function deviceSession(cfg: DeviceConfig): Device {
   }
 
   /** A cookie's account, its way, proof and offer, while the way still stands. */
-  async function standing(raw: string | null, purpose: string) {
+  async function standing({ raw, legacy }: { raw: string | null; legacy: boolean }, purpose: string) {
     const c = raw === null ? null : await verifyJwt(cfg.secret, raw);
     if (c === null || c.purpose !== purpose || typeof c.sub !== "string") return null;
+    // Under the plain name only a session from before the prefix stands. The tokens are never renewed,
+    // so those end within SESSION_TTL_S of the release that brought the prefix.
+    if (legacy && c.host === true) return null;
     const way = c.way as Way;
     if (typeof way !== "object" || way === null) return null;
     const user = await cfg.still(way, c.sub);
@@ -193,7 +205,7 @@ export function deviceSession(cfg: DeviceConfig): Device {
     signedIn,
     held,
     signedOut: (req) => cleared(req, ["session", "held"]),
-    sessionCookie: (req) => read(req, "session"),
+    sessionCookie: (req) => read(req, "session").raw,
     route(req) {
       const path = new URL(req.url).pathname;
       if (req.method !== "POST") return null;

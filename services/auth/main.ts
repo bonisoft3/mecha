@@ -22,6 +22,7 @@ import {
   verifyJwt as verify,
 } from "./jwt.ts";
 import { type Provider, providersFrom } from "./oidc.ts";
+import { legacyCookieFrom } from "./session.ts";
 import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, sealAuthTables } from "./schema.ts";
 export { androidOrigins, nativeSchemesFrom, REFRESH_TOKEN_TTL_S, shapeWhere };
 
@@ -452,7 +453,7 @@ function coreFor(opts: AuthHandlerOptions) {
     nativeSchemes: opts.nativeSchemes !== undefined ? nativeSchemesFrom(opts.nativeSchemes) : NATIVE_SCHEMES,
     fetcher: opts.fetcher,
     // "off" where an origin is new since the __Host- cookies: a bare mecha_session there could only be a sibling host's.
-    legacyCookie: opts.legacyCookie ?? Deno.env.get("OIDC_LEGACY_COOKIE") !== "off",
+    legacyCookie: opts.legacyCookie ?? legacyCookieFrom(Deno.env.get("OIDC_LEGACY_COOKIE")),
   });
 }
 

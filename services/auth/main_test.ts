@@ -1878,6 +1878,25 @@ Deno.test({
   },
 });
 
+Deno.test({
+  name: "adopting a guest is refused where a __Host- session is, and a planted plain one blocks it only while legacy reads are on",
+  ...opts,
+  async fn() {
+    const origin = `https://${door}`;
+    const mint = async () => (await (await handler(atDoor("/auth/guest", { cookie: false }, door, undefined, undefined, origin))).json()).token;
+    const own = cookies(await handler(atDoor("/auth/guest", {}, door, undefined, undefined, origin)));
+    assert(own[SESSION_COOKIE]);
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, await mint(), own, origin))).status, 409);
+    // A valid session of another account, planted under the plain name.
+    const planted = { [LEGACY_SESSION_COOKIE]: own[SESSION_COOKIE] };
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, await mint(), planted, origin))).status, 409);
+    const off = createHandler({ legacyCookie: false });
+    const adopted = await off(atDoor("/auth/session/adopt", {}, door, await mint(), planted, origin));
+    assertEquals(adopted.status, 200);
+    assert(cookies(adopted)[SESSION_COOKIE]);
+  },
+});
+
 // Last, and it has to be: Deno runs tests in source order, and this closes the
 // pool every test above it queries through.
 Deno.test({

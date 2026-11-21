@@ -7,7 +7,7 @@
 // misdirected.
 // deno-lint-ignore no-import-prefix
 import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1.0.13";
-import { encodeBase64Url, nativeSchemesFrom, randomToken, signJwt, STACK_ISSUER } from "./jwt.ts";
+import { encodeBase64Url, nativeSchemesFrom, randomToken, signJwt, STACK_ISSUER, verifyJwt } from "./jwt.ts";
 import { GUEST_ACR, sessionClaims } from "./claims.ts";
 import {
   type ConsumedTicket,
@@ -24,7 +24,7 @@ import {
   type Tickets,
   type User,
 } from "./oidc.ts";
-import { deviceSession, HELD_COOKIE, HINT_COOKIE, LEGACY_HELD_COOKIE, LEGACY_SESSION_COOKIE, SESSION_COOKIE } from "./session.ts";
+import { deviceSession, HELD_COOKIE, HINT_COOKIE, LEGACY_HELD_COOKIE, LEGACY_SESSION_COOKIE, legacyCookieFrom, SESSION_COOKIE } from "./session.ts";
 
 const ORIGIN = "https://app.test";
 // Google's state cookie: one per provider, all at Path=/ under the __Host- prefix.
@@ -864,24 +864,64 @@ Deno.test("over plain http the cookies keep their bare names on their old paths,
   assertEquals(jar(out), { mecha_session: "", mecha_session_held: "", mecha_session_hint: "" });
 });
 
-Deno.test("a plain session planted over https is read for an upgrade, and never where OIDC_LEGACY_COOKIE is off", async () => {
-  const on = await setup();
-  const session = jar(await signIn(on))[SESSION_COOKIE];
-  assertEquals((await on.serve(exchange(session, ORIGIN, LEGACY_SESSION_COOKIE))).status, 200);
-  // A prefixed one wins: a planted plain one never stands in its place.
-  const both = new Request(`${ORIGIN}/auth/session`, { method: "POST", headers: { cookie: `${LEGACY_SESSION_COOKIE}=planted; ${SESSION_COOKIE}=${session}` } });
-  assertEquals((await on.serve(both)).status, 200);
-  const off = await setup(GOOGLE, memory(), { legacyCookie: false });
-  const theirs = jar(await signIn(off))[SESSION_COOKIE];
-  assertEquals((await off.serve(exchange(theirs, ORIGIN, LEGACY_SESSION_COOKIE))).status, 401);
-  assertEquals((await off.serve(exchange(theirs))).status, 200);
-  // Over plain http the bare name is the only one, whatever the switch says.
-  const local = await setup(GOOGLE, memory(), { door: HTTP, legacyCookie: false });
-  assertEquals((await local.serve(new Request(`${HTTP}/auth/session`, { method: "POST", headers: { cookie: `${LEGACY_SESSION_COOKIE}=x` } }))).status, 401);
+const GOOGLE_WAY = { kind: "provider", provider: "google", issuer: "https://accounts.google.com" };
+/** A device-session token for a Google account the test holds, as an attacker or an older release would mint it. */
+async function sessionOf(s: Awaited<ReturnType<typeof setup>>, sub: string, handle: string, host?: true) {
+  const id = crypto.randomUUID();
+  s.links.users.set(`google:https://accounts.google.com:${sub}`, { id, handle, name: handle, email: null });
+  return await signJwt(SECRET, { purpose: "device-session", sub: id, way: GOOGLE_WAY, ...(host ? { host } : {}), exp: now() + 60 });
+}
+const asked = (cookie: string, door = ORIGIN) => new Request(`${door}/auth/session`, { method: "POST", headers: { cookie } });
+const whose = async (res: Response) => res.status === 200 ? (await res.json()).user.handle : res.status;
+
+Deno.test("a session minted over https carries the host marker, so the plain name never stands for it", async () => {
+  const s = await setup();
+  const claims = await verifyJwt(SECRET, jar(await signIn(s))[SESSION_COOKIE]);
+  assertEquals(claims?.host, true);
+  // Planted under the plain name by a sibling site, with the switch on: refused.
+  const marked = await sessionOf(s, "mallory-sub", "mallory", true);
+  assertEquals(await whose(await s.serve(asked(`${LEGACY_SESSION_COOKIE}=${marked}`))), 401);
+  // The same token under its own name stands.
+  assertEquals(await whose(await s.serve(asked(`${SESSION_COOKIE}=${marked}`))), "mallory");
 });
 
-Deno.test("a plain held offer planted over https is never read", async () => {
+Deno.test("a session from before the prefix is read under the plain name for an upgrade, and never where OIDC_LEGACY_COOKIE is off", async () => {
+  const on = await setup();
+  const old = await sessionOf(on, "alice-sub", "alice");
+  assertEquals(await whose(await on.serve(asked(`${LEGACY_SESSION_COOKIE}=${old}`))), "alice");
+  const off = await setup(GOOGLE, memory(), { legacyCookie: false });
+  const theirs = await sessionOf(off, "alice-sub", "alice");
+  assertEquals(await whose(await off.serve(asked(`${LEGACY_SESSION_COOKIE}=${theirs}`))), 401);
+  assertEquals(await whose(await off.serve(asked(`${SESSION_COOKIE}=${theirs}`))), "alice");
+});
+
+Deno.test("a prefixed session wins over a valid unmarked session of another account planted under the plain name", async () => {
   const s = await setup();
-  const planted = new Request(`${ORIGIN}/auth/session`, { method: "POST", headers: { cookie: `${LEGACY_HELD_COOKIE}=planted` } });
-  assertEquals((await s.serve(planted)).status, 401);
+  const mine = await sessionOf(s, "alice-sub", "alice", true);
+  const planted = await sessionOf(s, "mallory-sub", "mallory");
+  assertEquals(await whose(await s.serve(asked(`${LEGACY_SESSION_COOKIE}=${planted}; ${SESSION_COOKIE}=${mine}`))), "alice");
+  assertEquals(await whose(await s.serve(asked(`${SESSION_COOKIE}=${mine}; ${LEGACY_SESSION_COOKIE}=${planted}`))), "alice");
+});
+
+Deno.test("over plain http the bare name is the only one, whatever the switch says", async () => {
+  const local = await setup(GOOGLE, memory(), { door: HTTP, legacyCookie: false });
+  const token = await sessionOf(local, "alice-sub", "alice");
+  assertEquals(await whose(await local.serve(asked(`${LEGACY_SESSION_COOKIE}=${token}`, HTTP))), "alice");
+  // A __Host- name means nothing without https.
+  assertEquals(await whose(await local.serve(asked(`${SESSION_COOKIE}=${token}`, HTTP))), 401);
+});
+
+Deno.test("a valid held offer planted under the plain name over https is never read", async () => {
+  const s = await setup();
+  const owner = await sessionOf(s, "alice-sub", "alice");
+  const sub = (await verifyJwt(SECRET, owner))!.sub as string;
+  const held = await signJwt(SECRET, { purpose: "device-held", sub, way: GOOGLE_WAY, offer: "o", exp: now() + 60 });
+  assertEquals((await s.serve(asked(`${LEGACY_HELD_COOKIE}=${held}`))).status, 401);
+  assertEquals((await s.serve(asked(`${HELD_COOKIE}=${held}`))).status, 409);
+});
+
+Deno.test("OIDC_LEGACY_COOKIE is on, off, or an error at startup", () => {
+  assertEquals([undefined, "", "on"].map(legacyCookieFrom), [true, true, true]);
+  assertEquals(legacyCookieFrom("off"), false);
+  for (const bad of ["OFF", "false", "0", "no", " off", "of"]) assertThrows(() => legacyCookieFrom(bad), Error, "OIDC_LEGACY_COOKIE");
 });

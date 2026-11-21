@@ -4,7 +4,13 @@
 }
 
 :{$PORT:8080} {
+	# The auth service's session cookie is Path=/ (a __Host- cookie must be), so
+	# the browser sends it on every route. None of the upstreams below reads a
+	# cookie (PostgREST, Electric and imgproxy read the Authorization bearer, as
+	# do the ticker and the auth service's /auth/shape/verify), so each route
+	# drops it rather than forward a credential it has no use for.
 	handle /crud/* {
+		request_header -Cookie
 		uri strip_prefix /crud
 		# Idempotent inserts by default — duplicate POSTs with the same
 		# primary key are silently absorbed by PostgREST instead of returning
@@ -23,6 +29,7 @@
 	handle /electric/* {
 		uri strip_prefix /electric
 		route {
+			request_header -Cookie
 			forward_auth {$PRONTO_UPSTREAM_AUTH:auth:9999} {
 				uri /auth/shape/verify
 			}
@@ -57,6 +64,7 @@
 	}
 
 	handle /img/* {
+		request_header -Cookie
 		uri strip_prefix /img
 		reverse_proxy {$PRONTO_UPSTREAM_IMGPROXY:imgproxy:8081} {
 			flush_interval -1
@@ -66,6 +74,7 @@
 	# Mounted WITH the prefix: the ticker answers POST /poke and 404s
 	# everything else, so stripping would 404 every poke.
 	handle /poke {
+		request_header -Cookie
 		reverse_proxy {$PRONTO_UPSTREAM_TICKER:ticker:9998}
 	}
 

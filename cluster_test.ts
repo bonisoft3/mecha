@@ -772,19 +772,21 @@ Deno.test("a cluster requires the core published images; Activepieces is selecte
 
 // A provider's settings are the deployment's, over defaults the program may
 // give: a compose run inside a container that is handed no environment still
-// starts, and a provider whose client nobody gives fails at compose, before the
-// auth service boots with nothing to sign in through.
-Deno.test("a sign-in provider turns auth on and reaches it as a required client, and an unknown one is refused", async () => {
+// starts, with no provider on, and one turned on whose client nobody gives
+// fails at the auth service's start.
+Deno.test("a sign-in provider turns auth on and reaches it as one the deployment turns on, and an unknown one is refused", async () => {
   const on = await exported({}, "surface.targets.auth.compose.environment", { signIn: { google: {} } });
   assert.equal(on.ok, true, on.stderr);
-  assert.equal(on.value.OIDC_PROVIDERS, "google");
-  assert.equal(on.value.OIDC_GOOGLE_CLIENT_ID, "${OIDC_GOOGLE_CLIENT_ID:?OIDC_GOOGLE_CLIENT_ID is required: the cluster signs in through google}");
+  // Off until the deployment turns it on, as a release does; then the
+  // service refuses to start without its client (services/auth/oidc.ts).
+  assert.equal(on.value.OIDC_PROVIDERS, "${OIDC_PROVIDERS:-}");
+  assert.equal(on.value.OIDC_GOOGLE_CLIENT_ID, "${OIDC_GOOGLE_CLIENT_ID:-}");
   // The rest are the deployment's to set or leave, an issuer in Google's place among them.
   assert.equal(on.value.OIDC_GOOGLE_ISSUER, "${OIDC_GOOGLE_ISSUER:-}");
   assert.equal(on.value.OIDC_GOOGLE_AUTHORIZE_PARAMS, "${OIDC_GOOGLE_AUTHORIZE_PARAMS:-}");
   const off = await exported({}, "surface.targets.auth.compose.environment", { auth: true });
   assert.equal(off.ok, true, off.stderr);
-  assert.equal(off.value.OIDC_PROVIDERS, "");
+  assert.equal(off.value.OIDC_PROVIDERS, "${OIDC_PROVIDERS:-}");
   assert.equal("OIDC_GOOGLE_CLIENT_ID" in off.value, false);
   assert.equal((await exported({}, "capabilities", { signIn: { google: {} }, auth: false })).ok, false);
   assert.equal((await exported({}, "capabilities", { signIn: { myspace: {} } })).ok, false);

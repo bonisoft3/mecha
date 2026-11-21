@@ -122,6 +122,9 @@ A provider `signIn` names (`oidc.ts`) signs a person in by OpenID Connect's
 authorization code flow with PKCE, by redirect, so no provider script runs in
 a page the door serves:
 
+- `GET /auth/oidc` answers `{"providers": [...]}`, the providers this
+  deployment turns on (`OIDC_PROVIDERS`), the ways in the terminal draws: a
+  release turns on its program's, a local stack none.
 - `GET /auth/oidc/<provider>/start?return=<path>` sends the browser to the
   provider's authorization endpoint with a signed `state`, a nonce and the
   PKCE challenge. A guest starts by `POST` from this origin with its token as
@@ -188,7 +191,9 @@ Each is refused (403) from another origin.
   Nothing moves between them; left alone, the ticket expires and the guest
   stays. An app sends no guest token for a guest that wrote nothing.
 
-A provider is found by its discovery document. Each setting is `signIn`'s
+`OIDC_PROVIDERS` names the providers on, a deployment's alone: the cluster
+leaves it empty, and a release sets it to its program's. A provider is found
+by its discovery document. Each setting is `signIn`'s
 default for the provider (`issuer`, `internal`, `client`, `scope`, `params`),
 which the deployment's variable overrides; a secret is the deployment's alone,
 and a provider whose client neither gives refuses to start:

@@ -638,8 +638,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// The deployment's OIDC_<NAME>_<SETTING> wins over each, so the program
 		// may name another issuer in the provider's place and an environment
 		// another still; a provider whose client neither gives refuses to start.
-		// A secret is the deployment's alone. A provider signs a person in, so
-		// it presupposes `auth`.
+		// A secret is the deployment's alone. Which are on is the deployment's
+		// too (OIDC_PROVIDERS): a release turns on these, a local stack none,
+		// so it signs in by what needs no one else. A provider signs a person
+		// in, so it presupposes `auth`.
 		signIn: {
 			[!~"^(google|apple)$"]~(K,_): error("signIn.\(K): field not allowed")
 			google?: _#SignInProvider & {_name: "google"}
@@ -1223,13 +1225,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							WEBAUTHN_ORIGIN:        "${WEBAUTHN_ORIGIN:-https://localhost:*}"
 							ANDROID_APK_KEY_HASHES: "${ANDROID_APK_KEY_HASHES:-}"
 							NATIVE_SCHEMES:         "${NATIVE_SCHEMES:-}"
-							OIDC_PROVIDERS:         strings.Join([for p, _ in X.capabilities.signIn {p}], ",")
+							OIDC_PROVIDERS:         "${OIDC_PROVIDERS:-}"
 							for p, d in X.capabilities.signIn {
-								let k = "OIDC_\(strings.ToUpper(p))_CLIENT_ID"
-								if d.client == _|_ {
-									(k): "${\(k):?\(k) is required: the cluster signs in through \(p)}"
-								}
-								for o, v in {client: "CLIENT_ID", issuer: "ISSUER", internal: "INTERNAL", secret: "CLIENT_SECRET", scope: "SCOPE", params: "AUTHORIZE_PARAMS"} if o != "client" || d.client != _|_ {
+								for o, v in {client: "CLIENT_ID", issuer: "ISSUER", internal: "INTERNAL", secret: "CLIENT_SECRET", scope: "SCOPE", params: "AUTHORIZE_PARAMS"} {
 									let e = "OIDC_\(strings.ToUpper(p))_\(v)"
 									(e): "${\(e):-\(*d[o] | "")}"
 								}

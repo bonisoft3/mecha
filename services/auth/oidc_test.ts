@@ -825,3 +825,10 @@ Deno.test("guest promotion on OIDC start validates unlinked guest tokens and pre
     303,
   );
 });
+
+Deno.test("the providers a deployment turns on are the ways in it tells the page, and none where it turns on none", async () => {
+  const on = await setup();
+  assertEquals(await (await on.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: ["google"] });
+  const off = await setup({});
+  assertEquals(await (await off.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: [] });
+});

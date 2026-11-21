@@ -597,6 +597,11 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
 
   return (req) => {
     const path = new URL(req.url).pathname;
+    // The ways in this deployment offers, which the terminal draws: a release
+    // turns its program's on, a local stack none (OIDC_PROVIDERS).
+    if (req.method === "GET" && path === PREFIX) {
+      return Promise.resolve(Response.json({ providers: Object.keys(cfg.providers) }, { headers: { "cache-control": "no-store" } }));
+    }
     if (req.method === "POST" && path === `${PREFIX}/session`) return nativeSession(req);
     const m = /^\/auth\/oidc\/([a-z][a-z0-9]*)\/(start|callback)$/.exec(path);
     if (m === null || !Object.hasOwn(cfg.providers, m[1])) return null;

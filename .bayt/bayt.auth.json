@@ -11,7 +11,7 @@
       "WEBAUTHN_ORIGIN": "${WEBAUTHN_ORIGIN:-https://localhost:*}",
       "ANDROID_APK_KEY_HASHES": "${ANDROID_APK_KEY_HASHES:-}",
       "NATIVE_SCHEMES": "${NATIVE_SCHEMES:-}",
-      "OIDC_PROVIDERS": ""
+      "OIDC_PROVIDERS": "${OIDC_PROVIDERS:-}"
     },
     "ports": [],
     "volumes": [],
@@ -78,7 +78,7 @@
       "WEBAUTHN_ORIGIN": "${WEBAUTHN_ORIGIN:-https://localhost:*}",
       "ANDROID_APK_KEY_HASHES": "${ANDROID_APK_KEY_HASHES:-}",
       "NATIVE_SCHEMES": "${NATIVE_SCHEMES:-}",
-      "OIDC_PROVIDERS": ""
+      "OIDC_PROVIDERS": "${OIDC_PROVIDERS:-}"
     },
     "after": {
       "database": "healthy",

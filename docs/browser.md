@@ -187,6 +187,22 @@ open: a boot records what came due meanwhile, late where its lateness has
 passed, as any tier whose clock stopped does. The edge keeps the timer as the
 object's alarm.
 
+**The time** the page's clock and its computations read and wait on is
+`createCluster`'s `time`: an instant (`now`) and a wait (`after`, which returns
+its cancel), the host's `Date.now` and `setTimeout` (`hostTime`) unless the
+host passes one a driver holds. A bundled page passes omnishell's `heldTime`
+under `?clock=manual`, so the terminal's `__prontoClock.advance(ms)` steps the
+sweep with the screen's own waits, and nothing is swept until it passes an
+instant a schedule owes; the held instant starts at `?epoch`. The drains'
+one-second batching and their backoff stay on the host's clock. A given `time`
+reaches the database too: the cluster sets the session's `mecha.clock` to its
+instant, as ISO 8601, before the scripts run and before every pass through the
+connection, and leaves it unset without one. A function the app points at it
+reads the held instant; pronto's page does so for `machine_clock()`
+(`plugins/pronto/bundle/held-clock.ts`), so a row machine's deadline arms and
+fires on the time the driver advances. The setting is the page's alone: one
+user in one tab, so a clock the session sets carries no server's weight.
+
 ## The fence
 
 [`fence.ts`](../packages/mecha-browser/fence.ts) removes every span from a

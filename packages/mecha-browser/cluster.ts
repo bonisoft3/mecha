@@ -38,6 +38,17 @@ export interface ClusterConfig {
   drains?: Drain[]
   /** A frozen archive retains its schedules and runs none. */
   clock?: 'ticker' | 'disabled'
+  /** The time the clock and the computations read and wait on: the host's
+   * own unless a driver holds it, as omnishell's terminal does under
+   * `?clock=manual`. Given, its instant is also the session's `mecha.clock`. */
+  time?: Time
+}
+
+/** An instant in ms, and a wait that calls `fire` once `ms` have passed on
+ * the same clock, returning the wait's cancel. */
+export interface Time {
+  now: () => number
+  after: (ms: number, fire: () => void) => () => void
 }
 
 export interface Cluster {
@@ -53,6 +64,15 @@ export interface Cluster {
 /** setTimeout's longest wait; a farther instant is re-read when it fires. */
 const LONGEST_WAIT = 2 ** 31 - 1
 
+/** The host's clock. */
+export const hostTime: Time = {
+  now: () => Date.now(),
+  after: (ms, fire) => {
+    const t = setTimeout(fire, Math.min(ms, LONGEST_WAIT))
+    return () => clearTimeout(t)
+  },
+}
+
 type Row = Record<string, unknown>
 
 function json(status: number, body: unknown): Response {
@@ -66,13 +86,22 @@ const token = (claims: Row) => `${encodeBase64Url(enc.encode('{"alg":"none","typ
 
 export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
   const { db, log, fail } = cfg
+  const time = cfg.time ?? hostTime
+  // Under a time the host gives, the database reads it too: the session's
+  // `mecha.clock` holds its instant, set before the scripts and before every
+  // pass through the connection, for a function the app points at it.
+  const stamp = cfg.time === undefined ? null : async () => {
+    await db.query(`SELECT set_config('mecha.clock', $1, false)`, [new Date(time.now()).toISOString()])
+  }
+  await stamp?.()
   for (const sql of cfg.sql) await db.exec(browserTier(sql))
 
   // PGlite is one connection: requests are serialised so no two interleave,
   // and the user's claims are set once, session-wide, for RLS to read.
   let chain: Promise<unknown> = Promise.resolve()
   function serialize<T>(fn: () => Promise<T>): Promise<T> {
-    const p = chain.then(fn, fn)
+    const run = stamp === null ? fn : async () => { await stamp(); return fn() }
+    const p = chain.then(run, run)
     chain = p.catch(() => {})
     return p
   }
@@ -115,8 +144,8 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
   }
 
   const drains = await createDrains({ db, drains: cfg.drains ?? [], serialize, log })
-  const compute = cfg.compute ? await createSnapshotCoordinator({ ...cfg.compute, db, serialize }) : null
-  let computeTimer: ReturnType<typeof setTimeout> | null = null
+  const compute = cfg.compute ? await createSnapshotCoordinator({ ...cfg.compute, db, serialize, now: time.now }) : null
+  let computeTimer: (() => void) | null = null
   let computeStopped = false
   let computeRunning = false
   const computeError = (error: unknown) => fail(error instanceof Error ? error : new Error(String(error)))
@@ -124,12 +153,12 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     if (!compute || computeStopped || computeRunning) return
     const due = await compute.wakeAt()
     if (computeStopped || computeRunning) return
-    if (computeTimer !== null) clearTimeout(computeTimer)
-    computeTimer = due === null ? null : setTimeout(() => {
+    computeTimer?.()
+    computeTimer = due === null ? null : time.after(Math.max(0, due - time.now()), () => {
       computeTimer = null
       computeRunning = true
       void compute.resume().catch((e) => log(`compute retry: ${String(e)}`)).finally(() => { computeRunning = false }).then(armCompute).catch(computeError)
-    }, Math.max(0, due - Date.now()))
+    })
   }
   const unlistenCompute = compute ? await db.listen(NOTIFY_CHANNEL, () => { void armCompute().catch(computeError) }) : null
   await armCompute()
@@ -140,15 +169,15 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     return serialize(() => asService(r))
   })
   const ticks = cfg.clock !== 'disabled' && await serialize(() => hasSchedules(db))
-  let timer: ReturnType<typeof setTimeout> | null = null
+  let timer: (() => void) | null = null
   let timerAt: number | null = null
   let stopped = false
   const clearTimer = () => {
-    if (timer !== null) clearTimeout(timer)
+    timer?.()
     timer = timerAt = null
   }
   const clock = createClock({
-    db, read: serialize, crud: crudAsService, ticks,
+    db, read: serialize, crud: crudAsService, ticks, now: time.now,
     timer: {
       get: () => Promise.resolve(timerAt),
       clear: () => Promise.resolve(clearTimer()),
@@ -156,10 +185,10 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
         clearTimer()
         if (stopped) return Promise.resolve()
         timerAt = at
-        timer = setTimeout(() => {
+        timer = time.after(Math.max(at - time.now(), 0), () => {
           timer = timerAt = null
           sweep()
-        }, Math.min(Math.max(at - Date.now(), 0), LONGEST_WAIT))
+        })
         return Promise.resolve()
       },
     },
@@ -205,7 +234,7 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
     stop: async () => {
       stopped = true
       computeStopped = true
-      if (computeTimer !== null) clearTimeout(computeTimer)
+      computeTimer?.()
       await unlistenCompute?.()
       await compute?.stop()
       clearTimer()

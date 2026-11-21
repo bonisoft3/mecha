@@ -45,8 +45,8 @@ table. Its definition derives four database objects:
    `RAISE EXCEPTION`.
 3. **Relational effects**: Level-3 SQL side effects that execute inside the same
    ACID transaction before the row is committed.
-4. **Timeout predicates**: For transitions triggered after a duration (`after`),
-   the trigger validates elapsed wall-clock time via `clock_timestamp()`.
+4. **Timers**: Entering a state with `after` arms a one-shot schedule the
+   ticker delivers; the tick takes the timed transition.
 
 ## The grammar and relational effects
 
@@ -84,42 +84,24 @@ alternatives are in pronto's [external effects](../../../plugins/pronto/docs/dec
 
 ## Timeouts and the ticker
 
-Timeouts operate across two complementary paths: passive enforcement and active
-sweep.
+A timer is XState's `after`, and its delay a duration: milliseconds, or a name
+the machine's `delays` gives to milliseconds or to the row's `duration` field.
 
-### Passive enforcement (on write)
-
-When a state transition is conditioned on an elapsed duration (`after: { "60000": "expired" }`),
-the trigger enforces the temporal guard:
-
-```sql
-IF (EXTRACT(EPOCH FROM (clock_timestamp() - OLD.created_at)) * 1000) < 60000 THEN
-    RAISE EXCEPTION 'Transition to expired before timeout of 60000ms elapsed';
-END IF;
+```cue
+delays: review: "review_window"
+states: pending: after: {review: "expired", "60000": "reminded"}
 ```
 
-A client attempting to force an early timeout transition is rejected by the
-database catalog.
-
-### Active sweep (on schedule)
-
-Passive enforcement requires a write to fire. To transition abandoned rows where
-no user interaction occurs, mecha's [ticker](../services/ticker/README.md)
-sweeps overdue rows on a fixed schedule.
-
-The ticker pokes the database or executes an automated sweep query:
-
-```sql
-UPDATE challenge
-SET status = 'expired'
-WHERE status = 'pending'
-  AND (EXTRACT(EPOCH FROM (clock_timestamp() - created_at)) * 1000) >= 60000;
-```
-
-Because the sweep issues an `UPDATE`, the state machine's `BEFORE UPDATE`
-trigger fires for every overdue row, validating the transition and executing any
-configured relational effects (such as releasing reserved wagers or notifying
-opponents) in a single atomic transaction.
+Entering the state arms one schedule per delay in the entering transaction, due
+at the entry's `machine_clock()` plus the delay; the field is read once, as the
+state is entered. Leaving the state, or re-entering it, cancels the visit's
+schedules. Mecha's [ticker](../services/ticker/README.md) inserts a
+`machine_timer_tick` once a schedule is due; its trigger locks the row, checks
+that the same visit still stands, and takes the timed transition through the
+machine's own trigger, guards, actions and relational effects included, in one
+transaction. The tick's instant is the only time the fire reads, so a test
+delivers a future tick by naming its instant, and a deadline already past fires
+on the next sweep. A client cannot write a tick or a schedule.
 
 ## Bounded reducer machines
 
@@ -203,17 +185,14 @@ listing. The machine's `ports` describe the operations behind those rows. See
 - `join` locks the instance, accepts an existing member again, admits the
   declared seat only in the allowed phases, then sends a Mecha event. Seat
   uniqueness and all-or-nothing delivery are PostgreSQL constraints.
-- `wake` declares eligible phases, a deadline field and a Mecha event. Every
-  settled step arms the ticker's one-shot schedule for the phase's deadline,
-  and the tick rereads the deadline under the instance lock before delivering.
 - `lease` names the events a lease row's writes and delete deliver. Its
   machine is admitted by a parameterless admission keyed by the reader.
 - `reads` declares private SQL queries used by relational preconditions.
   SQL expressions remain trusted authored code, not a proof of authorization
   or concurrency correctness.
 
-Admission locks precede receipt locks and instance creation. Wakes reread
-state under the target lock. Lock declarations still need a consistent order across all participating
+Admission locks precede receipt locks and instance creation. A timer's fire
+holds the instance before it reads whether its schedule stands. Lock declarations still need a consistent order across all participating
 operations; the compiler does not prove global deadlock freedom.
 
 Composition reuses existing execution paths: a relational action can update
@@ -225,6 +204,45 @@ requires another queue or distributed transaction engine in Cortex. Airlock
 is for external effects; eventual projections cannot arbitrate exclusive
 seat admission. Cortex composition should select these Mecha operations,
 not implement their locks, writes or delivery protocols again.
+
+### Timers
+
+A bounded machine's timers are XState v5's `after`, kept by the
+[ticker](../services/ticker/README.md). A delay is a number of milliseconds or
+a name in the setup's `delays`, whose value is milliseconds or the context
+field holding them:
+
+```cue
+config: states: playing: after: turn: {target: "resolving", actions: "timeout"}
+setup: delays: turn: "turn_ms"
+```
+
+Entering the state starts each timer, measured from the step's time; the
+runtime reads a named delay off the context the state is entered with, and a
+value that is not a duration fails the step. Leaving the state cancels them. A
+step that stays in the state, with no target or with the state as its target,
+moves nothing; only re-entering it, as a transition with `reenter: true` does,
+starts them again. The step leaves to its host the actions XState leaves:
+each entry's delayed `xstate.raise` and each exit's `xstate.cancel`. The host
+arms a one-shot schedule per raise, due its delay after the step's time and
+named by the step's revision, and deletes the state's schedules on a cancel.
+
+A compound state, XState's nested one, holds its children one level deep;
+a phase is the atomic state's path (`racing.closing`), and a child takes the
+events its parent does. The parent's timers start when it is entered and
+stand while its children are entered and left, so a parent's `after` and a
+child's run together and the earlier decides; leaving the parent cancels
+both.
+
+The tick delivers the timer's event, `xstate.after.<delay>.<state>`, which only
+the machine's own tier may send. Its fire holds the instance, then takes the
+schedule it names; a schedule its state's exit already deleted delivers
+nothing. The step runs at the later of the instant the ticker found it due
+and the fire's own `clock()`, so a late tick starts the next state's timers
+from when it was decided. It takes the delay's first arrow whose guards hold,
+as XState does; with none, the timer is spent and nothing moves. A timer's
+transition runs the rules' guards and actions only: the database's have no
+delayed form.
 
 ## Tenancy and runtime safety
 
@@ -245,9 +263,10 @@ State machine triggers execute under the database user's transaction context:
   recursion or deadlock. Effects must target child, ledger, or projection
   tables, while modifications to the entity itself are applied by setting
   `NEW.<col>`.
-- **Clock references**: `CURRENT_TIMESTAMP` and `now()` return the timestamp of
-  the start of the transaction. High-precision timeout assertions use
-  `clock_timestamp()` to reflect real wall-clock time at evaluation instant.
+- **Clock references**: a machine reads time through `machine_clock()`, the
+  transaction's time, which a test database replaces to move time. A guard or
+  an expression calling `now()`, `CURRENT_TIMESTAMP` or `clock_timestamp()` is
+  refused by `pronto check replay`.
 
 ## Rejected
 

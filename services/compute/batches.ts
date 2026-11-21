@@ -41,7 +41,10 @@ const HYBRID_SERIALIZABLE_MACHINE_HASH = "57057ef2d61cf7f7615f134b81822ae725a9b6
 // The machine whose rules took positional arguments, before a rule was
 // XState's one argument.
 const POSITIONAL_RULES_MACHINE_HASH = "a71706b579d917082c9384ff022500ee5b36994bffd336895834f414df2f7154";
-const MECHA_MACHINE_HASH = "8b69d1417198756355c94505226ce60a00cc3f8b413b3479f7367002b9ad0a43";
+// The machine over XState's transition() bundle, before a timer was a
+// state's after (testdata/xstate-transition-batch-machine.sql).
+const XSTATE_TRANSITION_MACHINE_HASH = "8b69d1417198756355c94505226ce60a00cc3f8b413b3479f7367002b9ad0a43";
+const MECHA_MACHINE_HASH = "28ea0c9cd02d2b6a8295cdc279306e10b6a2dd7e1a51a42554273f123aa34877";
 
 function captureDigest(value: unknown): string | null {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -179,7 +182,7 @@ export async function openBatches(
 					"SELECT fingerprint FROM compute.machine_version",
 				);
 				if (recorded && recorded.fingerprint !== machineHash) {
-					if (![READ_COMMITTED_MACHINE_HASH, HYBRID_SERIALIZABLE_MACHINE_HASH, POSITIONAL_RULES_MACHINE_HASH].includes(recorded.fingerprint) || machineHash !== MECHA_MACHINE_HASH) {
+					if (![READ_COMMITTED_MACHINE_HASH, HYBRID_SERIALIZABLE_MACHINE_HASH, POSITIONAL_RULES_MACHINE_HASH, XSTATE_TRANSITION_MACHINE_HASH].includes(recorded.fingerprint) || machineHash !== MECHA_MACHINE_HASH) {
 						throw new Error("compute Cortex machine requires an explicit schema upgrade");
 					}
 					await client.query(machineSql);

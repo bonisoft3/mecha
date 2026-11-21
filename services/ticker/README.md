@@ -142,11 +142,12 @@ armed and waits on no lock, so claims never queue on the one row. Below cloud
 tier the airlock heard the enqueue itself, and the tick costs a row, which the
 airlock prunes after a day.
 
-Pronto's server machines use the same one-shot mechanism for `after`.
-Each state entry creates a distinct `machine:` schedule per delay. It emits
-into the private `machine_timer_tick` table, whose interpreter locks the owner
-and checks cancellation before applying the transition. Leaving the state
-deletes its schedules; retained ticks absorb duplicate delivery. The timing
+Pronto's server machines and Mecha's bounded machines use the same one-shot
+mechanism for `after`. Each state entry creates a distinct `machine:` schedule
+per delay. It emits into the private `machine_timer_tick` table, whose
+interpreter locks the owner and checks cancellation before applying the
+transition. Leaving the state deletes its schedules; retained ticks absorb
+duplicate delivery. The timing
 and migration contract is in [[../../../../plugins/pronto/SPEC|Pronto's spec]].
 
 ## What the mechanism guarantees

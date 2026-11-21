@@ -7,7 +7,7 @@
 // sweep wrote it to, where a drain's trigger (drains.ts) or a machine's fire
 // trigger answers it. Each host keeps one timer at the next instant any
 // schedule owes a runnable tick, driven by createClock: the object's alarm,
-// the page's own timeout.
+// the page's wait on its time (cluster.ts), the host's or one a driver holds.
 import type { PGlite } from '@electric-sql/pglite'
 import type { Crud } from '../../services/ticker/crud.ts'
 import { nextOwed, type Schedule } from '../../services/ticker/due.ts'
@@ -98,6 +98,8 @@ export interface ClockConfig {
   /** Another instant the timer must also stand at: a failed drain's retry. */
   also?: () => number | null
   timer: Timer
+  /** The host's instant in ms: Date.now, or a clock a driver holds. */
+  now?: () => number
 }
 
 export interface Clock {
@@ -115,6 +117,7 @@ export interface Clock {
 
 export function createClock(cfg: ClockConfig): Clock {
   const { db, read, timer } = cfg
+  const now = cfg.now ?? Date.now
   /** Passes in a row that left something owed at their own instant. */
   let stuck = 0
   /** What the last pass left owed, by name, and when it is owed again: a
@@ -131,27 +134,27 @@ export function createClock(cfg: ClockConfig): Clock {
     return p
   }
   async function arm(retry?: SweepRetry) {
-    const ticks = cfg.ticks ? await read(() => nextDue(db, new Date(), retry ?? held)) : null
+    const ticks = cfg.ticks ? await read(() => nextDue(db, new Date(now()), retry ?? held)) : null
     const also = cfg.also?.() ?? null
     const due = ticks === null ? also : also === null ? ticks : Math.min(ticks, also)
     // Nothing owed: a timer a cancelled deadline left would wake to nothing.
     if (due === null) return timer.clear()
     const standing = await timer.get()
-    if (retry || standing === null || due < standing) await timer.set(Math.max(due, Date.now()))
+    if (retry || standing === null || due < standing) await timer.set(Math.max(due, now()))
   }
   return {
     arm: () => queued(() => arm()),
     sweep: (caller) => queued(async () => {
-      const now = new Date()
-      const report = await sweepDue(cfg.crud, now, caller)
+      const instant = new Date(now())
+      const report = await sweepDue(cfg.crud, instant, caller)
       const owed = report.schedules.filter((s) => s.error !== undefined || s.held > 0 || s.behind).map((s) => s.schedule)
       stuck = owed.length ? stuck + 1 : 0
-      const at = new Date(Date.now() + backoff(stuck))
-      held = owed.length ? { through: now, at, only: new Set(owed) } : undefined
+      const at = new Date(now() + backoff(stuck))
+      held = owed.length ? { through: instant, at, only: new Set(owed) } : undefined
       // The pass's own re-read holds everything owed through its instant: an
       // instant it could not act on and did not report (a zone's skipped hour)
       // would otherwise arm the timer at once, again and again.
-      await arm({ through: now, at })
+      await arm({ through: instant, at })
       return { report, failed: report.schedules.some((s) => s.error !== undefined) }
     }),
     settled: () => queued(() => Promise.resolve()),

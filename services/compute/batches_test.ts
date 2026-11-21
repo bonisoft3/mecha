@@ -996,7 +996,9 @@ for (const legacy of [
   { name: "read committed", guard: "read committed", file: "hybrid-batch-machine.sql", engine: "hybrid fuel exhausted", hash: "dd7b02748a65c9c6fe5e56e4220b85e317e2fe56347eac3c725a2ea775079b53" },
   { name: "serializable", guard: "serializable", file: "hybrid-batch-machine.sql", engine: "hybrid fuel exhausted", hash: "57057ef2d61cf7f7615f134b81822ae725a9b688ccd3bb7c6978ce3b568844e3" },
   { name: "positional rules", guard: "serializable", file: "positional-rules-batch-machine.sql", engine: "mecha fuel exhausted", hash: "a71706b579d917082c9384ff022500ee5b36994bffd336895834f414df2f7154" },
-]) pgTest(`the known ${legacy.name} compiler upgrade preserves retained work`, async () => {
+  // What origin/main initialised, its rules already XState's one argument.
+  { name: "XState transition", guard: "serializable", file: "xstate-transition-batch-machine.sql", engine: "mecha fuel exhausted", hash: "8b69d1417198756355c94505226ce60a00cc3f8b413b3479f7367002b9ad0a43", oneArgument: true },
+] as { name: string; guard: string; file: string; engine: string; hash: string; oneArgument?: boolean }[]) pgTest(`the known ${legacy.name} compiler upgrade preserves retained work`, async () => {
   await using server = await postgres();
   const db = new pg.Pool({ connectionString: server.url });
   const isolation = (await Deno.readTextFile(new URL("./testdata/read-committed-machine.sql", import.meta.url))).trimEnd();
@@ -1037,7 +1039,7 @@ for (const legacy of [
     assertEquals((await db.query("SELECT fingerprint FROM compute.machine_version")).rows[0].fingerprint, fingerprint);
     assert((await db.query("SELECT prosrc FROM pg_proc WHERE oid='hybrid_compute_batch.serial()'::regprocedure")).rows[0].prosrc.includes(`<> '${legacy.guard}'`));
     const before = (await db.query("SELECT prosrc FROM pg_proc WHERE oid='hybrid_compute_batch.engine(jsonb)'::regprocedure")).rows[0].prosrc;
-    assert(before.includes(legacy.engine) && !before.includes(ONE_ARGUMENT));
+    assert(before.includes(legacy.engine) && before.includes(ONE_ARGUMENT) === (legacy.oneArgument === true));
     assertEquals(await snapshot(db), retained);
     const published: unknown[] = [];
     batches = await openBatches(server.url, [spec({

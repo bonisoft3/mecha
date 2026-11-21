@@ -10,9 +10,10 @@ package cluster
 	setup:  #MachineSetup
 }
 
-// The JSON subset of XState v5's machine configuration Mecha executes: flat
-// states, transitions on events and `always`, final states, and an `invoke`
-// whose `src` names an actor the setup implements. A guard and an action are
+// The JSON subset of XState v5's machine configuration Mecha executes:
+// states, a compound one's children one level deep, transitions on events,
+// `always` and `after`, final states, and an `invoke` whose `src` names an
+// actor the setup implements. A guard and an action are
 // names, as XState's JSON form references them; `meta`, `tags` and
 // `description` are XState's own and carry anything else.
 #XState: {
@@ -37,6 +38,11 @@ package cluster
 	meta?:        {...}
 	on?: [string]: #XStateTransitions
 	always?: #XStateTransitions
+	// XState's delayed transitions, keyed by a delay in milliseconds or by a
+	// name the setup's `delays` resolves. Entering the state starts each
+	// timer, leaving it cancels them, and only re-entering it, as a
+	// transition with `reenter: true` does, starts them again.
+	after?: [=~"^(0|[1-9][0-9]{0,11}|[a-z_][a-z0-9_]*)$"]: #XStateTransitions
 	invoke?: #XStateInvoke | [...#XStateInvoke]
 	states?: [string]: #XStateState
 })
@@ -121,6 +127,9 @@ package cluster
 		public?: #Shape & {type: "object"}
 	}
 	initialize?: string
+	// XState's `delays`: each name an `after` uses, as milliseconds or as the
+	// context field that holds them when the state is entered.
+	delays?: [=~"^[a-z_][a-z0-9_]*$"]: (int & >=0 & <=9007199254740991) | =~"^[a-z_][a-z0-9_]*$"
 	// Each guard and action the configuration names. One the rules implement
 	// states its contract: the event fields it reads beside the context, and,
 	// for an action, the context fields it writes. The runtime hands it only

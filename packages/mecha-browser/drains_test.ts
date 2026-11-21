@@ -4,7 +4,7 @@
 // the page was never applied, and a midnight tick was a row nothing read.
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
-import { type Cluster, createCluster } from './cluster.ts'
+import { type Cluster, createCluster, type Time } from './cluster.ts'
 import type { Drain } from './drains.ts'
 
 const rls = await Deno.readTextFile(new URL('../../services/database/rls/rls.sql', import.meta.url))
@@ -47,7 +47,7 @@ const DRAINS: Drain[] = [
 async function page(drains: Drain[], ...sql: string[]): Promise<{ db: PGlite; cluster: Cluster; lines: string[] }> {
   return await pageWith({ drains }, ...sql)
 }
-async function pageWith(opts: { drains: Drain[]; clock?: 'ticker' | 'disabled' }, ...sql: string[]): Promise<{ db: PGlite; cluster: Cluster; lines: string[] }> {
+async function pageWith(opts: { drains: Drain[]; clock?: 'ticker' | 'disabled'; time?: Time }, ...sql: string[]): Promise<{ db: PGlite; cluster: Cluster; lines: string[] }> {
   const db = await PGlite.create()
   const lines: string[] = []
   const cluster = await createCluster({ db, sql: [rls, schema, ...sql], tables: ['request'], ...opts, log: (l) => lines.push(l), fail: (e) => { throw e } })
@@ -213,6 +213,57 @@ Deno.test("a frozen archive's page sweeps nothing over the schedules it keeps", 
   try {
     await cluster.swept()
     assert.deepEqual((await db.query('SELECT 1 FROM tick')).rows, [])
+  } finally {
+    await cluster.stop()
+    await db.close()
+  }
+})
+
+/** A clock the test holds, as omnishell's terminal holds one under
+ * ?clock=manual: no wait comes due until the test advances past it. */
+function heldClock(start: number) {
+  let now = start
+  const waits = new Set<{ at: number; fire: () => void }>()
+  const time: Time = {
+    now: () => now,
+    after: (ms, fire) => {
+      const wait = { at: now + ms, fire }
+      waits.add(wait)
+      return () => waits.delete(wait)
+    },
+  }
+  const advance = (ms: number) => {
+    now += ms
+    for (const w of [...waits]) if (w.at <= now) { waits.delete(w); w.fire() }
+  }
+  return { time, advance, waits: () => [...waits].map((w) => w.at - now) }
+}
+
+Deno.test("under a held clock nothing is swept until the clock passes a due instant, and then only what is due", async () => {
+  const start = Date.parse('2026-01-01T00:00:00Z')
+  const held = heldClock(start)
+  const { db, cluster } = await pageWith({ drains: [], time: held.time }, scheduleSql, TICKS,
+    `INSERT INTO schedule (name, due_at, emits_entity) VALUES
+       ('first', '2026-01-01T00:00:05Z', 'tick'), ('second', '2026-01-01T00:00:10Z', 'tick')`)
+  const ticks = async () => (await db.query<{ schedule: string; tick_at: Date }>('SELECT schedule, tick_at FROM tick ORDER BY tick_at')).rows
+    .map((t) => [t.schedule, t.tick_at.toISOString()])
+  try {
+    // The boot's pass runs at the held instant, where nothing is owed yet:
+    // the page's real clock, long past both, is not read.
+    await cluster.swept()
+    assert.deepEqual(await ticks(), [])
+    assert.deepEqual(held.waits(), [5000])
+    held.advance(4999)
+    await cluster.swept()
+    assert.deepEqual(await ticks(), [])
+    held.advance(1)
+    await cluster.swept()
+    assert.deepEqual(await ticks(), [['first', '2026-01-01T00:00:05.000Z']])
+    assert.deepEqual(held.waits(), [5000])
+    held.advance(5000)
+    await cluster.swept()
+    assert.deepEqual(await ticks(), [['first', '2026-01-01T00:00:05.000Z'], ['second', '2026-01-01T00:00:10.000Z']])
+    assert.deepEqual(held.waits(), [])
   } finally {
     await cluster.stop()
     await db.close()

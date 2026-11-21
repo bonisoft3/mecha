@@ -1,0 +1,159 @@
+{
+  "scope": "Golaberto e2-medium, RisingWave3.1.1,1024 streaming actors; controlled live samples, not a general benchmark",
+  "original": [
+    {
+      "computeCandidates": [
+        4074463
+      ]
+    },
+    {
+      "phase": "poller_running",
+      "cpuPercent": 169.3
+    },
+    {
+      "phase": "poller_paused",
+      "cpuPercent": 101.8
+    },
+    {
+      "phase": "poller_resumed",
+      "cpuPercent": 163.1
+    }
+  ],
+  "barrierIsolation": [
+    {
+      "computeCandidates": [
+        4074463
+      ]
+    },
+    {
+      "phase": "paused_barrier_1000ms",
+      "cpuPercent": 25.7
+    },
+    {
+      "phase": "paused_barrier_10000ms",
+      "cpuPercent": 7.0
+    },
+    {
+      "phase": "restored_running",
+      "cpuPercent": 161.7
+    }
+  ],
+  "pollWithoutForcedFlush": [
+    {
+      "computeCandidates": [
+        4122437
+      ]
+    },
+    {
+      "phase": "poller_running",
+      "cpuPercent": 51.9
+    },
+    {
+      "phase": "poller_paused",
+      "cpuPercent": 25.0
+    },
+    {
+      "phase": "poller_resumed",
+      "cpuPercent": 66.2
+    }
+  ],
+  "canary": [
+    {
+      "idlePolls": 5,
+      "idleFlushes": 0,
+      "cdcReadinessMs": 1232,
+      "polls": 7,
+      "updateRetracted": 5,
+      "updateInserted": 14,
+      "captureFlushes": 1,
+      "acknowledgmentFlushes": 2,
+      "duplicateAcknowledgment": "no duplicate delta",
+      "missingPipeline": "rejected"
+    }
+  ],
+  "tests": {
+    "nativeRuntimePassed": 15,
+    "nativeRisingWavePassed": 7,
+    "stepsPassed": 2,
+    "dockerIntegrationIgnored": 1
+  },
+  "restoredConfiguration": {
+    "barrier_interval_ms": 1000
+  },
+  "observedIdleMetrics": {
+    "incomingRows": 0,
+    "outgoingRows": 0,
+    "compactions": 0,
+    "actors": 1024
+  },
+  "limitations": [
+    "CPU percentages use one logical CPU as 100%; each controlled sample lasted ten seconds",
+    "Readiness waits for normal engine commits; polling interval is not a freshness guarantee",
+    "The experiment with 10-second barriers was diagnostic and was reverted",
+    "The early no-FLUSH improvement did not persist; retained-table readiness scans still saturated the engine. The maintained count removes those scans; periodic barriers still consume CPU."
+  ],
+  "countReadiness": {
+    "controlledCpu": [
+      {
+        "computeCandidates": [
+          4141993
+        ]
+      },
+      {
+        "phase": "poller_running",
+        "cpuPercent": 29.9
+      },
+      {
+        "phase": "poller_paused",
+        "cpuPercent": 30.8
+      },
+      {
+        "phase": "poller_resumed",
+        "cpuPercent": 35.7
+      }
+    ],
+    "readinessQueryMs": {
+      "standings": {
+        "scan": 67.444,
+        "count": 3.901
+      },
+      "teamRatings": {
+        "scan": 187.395,
+        "count": 3.223
+      },
+      "playerRatings": {
+        "scan": 96.261,
+        "count": 4.266
+      },
+      "chances": {
+        "scan": 152.598,
+        "count": 2.996
+      },
+      "gameCards": {
+        "scan": 8088.151,
+        "count": 4.922
+      },
+      "playerStats": {
+        "scan": 818.102,
+        "count": 15.349
+      }
+    },
+    "canary": [
+      {
+        "idlePolls": 5,
+        "idleFlushes": 0,
+        "cdcReadinessMs": 1070,
+        "polls": 10,
+        "updateRetracted": 5,
+        "updateInserted": 14,
+        "captureFlushes": 1,
+        "acknowledgmentFlushes": 2,
+        "duplicateAcknowledgment": "no duplicate delta",
+        "missingPipeline": "rejected"
+      }
+    ],
+    "idleWithoutForcedFlushButStillScanning": 167.8,
+    "barrierIntervalMs": 1000,
+    "checkpointFrequency": 1
+  }
+}

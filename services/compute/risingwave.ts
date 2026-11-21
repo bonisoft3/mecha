@@ -9,6 +9,7 @@ export type RisingWaveProgram = {
 };
 
 export interface RisingWaveSqlSession {
+  on?(event: "error", listener: (error: Error) => void): unknown;
   query<R extends Record<string, unknown> = Record<string, unknown>>(
     text: string,
     values?: unknown[],

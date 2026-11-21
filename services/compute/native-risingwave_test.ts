@@ -1,9 +1,10 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import pg from "npm:pg@8.16.3";
+import { openNativeReadiness } from "./native-readiness.ts";
 import { NativeRuntime } from "./native-runtime.ts";
 import { type Batches, openBatches } from "./batches.ts";
 import { NativeRisingWave } from "./native-risingwave.ts";
-import type { RisingWaveSqlSession } from "./risingwave.ts";
+import { defaultRisingWaveConnect, type RisingWaveSqlSession } from "./risingwave.ts";
 import {
   type IncrementalProgram,
   installSources,
@@ -153,8 +154,9 @@ Deno.test("progress on another source cannot hide a stalled bootstrap", async ()
 // Derived materialized views must wait for CDC table snapshots and captured_*
 // seeding so multi-hundred-thousand-row backfills do not stall barriers or
 // retract intermediate aggregates on every CDC batch.
-Deno.test("native bootstrap finishes CDC snapshots and baseline ingress before creating derived views", async () => {
+Deno.test("native bootstrap finishes CDC snapshots and baseline ingress before creating derived views", async (t) => {
   const order: string[] = [];
+  const queries: string[] = [];
   let countPolls = 0;
   const client = {
     query: (sql: string) => {
@@ -181,6 +183,7 @@ Deno.test("native bootstrap finishes CDC snapshots and baseline ingress before c
     query<R extends Record<string, unknown> = Record<string, unknown>>(
       sql: string,
     ): Promise<{ rows: R[] }> {
+      queries.push(sql);
       if (sql.includes("information_schema.schemata")) {
         return Promise.resolve({
           rows: [{ present: "rw_ordered" }] as unknown as R[],
@@ -247,7 +250,23 @@ Deno.test("native bootstrap finishes CDC snapshots and baseline ingress before c
     "CREATE MATERIALIZED VIEW",
     "CREATE VIEW stream_items",
     "CREATE MATERIALIZED VIEW",
+    "CREATE MATERIALIZED VIEW",
+    "CREATE SUBSCRIPTION __readiness",
   ]);
+  await t.step("idle readiness observes committed output without forcing a global barrier", async () => {
+    queries.length = 0;
+    assertEquals(await runtime.pending(), false);
+    assertEquals(queries, ['SELECT 1 AS pending FROM "rw_ordered".__pending WHERE n > 0']);
+    assert(!queries.some((sql) => sql.includes("information_schema.schemata")));
+    assert(!queries.includes("FLUSH"));
+  });
+  await t.step("capture still flushes before reading the output delta", async () => {
+    queries.length = 0;
+    assertEquals(await runtime.capture(), { items: [] });
+    const flush = queries.indexOf("FLUSH");
+    assert(flush >= 0);
+    assert(flush < queries.findIndex((sql) => sql.includes("FROM pending_items")));
+  });
 });
 
 Deno.test("native acknowledge casts DOUBLE literals from text to avoid RisingWave DECIMAL rounding", async () => {
@@ -519,6 +538,7 @@ Deno.test({
     }
     let db: pg.Pool | undefined;
     let batches: Batches | undefined;
+    let readiness: Awaited<ReturnType<typeof openNativeReadiness>> | undefined;
     try {
       await compose("up", "-d", "--wait");
       const pgAddr = await compose("port", "postgres", "5432");
@@ -688,7 +708,7 @@ Deno.test({
           });
         },
       };
-      const options = { coalesceMs: 0, pollInterval: 20 };
+      const options = { coalesceMs: 0, pollInterval: 20, invalidateOnStart:false };
       const full = new NativeRuntime(
         db,
         endpoint,
@@ -701,19 +721,11 @@ Deno.test({
       const connectionString = db.options.connectionString!;
       batches = await openBatches(connectionString, [full.spec], options);
       await full.initialize();
-      const settle = async () => {
-        assert(await full.pending());
-        await batches!.invalidateNames([computation.name]);
-        await until(async () => {
-          const { rows: [state] } = await db!.query(
-            "SELECT requested=completed AS done FROM compute.batch WHERE name=$1",
-            [computation.name],
-          );
-          return state.done;
-        }, "durable native publication");
-        assertEquals(await full.pending(), false);
-      };
-      await settle();
+      readiness = await openNativeReadiness(connectionString, db, [full], batches);
+      await Promise.race([readiness.promise, until(async () =>
+        (await db!.query("SELECT count(*)::int AS n FROM runtime_sink")).rows[0].n === 2,
+        "subscription initial publication")]);
+      await until(async () => (await db!.query("SELECT requested=completed AS done FROM compute.batch WHERE name=$1", [computation.name])).rows[0].done, "initial completion");
       assertEquals(calculations, 2);
       assertEquals(
         (await db.query("SELECT * FROM runtime_sink ORDER BY id")).rows,
@@ -723,6 +735,8 @@ Deno.test({
         "SELECT slots, publications FROM compute.native_epoch WHERE name=$1",
         [computation.name],
       );
+      await readiness?.close();
+      readiness = undefined;
       await batches.close();
       batches = undefined;
       await full.close();
@@ -747,32 +761,23 @@ Deno.test({
       );
       assertEquals(reattachedEpoch.slots, firstEpoch.slots);
       assertEquals(reattachedEpoch.publications, firstEpoch.publications);
-      assert(await reattached.pending());
-      await batches.invalidateNames([computation.name]);
-      await until(async () => {
-        const { rows: [state] } = await db!.query(
-          "SELECT requested=completed AS done FROM compute.batch WHERE name=$1",
-          [computation.name],
-        );
-        return state.done;
-      }, "warm reattach idle verification");
-      assertEquals(calculations, 2);
-
+      readiness = await openNativeReadiness(connectionString, db, [reattached], batches);
       await db.query("UPDATE runtime_items SET amount=5 WHERE id='one'");
-      await until(() => reattached.pending(), "CDC update after warm reattach");
-      await batches.invalidateNames([computation.name]);
-      await until(async () => {
-        const { rows: [state] } = await db!.query(
-          "SELECT requested=completed AS done FROM compute.batch WHERE name=$1",
-          [computation.name],
-        );
-        return state.done;
-      }, "warm reattach CDC publication");
+      await Promise.race([readiness.promise, until(async () =>
+        (await db!.query("SELECT amount FROM runtime_sink WHERE id='a'")).rows[0]?.amount === 16,
+        "subscription CDC publication")]);
+      await until(async () => (await db!.query("SELECT requested=completed AS done FROM compute.batch WHERE name=$1", [computation.name])).rows[0].done, "CDC completion");
       assertEquals(calculations, 3);
       assertEquals(
         (await db.query("SELECT * FROM runtime_sink ORDER BY id")).rows,
         [{ id: "a", amount: 16 }, { id: "b", amount: 14 }],
       );
+      await db.query("UPDATE runtime_sink SET amount=999 WHERE id='a'");
+      await Promise.race([readiness.promise, until(async () =>
+        (await db!.query("SELECT amount FROM runtime_sink WHERE id='a'")).rows[0]?.amount === 16,
+        "subscription PostgreSQL-only repair")]);
+      await readiness?.close();
+      readiness = undefined;
       await batches.close();
       batches = undefined;
       await reattached.close();
@@ -798,11 +803,79 @@ Deno.test({
       await batches.close();
       batches = undefined;
       await upgraded.close();
+      const declared = Promise.withResolvers<void>();
+      const empty = new NativeRisingWave(endpoint, "empty-runtime", {
+        sql:"", inputs:{}, outputs:{}, incremental:{inputs:{}, outputs:{}},
+      }, "d".repeat(64), uri, async (url) => {
+        const session = await defaultRisingWaveConnect(url);
+        return {
+          async query<R extends Record<string, unknown>>(sql: string, values?: unknown[]) {
+            const result = await session.query<R>(sql, values);
+            if (sql.startsWith("DECLARE")) declared.resolve();
+            return result;
+          },
+          end: () => session.end(),
+        };
+      });
+      await empty.initialize(db, {}, []);
+      const abortEmpty = new AbortController();
+      const watchingEmpty = empty.subscribe(abortEmpty.signal, () => { throw new Error("zero-output pipeline woke"); });
+      await Promise.race([declared.promise, watchingEmpty]);
+      assertEquals(await empty.pending(), false);
+      abortEmpty.abort();
+      await watchingEmpty;
+      await empty.close();
+
     } finally {
+      await readiness?.close();
       if (batches) await batches.close();
       if (db) await db.end();
       await compose("down", "-v");
       await Deno.remove(directory, { recursive: true });
     }
   },
+});
+
+Deno.test("native subscription wakes only positive insertions and closes on abort", async () => {
+  const program: IncrementalProgram = JSON.parse(await Deno.readTextFile(new URL("./fixtures/native-integration.json", import.meta.url)));
+  const abort = new AbortController();
+  const queries: string[] = [];
+  let closes = 0;
+  const changes = [{op:"UpdateDelete", n:2}, {op:"UpdateInsert", n:0}, {op:"Insert", n:1}];
+  const session = {
+    query: (sql: string) => {
+      queries.push(sql);
+      return Promise.resolve({rows: sql.startsWith("FETCH") ? [changes.shift()!] : []});
+    },
+    end: () => { closes++; return Promise.resolve(); },
+  } as RisingWaveSqlSession;
+  const engine = new NativeRisingWave("http://unused.invalid", "subscription", program, "a".repeat(64), "postgres://unused.invalid", () => Promise.resolve(session));
+  let wakes = 0;
+  await engine.subscribe(abort.signal, () => { wakes++; abort.abort(); });
+  assertEquals(wakes, 1);
+  assertEquals(closes, 1);
+  assertEquals(queries[0], 'DECLARE readiness SUBSCRIPTION CURSOR FOR "rw_subscription".__readiness FULL');
+  assertEquals(queries.filter((sql) => sql.startsWith("FETCH")).length, 3);
+  assert(!queries.includes("FLUSH"));
+});
+
+Deno.test("native blocked subscription abort closes its dedicated connection", async () => {
+  const program: IncrementalProgram = JSON.parse(await Deno.readTextFile(new URL("./fixtures/native-integration.json", import.meta.url)));
+  const fetching = Promise.withResolvers<void>();
+  const blocked = Promise.withResolvers<{rows: Record<string, unknown>[]}>();
+  const abort = new AbortController();
+  let closes = 0;
+  const session = {
+    query: (sql: string) => {
+      if (sql.startsWith("FETCH")) { fetching.resolve(); return blocked.promise; }
+      return Promise.resolve({ rows: [] });
+    },
+    end: () => { closes++; blocked.reject(new Error("Connection terminated")); return Promise.resolve(); },
+  } as RisingWaveSqlSession;
+  const engine = new NativeRisingWave("http://unused.invalid", "blocked", program, "a".repeat(64), "postgres://unused.invalid", () => Promise.resolve(session));
+  const task = engine.subscribe(abort.signal, () => { throw new Error("unexpected idle wake"); });
+  await fetching.promise;
+  abort.abort();
+  await task;
+  assertEquals(closes, 1);
 });

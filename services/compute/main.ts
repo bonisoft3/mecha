@@ -57,6 +57,7 @@
 // transactions; sink writes retain the service role's policies and triggers.
 
 import pg from "npm:pg@8.16.3";
+import { openNativeReadiness } from "./native-readiness.ts";
 import { NativeRuntime } from "./native-runtime.ts";
 import { reconcileNativeResources } from "./native-cleanup.ts";
 import { isGlobalIncrementalProgram } from "./native-sources.ts";
@@ -888,36 +889,24 @@ async function main() {
       return true;
     },
   };
-  let stopping = false;
-  const polling = (async () => {
-    while (!stopping && native.length) {
-      const { rows: active } = await nativeDb.query<{ name: string }>(
-        "SELECT name FROM compute.batch WHERE requested > coalesce(claimed, completed) AND wake IS NOT NULL",
-      );
-      const queued = new Set(active.map((row) => row.name));
-      const flush = { done: false };
-      const dirty: string[] = [];
-      for (const runtime of native) {
-        if (queued.has(runtime.spec.name)) {
-          await runtime.check();
-          continue;
-        }
-        if (await runtime.pending(flush)) dirty.push(runtime.spec.name);
-      }
-      if (dirty.length) await coordinator.invalidateNames(dirty);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  })();
-  polling.catch((error) => engineFailure.resolve(error));
-  const server = serve(service, jwt, Number(Deno.env.get("PORT") || 9997));
+  let readiness: Awaited<ReturnType<typeof openNativeReadiness>> | undefined;
+  let server: ReturnType<typeof serve> | undefined;
   try {
-    await Promise.race([server.finished, coordinator.promise, engineFailure.promise.then((error) => { throw error; })]);
+    readiness = await openNativeReadiness(databaseUrl, nativeDb, native, coordinator);
+    server = serve(service, jwt, Number(Deno.env.get("PORT") || 9997));
+    await Promise.race([server.finished, coordinator.promise, readiness.promise, engineFailure.promise.then((error) => { throw error; })]);
   } finally {
-    stopping = true;
-    await server.shutdown();
-    await coordinator.close();
-    for (const runtime of native) await runtime.close();
+    const closed = await Promise.allSettled([
+      readiness?.close(), server?.shutdown(),
+    ]);
+    const batchesClosed = await Promise.allSettled([coordinator.close()]);
+    const engines = await Promise.allSettled(native.map((runtime) => runtime.close()));
     await nativeDb.end();
+    const errors = [...closed, ...batchesClosed, ...engines].flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (errors.length) {
+      // deno-lint-ignore no-unsafe-finally
+      throw new AggregateError(errors, "native computation shutdown failed");
+    }
   }
 }
 

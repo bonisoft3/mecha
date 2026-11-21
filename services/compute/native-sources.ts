@@ -324,6 +324,10 @@ export function nativeSql(
     }) UNION ALL SELECT ${columns} FROM captured_${name} WHERE false;
       CREATE MATERIALIZED VIEW pending_${name} AS SELECT ${columns},CAST(SUM(__rw_delta_weight) AS BIGINT) AS __rw_mult FROM (SELECT ${columns},CAST(1 AS BIGINT) AS __rw_delta_weight FROM stream_${name} UNION ALL SELECT ${columns},-__rw_mult AS __rw_delta_weight FROM captured_${name}) __rw_bag GROUP BY ${columns} HAVING SUM(__rw_delta_weight) <> 0;`;
   }
+  const pending = Object.keys(program.outputs).map((name) => `SELECT 1 AS present FROM pending_${name}`);
+  // COUNT rows, not weights: a replacement's retraction and insertion sum to zero.
+  sql += `\nCREATE MATERIALIZED VIEW __pending AS SELECT COUNT(*) AS n FROM (${pending.length ? pending.join(" UNION ALL ") : "SELECT 1 AS present FROM __ack_state WHERE false"}) AS pending;
+    CREATE SUBSCRIPTION __readiness FROM __pending WITH (retention = '1 hour');`;
   for (const [name, query] of Object.entries(program.incremental.checks ?? {})) {
     sqlIdentifier(name);
     sql += `\nCREATE MATERIALIZED VIEW invalid_${name} AS ${

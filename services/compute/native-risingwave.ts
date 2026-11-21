@@ -181,6 +181,11 @@ export class NativeRisingWave {
         `SELECT name FROM rw_catalog.rw_materialized_views WHERE schema_id = ${schemaId}`,
       );
       const mvSet = new Set(rwMvs.map((r) => r.name));
+      if (!mvSet.has("__pending")) return false;
+      const { rows: subscriptions } = await session.query(
+        `SELECT name FROM rw_catalog.rw_subscriptions WHERE schema_id = ${schemaId} AND name = '__readiness'`,
+      );
+      if (subscriptions.length !== 1) return false;
       for (const out of Object.keys(this.program.outputs)) {
         if (!mvSet.has(`pending_${out}`)) return false;
       }
@@ -522,18 +527,40 @@ export class NativeRisingWave {
     }
   }
 
-  async pending(flush: boolean | { done: boolean } = true): Promise<boolean> {
-    await this.check();
+  async subscribe(signal: AbortSignal, wake: () => void): Promise<void> {
+    const session = await this.connect(this.endpoint);
+    const failed = Promise.withResolvers<Error>();
+    session.on?.("error", failed.resolve);
+    let closing: Promise<void> | undefined;
+    const close = () => { closing ??= session.end(); };
+    signal.addEventListener("abort", close, { once: true });
+    const consume = async () => {
+      if (signal.aborted) return;
+      await session.query(`DECLARE readiness SUBSCRIPTION CURSOR FOR "${this.rwSchema}".__readiness FULL`);
+      while (!signal.aborted) {
+        const { rows } = await session.query("FETCH 1 FROM readiness WITH (timeout = '30s')");
+        if (rows.some((row) => ["Insert", "UpdateInsert"].includes(String(row.op)) && Number(row.n) > 0)) wake();
+      }
+    };
+    try {
+      await Promise.race([consume(), failed.promise.then((error) => { throw error; })]);
+    } catch (error) {
+      if (!signal.aborted || !(error instanceof Error) || !/Connection terminated/.test(error.message)) throw error;
+    } finally {
+      signal.removeEventListener("abort", close);
+      close();
+      await closing;
+    }
+  }
+
+  async pending(): Promise<boolean> {
     const names = Object.keys(this.program.outputs);
-    if (names.length === 0) return false;
-    const shouldFlush = typeof flush === "boolean" ? flush : !flush.done;
-    if (shouldFlush) {
-      await this.rwQuery("FLUSH");
-      if (typeof flush === "object") flush.done = true;
+    if (names.length === 0) {
+      await this.check();
+      return false;
     }
     return (await this.rwQuery(
-      names.map((name) => `(SELECT 1 AS pending FROM pending_${name} LIMIT 1)`)
-        .join(" UNION ALL "),
+      `SELECT 1 AS pending FROM ${sqlIdentifier(this.rwSchema)}.__pending WHERE n > 0`,
     )).length > 0;
   }
 

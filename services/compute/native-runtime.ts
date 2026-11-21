@@ -73,6 +73,7 @@ export class NativeRuntime {
 
   readonly engine: NativeRisingWave;
   readonly spec: BatchSpec;
+  onReady: (() => void) | undefined;
   private readonly ready = Promise.withResolvers<void>();
   private busy = false;
   private failure: { error: unknown } | undefined;
@@ -134,6 +135,7 @@ export class NativeRuntime {
         await client.query(
           `CREATE OR REPLACE FUNCTION compute.repair_sink() RETURNS trigger
           LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $repair$
+          DECLARE affected boolean := false;
           BEGIN
             IF TG_OP='UPDATE' THEN
               IF OLD.id IS DISTINCT FROM NEW.id AND EXISTS(SELECT FROM compute.stream_owner
@@ -144,15 +146,21 @@ export class NativeRuntime {
             IF TG_OP='TRUNCATE' THEN
               UPDATE compute.stream_partition p SET dirty=true FROM compute.stream_owner o
                 WHERE o.name=TG_ARGV[0] AND o.sink=TG_TABLE_NAME AND p.name=o.name AND p.key=o.partition;
+              affected := FOUND;
             ELSE
               IF TG_OP<>'INSERT' THEN
                 UPDATE compute.stream_partition p SET dirty=true FROM compute.stream_owner o
                   WHERE o.name=TG_ARGV[0] AND o.sink=TG_TABLE_NAME AND o.id=OLD.id::text AND p.name=o.name AND p.key=o.partition;
+                affected := FOUND;
               END IF;
               IF TG_OP<>'DELETE' THEN
                 UPDATE compute.stream_partition p SET dirty=true FROM compute.stream_owner o
                   WHERE o.name=TG_ARGV[0] AND o.sink=TG_TABLE_NAME AND o.id=NEW.id::text AND p.name=o.name AND p.key=o.partition;
+                affected := affected OR FOUND;
               END IF;
+            END IF;
+            IF affected THEN
+              PERFORM pg_notify('compute_native_ready', TG_ARGV[0]);
             END IF;
             RETURN NULL;
           END $repair$;
@@ -183,11 +191,13 @@ export class NativeRuntime {
         } catch (error) {
           this.busy = false;
           this.failure = { error };
+          this.onReady?.();
           throw error;
         }
       },
       abortCapture: () => {
         this.busy = false;
+        this.onReady?.();
       },
       capture: async (client, prepared) => {
         if (!client) {
@@ -802,6 +812,14 @@ export class NativeRuntime {
         this.pendingInputs.delete(capture.id);
       },
     };
+    const release = this.spec.release;
+    this.spec.release = async (inputs, output) => {
+      try {
+        await release?.(inputs, output);
+      } finally {
+        this.onReady?.();
+      }
+    };
     const capture = this.spec.capture;
     this.spec.capture = async (client, prepared) => {
       try {
@@ -810,7 +828,11 @@ export class NativeRuntime {
         return result;
       } catch (error) {
         if (prepared === undefined) this.busy = false;
-        this.failure = { error };
+        // The coordinator retries capture transactions before releasing their prepared delta.
+        if (!(error instanceof pg.DatabaseError) || !["40001", "40P01"].includes(error.code ?? "")) {
+          this.failure = { error };
+          this.onReady?.();
+        }
         throw error;
       }
     };
@@ -820,6 +842,7 @@ export class NativeRuntime {
         await captured(inputs);
       } catch (error) {
         this.failure = { error };
+        this.onReady?.();
         throw error;
       } finally {
         this.busy = false;
@@ -977,11 +1000,11 @@ export class NativeRuntime {
     if (this.failure) throw this.failure.error;
     await this.engine.check();
   }
-  async pending(flush: boolean | { done: boolean } = true) {
+  async pending() {
     if (this.failure) throw this.failure.error;
     if (this.busy || this.first) await this.engine.check();
     if (this.busy) return false;
-    if (this.first || await this.engine.pending(flush)) return true;
+    if (this.first || await this.engine.pending()) return true;
     const { rows } = await this.db.query(
       `SELECT 1 FROM compute.stream_partition WHERE name=$1 AND dirty
       AND NOT EXISTS(SELECT FROM compute.batch WHERE name=$1 AND claimed IS NOT NULL) LIMIT 1`,

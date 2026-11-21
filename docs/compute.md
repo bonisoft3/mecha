@@ -458,6 +458,45 @@ Sink publication is atomic and retries cannot overwrite newer completed
 work. pg_duckpipe independently feeds the lake and does not supply this runtime's
 input frontier.
 
+Native readiness is event-driven. Each pipeline maintains a single-row
+`__pending` count over its `pending_<name>` views and a `__readiness` subscription.
+Counting rows rather than weights preserves replacements whose insertion and
+retraction sum to zero. A dedicated PostgreSQL-protocol connection opens a `FULL`
+cursor (snapshot followed by changes) and blocks on `FETCH 1` with a 30-second
+timeout. A timeout only renews the fetch; it does not scan readiness or force a
+barrier. Positive `Insert`/`UpdateInsert` records wake the existing durable batch
+coordinator. Retracted positive counts are not fresh work. Counts can remain equal
+while RisingWave emits changes; notifications are hints, not captured data.
+
+PostgreSQL sink repair triggers mark owned partitions dirty and send
+`compute_native_ready` at commit. The listener subscribes before startup
+reconciliation, so repairs missed while the process was stopped remain discoverable.
+Only authoritative runtime readiness schedules work. Duplicate hints coalesce;
+queued batches already own their wake. Completion and capture abortion request
+another readiness check because an event can arrive while capture is busy.
+Initial computations, including empty inputs, retain their startup reconciliation.
+Non-retryable capture failures also wake the lifecycle so they cannot sit undetected
+until a future CDC event. Serialization failures and deadlocks in capture transactions
+remain owned by the coordinator's retry loop. No 500 ms native readiness loop remains.
+
+Capture, acknowledgment and durable publication retain their existing protocol
+and explicit flushes. Stream/listener failure fails the service; restart opens a
+new `FULL` cursor and reconciles durable work instead of persisting cursor offsets
+or silently falling back to polling. Shutdown closes blocked subscription clients
+and joins the readiness task before closing the coordinator. Pipelines with no
+outputs also own a zero-count subscription, preserving lifecycle failure detection.
+The PostgreSQL listener uses TCP keepalive and requires a direct or session-pooled
+connection; transaction-mode pooling cannot preserve `LISTEN` registration.
+The 30-second fetch timeout is not a source-to-sink latency guarantee; natural
+RisingWave barriers and CDC still determine visibility.
+
+The generated SQL fingerprint includes the count and subscription. Upgrading an
+older pipeline reconstructs it through the existing baseline/slot ownership
+protocol; large materialized-view rebuilds can make the first startup expensive.
+Unchanged subsequent starts reuse the same pipeline. Warm attach also verifies
+the subscription exists; a missing subscription requires reconstruction. This is a Mecha runtime
+change, independent of the renderer and its release targets.
+
 The singleton coordinator owns the RisingWave schema. An uncheckpointed restart reconstructs source
 state using fresh publications and replication identities, then restores the
 last durably captured baseline into the `captured_<name>` tables.
@@ -484,6 +523,17 @@ exactly-once guarantee.
 [[../../../plugins/pronto/bundle/derived.ts|Pages and Cloudflare snapshot export]]
 selects DuckDB snapshot mode, wires `compute-events` on `transform`, and removes
 RisingWave from its disposable computation stack.
+
+The [[../services/compute/spikes/idle-readiness/adoption|isolated adoption canary]]
+uses the real coordinator and PostgreSQL CDC to exercise initial publication,
+warm restart with a missed update, PostgreSQL-only repair, an update while
+capture is held busy, reconstruction after subscription removal, and a
+zero-output subscription. It needs an administrative `DATABASE_URL`, an existing
+`service` role, and `RISINGWAVE_URL`; it creates and removes a disposable database
+and pipeline. Do not run its fixed-name pipeline concurrently with itself.
+[[../services/compute/spikes/idle-readiness/adoption-results.json|Recorded results]]
+include cleanup verification; they are correctness evidence, not a performance
+benchmark.
 
 The opt-in native regressions start isolated PostgreSQL and pinned RisingWave
 containers. From the repository root:

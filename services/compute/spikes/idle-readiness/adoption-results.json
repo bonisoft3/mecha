@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-21",
+  "base": "origin/main 5c0044712fb27c25d2f66dd14903bb385a63473d",
+  "risingwave": "3.1.1 (04db7efd159bfe2941cd0aeaf1a42288d49a70ff)",
+  "scope": "Current branch runtime and coordinator, disposable PostgreSQL database and isolated RisingWave pipeline on Golaberto test server; application release unchanged",
+  "result": {
+    "initialPublication": true,
+    "warmReconnectMissedUpdate": true,
+    "postgresOnlyRepair": true,
+    "updateWhileCaptureBusy": true,
+    "missingSubscriptionReconstructed": true,
+    "calculations": 5,
+    "zeroOutputSubscription": true
+  },
+  "cleanup": {
+    "remainingProbeDatabases": 0,
+    "remainingProbeSchemas": 0,
+    "productionPipelinesIdle": 6,
+    "ddlJobs": 0
+  },
+  "validation": {
+    "runtimeAndReadinessTests": 19,
+    "sourceAndTransportTests": 10,
+    "typecheck": "passed",
+    "lint": "passed",
+    "cueVet": "passed",
+    "localDockerIntegration": {
+      "status": "not passed",
+      "detail": "Initial run reached coordinator initialization but PostgreSQL entered recovery during source creation. Experimental memory budgets caused RisingWave compactor startup failure and were reverted. Live adoption canary passed against the same RisingWave version."
+    }
+  },
+  "limitations": [
+    "No production rollout or performance claim",
+    "First upgrade reconstructs pipelines because generated SQL changes",
+    "Network blackholes and long retention expiry were not injected"
+  ]
+}

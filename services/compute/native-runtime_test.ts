@@ -3,6 +3,7 @@ import pg from "npm:pg@8.16.3";
 import { type Batches, openBatches } from "./batches.ts";
 import { BoundedRuntime } from "./bounded-runtime.ts";
 import type { DeltaStep } from "./deltas.ts";
+import { openNativeReadiness } from "./native-readiness.ts";
 import { NativeRuntime } from "./native-runtime.ts";
 import { type IncrementalProgram, sourceSchema } from "./native-sources.ts";
 import { pgTest, postgres } from "./pg-machine-test.ts";
@@ -122,6 +123,7 @@ async function fixture(uuid = false) {
     throw error;
   }
   let batches: Batches | undefined;
+  let readiness: Awaited<ReturnType<typeof openNativeReadiness>> | undefined;
   let runtime: NativeRuntime;
   let baseline: Row[] = [];
   let acknowledged = new Set<string>();
@@ -257,11 +259,22 @@ async function fixture(uuid = false) {
         )).rows[0].n === 1
       );
     },
+    async listen() {
+      runtime.engine.subscribe = (signal) => new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), {once:true});
+      });
+      readiness = await openNativeReadiness(server.url, db, [runtime], batches!);
+      return readiness;
+    },
     async stop() {
+      await readiness?.close();
+      readiness = undefined;
       await batches!.close();
       batches = undefined;
     },
     async [Symbol.asyncDispose]() {
+      await readiness?.close();
       if (batches) await batches.close();
       await db.end();
       await server[Symbol.asyncDispose]();
@@ -1113,3 +1126,61 @@ pgTest(
     }
   },
 );
+
+pgTest("native readiness repairs PostgreSQL-only damage and reconciles repairs missed while stopped", async () => {
+  await using f = await fixture();
+  await f.start();
+  await f.listen();
+  const repaired = async () => (await f.db.query("SELECT amount::int FROM sink WHERE id='a'")).rows[0]?.amount === 5;
+  await until(repaired);
+  await f.db.query("UPDATE sink SET amount=999 WHERE id='a'");
+  await until(repaired);
+  await until(async () => (await f.db.query("SELECT requested=completed AS done FROM compute.batch")).rows[0].done);
+  await f.stop();
+  await f.db.query("UPDATE sink SET amount=888 WHERE id='a'");
+  await f.start();
+  await f.listen();
+  await until(repaired);
+});
+
+pgTest("native readiness leaves serialization and deadlock retries to the coordinator", async () => {
+  for (const code of ["40001", "40P01"]) {
+    await using f = await fixture();
+    await f.start();
+    await f.db.query(`CREATE SEQUENCE capture_attempt;
+      CREATE FUNCTION fail_capture_once() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF nextval('capture_attempt')=1 THEN
+          RAISE EXCEPTION 'retry capture' USING ERRCODE='${code}';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fail_capture_once BEFORE INSERT ON compute.stream_partition
+        FOR EACH ROW EXECUTE FUNCTION fail_capture_once();`);
+    const runtime = f.runtime();
+    const capture = runtime.spec.capture;
+    let retried = false;
+    runtime.spec.capture = async (client, prepared) => {
+      try {
+        return await capture(client, prepared);
+      } catch (error) {
+        if (!(error instanceof pg.DatabaseError) || error.code !== code) throw error;
+        // A readiness hint can run before the coordinator gets its next attempt.
+        await runtime.check();
+        retried = true;
+        throw error;
+      }
+    };
+    const watcher = await f.listen();
+    await Promise.race([
+      watcher.promise,
+      until(async () => (await f.db.query(
+        "SELECT requested>0 AND requested=completed AS done FROM compute.batch",
+      )).rows[0].done),
+    ]);
+    assertEquals(retried, true);
+    assertEquals((await f.db.query("SELECT id,amount::int FROM sink ORDER BY id")).rows,
+      [{ id: "a", amount: 5 }, { id: "b", amount: 7 }]);
+    await runtime.check();
+  }
+});

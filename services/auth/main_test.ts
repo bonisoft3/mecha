@@ -28,7 +28,7 @@ import {
   verifyJwt,
 } from "./main.ts";
 import { encodeBase64Url, PUBLIC_WHERE, randomToken, sha256url } from "./jwt.ts";
-import { HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
+import { HELD_COOKIE, HINT_COOKIE, LEGACY_HELD_COOKIE, LEGACY_SESSION_COOKIE, SESSION_COOKIE } from "./session.ts";
 import { nameHandle } from "./handles.ts";
 import { type Profile, providersFrom, type User } from "./oidc.ts";
 import { PUBLIC_WHERE as CLIENT_PUBLIC_WHERE } from "../../packages/client/src/public-where.ts";
@@ -1082,7 +1082,7 @@ Deno.test({
     assertEquals(res.status, 200);
     await res.body?.cancel();
     const jar = cookies(res);
-    assert(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/auth;")));
+    assert(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/;") && c.includes("Secure") && !/domain=/i.test(c)));
     assertEquals(jar[HINT_COOKIE], "1");
     const again = await handler(atDoor("/auth/session", {}, door, undefined, jar));
     assertEquals(again.status, 200);
@@ -1101,7 +1101,7 @@ Deno.test({
     await gone.body?.cancel();
     // Signing out clears the cookies.
     const out = await handler(atDoor("/auth/signout", {}, door, undefined, jar));
-    assertEquals([out.status, cookies(out)], [204, { [SESSION_COOKIE]: "", [HELD_COOKIE]: "", [HINT_COOKIE]: "" }]);
+    assertEquals([out.status, cookies(out)], [204, { [SESSION_COOKIE]: "", [HELD_COOKIE]: "", [LEGACY_SESSION_COOKIE]: "", [LEGACY_HELD_COOKIE]: "", [HINT_COOKIE]: "" }]);
   },
 });
 
@@ -1875,6 +1875,25 @@ Deno.test({
     assertEquals(merge.gone, true);
 
     await sql`DROP TABLE owned_fav, owned_deck`;
+  },
+});
+
+Deno.test({
+  name: "adopting a guest is refused where a __Host- session is, and a planted plain one blocks it only while legacy reads are on",
+  ...opts,
+  async fn() {
+    const origin = `https://${door}`;
+    const mint = async () => (await (await handler(atDoor("/auth/guest", { cookie: false }, door, undefined, undefined, origin))).json()).token;
+    const own = cookies(await handler(atDoor("/auth/guest", {}, door, undefined, undefined, origin)));
+    assert(own[SESSION_COOKIE]);
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, await mint(), own, origin))).status, 409);
+    // A valid session of another account, planted under the plain name.
+    const planted = { [LEGACY_SESSION_COOKIE]: own[SESSION_COOKIE] };
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, await mint(), planted, origin))).status, 409);
+    const off = createHandler({ legacyCookie: false });
+    const adopted = await off(atDoor("/auth/session/adopt", {}, door, await mint(), planted, origin));
+    assertEquals(adopted.status, 200);
+    assert(cookies(adopted)[SESSION_COOKIE]);
   },
 });
 

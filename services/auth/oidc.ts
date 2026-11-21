@@ -29,7 +29,10 @@ import { cookieOf, type Device, type Way } from "./session.ts";
 export { sha256url };
 
 export const PREFIX = "/auth/oidc";
-export const STATE_COOKIE = "mecha_oidc_state";
+// Over https the state cookie is __Host- (host-only, Secure, Path=/), one per provider, since every
+// one shares Path=/; plain http keeps the bare name on the callback's path.
+export const STATE_COOKIE = "__Host-mecha_oidc_state";
+const PLAIN_STATE_COOKIE = "mecha_oidc_state";
 const STATE_TTL_S = 600;
 export const NATIVE_TICKET_TTL_S = 60;
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
@@ -352,10 +355,11 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
   const secure = (origin: string) => origin.startsWith("https://") ? "; Secure" : "";
   const callbackOf = (origin: string, name: string) => `${origin}${PREFIX}/${name}/callback`;
   const clientOf = (p: Provider, origin: string) => p.client === ORIGIN_CLIENT ? origin : p.client;
+  const stateName = (origin: string, name: string) => origin.startsWith("https://") ? `${STATE_COOKIE}_${name}` : PLAIN_STATE_COOKIE;
   // Lax reaches the callback: the provider sends the reader back by a
   // top-level GET.
   const stateCookie = (origin: string, name: string, value: string, age: number) =>
-    `${STATE_COOKIE}=${value}; Path=${PREFIX}/${name}/callback; HttpOnly; SameSite=Lax${secure(origin)}; Max-Age=${age}`;
+    `${stateName(origin, name)}=${value}; Path=${origin.startsWith("https://") ? "/" : `${PREFIX}/${name}/callback`}; HttpOnly; SameSite=Lax${secure(origin)}; Max-Age=${age}`;
   // A cross-site POST carries no Lax cookie, and the Origin a browser sends
   // is checked besides.
   const foreign = (req: Request) => {
@@ -510,7 +514,7 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
       verifier = await openVerifier(cfg.secret, state.seal);
       if (verifier === null) return refuse(400, "invalid state");
     } else {
-      verifier = cookieOf(req, STATE_COOKIE);
+      verifier = cookieOf(req, stateName(origin, name));
       if (verifier === null || (await sha256url(verifier)) !== state.bind) return refuse(400, "state is another browser's");
     }
     const client = clientOf(p, origin);

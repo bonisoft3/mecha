@@ -125,8 +125,8 @@ a page the door serves:
 - `GET /auth/oidc/<provider>/start?return=<path>` sends the browser to the
   provider's authorization endpoint with a signed `state`, a nonce and the
   PKCE challenge. A guest starts by `POST` from this origin with its token as
-  the form's `id_token_hint` and `return`, so the token is in no URL; the verifier stays in an HttpOnly cookie scoped to the
-  callback, and the state carries only its hash. Speculative `GET`s
+  the form's `id_token_hint` and `return`, so the token is in no URL; the verifier stays in an HttpOnly state cookie (scoped to the
+  callback over plain http), and the state carries only its hash. Speculative `GET`s
   (`Service-Worker-Navigation-Preload` and `prefetch`/`preview`) are refused on
   both `start` and `callback` without touching cookies or spending a code.
 - `GET /auth/oidc/<provider>/callback` redeems the code at the provider's token
@@ -145,8 +145,7 @@ a page the door serves:
 ## Device session
 
 A browser holds one account (`session.ts`): every sign-in — a passkey's, a
-provider's, a guest's mint — leaves an HttpOnly `mecha_session` cookie on
-`/auth` and a readable `mecha_session_hint`. The cookie is never renewed, so
+provider's, a guest's mint — leaves an HttpOnly session cookie and a readable `mecha_session_hint` (see Cookie names). The cookie is never renewed, so
 it lasts 30 days from the sign-in that set it, and it names the way the
 account came in, which must still stand when it is taken up: the passkey still
 the account's, the provider's link still there, the guest still a guest. Only
@@ -169,9 +168,32 @@ in for a token, never replace this browser's session.
   guest's token makes it the device's session, unless the device has one (409)
   — a sign-in that finished first keeps it. The same route takes up a guest an
   earlier release kept in a tab's sessionStorage (`guest: true`, no `acr`).
-- `POST /auth/signout` clears every cookie.
+- `POST /auth/signout` clears every cookie, under both of their names.
 
 Each is refused (403) from another origin.
+
+### Cookie names
+
+Over https the credential-bearing cookies are `__Host-` cookies: no `Domain`, `Path=/`, `Secure`,
+which a browser accepts only from the exact host that sets them. A sibling site under the same
+parent domain can otherwise set a `Domain=<parent>` cookie of the same name here and sign a
+visitor into its own account (login fixation).
+
+| https | plain http (local) |
+| --- | --- |
+| `__Host-mecha_session` | `mecha_session`, `Path=/auth` |
+| `__Host-mecha_session_held` | `mecha_session_held`, `Path=/auth` |
+| `__Host-mecha_oidc_state_<provider>` | `mecha_oidc_state`, `Path=/auth/oidc/<provider>/callback` |
+
+Browsers refuse `__Host-` without https, so plain http keeps the bare names. Each provider's state
+cookie has a name of its own since they now share `Path=/`. `mecha_session_hint` holds no
+credential and keeps its name and `Path=/`.
+
+`OIDC_LEGACY_COOKIE` (default on) is the upgrade switch. Over https, a plain `mecha_session` is read
+only when no `__Host-` session exists, so a release does not sign everyone out; the next sign-in
+sets the prefixed one. A plain `mecha_session_held` is never read (an offer lasts five minutes).
+Set `OIDC_LEGACY_COOKIE=off` where no plain cookie of ours can exist (an origin new since, or once
+sessions have rolled over, 30 days): a plain one there could only be a sibling's. Sign-out clears both names.
 
 ## Provider settings
 - `POST /auth/oidc/session` serves a native host: when `/start` ran with
@@ -200,6 +222,7 @@ and a provider whose client neither gives refuses to start:
 | `OIDC_<NAME>_INTERNAL` | where this service reaches the issuer when the cluster's way differs from the reader's |
 | `OIDC_<NAME>_CLIENT_SECRET` | where the provider wants one; Google's code flow does |
 | `OIDC_<NAME>_SCOPE` | `openid`, or the preset's |
+| `OIDC_LEGACY_COOKIE` | `off` stops reading a plain `mecha_session` over https (see Cookie names); anything else reads it where no `__Host-` one exists |
 | `OIDC_<NAME>_AUTHORIZE_PARAMS` | further authorization parameters, URL-encoded; never one the flow sets |
 
 A person signed in through a provider and one holding a passkey are two

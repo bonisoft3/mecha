@@ -434,6 +434,8 @@ export type AuthHandlerOptions = {
   nativeSchemes?: string | readonly string[];
   providers?: Record<string, Provider>;
   fetcher?: typeof fetch;
+  /** Overrides OIDC_LEGACY_COOKIE. */
+  legacyCookie?: boolean;
 };
 
 function coreFor(opts: AuthHandlerOptions) {
@@ -449,6 +451,8 @@ function coreFor(opts: AuthHandlerOptions) {
     providers: opts.providers ?? OIDC_PROVIDERS,
     nativeSchemes: opts.nativeSchemes !== undefined ? nativeSchemesFrom(opts.nativeSchemes) : NATIVE_SCHEMES,
     fetcher: opts.fetcher,
+    // "off" where an origin is new since the __Host- cookies: a bare mecha_session there could only be a sibling host's.
+    legacyCookie: opts.legacyCookie ?? Deno.env.get("OIDC_LEGACY_COOKIE") !== "off",
   });
 }
 

@@ -28,7 +28,7 @@ import {
   verifyJwt,
 } from "./main.ts";
 import { encodeBase64Url, PUBLIC_WHERE, randomToken, sha256url } from "./jwt.ts";
-import { HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
+import { HELD_COOKIE, HINT_COOKIE, LEGACY_HELD_COOKIE, LEGACY_SESSION_COOKIE, SESSION_COOKIE } from "./session.ts";
 import { nameHandle } from "./handles.ts";
 import { type Profile, providersFrom, type User } from "./oidc.ts";
 import { PUBLIC_WHERE as CLIENT_PUBLIC_WHERE } from "../../packages/client/src/public-where.ts";
@@ -1082,7 +1082,7 @@ Deno.test({
     assertEquals(res.status, 200);
     await res.body?.cancel();
     const jar = cookies(res);
-    assert(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/auth;")));
+    assert(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/;") && c.includes("Secure") && !/domain=/i.test(c)));
     assertEquals(jar[HINT_COOKIE], "1");
     const again = await handler(atDoor("/auth/session", {}, door, undefined, jar));
     assertEquals(again.status, 200);
@@ -1101,7 +1101,7 @@ Deno.test({
     await gone.body?.cancel();
     // Signing out clears the cookies.
     const out = await handler(atDoor("/auth/signout", {}, door, undefined, jar));
-    assertEquals([out.status, cookies(out)], [204, { [SESSION_COOKIE]: "", [HELD_COOKIE]: "", [HINT_COOKIE]: "" }]);
+    assertEquals([out.status, cookies(out)], [204, { [SESSION_COOKIE]: "", [HELD_COOKIE]: "", [LEGACY_SESSION_COOKIE]: "", [LEGACY_HELD_COOKIE]: "", [HINT_COOKIE]: "" }]);
   },
 });
 

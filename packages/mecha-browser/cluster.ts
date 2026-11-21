@@ -13,7 +13,7 @@
 import type { PGlite } from '@electric-sql/pglite'
 import { createRestHandler } from '@mecha/postgrest-js'
 import { encodeBase64Url } from 'jsr:@std/encoding@1.0.7/base64url'
-import { shapeWhere } from '../../services/auth/jwt.ts'
+import { shapeWhere } from '../../services/auth/where.ts'
 import { createClock, hasSchedules, serviceCrud } from './clock.ts'
 import { createDrains, type Drain, type Drains } from './drains.ts'
 import { browserTier } from './fence.ts'

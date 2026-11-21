@@ -14,7 +14,7 @@ import {
   SUBSET_PARAMS,
   subsetParams,
   subsetPositions,
-} from '../../services/auth/jwt.ts'
+} from '../../services/auth/where.ts'
 
 export interface ShapesDb {
   query<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<{ rows: T[] }>

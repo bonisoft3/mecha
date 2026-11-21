@@ -4,6 +4,7 @@
     "@electric-sql/pglite": "npm:@electric-sql/pglite@0.5.8",
     "@electric-sql/pglite-icu-full": "npm:@electric-sql/pglite-icu-full@0.0.2",
     "@simplewebauthn/server": "npm:@simplewebauthn/server@10.0.1",
+    "jose": "npm:jose@6.2.15",
     "graphile-worker": "npm:graphile-worker@0.18.0",
     "croner": "npm:croner@10.0.1",
     "@mecha/postgrest-js": "../postgrest-js/src/index.ts",

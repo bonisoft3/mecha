@@ -31,7 +31,8 @@
 //   answers `offset=-1` with `up-to-date` in one round-trip, and Electric's
 //   client holds back `up-to-date` for 60 s from any response whose cursor
 //   matches the previous session's.
-import { isSession, PUBLIC_WHERE, verifyJwt } from '../../../services/auth/jwt.ts'
+import { isSession, verifyJwt } from '../../../services/auth/jwt.ts'
+import { PUBLIC_WHERE } from '../../../services/auth/where.ts'
 import { isGuest } from '../../../services/auth/claims.ts'
 import type { EdgeEnv } from './object.ts'
 import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'

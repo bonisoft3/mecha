@@ -14,11 +14,10 @@ import {
   androidOrigins,
   isSession,
   nativeSchemesFrom,
-  PUBLIC_WHERE,
-  shapeWhere,
   signJwt,
   verifyJwt,
 } from '../../../services/auth/jwt.ts'
+import { PUBLIC_WHERE, shapeWhere } from '../../../services/auth/where.ts'
 import type { Provider } from '../../../services/auth/oidc.ts'
 import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'

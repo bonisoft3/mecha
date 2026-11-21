@@ -23,8 +23,9 @@
 //
 // Pure but for what Config hands it — the origin, the links, the tickets, the
 // network — so oidc_test.ts drives every refusal against a provider of its own.
+import { compactDecrypt, CompactEncrypt, createRemoteJWKSet, customFetch, errors, jwtVerify, type JWTVerifyGetKey } from "jose";
 import { isGuest, providerProof, type Proof } from "./claims.ts";
-import { decodeBase64Url, encodeBase64Url, isSession, randomToken, sha256url, signJwt, verifyJwt } from "./jwt.ts";
+import { isSession, randomToken, sha256url, signJwt, verifyJwt } from "./jwt.ts";
 import { cookieOf, type Device, type Way } from "./session.ts";
 export { sha256url };
 
@@ -140,19 +141,31 @@ export function discovery(fetcher: typeof fetch = fetch): (p: Provider) => Promi
   };
 }
 
-/** A provider's signing keys, fetched again only for a key id not held, as
- * rotation reaches a running service. */
-export function keySource(fetcher: typeof fetch = fetch): (jwks: string, kid: string) => Promise<JsonWebKey | undefined> {
-  const held = new Map<string, JsonWebKey[]>();
-  return async (jwks, kid) => {
-    const find = () => held.get(jwks)?.find((k) => (k as { kid?: string }).kid === kid);
-    if (find()) return find();
-    const res = await fetcher(jwks);
-    if (!res.ok) throw new Error(`${jwks}: ${res.status}`);
-    held.set(jwks, ((await res.json()) as { keys: JsonWebKey[] }).keys);
-    return find();
+/** A provider's key set, fetched again at once for a key id it does not
+ * hold, as rotation reaches a running service (jose's remote set). A token
+ * names its key. */
+export function keySource(fetcher: typeof fetch = fetch): (jwks: string) => JWTVerifyGetKey {
+  const held = new Map<string, JWTVerifyGetKey>();
+  return (jwks) => {
+    let set = held.get(jwks);
+    if (set === undefined) {
+      const remote = createRemoteJWKSet(new URL(jwks), { [customFetch]: fetcher, cooldownDuration: 0 });
+      set = (header, token) => {
+        if (typeof header.kid !== "string") throw new errors.JWKSNoMatchingKey();
+        return remote(header, token);
+      };
+      held.set(jwks, set);
+    }
+    return set;
   };
 }
+
+// What makes a token no token of this provider's. Anything else jose raises,
+// a key set the provider failed to serve among it, is the provider's fault.
+const REFUSED = [
+  errors.JWSInvalid, errors.JWTInvalid, errors.JWSSignatureVerificationFailed, errors.JWTClaimValidationFailed,
+  errors.JWTExpired, errors.JOSEAlgNotAllowed, errors.JWKSNoMatchingKey, errors.JWKSMultipleMatchingKeys,
+];
 
 /** A provider's subject and what it says of the person: `given` is the first
  * name (OpenID Connect's given_name), `name` the whole one. */
@@ -237,80 +250,47 @@ const random = (bytes: number) => randomToken(bytes);
 
 // A native start has no cookie to keep its PKCE verifier in, so the state the
 // provider sees carries it sealed.
-const sealKeys = new Map<string, Promise<CryptoKey>>();
-function sealKey(secret: string): Promise<CryptoKey> {
+const sealKeys = new Map<string, Promise<Uint8Array>>();
+function sealKey(secret: string): Promise<Uint8Array> {
   let k = sealKeys.get(secret);
   if (k === undefined) {
-    k = crypto.subtle.digest("SHA-256", enc.encode(`oidc-state-seal:${secret}`))
-      .then((raw) => crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]));
+    k = crypto.subtle.digest("SHA-256", enc.encode(`oidc-state-seal:${secret}`)).then((raw) => new Uint8Array(raw));
     sealKeys.set(secret, k);
   }
   return k;
 }
 
 async function sealVerifier(secret: string, verifier: string): Promise<string> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await sealKey(secret), enc.encode(verifier)));
-  const packed = new Uint8Array(iv.length + ct.length);
-  packed.set(iv, 0);
-  packed.set(ct, iv.length);
-  return encodeBase64Url(packed);
+  return await new CompactEncrypt(enc.encode(verifier)).setProtectedHeader({ alg: "dir", enc: "A256GCM" }).encrypt(await sealKey(secret));
 }
 
 async function openVerifier(secret: string, sealed: string): Promise<string | null> {
   try {
-    const packed = decodeBase64Url(sealed);
-    if (packed.length <= 12) return null;
-    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: packed.slice(0, 12) }, await sealKey(secret), packed.slice(12));
-    return dec.decode(pt);
-  } catch {
-    return null;
+    return dec.decode((await compactDecrypt(sealed, await sealKey(secret), { keyManagementAlgorithms: ["dir"], contentEncryptionAlgorithms: ["A256GCM"] })).plaintext);
+  } catch (e) {
+    if (e instanceof errors.JOSEError) return null;
+    throw e;
   }
 }
 
-const ALGS = {
-  RS256: { kty: "RSA", import: { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, verify: { name: "RSASSA-PKCS1-v1_5" } },
-  ES256: { kty: "EC", import: { name: "ECDSA", namedCurve: "P-256" }, verify: { name: "ECDSA", hash: "SHA-256" } },
-} as const;
-
-/** An ID token's subject and profile, verified: signed under one of the
- * provider's keys, issued by it for this client, unexpired, and carrying the
- * nonce this browser was sent with. Null on any doubt. */
+/** An ID token's subject and profile, verified by jose: signed under one of
+ * the provider's keys, issued by it for this client, unexpired, and carrying
+ * the nonce this browser was sent with. Null on any doubt. */
 export async function verifyIdToken(
   provider: string,
   token: string,
-  key: (kid: string) => Promise<JsonWebKey | undefined>,
+  keys: JWTVerifyGetKey,
   p: { issuer: string; issuers: string[]; client: string; nonce: string },
 ): Promise<Profile | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  let head: unknown, c: unknown;
+  let c: Record<string, unknown>;
   try {
-    head = JSON.parse(dec.decode(decodeBase64Url(parts[0])));
-    c = JSON.parse(dec.decode(decodeBase64Url(parts[1])));
-  } catch {
-    return null;
+    c = (await jwtVerify(token, keys, { algorithms: ["RS256", "ES256"], issuer: p.issuers, audience: p.client, requiredClaims: ["exp", "sub"] })).payload;
+  } catch (e) {
+    if (REFUSED.some((kind) => e instanceof kind)) return null;
+    throw e;
   }
-  if (!isObject(head) || !isObject(c)) return null;
-  if (typeof head.kid !== "string" || !Object.hasOwn(ALGS, head.alg as string)) return null;
-  const alg = ALGS[head.alg as keyof typeof ALGS];
-  const jwk = await key(head.kid);
-  if (jwk === undefined || jwk.kty !== alg.kty) return null;
-  let ok: boolean;
-  try {
-    const pub = alg.kty === "RSA" ? { kty: "RSA", n: jwk.n, e: jwk.e } : { kty: "EC", crv: jwk.crv, x: jwk.x, y: jwk.y };
-    const k = await crypto.subtle.importKey("jwk", pub, alg.import, false, ["verify"]);
-    ok = await crypto.subtle.verify(alg.verify, k, decodeBase64Url(parts[2]), enc.encode(`${parts[0]}.${parts[1]}`));
-  } catch {
-    return null;
-  }
-  if (!ok) return null;
-  if (typeof c.iss !== "string" || !p.issuers.includes(c.iss)) return null;
-  const aud = Array.isArray(c.aud) ? c.aud : [c.aud];
-  if (!aud.includes(p.client)) return null;
   // A token for several audiences names the one it was handed to (OIDC Core 3.1.3.7).
-  if (aud.length > 1 && c.azp !== p.client) return null;
-  if (typeof c.exp !== "number" || c.exp <= Math.floor(Date.now() / 1000)) return null;
+  if (Array.isArray(c.aud) && c.aud.length > 1 && c.azp !== p.client) return null;
   if (p.nonce === "" || c.nonce !== p.nonce) return null;
   if (typeof c.sub !== "string" || c.sub === "" || c.sub.length > 255) return null;
   const name = typeof c.name === "string" && c.name.trim() !== "" ? c.name.trim().slice(0, 120) : null;
@@ -530,7 +510,7 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     if (!exchanged.ok) return refuse(401, "the provider refused the code");
     const idToken = ((await exchanged.json()) as { id_token?: unknown }).id_token;
     if (typeof idToken !== "string") return refuse(401, "no id token");
-    const profile = await verifyIdToken(name, idToken, (kid) => keys(ends.jwks, kid), { issuer: p.issuer, issuers: p.issuers, client, nonce: state.nonce });
+    const profile = await verifyIdToken(name, idToken, keys(ends.jwks), { issuer: p.issuer, issuers: p.issuers, client, nonce: state.nonce });
     if (profile === null) return refuse(401, "id token refused");
     if (native !== null) {
       const found = await cfg.links.userFor(profile, typeof state.promote === "string" ? state.promote : null);

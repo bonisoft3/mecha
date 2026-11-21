@@ -6,6 +6,7 @@
     "jsr:@std/internal@^1.0.6": "1.0.14",
     "npm:@simplewebauthn/server@10.0.1": "10.0.1",
     "npm:@types/node@*": "22.15.15",
+    "npm:jose@6.2.15": "6.2.15",
     "npm:postgres@3.4.9": "3.4.9"
   },
   "jsr": {
@@ -116,6 +117,9 @@
         "node-fetch"
       ]
     },
+    "jose@6.2.15": {
+      "integrity": "sha512-qdF6ewcZARtef63fJ9AKKZPgxw+t7USH6HLXYcD4CrdmSvDp79rpJSPFEKc90QBeGS63u1KQtN2MZQHC0yDIzA=="
+    },
     "node-fetch@2.7.0": {
       "integrity": "sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==",
       "dependencies": [
@@ -157,6 +161,7 @@
   "workspace": {
     "dependencies": [
       "npm:@simplewebauthn/server@10.0.1",
+      "npm:jose@6.2.15",
       "npm:postgres@3.4.9"
     ]
   }

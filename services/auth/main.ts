@@ -8,19 +8,21 @@ import { type AuthDb, authCore, type Query, REFRESH_TOKEN_TTL_S, type Row } from
 import {
   androidOrigins,
   isSession,
-  isSubsetWhere,
   nativeSchemesFrom,
+  STACK_ISSUER,
+  signJwt as sign,
+  verifyJwt as verify,
+} from "./jwt.ts";
+import {
+  isSubsetWhere,
   PUBLIC_WHERE,
   SHAPE_FIXED_PARAMS,
-  STACK_ISSUER,
   shapeWhere,
-  signJwt as sign,
   SUBSET_LIMIT,
   SUBSET_ORDER,
   SUBSET_PARAMS,
   subsetParams,
-  verifyJwt as verify,
-} from "./jwt.ts";
+} from "./where.ts";
 import { type Provider, providersFrom } from "./oidc.ts";
 import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, sealAuthTables } from "./schema.ts";
 export { androidOrigins, nativeSchemesFrom, REFRESH_TOKEN_TTL_S, shapeWhere };

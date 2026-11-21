@@ -2,6 +2,7 @@
   "nodeModulesDir": "auto",
   "imports": {
     "@simplewebauthn/server": "npm:@simplewebauthn/server@10.0.1",
+    "jose": "npm:jose@6.2.15",
     "postgres": "npm:postgres@3.4.9"
   },
   "lock": true

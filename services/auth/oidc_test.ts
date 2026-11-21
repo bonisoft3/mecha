@@ -41,8 +41,8 @@ const generate = (alg: Alg) =>
     ["sign", "verify"],
   ) as Promise<CryptoKeyPair>;
 
-async function sign(alg: Alg, key: CryptoKey, kid: string, claims: Record<string, unknown>): Promise<string> {
-  const head = b64(JSON.stringify({ alg, kid, typ: "JWT" }));
+async function sign(alg: Alg, key: CryptoKey, kid: string | undefined, claims: Record<string, unknown>): Promise<string> {
+  const head = b64(JSON.stringify({ alg, ...(kid === undefined ? {} : { kid }), typ: "JWT" }));
   const body = b64(JSON.stringify(claims));
   const params = alg === "RS256" ? { name: "RSASSA-PKCS1-v1_5" } : { name: "ECDSA", hash: "SHA-256" };
   const sig = new Uint8Array(await crypto.subtle.sign(params, key, new TextEncoder().encode(`${head}.${body}`)));
@@ -60,14 +60,16 @@ async function provider(p: { issuer: string; reachedAt?: string; alg: Alg; clien
   const codes = new Map<string, { client: string; redirect: string; challenge: string; nonce: string }>();
   const asked: string[] = [];
   let bend: Record<string, unknown> = {};
-  let signer = { key: keys.privateKey, kid: "k1" };
+  let signer: { key: CryptoKey; kid: string | undefined } = { key: keys.privateKey, kid: "k1" };
+  const published = [jwk];
+  let keysDown = false;
   const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     asked.push(url);
     if (url === `${base}/.well-known/openid-configuration`) {
       return Response.json({ issuer: p.issuer, authorization_endpoint: `${publicBase}/authorize`, token_endpoint: `${publicBase}/token`, jwks_uri: `${publicBase}/jwks` });
     }
-    if (url === `${base}/jwks`) return Response.json({ keys: [jwk] });
+    if (url === `${base}/jwks`) return keysDown ? new Response("unavailable", { status: 503 }) : Response.json({ keys: published });
     if (url === `${base}/token`) {
       const form = new URLSearchParams(String(init?.body));
       const grant = codes.get(form.get("code") ?? "");
@@ -95,8 +97,16 @@ async function provider(p: { issuer: string; reachedAt?: string; alg: Alg; clien
     bend(claims: Record<string, unknown>) {
       bend = claims;
     },
-    signWithAnotherKey(kid = "k1") {
+    signWithAnotherKey(kid: string | undefined = "k1") {
       signer = { key: other.privateKey, kid };
+    },
+    /** Publishes a new key and signs with it from now on, as a rotation does. */
+    async rotate() {
+      published.push({ ...(await crypto.subtle.exportKey("jwk", other.publicKey)), kid: "k2" });
+      signer = { key: other.privateKey, kid: "k2" };
+    },
+    breakKeys() {
+      keysDown = true;
     },
   };
 }
@@ -326,6 +336,7 @@ Deno.test("an ID token is refused unless the provider signed it for this client 
   const cases: [string, (idp: Idp) => void][] = [
     ["another key", (idp) => idp.signWithAnotherKey()],
     ["an unpublished kid", (idp) => idp.signWithAnotherKey("k2")],
+    ["no kid", (idp) => idp.signWithAnotherKey(undefined)],
     ["another issuer", (idp) => idp.bend({ iss: "https://evil.test" })],
     ["another client", (idp) => idp.bend({ aud: "someone-else" })],
     ["several audiences, handed to another", (idp) => idp.bend({ aud: ["client-123", "x"], azp: "x" })],
@@ -339,6 +350,22 @@ Deno.test("an ID token is refused unless the provider signed it for this client 
     assertEquals((await signIn(s)).status, 401, why);
     assertEquals(s.links.users.size, 0, why);
   }
+});
+
+// Regression: jose's remote key set waits 30 s after a fetch before fetching
+// again, and a key the provider rotated to within that time was refused.
+Deno.test("a key the provider rotates to is fetched at once, and its first token signs in", async () => {
+  const s = await setup();
+  assertEquals((await signIn(s)).status, 303);
+  await s.idp.rotate();
+  assertEquals((await signIn(s)).status, 303);
+});
+
+// Regression: a provider failing to serve its keys read as its token refused.
+Deno.test("a provider that cannot serve its keys fails the sign-in loudly, not as a refused token", async () => {
+  const s = await setup();
+  s.idp.breakKeys();
+  await assertRejects(() => signIn(s));
 });
 
 Deno.test("a discovery document naming another issuer is refused", async () => {

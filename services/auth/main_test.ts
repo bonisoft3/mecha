@@ -27,7 +27,8 @@ import {
   sql,
   verifyJwt,
 } from "./main.ts";
-import { encodeBase64Url, PUBLIC_WHERE, randomToken, sha256url } from "./jwt.ts";
+import { encodeBase64Url, randomToken, sha256url } from "./jwt.ts";
+import { PUBLIC_WHERE } from "./where.ts";
 import { HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
 import { nameHandle } from "./handles.ts";
 import { type Profile, providersFrom, type User } from "./oidc.ts";

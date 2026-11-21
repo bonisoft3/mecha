@@ -17,6 +17,7 @@
     "npm:croner@10.0.1": "10.0.1",
     "npm:fast-png@6.4.0": "6.4.0",
     "npm:graphile-worker@0.18.0": "0.18.0",
+    "npm:jose@6.2.15": "6.2.15",
     "npm:jpeg-js@0.4.4": "0.4.4"
   },
   "npm": {
@@ -474,6 +475,9 @@
     "is-fullwidth-code-point@3.0.0": {
       "integrity": "sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg=="
     },
+    "jose@6.2.15": {
+      "integrity": "sha512-qdF6ewcZARtef63fJ9AKKZPgxw+t7USH6HLXYcD4CrdmSvDp79rpJSPFEKc90QBeGS63u1KQtN2MZQHC0yDIzA=="
+    },
     "jpeg-js@0.4.4": {
       "integrity": "sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg=="
     },
@@ -765,6 +769,7 @@
       "npm:croner@10.0.1",
       "npm:fast-png@6.4.0",
       "npm:graphile-worker@0.18.0",
+      "npm:jose@6.2.15",
       "npm:jpeg-js@0.4.4"
     ]
   }

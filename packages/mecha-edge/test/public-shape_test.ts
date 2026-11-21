@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { PGlite } from '@electric-sql/pglite'
 import { createEdgeCluster } from '../src/cluster.ts'
-import { PUBLIC_WHERE } from '../../../services/auth/jwt.ts'
+import { PUBLIC_WHERE } from '../../../services/auth/where.ts'
 import { PUBLIC_WHERE as CLIENT_PUBLIC_WHERE } from '../../client/src/public-where.ts'
 
 // A screen mounted only once every shape it reads answered, and each waited on

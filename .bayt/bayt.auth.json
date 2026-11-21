@@ -203,7 +203,8 @@
           "services/auth/main.ts",
           "services/auth/oidc.ts",
           "services/auth/schema.ts",
-          "services/auth/session.ts"
+          "services/auth/session.ts",
+          "services/auth/where.ts"
         ],
         "exclude": []
       },
@@ -229,7 +230,8 @@
               "services/auth/main.ts",
               "services/auth/oidc.ts",
               "services/auth/schema.ts",
-              "services/auth/session.ts"
+              "services/auth/session.ts",
+              "services/auth/where.ts"
             ],
             "exclude": []
           }

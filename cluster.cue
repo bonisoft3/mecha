@@ -993,6 +993,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							POSTGRES_DB:            "${POSTGRES_DB:-\(X.meta.app)}"
 							ELECTRIC_PASSWORD:      electricPassword
 							AUTHENTICATOR_PASSWORD: authenticatorPassword
+							// The key crud verifies tokens with, handed to the database as well (compose passes
+							// only the variables a service names), so an app's initdb step can refuse the public
+							// fallback in any stack, a container's included, instead of starting crud on it.
+							PGRST_JWT_SECRET: jwtSecret
 							// ORDER BY on text reaches a reader, so it sorts the way a
 							// dictionary does, not by byte: bytes put every accent past all
 							// of ASCII and split the alphabet by case, so "ana" follows "Zoe".

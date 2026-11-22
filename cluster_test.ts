@@ -625,6 +625,18 @@ Deno.test("electric's password reaches the role and its URL from one variable", 
   );
 });
 
+// The database is handed the key crud verifies tokens with, the expression crud signs
+// with (its fallback is the dev key): compose passes a service only the variables it names, so an app's initdb step
+// that refuses the public fallback sees the deployment's key (or the fallback, and refuses it) in
+// a container as it does on host processes.
+Deno.test("the database is handed the key crud verifies tokens with", async () => {
+  const got = await exported({}, "surface.targets", { server: true });
+  assert.equal(got.ok, true, got.stderr);
+  const key = got.value.database.compose.environment.PGRST_JWT_SECRET;
+  assert.match(key, /^\$\{PGRST_JWT_SECRET:-/);
+  assert.match(key, /^\$\{PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch\}$/);
+});
+
 Deno.test("a caller step on the electric password's digits is refused", async () => {
   const got = await exported({ migrations: ["m/899_late.sql"] }, "surface.targets.database", { server: true });
   assert.equal(got.ok, false);

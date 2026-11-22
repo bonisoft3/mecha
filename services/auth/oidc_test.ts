@@ -297,17 +297,35 @@ Deno.test("signing in again is the same person, with the provider's new name", a
   assertEquals(s.links.users.get("google:https://accounts.google.com:alice-sub")!.name, "Alice B.");
 });
 
-Deno.test("a callback is refused without this browser's verifier, and its code is then spent for nobody", async () => {
+/** A callback that can't finish: back to the app (no raw JSON), no session, the state cookie cleared. */
+function sentBack(res: Response, to: string, why = "") {
+  assertEquals(res.status, 303, why);
+  assertEquals(res.headers.get("location"), to, why);
+  const cookies = res.headers.getSetCookie();
+  assert(!cookies.some((c) => c.startsWith(`${SESSION_COOKIE}=`)), `no session: ${why}`);
+  assert(cookies.some((c) => c.startsWith(`${STATE_COOKIE}=;`) || (c.startsWith(`${STATE_COOKIE}=`) && c.includes("Max-Age=0"))), `state cleared: ${why}`);
+}
+
+Deno.test("a callback without this browser's verifier, or with another start's, goes back to the app signed in as nobody", async () => {
   const s = await setup();
   const { to, state } = await begin(s.serve);
   const code = s.idp.authorize(to);
-  assertEquals((await s.serve(callback({ code, state }, null))).status, 400);
+  sentBack(await s.serve(callback({ code, state }, null)), "/chapter/8", "no cookie");
   const other = await begin(s.serve);
-  assertEquals((await s.serve(callback({ code, state }, other.verifier))).status, 400);
+  sentBack(await s.serve(callback({ code, state }, other.verifier)), "/chapter/8", "another start's cookie");
   assertEquals(s.links.users.size, 0);
 });
 
-Deno.test("a callback is refused with a forged, foreign or expired state", async () => {
+Deno.test("a callback replayed after its sign-in goes back to the app, not to an error", async () => {
+  const s = await setup();
+  const { to, state, verifier } = await begin(s.serve);
+  const code = s.idp.authorize(to);
+  assertEquals((await s.serve(callback({ code, state }, verifier))).status, 303);
+  sentBack(await s.serve(callback({ code, state }, null)), "/chapter/8", "replayed, its cookie cleared by the sign-in");
+  assertEquals(s.links.users.size, 1);
+});
+
+Deno.test("a callback with a forged, foreign or expired state goes back to the app signed in as nobody", async () => {
   const s = await setup();
   const { to, verifier } = await begin(s.serve);
   const code = s.idp.authorize(to);
@@ -319,7 +337,7 @@ Deno.test("a callback is refused with a forged, foreign or expired state", async
     ["another provider's", await signJwt(SECRET, { ...claims, provider: "apple" })],
     ["expired", await signJwt(SECRET, { ...claims, exp: now() - 1 })],
   ]) {
-    assertEquals((await s.serve(callback({ code, state }, verifier))).status, 400, why);
+    sentBack(await s.serve(callback({ code, state }, verifier)), "/", String(why));
   }
 });
 
@@ -539,7 +557,7 @@ Deno.test("replacing an issuer cannot inherit its subject or its browser session
   const broker = await setup(BROKERED, links);
   assertEquals((await broker.serve(exchange(previous))).status, 401);
   const pending = await begin(google.serve);
-  assertEquals((await broker.serve(callback({ code: google.idp.authorize(pending.to), state: pending.state }, pending.verifier))).status, 400);
+  sentBack(await broker.serve(callback({ code: google.idp.authorize(pending.to), state: pending.state }, pending.verifier)), "/", "another issuer's state");
   const current = jar(await signIn(broker))[SESSION_COOKIE];
   const other = (await (await broker.serve(exchange(current))).json()).user;
   assert(alice.id !== other.id);

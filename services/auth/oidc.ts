@@ -466,6 +466,12 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     return redirect(to, cookies);
   }
 
+  // A callback that can't finish: the reason on the log (never a value), the reader back in the app.
+  function startAgain(name: string, reason: string, to: string, origin: string): Response {
+    console.warn(`oidc ${name} callback: ${reason}`);
+    return redirect(to, [stateCookie(origin, name, "", 0)]);
+  }
+
   async function callback(req: Request, name: string): Promise<Response> {
     const p = cfg.providers[name];
     const origin = cfg.origin(req);
@@ -476,7 +482,8 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     if (code === null || stateToken === null) return refuse(400, "no code");
     const state = await verifyJwt(cfg.secret, stateToken);
     if (state === null || state.purpose !== "oidc" || state.provider !== name || state.issuer !== p.issuer || typeof state.nonce !== "string") {
-      return refuse(400, "invalid state");
+      // Expired, or not ours: back to the app, which offers the sign-in again; a reader never lands on raw JSON.
+      return startAgain(name, "invalid or expired state", "/", origin);
     }
     const native = isObject(state.native) ? state.native : null;
     let verifier: string | null;
@@ -491,7 +498,11 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
       if (verifier === null) return refuse(400, "invalid state");
     } else {
       verifier = cookieOf(req, STATE_COOKIE);
-      if (verifier === null || (await sha256url(verifier)) !== state.bind) return refuse(400, "state is another browser's");
+      // No cookie (this callback already signed in, or it came back in another browser) or another start's
+      // cookie (a later /start replaced it): back to where the sign-in began, signed in or not, never raw JSON.
+      if (verifier === null || (await sha256url(verifier)) !== state.bind) {
+        return startAgain(name, verifier === null ? "no state cookie" : "state cookie of another start", safeReturn(typeof state.ret === "string" ? state.ret : null), origin);
+      }
     }
     const client = clientOf(p, origin);
     const ends = await endpoints(p);

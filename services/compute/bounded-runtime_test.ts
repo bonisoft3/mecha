@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { type BoundedOptions, BoundedRuntime } from "./bounded-runtime.ts";
 import { encodeWasmQueryInput } from "../../packages/compute-snapshot/src/bounded.ts";
+import { strictJson } from "./workers.ts";
 
 const source =
 	`export const reads=[]; export const queries={}; export const finish=()=>({});
@@ -64,6 +65,50 @@ Deno.test("bounded captures survive restart and retain frozen multi-query inputs
 			replay.push(...page);
 		}
 		assertEquals(replay, pages.flat());
+	} finally {
+		await Deno.remove(directory, { recursive: true });
+	}
+});
+// Regression: the capture paged its input with OFFSET, rescanning every earlier
+// row on each page, and held one hex hash per row in the JS heap to sort; on
+// golaberto's archive the compute container ran out of memory. The digest is
+// unchanged by moving the sort into DuckDB, so earlier captures stay valid.
+Deno.test("a capture digests every row of a relation many pages long, as before", async () => {
+	const directory = await Deno.makeTempDir();
+	try {
+		const config = options(directory);
+		config.queries = {
+			items: "SELECT i::VARCHAR AS id, i::INTEGER AS value FROM range(10000) t(i)",
+		};
+		const capture = await (await BoundedRuntime.create(config)).capture();
+		const hex = async (text: string) =>
+			Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))))
+				.map((b) => b.toString(16).padStart(2, "0")).join("");
+		const rows = (await Promise.all(
+			Array.from({ length: 10000 }, (_, i) => hex(strictJson({ id: String(i), value: i }))),
+		)).sort();
+		const expected = await hex(`v1\0items\0${rows.map((h) => `${h}\n`).join("")}\0`);
+		assertEquals(capture.digest, expected);
+	} finally {
+		await Deno.remove(directory, { recursive: true });
+	}
+});
+// The rows are bound to DuckDB as a list of their exact text: a value full of
+// the characters JSON escapes must hash as the text JavaScript encoded.
+Deno.test("a capture stores and digests each row's exact text", async () => {
+	const directory = await Deno.makeTempDir();
+	try {
+		const config = options(directory);
+		const values = ['q"uo"te', "back\\slash", "new\nline", "ação ✓", ""];
+		config.queries = {
+			items: `SELECT * FROM (VALUES ${values.map((v, i) => `('${i}', ${`'${v.replaceAll("'", "''")}'`})`).join(",")}) t(id, value)`,
+		};
+		const capture = await (await BoundedRuntime.create(config)).capture();
+		const hex = async (text: string) =>
+			Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))))
+				.map((b) => b.toString(16).padStart(2, "0")).join("");
+		const rows = (await Promise.all(values.map((value, i) => hex(strictJson({ id: String(i), value }))))).sort();
+		assertEquals(capture.digest, await hex(`v1\0items\0${rows.map((h) => `${h}\n`).join("")}\0`));
 	} finally {
 		await Deno.remove(directory, { recursive: true });
 	}

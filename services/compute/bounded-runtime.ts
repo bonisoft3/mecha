@@ -3,6 +3,9 @@ import { join, resolve } from "node:path";
 import {
   type DuckDBConnection,
   DuckDBInstance,
+  LIST,
+  listValue,
+  VARCHAR,
 } from "npm:@duckdb/node-api@1.5.6-r.1";
 import {
   EXTENSIONS,
@@ -60,6 +63,21 @@ const parse = (value: unknown): Row => {
   return row;
 };
 const replicaLocks = new Map<string, Promise<void>>();
+
+// A captured relation's rows, stored as the exact text a digest hashes: bound
+// as a list, so no row is encoded a second time.
+async function appendRows(
+  con: DuckDBConnection,
+  target: string,
+  offset: number,
+  texts: string[],
+) {
+  await con.run(
+    `INSERT INTO ${target} SELECT CAST($1 AS BIGINT)+i,l[i] FROM (SELECT $2 AS l) s,range(1,len(s.l)+1) r(i)`,
+    [offset, listValue(texts)],
+    { 2: LIST(VARCHAR) },
+  );
+}
 
 async function withReplicaLock<T>(
   key: string,
@@ -556,7 +574,6 @@ export class BoundedRuntime {
       }
       for (const [name, original] of Object.entries(this.options.queries)) {
         digest.update(`${name}\0`);
-        const rowHashes: string[] = [];
         const plan = this.options.queryStages?.[name];
         for (const stage of plan?.stages ?? []) {
           await con.run(`CREATE TABLE ${quote(stage.name)} AS ${stage.sql}`);
@@ -592,35 +609,31 @@ export class BoundedRuntime {
           const [page] = await readerOf(con).query(
             `SELECT count(*)::INTEGER AS n FROM (
               SELECT ${ordinal},sum(octet_length(encode(to_json(r)::VARCHAR))) OVER (ORDER BY ${ordinal}) AS size
-              FROM (SELECT * FROM duckstream_private.raw_input LIMIT 4096 OFFSET ${offset}) r
+              FROM duckstream_private.raw_input r
+              WHERE ${ordinal}>${offset} AND ${ordinal}<=${offset + 4096}
             ) WHERE size<=524288 OR ${ordinal}=${offset + 1}`,
           );
           const rows = await readerOf(con).query(
-            `SELECT * EXCLUDE (${ordinal}) FROM duckstream_private.raw_input LIMIT ${
-              Number(page.n)
-            } OFFSET ${offset}`,
+            `SELECT * EXCLUDE (${ordinal}) FROM duckstream_private.raw_input
+             WHERE ${ordinal}>${offset} AND ${ordinal}<=${offset + Number(page.n)}
+             ORDER BY ${ordinal}`,
             fields ? { fields, types: this.options.spec.types! } : undefined,
           );
           if (!rows.length) break;
-          const encodedRows = rows.map((row) => strictJson(row));
-          for (const encoded of encodedRows) {
-            rowHashes.push(createHash("sha256").update(encoded).digest("hex"));
-          }
-          const json = `[${encodedRows.join(",")}]`;
-          if (bytes(json) > 2 * 1024 * 1024) {
+          const texts = rows.map((row) => strictJson(row));
+          if (texts.reduce((n, text) => n + bytes(text) + 1, 1) > 2 * 1024 * 1024) {
             throw new Error("capture page exceeds byte limit");
           }
-          await con.run(
-            `INSERT INTO ${target} SELECT CAST(? AS BIGINT)+CAST(key AS BIGINT)+1,value::VARCHAR FROM json_each(CAST(? AS JSON))`,
-            [offset, json],
-          );
+          await appendRows(con, target, offset, texts);
           offset += rows.length;
         }
         await con.run("COMMIT");
-        rowHashes.sort();
-        for (const rowHash of rowHashes) {
-          digest.update(rowHash);
-          digest.update("\n");
+        const hashes = await con.stream(`SELECT sha256(value) AS hash FROM ${target} ORDER BY hash`);
+        for await (const chunk of hashes) {
+          for (const hash of chunk.getColumnValues(0)) {
+            digest.update(String(hash));
+            digest.update("\n");
+          }
         }
         digest.update("\0");
         await con.run("DROP TABLE duckstream_private.raw_input");
@@ -677,10 +690,7 @@ export class BoundedRuntime {
           let pendingBytes = 2;
           const flushPending = async () => {
             if (!pending.length) return;
-            await con.run(
-              `INSERT INTO ${target} SELECT CAST(? AS BIGINT)+CAST(key AS BIGINT)+1,value::VARCHAR FROM json_each(CAST(? AS JSON))`,
-              [offset, `[${pending.join(",")}]`],
-            );
+            await appendRows(con, target, offset, pending);
             offset += pending.length;
             pending = [];
             pendingBytes = 2;

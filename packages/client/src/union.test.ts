@@ -112,4 +112,26 @@ describe("union of shapes", () => {
     ;(c.utils as any).drop(seen)
     await expect((c.utils as any).awaitTxId(7)).rejects.toThrow(/no source/)
   })
+
+  // The union is ready with its base, so whether a grant's rows are in yet is
+  // the grant shape's own readiness, asked through the sources it lists.
+  it("lists its sources, so one still loading is visible past the union's readiness", async () => {
+    const base = source("base")
+    const { c } = union(base)
+    await c.preload()
+    let ready = () => {}
+    const pending = createCollection({
+      id: "pending",
+      getKey: (r: any) => r.id,
+      sync: { sync: ({ markReady }: any) => void (ready = markReady) },
+    } as any)
+    ;(c.utils as any).add(pending)
+    expect(c.isReady()).toBe(true)
+    expect((c.utils as any).sources()).toEqual([base, pending])
+    expect(pending.status).toBe("loading")
+    ready()
+    expect(pending.status).toBe("ready")
+    ;(c.utils as any).drop(pending)
+    expect((c.utils as any).sources()).toEqual([base])
+  })
 })

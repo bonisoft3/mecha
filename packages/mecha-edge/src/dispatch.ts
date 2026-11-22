@@ -9,8 +9,9 @@ import {
   type CloudflareAiBinding,
   createTsBifrost,
 } from '../../../services/airlock/tsbifrost.ts'
-import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, ORIGIN, outcome, type Outcome, sinkHeaders, step } from '../../../services/airlock/reentry.ts'
+import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, ORIGIN, outcome, type Outcome, sinkHeaders, sinkMethod, step } from '../../../services/airlock/reentry.ts'
 import { type BlobStore, contentBlob, stowed } from '../../../services/airlock/blobs.ts'
+import { MULTIPART, multipartBody } from '../../../services/airlock/multipart.ts'
 import { openFields, refuseDevKey, type SealKeys, sealKeys } from '../../../services/airlock/seal.ts'
 
 export interface EdgeSink {
@@ -80,7 +81,6 @@ export interface ClaimedRun {
 /** What a dispatcher answers the object for one run. */
 export type RunAnswer = { outcome: Outcome } | { error: string }
 
-const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE'])
 export const HANDLER_TIMEOUT_MS = 90_000
 
 /** The longest a claimed run can still be calling its sink: reconcile where
@@ -94,10 +94,14 @@ export function runBoundMs(effect: Effect, entered: number, handlerTimeoutMs = H
 // Each call and each handler run is bounded, as the container airlock bounds
 // them (services/airlock/handler.ts): a run past its bound is an error the
 // object schedules again.
-async function within<T>(ms: number, what: string, run: Promise<T>): Promise<T> {
+// `expire` runs inside the timer's own callback, before anything else can.
+async function within<T>(ms: number, what: string, run: Promise<T>, expire?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} gave no answer in ${ms}ms`)), ms)
+    timer = setTimeout(() => {
+      expire?.()
+      reject(new Error(`${what} gave no answer in ${ms}ms`))
+    }, ms)
   })
   try {
     return await Promise.race([run, timeout])
@@ -197,7 +201,11 @@ function sinkOrigin(target: { url: string } | { secret: string }, strings: Recor
   return value
 }
 
-function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, aiBinding }: ReturnType<typeof extractEnv>): EdgeSink {
+/** Whether the handler call a sink was handed for is over: its answer, its
+ * throw or its bound decided, after which the sink starts no call. */
+type Gate = { over: boolean }
+
+function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, aiBinding }: ReturnType<typeof extractEnv>, gate: Gate = { over: false }): EdgeSink {
   const { fetcher = fetch, callTimeoutMs = CALL_TIMEOUT_MS } = cfg
   const tsbifrost = createTsBifrost({ target: 'cloudflare', config: cfg.ai, env: strings, aiBinding, fetcher })
   const credHeader: Record<string, string> = {}
@@ -219,22 +227,39 @@ function makeSink(spec: EdgeEffect, key: string, cfg: PerformConfig, { strings, 
       if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
         throw new Error(`sink.fetch path must begin with one '/', got ${JSON.stringify(path)}`)
       }
-      const { method = 'GET', body, headers: asked } = (init ?? {}) as { method?: unknown; body?: unknown; headers?: unknown }
-      if (typeof method !== 'string' || !METHODS.has(method)) {
-        throw new Error(`sink.fetch method must be GET, POST, PUT or DELETE, got ${JSON.stringify(method)}`)
-      }
-      let payload: string | undefined
+      const { method: asking = 'GET', body, headers: asked } = (init ?? {}) as { method?: unknown; body?: unknown; headers?: unknown }
+      const method = sinkMethod(asking, body)
+      // Taken at the call, before any await, as the container's cage takes
+      // them when it posts the call: a later change to the handler's object
+      // reaches no call already asked.
+      const own = sinkHeaders(asked, spec.declaration.credential ? [spec.declaration.credential.header] : [])
+      let payload: string | Uint8Array<ArrayBuffer> | undefined
+      let contentType = spec.declaration.contentType ?? 'application/json'
       if (body !== undefined) {
-        if (method === 'GET' || method === 'DELETE') throw new Error(`sink.fetch ${method} takes no body`)
-        payload = encodedBody(spec.declaration.contentType, body)
+        if (contentType === MULTIPART) {
+          const encoded = await multipartBody(body, (blobKey) => contentBlob(cfg.blobs, blobKey))
+          contentType = encoded.contentType
+          payload = encoded.bytes
+        } else {
+          payload = encodedBody(spec.declaration.contentType, body)
+        }
       }
       const headers = new Headers({
-        ...sinkHeaders(asked, spec.declaration.credential ? [spec.declaration.credential.header] : []),
-        'content-type': spec.declaration.contentType ?? 'application/json',
+        ...own,
+        // A multipart type is nothing without its boundary, which only a body has.
+        ...(payload === undefined && contentType === MULTIPART ? {} : { 'content-type': contentType }),
         'Idempotency-Key': encodeURIComponent(key),
         ...credHeader,
       })
       const request = { method, headers, ...(payload !== undefined ? { body: payload } : {}) }
+      // The guarantee, as the dispatcher observes it: a call starts only if,
+      // a turn after its body is encoded, the handler's promise has not
+      // settled and its bound has not passed; a call still encoding when
+      // either happens, as one awaiting a blob, starts nothing, since the
+      // object may already run the effect again. The turn lets a handler that
+      // answered without awaiting this call settle first.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      if (gate.over) throw new Error(`${key}: ${method} ${path} after its handler call ended`)
       const answered = await within(callTimeoutMs, `${key}: ${method} ${path}`, (async () => {
         let res: Response
         if (spec.target.kind === 'tsbifrost') {
@@ -275,7 +300,24 @@ export async function performEffect(spec: EdgeEffect, run: { key: string; entere
   const effect = spec.declaration
   const { key, entered } = run
   const env = extractEnv(cfg.env)
-  const sink = makeSink(spec, key, cfg, env)
+  // One sink per handler call, each closed when its call ends, as the
+  // container airlock ends each call's cage.
+  const reconciling: Gate = { over: false }
+  const issuing: Gate = { over: false }
+  const reconcileSink = makeSink(spec, key, cfg, env, reconciling)
+  const sink = makeSink(spec, key, cfg, env, issuing)
+  // Closed in the bound's own callback, so a blob read that lands in the same
+  // moment as the bound finds it closed, and again when the call settles.
+  // and the moment the handler's own promise settles, ahead of the race.
+  const closing = async <T>(gate: Gate, what: string, call: () => unknown): Promise<T> => {
+    const close = () => { gate.over = true }
+    const handled = Promise.resolve().then(call).then((v) => (close(), v), (e) => { close(); throw e })
+    try {
+      return await within(handlerTimeoutMs, what, handled as Promise<T>, close)
+    } finally {
+      close()
+    }
+  }
   const { strings } = env
   const typed: Record<string, string> = {}
   if (effect.secretFields?.length) {
@@ -292,10 +334,10 @@ export async function performEffect(spec: EdgeEffect, run: { key: string; entere
     jsonAnswer(call, await within(handlerTimeoutMs, `${key}: storing the answer's bytes`, stowed(answer, key, cfg.blobs)))
   if (step(effect, entered) === 'reconcile') {
     if (!spec.reconcile) throw new TypeError(`effect ${effect.handler} exports no reconcile function`)
-    const known = checkAnswer('reconcile', await within(handlerTimeoutMs, `effect ${effect.handler}: reconcile`, Promise.resolve(spec.reconcile(input, sink, secrets))))
+    const known = checkAnswer('reconcile', await closing(reconciling, `effect ${effect.handler}: reconcile`, () => spec.reconcile!(input, reconcileSink, secrets)))
     if (!('absent' in known)) return outcome(effect, await stow('reconcile', known), true)
   }
-  const ans = await stow('issue', checkAnswer('issue', await within(handlerTimeoutMs, `effect ${effect.handler}: issue`, Promise.resolve(spec.issue(input, sink, secrets)))))
+  const ans = await stow('issue', checkAnswer('issue', await closing(issuing, `effect ${effect.handler}: issue`, () => spec.issue(input, sink, secrets))))
   if ('failed' in ans) log(`airlock effect ${key} returned failed on attempt ${entered}: ${JSON.stringify(ans.failed)}`)
   return outcome(effect, ans, false)
 }

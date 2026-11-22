@@ -16,7 +16,8 @@ import { runMigrations } from "graphile-worker";
 import pg from "pg";
 import { hold, start } from "./airlock.ts";
 import { BreakerOpen, Handler, meshTransport } from "./handler.ts";
-import type { Effect } from "./reentry.ts";
+import { base64Of, type Effect } from "./reentry.ts";
+import { multipartBody } from "./multipart.ts";
 import { get, type Read, READ_JOURNAL_SQL, ReadCache } from "./read.ts";
 import { generateSealKey, seal as sealValue, sealKeys, sealLabel } from "./seal.ts";
 import { SEAL_TABLES_SQL } from "./seal-tables.ts";
@@ -61,6 +62,12 @@ function sink() {
     const key = req.headers.get("idempotency-key") ?? "";
     if (req.headers.get("content-type") === "application/x-www-form-urlencoded") {
       posts.push({ key, body: await req.text() });
+      return Response.json({ id: `ch_${key}` });
+    }
+    if (req.headers.get("content-type")?.startsWith("multipart/form-data; boundary=")) {
+      const form = await req.formData();
+      const file = form.get("file") as File;
+      posts.push({ key, body: { subject: form.get("subject"), filename: file.name, type: file.type, bytes: [...new Uint8Array(await file.arrayBuffer())] } });
       return Response.json({ id: `ch_${key}` });
     }
     const body = await req.json();
@@ -609,6 +616,17 @@ Deno.test({ name: "the airlock runs every effect to an outcome, across crashes, 
       const answer = await meshTransport(mesh)("charge", "/v1/form", { method: "POST", body: "a=1&b=2", contentType: "application/x-www-form-urlencoded" }, "form:raw", {});
       assertEquals(answer, { status: 200, body: { id: "ch_form:raw" } });
       assertEquals(target.posts.find((p) => p.key === "form:raw")?.body, "a=1&b=2");
+    });
+
+    await t.step("a multipart body reaches the sink byte for byte under its boundary, through the real daprd", async () => {
+      const binary = Array.from({ length: 256 }, (_, i) => i);
+      const { bytes, contentType } = await multipartBody([
+        { name: "subject", value: "Relatório" },
+        { name: "file", filename: "r.pdf", type: "application/pdf", bytes: base64Of(Uint8Array.from(binary)) },
+      ], () => Promise.reject(new Error("no blob")));
+      const answer = await meshTransport(mesh)("charge", "/v1/upload", { method: "POST", body: bytes, contentType }, "multipart:raw", {});
+      assertEquals(answer, { status: 200, body: { id: "ch_multipart:raw" } });
+      assertEquals(target.posts.find((p) => p.key === "multipart:raw")?.body, { subject: "Relatório", filename: "r.pdf", type: "application/pdf", bytes: binary });
     });
 
     await t.step("past daprd's default size, both ways", async () => {

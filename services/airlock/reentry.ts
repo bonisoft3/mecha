@@ -39,7 +39,8 @@ export type Effect = {
   /** What the handler may use past the language (compute's language.ts). */
   endowments?: string[];
   /** The media type of a sink that takes no JSON, whose handler sends its
-   * body already encoded, as a string. */
+   * body already encoded, as a string; or multipart/form-data, whose handler
+   * sends a list of parts the airlock encodes (multipart.ts). */
   contentType?: string;
   /** The origin the edge's airlock calls, or the dispatcher's secret that
    * holds it, for a sink each deployment points elsewhere; the compose
@@ -123,7 +124,7 @@ export const ORIGIN = /^https:\/\/([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-
 const MEDIA_TYPE = /^[a-z]+\/[a-z0-9][a-z0-9.+-]*$/;
 const HEADER_VALUE = /^[\x21-\x7e]([\x20-\x7e]*[\x21-\x7e])?$/;
 
-/** The headers a handler sets on one sink call, checked: names daprd forwards,
+/** The headers a handler sets on one sink call, checked into a frozen copy: names daprd forwards,
  * none HTTP or the host sets (the idempotency key, the effect's credential),
  * and visible ASCII values. Both airlocks take them, so one handler sets them
  * in either. */
@@ -132,6 +133,9 @@ export function sinkHeaders(headers: unknown, host: string[] = []): Record<strin
   if (typeof headers !== "object" || headers === null || Array.isArray(headers)) {
     throw new TypeError(`sink headers must be an object of strings, got ${JSON.stringify(headers)}`);
   }
+  // A copy, each value read once and checked as read: what is sent is what
+  // was checked, whatever the handler does to its object afterwards.
+  const copy: Record<string, string> = {};
   for (const [name, value] of Object.entries(headers)) {
     const taken = RESERVED_HEADERS.has(name.toLowerCase()) || host.some((h) => h.toLowerCase() === name.toLowerCase());
     if (!HEADER.test(name) || taken) {
@@ -140,18 +144,43 @@ export function sinkHeaders(headers: unknown, host: string[] = []): Record<strin
     if (typeof value !== "string" || !HEADER_VALUE.test(value)) {
       throw new TypeError(`sink header ${name}: the value is visible ASCII, got ${JSON.stringify(value)}`);
     }
+    copy[name] = value;
   }
-  return headers as Record<string, string>;
+  return Object.freeze(copy);
 }
+const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+// RFC 9110 gives a body on GET or DELETE no meaning, and some origins and
+// proxies refuse one, so neither airlock sends it.
+const BODILESS = new Set(["GET", "DELETE"]);
+
+/** The method of one sink call, checked: an HTTP verb a sink is called with,
+ * and a body only with POST, PUT or PATCH, whatever its content type. Both
+ * airlocks take it, so one handler calls alike in either. */
+export function sinkMethod(method: unknown, body: unknown): string {
+  if (typeof method !== "string" || !METHODS.has(method)) {
+    throw new TypeError(`sink method ${JSON.stringify(method)}: GET, POST, PUT, PATCH or DELETE`);
+  }
+  if (body !== undefined && BODILESS.has(method)) throw new TypeError(`sink method ${method} takes no body`);
+  return method;
+}
+
 /** The effect's name is also its Dapr HTTPEndpoint's. */
 const ENDPOINT = /^[a-z][a-z0-9-]*$/;
 
 /** The body of one sink call: JSON unless the effect declares otherwise, when
- * only the handler knows the encoding. Bytes in a JSON body are sent as
- * base64, the only way JSON carries them. Both airlocks ask here. */
-export function encodedBody(contentType: string | undefined, body: unknown): string {
+ * only the handler knows the encoding, but for multipart/form-data, which the
+ * airlock has encoded (multipart.ts) and sends as bytes under its boundary.
+ * Bytes in a JSON body are sent as base64, the only way JSON carries them.
+ * Both airlocks ask here. */
+export function encodedBody(contentType: undefined, body: unknown): string;
+export function encodedBody(contentType: string | undefined, body: unknown): string | Uint8Array<ArrayBuffer>;
+export function encodedBody(contentType: string | undefined, body: unknown): string | Uint8Array<ArrayBuffer> {
   if (contentType === undefined) {
     return typeof body === "string" ? body : JSON.stringify(body, (_, v) => v instanceof Uint8Array ? base64Of(v) : v);
+  }
+  if (contentType.startsWith("multipart/form-data; boundary=")) {
+    if (!(body instanceof Uint8Array)) throw new TypeError(`sink body: a multipart body is the airlock's encoding, got ${typeof body}`);
+    return body as Uint8Array<ArrayBuffer>;
   }
   if (typeof body !== "string") throw new TypeError(`sink body: a ${contentType} effect sends an encoded string, got ${typeof body}`);
   return body;
@@ -206,8 +235,11 @@ export function parseManifest(text: string): Record<string, Effect> {
     if (e.secretFields !== undefined && (!Array.isArray(e.secretFields) || !e.secretFields.every((f) => IDENTIFIER.test(f)))) {
       bad("secretFields is not a list of identifiers");
     }
-    if (e.contentType !== undefined && (typeof e.contentType !== "string" || !MEDIA_TYPE.test(e.contentType) || e.contentType === "application/json")) {
-      bad("contentType is not a media type other than JSON, which is the default");
+    if (
+      e.contentType !== undefined && e.contentType !== "multipart/form-data" &&
+      (typeof e.contentType !== "string" || !MEDIA_TYPE.test(e.contentType) || e.contentType === "application/json" || e.contentType.startsWith("multipart/"))
+    ) {
+      bad("contentType is not a media type other than JSON, which is the default, and of the multipart family only multipart/form-data, whose boundary the airlock picks");
     }
     if (e.edgeBridge !== undefined && (typeof e.edgeBridge !== "string" || !ENDPOINT.test(e.edgeBridge))) {
       bad("edgeBridge is not a bridge's name, a DNS label");

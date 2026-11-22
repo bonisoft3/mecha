@@ -4,7 +4,7 @@
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { BreakerOpen, Handler, meshTransport, sinkPath, type Transport } from "./handler.ts";
-import { type Effect, encodedBody } from "./reentry.ts";
+import { base64Of, type Effect, encodedBody } from "./reentry.ts";
 import type { BlobStore } from "./blobs.ts";
 
 const effect: Effect = {
@@ -387,3 +387,233 @@ Deno.test("a declared content type reaches the sink's call, and its body is the 
   await Deno.remove(dir, { recursive: true });
 });
 
+Deno.test("a multipart effect's parts reach the sink as bytes under the airlock's boundary, its file intact", async () => {
+  // Every byte value, which a UTF-8 string would have mangled.
+  const binary = Uint8Array.from({ length: 256 }, (_, i) => i);
+  const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", JPEG))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const blobs: BlobStore = { put: () => Promise.reject(new Error("put")), get: () => Promise.resolve(JPEG), url: (k) => k };
+  const path = await file(`export async function issue(input, sink) {
+    const r = await sink.fetch("/hermes/message/attachment/upload", { method: "POST", headers: { "X-Tenant": "t1" }, body: [
+      { name: "subject", value: "Relatório" },
+      { name: "file", filename: "relatorio.pdf", type: "application/pdf", bytes: input.pdf },
+      { name: "photo", filename: "card.jpg", type: "image/jpeg", blob: input.photo },
+    ] });
+    return { done: r.body };
+  }`);
+  const fetched = globalThis.fetch;
+  const sent: Request[] = [];
+  globalThis.fetch = (url, init) => {
+    sent.push(new Request(String(url), init));
+    return Promise.resolve(Response.json({ id: "att_1" }));
+  };
+  try {
+    const handler = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" });
+    const input = { pdf: base64Of(binary), photo: `${hash}.jpg` };
+    const answer = await handler.call("issue", input, "upload:1", meshTransport("http://mesh"), {}, { Authorization: "Bearer vk" }, { blobs });
+    assertEquals(answer, { done: { id: "att_1" } });
+    const [req] = sent;
+    assertEquals(req.url, "http://mesh/v1.0/invoke/upload/method/hermes/message/attachment/upload");
+    assertEquals([req.headers.get("idempotency-key"), req.headers.get("authorization"), req.headers.get("x-tenant")], ["upload:1", "Bearer vk", "t1"]);
+    assertEquals(/^multipart\/form-data; boundary=\S+$/.test(req.headers.get("content-type")!), true);
+    const form = await req.formData();
+    assertEquals(form.get("subject"), "Relatório");
+    const pdf = form.get("file") as File;
+    assertEquals([pdf.name, pdf.type], ["relatorio.pdf", "application/pdf"]);
+    assertEquals(new Uint8Array(await pdf.arrayBuffer()), binary);
+    assertEquals(new Uint8Array(await (form.get("photo") as File).arrayBuffer()), JPEG);
+    // A part the airlock refuses, or a blob that is not a content key, reaches nothing.
+    sent.length = 0;
+    await assertRejects(() => handler.call("issue", { pdf: "not base64!", photo: `${hash}.jpg` }, "upload:2", meshTransport("http://mesh"), {}, {}, { blobs }), Error, "canonical base64");
+    await assertRejects(() => handler.call("issue", { pdf: "", photo: "card.jpg" }, "upload:3", meshTransport("http://mesh"), {}, {}, { blobs }), Error, "only a content key");
+    assertEquals(sent, []);
+  } finally {
+    globalThis.fetch = fetched;
+    await Deno.remove(path);
+  }
+});
+
+
+// A blob read still pending when the call's disposition is decided: the call
+// it would have made is never started.
+async function slowBlob(ms: number) {
+  const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", JPEG))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const blobs: BlobStore = { put: () => Promise.reject(new Error("put")), get: () => new Promise((r) => setTimeout(() => r(JPEG), ms)), url: (k) => k };
+  return { key: `${hash}.jpg`, blobs };
+}
+const UPLOADS = `export async function issue(input, sink) {
+  const upload = sink.fetch("/upload", { method: "POST", body: [{ name: "file", filename: "a.jpg", blob: input.photo }] });
+  const ping = sink.fetch("/ping", { method: "POST", body: [{ name: "a", value: "1" }] });
+  await Promise.all([upload, ping]);
+  return { done: null };
+}`;
+
+Deno.test("a breaker that gives the run back stops an upload still reading its blob from starting", async () => {
+  const { key, blobs } = await slowBlob(100);
+  const path = await file(UPLOADS);
+  try {
+    const h = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" });
+    const paths: string[] = [];
+    const transport: Transport = (_e, p) => {
+      paths.push(p);
+      return Promise.reject(new BreakerOpen("open"));
+    };
+    await assertRejects(() => h.call("issue", { photo: key }, "upload:1", transport, {}, {}, { blobs }), BreakerOpen);
+    await new Promise((r) => setTimeout(r, 200));
+    assertEquals(paths, ["/ping"]);
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
+Deno.test("a call past its bound starts no upload whose blob arrives later", async () => {
+  const { key, blobs } = await slowBlob(1200);
+  const path = await file(UPLOADS);
+  try {
+    const h = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" }, 600);
+    const rec = recording(() => ({ status: 200, body: null }));
+    await assertRejects(() => h.call("issue", { photo: key }, "upload:2", rec.transport, {}, {}, { blobs }), Error, "no answer in 600ms");
+    await new Promise((r) => setTimeout(r, 1000));
+    assertEquals(rec.calls.map((c) => c.path), ["/ping"]);
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
+Deno.test("a body goes only with POST, PUT or PATCH, as on the edge", async () => {
+  const asking = (method: string, body: unknown) => file(`export const issue = async (input, sink) => {
+    await sink.fetch("/x", { method: ${JSON.stringify(method)}, body: ${JSON.stringify(body)} });
+    return { done: null };
+  };`);
+  const parts = [{ name: "a", value: "1" }];
+  const patch = recording(() => ({ status: 200, body: null }));
+  await (await Handler.admit("upload", await asking("PATCH", parts), { ...idempotent, contentType: "multipart/form-data" })).call("issue", {}, "k", patch.transport);
+  assertEquals(patch.calls.map((c) => [c.init.method, c.init.body instanceof Uint8Array]), [["PATCH", true]]);
+  for (const [method, contentType, body] of [["DELETE", "multipart/form-data", parts], ["GET", undefined, { a: 1 }], ["DELETE", undefined, { a: 1 }]] as const) {
+    const none = recording(() => ({ status: 200, body: null }));
+    const h = await Handler.admit("upload", await asking(method, body), { ...idempotent, ...(contentType ? { contentType } : {}) });
+    await assertRejects(() => h.call("issue", {}, "k", none.transport), Error, "takes no body");
+    assertEquals(none.calls, []);
+  }
+});
+
+// The guarantee as the host observes it: a call starts only while the host
+// has not read the handler's answer, and one that starts is counted before
+// the answer is read. A handler that answers while its upload still reads a
+// blob has answered first, so the upload never starts; one whose call was
+// already encoded may start, and it is counted.
+Deno.test("a call still encoding when the host reads the handler's answer never starts", async () => {
+  const { key, blobs } = await slowBlob(300);
+  const path = await file(`export function issue(input, sink) {
+    sink.fetch("/upload", { method: "POST", body: [{ name: "file", filename: "a.jpg", blob: input.photo }] }).catch(() => {});
+    return { failed: "cancelled" };
+  }`);
+  try {
+    const h = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" });
+    const rec = recording(() => ({ status: 200, body: null }));
+    assertEquals(await h.call("issue", { photo: key }, "upload:c", rec.transport, {}, {}, { blobs }), { failed: "cancelled" });
+    await new Promise((r) => setTimeout(r, 500));
+    assertEquals(rec.calls, []);
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
+Deno.test("a call that starts is counted before the answer is read: a breaker beside it is a throw, not a run given back", async () => {
+  // The upload starts first and hangs; the ping meets the breaker as the
+  // second call started, so the run is not given back to the ledger.
+  const path = await file(`export async function issue(input, sink) {
+    sink.fetch("/upload", { method: "POST", body: [{ name: "a", value: "1" }] }).catch(() => {});
+    try { await sink.fetch("/ping", { method: "POST", body: [{ name: "b", value: "2" }] }); } catch (e) { return { failed: e.message }; }
+    return { done: null };
+  }`);
+  try {
+    const h = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" });
+    const paths: string[] = [];
+    const transport: Transport = (_e, p) => {
+      paths.push(p);
+      return p === "/upload" ? new Promise(() => {}) : Promise.reject(new BreakerOpen("open"));
+    };
+    assertEquals(await h.call("issue", {}, "upload:e", transport), { failed: "open" });
+    assertEquals(paths, ["/upload", "/ping"]);
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
+Deno.test("a part the airlock refuses reaches the handler as a TypeError, as on the edge; a sink's error as an Error", async () => {
+  const path = await file(`export async function issue(input, sink) {
+    const seen = [];
+    for (const body of [[{ name: "a" }], [{ name: "f", filename: "x", bytes: "AB==" }]]) {
+      try { await sink.fetch("/upload", { method: "POST", body }); } catch (e) { seen.push([e instanceof TypeError, e.name]); }
+    }
+    try { await sink.fetch("/down", { method: "POST", body: [{ name: "a", value: "1" }] }); } catch (e) { seen.push([e instanceof TypeError, e.name, e.message]); }
+    return { done: seen };
+  }`);
+  try {
+    const h = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" });
+    const transport: Transport = () => Promise.reject(new Error("sink down"));
+    assertEquals(await h.call("issue", {}, "upload:t", transport), { done: [[true, "TypeError"], [true, "TypeError"], [false, "Error", "sink down"]] });
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
+Deno.test("a call's headers are taken as it is asked: a later change to the handler's object reaches no call already asked", async () => {
+  const path = await file(`export async function issue(input, sink) {
+    const headers = { "X-Part": "one" };
+    const first = sink.fetch("/a", { method: "POST", body: [{ name: "f", filename: "a.jpg", blob: input.photo }], headers });
+    headers["X-Part"] = "two";
+    const second = sink.fetch("/b", { method: "POST", body: [{ name: "a", value: "1" }], headers });
+    await Promise.all([first, second]);
+    return { done: null };
+  }`);
+  const { key, blobs } = await slowBlob(50);
+  try {
+    const h = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" });
+    const rec = recording(() => ({ status: 200, body: null }));
+    await h.call("issue", { photo: key }, "upload:h", rec.transport, {}, {}, { blobs });
+    assertEquals(rec.calls.map((c) => [c.path, c.init.headers]).sort(), [["/a", { "X-Part": "one" }], ["/b", { "X-Part": "two" }]]);
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
+Deno.test("a body refused locally counts as no call: the breaker its retry meets gives the run back", async () => {
+  const path = await file(`export async function issue(input, sink) {
+    try { await sink.fetch("/v1/sessions", { method: "POST", body: { a: 1 } }); } catch (e) { if (!(e instanceof TypeError)) throw e; }
+    await sink.fetch("/v1/sessions", { method: "POST", body: "a=1" });
+    return { done: null };
+  }`);
+  try {
+    const h = await Handler.admit("form", path, { ...idempotent, contentType: "application/x-www-form-urlencoded" });
+    const sent: unknown[] = [];
+    const transport: Transport = (_e, _p, init) => {
+      sent.push(init.body);
+      return Promise.reject(new BreakerOpen("open"));
+    };
+    await assertRejects(() => h.call("issue", {}, "form:b", transport), BreakerOpen);
+    assertEquals(sent, ["a=1"]);
+  } finally {
+    await Deno.remove(path);
+  }
+});
+
+Deno.test("a part no structured clone carries is a TypeError, rejected, as on the edge", async () => {
+  const path = await file(`export async function issue(input, sink) {
+    const seen = [];
+    for (const init of [{ body: [{ name: "note", value: () => "" }] }, { body: [{ name: "a", value: "1" }], headers: { "X-A": Symbol("x") } }]) {
+      let pending;
+      try { pending = sink.fetch("/upload", { method: "POST", ...init }); } catch (e) { seen.push("thrown synchronously"); continue; }
+      try { await pending; seen.push("sent"); } catch (e) { seen.push([e instanceof TypeError, e.name]); }
+    }
+    return { done: seen };
+  }`);
+  try {
+    const h = await Handler.admit("upload", path, { ...idempotent, contentType: "multipart/form-data" });
+    const rec = recording(() => ({ status: 200, body: null }));
+    assertEquals(await h.call("issue", {}, "upload:f", rec.transport), { done: [[true, "TypeError"], [true, "TypeError"]] });
+    assertEquals(rec.calls, []);
+  } finally {
+    await Deno.remove(path);
+  }
+});

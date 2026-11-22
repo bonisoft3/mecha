@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { type EdgeEffect, performEffect } from './dispatch.ts'
+import { type EdgeEffect, type EdgeSink, performEffect } from './dispatch.ts'
 
 const acquire = (issue: EdgeEffect['issue']): EdgeEffect => ({
   declaration: {
@@ -182,4 +182,177 @@ Deno.test("an unkeyed route refuses only the tier it routes", async () => {
   await performEffect(sketch, { key: 'sketch:c1', entered: 1 }, {}, { ai: routedAi, env, fetcher, log: () => {} })
   assert.equal(drawn.length, 1, 'level 2 ran on Workers AI')
   await assert.rejects(performEffect(illustrate, { key: 'illustrate:c1', entered: 1 }, {}, { ai: routedAi, env, fetcher, log: () => {} }), /reads GEMINI_API_KEY or GOOGLE_API_KEY, and this deployment holds none/)
+})
+
+// The edge encodes a multipart effect's parts as the container airlock does
+// (services/airlock/multipart.ts), and sends the bytes as they are.
+Deno.test("a multipart effect's parts reach an origin as bytes under the airlock's boundary", async () => {
+  const binary = Uint8Array.from({ length: 256 }, (_, i) => i)
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', binary))].map(b => b.toString(16).padStart(2, '0')).join('')
+  const blobs = { put: () => Promise.reject(new Error('put')), get: () => Promise.resolve(binary), url: (k: string) => k }
+  const seen: Request[] = []
+  const fetcher = ((url: string, init: RequestInit) => { seen.push(new Request(url, init)); return Promise.resolve(Response.json({ id: 'att_1' })) }) as unknown as typeof fetch
+  const upload: EdgeEffect = {
+    declaration: {
+      table: 'mail', field: 'status', state: 'attaching', onDone: 'attached', onError: 'failed',
+      row: ['id'], key: ['id'], idempotent: true, attempts: 3, handler: 'effects/attach.js', contentType: 'multipart/form-data',
+      credential: { header: 'Authorization', scheme: 'Bearer', secret: 'HERMES_KEY' },
+    },
+    target: { kind: 'origin', url: 'https://hermes.example.com' },
+    issue: async (input, sink) => ({
+      done: (await sink.fetch('/hermes/message/attachment/upload', { method: 'POST', body: [
+        { name: 'subject', value: 'Relatório' },
+        { name: 'file', filename: 'r.pdf', type: 'application/pdf', blob: (input as { pdf: string }).pdf },
+      ] })).body,
+    }),
+  }
+  const got = await performEffect(upload, { key: 'attach:m1', entered: 1 }, { pdf: `${hash}.pdf` }, { env: { HERMES_KEY: 'hk' }, blobs, fetcher, log: () => {} })
+  assert.deepEqual(got, { target: 'attached', kind: 'done', data: { id: 'att_1' }, reconciled: false })
+  const [req] = seen
+  assert.equal(req.url, 'https://hermes.example.com/hermes/message/attachment/upload')
+  assert.equal(req.headers.get('authorization'), 'Bearer hk')
+  assert.equal(req.headers.get('idempotency-key'), encodeURIComponent('attach:m1'))
+  assert.match(req.headers.get('content-type')!, /^multipart\/form-data; boundary=\S+$/)
+  const form = await req.formData()
+  assert.equal(form.get('subject'), 'Relatório')
+  assert.deepEqual(new Uint8Array(await (form.get('file') as File).arrayBuffer()), binary)
+})
+
+const uploading = (issue: EdgeEffect['issue'], idempotent = true): EdgeEffect => ({
+  declaration: {
+    table: 'mail', field: 'status', state: 'attaching', onDone: 'attached', onError: 'failed',
+    row: ['id'], key: ['id'], idempotent, ...(idempotent ? {} : { reentry: 'repeat' as const }), attempts: 3, handler: 'effects/attach.js', contentType: 'multipart/form-data',
+  },
+  target: { kind: 'origin', url: 'https://hermes.example.com' },
+  issue,
+})
+
+// As the container airlock ends a call's cage: an upload still reading its
+// blob when the handler's bound passed starts nothing, since the object may
+// already run the effect again.
+Deno.test('an upload whose blob arrives after its handler call ended is never started', async () => {
+  const binary = new Uint8Array([1, 2, 3])
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', binary))].map(b => b.toString(16).padStart(2, '0')).join('')
+  const blobs = { put: () => Promise.reject(new Error('put')), get: () => new Promise<Uint8Array>(r => setTimeout(() => r(binary), 150)), url: (k: string) => k }
+  const seen: string[] = []
+  const fetcher = ((url: string) => { seen.push(url); return Promise.resolve(Response.json({})) }) as unknown as typeof fetch
+  let late: Promise<unknown> | undefined
+  const effect = uploading((_input, sink) => {
+    late = sink.fetch('/upload', { method: 'POST', body: [{ name: 'file', filename: 'a.bin', blob: `${hash}.bin` }] }).catch(e => e)
+    return new Promise(() => {})
+  }, false)
+  await assert.rejects(performEffect(effect, { key: 'attach:m2', entered: 1 }, {}, { blobs, fetcher, handlerTimeoutMs: 50, log: () => {} }), /gave no answer in 50ms/)
+  const ended = await late
+  assert.match(String(ended), /after its handler call ended/)
+  assert.deepEqual(seen, [])
+})
+
+Deno.test('a body goes only with POST, PUT or PATCH, as in the container airlock', async () => {
+  const seen: Request[] = []
+  const fetcher = ((url: string, init: RequestInit) => { seen.push(new Request(url, init)); return Promise.resolve(Response.json({ ok: true })) }) as unknown as typeof fetch
+  const calling = (method: string) => uploading(async (_input, sink) => ({ done: (await sink.fetch('/x', { method, body: [{ name: 'a', value: '1' }] })).body }))
+  const got = await performEffect(calling('PATCH'), { key: 'attach:p', entered: 1 }, {}, { fetcher, log: () => {} })
+  assert.deepEqual(got.data, { ok: true })
+  assert.equal(seen[0].method, 'PATCH')
+  assert.equal((await seen[0].formData()).get('a'), '1')
+  for (const method of ['DELETE', 'GET']) {
+    await assert.rejects(performEffect(calling(method), { key: 'attach:d', entered: 1 }, {}, { fetcher, log: () => {} }), /takes no body/)
+  }
+  assert.equal(seen.length, 1)
+  // Body-less, a multipart effect's call names no content type: there is no boundary.
+  await performEffect(uploading(async (_input, sink) => ({ done: (await sink.fetch('/x', { method: 'DELETE' })).body })), { key: 'attach:e', entered: 1 }, {}, { fetcher, log: () => {} })
+  assert.equal(seen[1].headers.get('content-type'), null)
+})
+
+// The bound closes the sink in its own timer callback: a call begun in the
+// very turn the bound fires, before any promise reacts, finds it closed. The
+// probe runs right after the bound's callback, in the same macrotask.
+Deno.test("a call begun in the same turn the handler's bound fires is never started", async () => {
+  const seen: string[] = []
+  const fetcher = ((url: string) => { seen.push(url); return Promise.resolve(Response.json({})) }) as unknown as typeof fetch
+  let held: EdgeSink | undefined
+  let late: Promise<unknown> | undefined
+  const real = globalThis.setTimeout
+  globalThis.setTimeout = ((cb: () => void, ms?: number) =>
+    real(ms === 50 ? () => { cb(); late ??= held!.fetch('/late').catch(e => e) } : cb, ms)) as typeof setTimeout
+  try {
+    const effect = uploading((_input, sink) => { held = sink; return new Promise(() => {}) }, false)
+    await assert.rejects(performEffect(effect, { key: 'attach:m3', entered: 1 }, {}, { fetcher, handlerTimeoutMs: 50, log: () => {} }), /gave no answer in 50ms/)
+  } finally {
+    globalThis.setTimeout = real
+  }
+  assert.match(String(await late), /after its handler call ended/)
+  assert.deepEqual(seen, [])
+})
+
+// A call the handler started and did not await, its handler having answered
+// already, starts nothing: the sink waits a turn after encoding, by when the
+// handler's own settling has closed it.
+Deno.test('a call the handler did not await starts nothing once it has answered', async () => {
+  for (const multipart of [true, false]) {
+    const seen: string[] = []
+    const fetcher = ((url: string) => { seen.push(url); return Promise.resolve(Response.json({})) }) as unknown as typeof fetch
+    let late: Promise<unknown> | undefined
+    const effect = uploading((_input, sink) => {
+      late = sink.fetch('/upload', { method: 'POST', body: multipart ? [{ name: 'a', value: '1' }] : 'x' }).catch(e => e)
+      return { failed: 'cancelled' }
+    }, false)
+    if (!multipart) effect.declaration = { ...effect.declaration, contentType: 'text/plain' }
+    const got = await performEffect(effect, { key: 'attach:c', entered: 1 }, {}, { fetcher, log: () => {} })
+    assert.equal(got.kind, 'failed')
+    assert.match(String(await late), /after its handler call ended/)
+    assert.deepEqual(seen, [], `multipart ${multipart}`)
+  }
+})
+
+Deno.test('a call the handler awaits reaches the sink', async () => {
+  const seen: string[] = []
+  const fetcher = ((url: string) => { seen.push(url); return Promise.resolve(Response.json({ id: 1 })) }) as unknown as typeof fetch
+  const effect = uploading(async (_input, sink) => ({ done: (await sink.fetch('/upload', { method: 'POST', body: [{ name: 'a', value: '1' }] })).body }))
+  assert.deepEqual((await performEffect(effect, { key: 'attach:w', entered: 1 }, {}, { fetcher, log: () => {} })).data, { id: 1 })
+  assert.equal(seen.length, 1)
+})
+
+Deno.test('a part the airlock refuses reaches the handler as a TypeError, as in the container airlock', async () => {
+  const fetcher = (() => Promise.reject(new Error('called'))) as unknown as typeof fetch
+  const effect = uploading(async (_input, sink) => {
+    const seen: unknown[] = []
+    for (const body of [[{ name: 'a' }], [{ name: 'f', filename: 'x', bytes: 'AB==' }]]) {
+      try { await sink.fetch('/upload', { method: 'POST', body }) } catch (e) { seen.push([e instanceof TypeError, (e as Error).name]) }
+    }
+    return { done: seen }
+  })
+  assert.deepEqual((await performEffect(effect, { key: 'attach:t', entered: 1 }, {}, { fetcher, log: () => {} })).data, [[true, 'TypeError'], [true, 'TypeError']])
+})
+
+Deno.test("a call's headers are taken as it is asked, before its body is encoded", async () => {
+  const binary = new Uint8Array([1, 2, 3])
+  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', binary))].map(b => b.toString(16).padStart(2, '0')).join('')
+  const blobs = { put: () => Promise.reject(new Error('put')), get: () => new Promise<Uint8Array>(r => setTimeout(() => r(binary), 20)), url: (k: string) => k }
+  const sent: [string, string | null][] = []
+  const fetcher = ((url: string, init: RequestInit) => { sent.push([new URL(url).pathname, new Headers(init.headers).get('x-part')]); return Promise.resolve(Response.json({})) }) as unknown as typeof fetch
+  const effect = uploading(async (_input, sink) => {
+    const headers = { 'X-Part': 'one' }
+    const first = sink.fetch('/a', { method: 'POST', body: [{ name: 'f', filename: 'a.bin', blob: `${hash}.bin` }], headers })
+    headers['X-Part'] = 'two'
+    const second = sink.fetch('/b', { method: 'POST', body: [{ name: 'a', value: '1' }], headers })
+    await Promise.all([first, second])
+    return { done: null }
+  })
+  await performEffect(effect, { key: 'attach:h', entered: 1 }, {}, { blobs, fetcher, log: () => {} })
+  assert.deepEqual(sent.sort(), [['/a', 'one'], ['/b', 'two']])
+})
+
+Deno.test('a part holding a function or a header holding a symbol is a TypeError, rejected, as in the container airlock', async () => {
+  const fetcher = (() => Promise.reject(new Error('called'))) as unknown as typeof fetch
+  const effect = uploading(async (_input, sink) => {
+    const seen: unknown[] = []
+    for (const init of [{ body: [{ name: 'note', value: () => '' }] }, { body: [{ name: 'a', value: '1' }], headers: { 'X-A': Symbol('x') } }]) {
+      let pending: Promise<unknown>
+      try { pending = sink.fetch('/upload', { method: 'POST', ...init }) } catch { seen.push('thrown synchronously'); continue }
+      try { await pending; seen.push('sent') } catch (e) { seen.push([e instanceof TypeError, (e as Error).name]) }
+    }
+    return { done: seen }
+  })
+  assert.deepEqual((await performEffect(effect, { key: 'attach:f', entered: 1 }, {}, { fetcher, log: () => {} })).data, [[true, 'TypeError'], [true, 'TypeError']])
 })

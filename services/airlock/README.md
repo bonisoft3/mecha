@@ -98,7 +98,9 @@ export async function reconcile(input, sink) {
   parsed when the sink answers JSON. `headers` are the handler's own, such as
   tsbifrost's `X-Bf-Passthrough-Extra-Params`: names daprd forwards (uppercase first),
   never one HTTP or the host sets, and visible ASCII values (`sinkHeaders` in
-  `reentry.ts`, which the edge airlock applies too).
+  `reentry.ts`, which the edge airlock applies too). `method` is GET, POST, PUT, PATCH or
+  DELETE, and a body goes only with POST, PUT or PATCH (`sinkMethod` in `reentry.ts`, the
+  edge airlock's rule too).
 - The host sends the request as an invocation of the effect's HTTPEndpoint on daprd,
   `/v1.0/invoke/<effect>/method/<path>`, with the handler's headers, the `Idempotency-Key`
   and the content type as its own. The endpoint's `baseUrl` is the declared origin, and
@@ -109,6 +111,45 @@ export async function reconcile(input, sink) {
   client certificate is not declared yet.
 - A sink that takes no JSON declares `contentType`, and its handler sends the body already
   encoded, as a string, which arrives as it was sent.
+- A sink that takes `multipart/form-data` declares it bare, and its handler sends the body
+  as a list of parts in FormData's terms: `{name, value}` for a text field, or
+  `{name, filename, type?, bytes}` and `{name, filename, type?, blob}` for a file, `bytes`
+  canonical base64 (Pronto's `bytes`) and `blob` a content key the airlock reads as
+  `sink.blob` does. The airlock encodes them (`multipart.ts`, which the edge airlock uses
+  too) as RFC 7578 under a boundary it picks per call, escapes a name's or a filename's
+  quote, CR and LF as the WHATWG encoding does, and sends the bytes as they are with
+  `Content-Type: multipart/form-data; boundary=...`. A file without `type` goes as
+  `application/octet-stream`; a `type` is a media type as RFC 9110 spells it, visible
+  ASCII with SP or HTAB between parameters. The parts are checked into the airlock's own
+  frozen copies before any blob is read, each value read once, so what the handler does
+  to its objects afterwards changes nothing sent. A malformed part is a TypeError before the
+  call: none or more than one of `value`, `bytes` and `blob`, bytes that are not canonical
+  base64 (padded, `=` only at the end, the unused bits zero), a `type` with a control
+  character or outside that grammar, or a `blob` that is not a content key. A blob the
+  airlock cannot hand over is an Error, also before the call: one missing from the plane,
+  a cluster with no plane, or bytes that do not hash to their key.
+- A sink call starts only while the host has not yet read the handler's answer or throw,
+  nor ended the run at its bound or at an open breaker it gives back to the ledger; one
+  still encoding its body or reading a blob then starts nothing. A call that starts is
+  counted in the run in the same step, before any answer is read, so the ledger never
+  gives back a run that reached the sink. That is what the host observes, and no more: a
+  call the handler asked for without awaiting may start before the host reads an answer
+  the cage has already posted. The edge airlock holds the same rule for its own order: a
+  call starts only if, a turn after its body is encoded, the handler's promise has not
+  settled and its bound has not passed.
+
+  ```js
+  export async function issue(input, sink) {
+    const r = await sink.fetch("/hermes/message/attachment/upload", {
+      method: "POST",
+      body: [
+        { name: "message_id", value: input.messageId },
+        { name: "file", filename: "relatorio.pdf", type: "application/pdf", blob: input.pdf },
+      ],
+    });
+    return r.status < 300 ? { done: r.body } : { failed: r.body };
+  }
+  ```
 - daprd's own failure is also a 500, told from a sink's by `errorCode: ERR_DIRECT_INVOKE`. An
   open breaker called nothing, so it ends the run, gives the ledger's count back and leaves the
   queue's backoff to bring the job again; it spends no attempt. Any other daprd failure may

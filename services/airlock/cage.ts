@@ -28,7 +28,16 @@ let nextId = 0;
 
 function ask(message: Record<string, unknown>) {
   const id = nextId++;
-  postMessage({ ...message, id });
+  try {
+    postMessage({ ...message, id });
+  } catch (e) {
+    // A value no structured clone carries (a function, a symbol) never reaches
+    // the host to be checked there; refused here as the host refuses what it
+    // checks, a TypeError, and as a rejection, as the edge airlock's sink is.
+    if (!(e instanceof Error && e.name === "DataCloneError")) throw e;
+    const what = "fetch" in message ? "sink.fetch: the body or headers hold" : "sink.blob: the key is";
+    return Promise.reject(new TypeError(`${what} a value that cannot be sent, such as a function or a symbol: ${e.message}`));
+  }
   return new Promise((resolve, reject) => pending.set(id, { resolve, reject })).then((r) => harden(r));
 }
 
@@ -52,7 +61,8 @@ function sink(key: string, origin: string | undefined) {
 
 // {source, file, endowments} loads the module and answers its exports' names; {call,
 // input, key, secrets, origin} runs issue or reconcile and answers {result}; {id,
-// answer} and {id, failure} settle a fetch. A throw is answered as {error}.
+// answer} and {id, failure, typeError?} settle a fetch, a TypeError's as one. A
+// throw is answered as {error}.
 addEventListener("message", async (event) => {
   const { data } = event as MessageEvent;
   if ("answer" in data || "failure" in data) {
@@ -60,7 +70,7 @@ addEventListener("message", async (event) => {
     if (waiter === undefined) throw new Error(`no host call ${data.id} is waiting`);
     pending.delete(data.id);
     if ("answer" in data) waiter.resolve(data.answer);
-    else waiter.reject(new Error(data.failure));
+    else waiter.reject(data.typeError ? new TypeError(data.failure) : new Error(data.failure));
     return;
   }
   try {

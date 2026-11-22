@@ -21,6 +21,9 @@ export interface UnionUtils {
   drop(source: Collection<any, any, any>): void
   /** Resolves when any source has seen the txid; write confirmation reads this. */
   awaitTxId(txid: number, timeout?: number): Promise<boolean>
+  /** The sources it is made of now, the base first. The union is ready with
+   * its base, so a source still loading its first snapshot is asked here. */
+  sources(): Collection<any, any, any>[]
 }
 
 export interface UnionConfig {
@@ -122,6 +125,7 @@ export function unionCollectionOptions(config: UnionConfig) {
       if (sink === null) return Promise.resolve(true)
       return anyOf([...sources], (s) => (s as any).utils?.awaitTxId?.(txid, timeout))
     },
+    sources: () => [...sources],
   }
 
   return {

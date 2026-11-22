@@ -10,8 +10,9 @@
 
 import { compile } from "../compute/workers.ts";
 import { endowable } from "../compute/language.ts";
-import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, parseManifest, sinkHeaders } from "./reentry.ts";
+import { type Answer, CALL_TIMEOUT_MS, type Effect, encodedBody, parseManifest, sinkHeaders, sinkMethod } from "./reentry.ts";
 import { type BlobStore, contentBlob } from "./blobs.ts";
+import { MULTIPART, multipartBody } from "./multipart.ts";
 
 const NONE = { type: "module", deno: { permissions: "none" } } as const;
 
@@ -28,7 +29,6 @@ export type Transport = (
   headers: Record<string, string>,
 ) => Promise<Response>;
 
-const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 // A path's characters, then optionally a query; no `%` in the path, no empty
 // segment and no dot segment, so what daprd appends to the endpoint's declared
 // base URL stays beneath it.
@@ -133,8 +133,17 @@ export class Handler {
     // Counted when it starts, not when it settles: one in flight beside the
     // breaker may already have reached the sink.
     let started = 0;
+    // Set the moment the host decides the call's disposition (reads its answer
+    // or its throw, or ends it at the timeout or a breaker given back): a sink
+    // call still encoding its body, as one awaiting a blob, starts nothing
+    // after it, so a run the ledger took back, or one past its bound, cannot
+    // reach the sink late.
+    let over = false;
     let refuse: (e: BreakerOpen) => void;
-    const refused = new Promise<never>((_, reject) => (refuse = reject));
+    const refused = new Promise<never>((_, reject) => (refuse = (e) => {
+      over = true;
+      reject(e);
+    }));
     const serve = async (data: Record<string, unknown>) => {
       const id = data.id;
       if ("blob" in data) {
@@ -142,37 +151,64 @@ export class Handler {
         try {
           worker.postMessage({ id, answer: await contentBlob(place.blobs, data.blob) });
         } catch (e) {
-          worker.postMessage({ id, failure: e instanceof Error ? e.message : String(e) });
+          worker.postMessage({ id, ...failure(e) });
         }
         return;
       }
       try {
-        const { path, method, body, headers: asked } = data.fetch as { path: unknown; method: unknown; body: unknown; headers: unknown };
-        if (typeof method !== "string" || !METHODS.has(method)) throw new TypeError(`sink method ${JSON.stringify(method)}`);
+        const { path, method: asking, body, headers: asked } = data.fetch as { path: unknown; method: unknown; body: unknown; headers: unknown };
+        const method = sinkMethod(asking, body);
         const own = sinkHeaders(asked, Object.keys(headers));
+        const sinkAt = sinkPath(path);
+        // Encoded before the call counts: a refused part or blob reached nothing.
+        // Any other body is checked here the way the transport encodes it, so
+        // one refused locally, as an object for a declared media type, throws
+        // before `started` counts it, never inside the transport.
+        if (this.contentType !== MULTIPART && body !== undefined) encodedBody(this.contentType, body);
+        const sent = this.contentType === MULTIPART && body !== undefined
+          ? await multipartBody(body, (k) => contentBlob(place.blobs, k)).then((m) => ({ body: m.bytes, contentType: m.contentType }))
+          : { body, ...(this.contentType ? { contentType: this.contentType } : {}) };
+        // The guarantee, as the host observes it: a call starts only while the
+        // host has not read the handler's answer (nor ended the run at its
+        // bound or a breaker), and it is counted in `started` in the same step,
+        // before any answer is read. Nothing is promised across the cage:
+        // a call the handler asked for and did not await may start before the
+        // host reads an answer the cage has already posted.
+        if (over) return;
         started++;
-        const answer = await transport(this.name, sinkPath(path), { method, body, headers: own, ...(this.contentType ? { contentType: this.contentType } : {}) }, key, headers);
+        const answer = await transport(this.name, sinkAt, { method, ...sent, headers: own }, key, headers);
         worker.postMessage({ id, answer });
       } catch (e) {
         if (e instanceof BreakerOpen && started === 1) return refuse(e);
-        worker.postMessage({ id, failure: e instanceof Error ? e.message : String(e) });
+        worker.postMessage({ id, ...failure(e) });
       }
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`effect ${this.name}: ${fn} gave no answer in ${this.timeoutMs}ms`)), this.timeoutMs);
+      timer = setTimeout(() => {
+        over = true;
+        reject(new Error(`effect ${this.name}: ${fn} gave no answer in ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
     });
     const run = async () => {
       await exchange(worker, { source: this.compiled, file: this.file, endowments: this.endowments }, serve);
-      return (await exchange(worker, { call: fn, input, key, secrets, origin: place.origin }, serve)).result;
+      return (await exchange(worker, { call: fn, input, key, secrets, origin: place.origin }, serve, () => (over = true))).result;
     };
     try {
       return checked(this.name, fn, await Promise.race([run(), timeout, refused]));
     } finally {
+      over = true;
       clearTimeout(timer);
       worker.terminate();
     }
   }
+}
+
+/** A host call's error as it crosses into the cage: its message, and whether
+ * it is a TypeError, which the cage throws as one, as the edge airlock's
+ * handler receives it. */
+function failure(e: unknown): { failure: string; typeError?: true } {
+  return { failure: e instanceof Error ? e.message : String(e), ...(e instanceof TypeError ? { typeError: true as const } : {}) };
 }
 
 /** issue answers {done} or {failed}; reconcile may also answer {absent: true}. */
@@ -188,21 +224,25 @@ function checked(name: string, fn: "issue" | "reconcile", answer: unknown): Answ
 }
 
 /** One request to the cage, answered once; the cage's fetches are served on the
- * way. */
+ * way, and `onSettled` runs as the answer or the error is read. */
 function exchange(
   worker: Worker,
   message: unknown,
   onHostCall: (data: Record<string, unknown>) => void,
+  onSettled: () => void = () => {},
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     worker.onmessage = (e) => {
       const data = e.data as Record<string, unknown>;
       if ("fetch" in data || "blob" in data) return onHostCall(data);
+      // Settled in this very message's task, before any later one is read.
+      onSettled();
       if ("error" in data) return reject(new Error(String(data.error)));
       resolve(data);
     };
     worker.onerror = (e) => {
       e.preventDefault();
+      onSettled();
       reject(new Error(e.message));
     };
     worker.postMessage(message);

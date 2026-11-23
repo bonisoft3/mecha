@@ -91,6 +91,18 @@ export function ceremonyOrigin(configured: string, host: string | null): string 
   return host !== null && /^localhost(:\d+)?$/.test(host) ? `https://${host}` : configured;
 }
 
+/**
+ * The origin a page the door served has, which its cookies and same-origin
+ * checks are for. A configured origin is exact. Behind the dev door the Host
+ * forwarded names it: localhost, or a container network's one-label name such
+ * as `caddy`, where a stack's own browser reaches the door, though no passkey
+ * on localhost verifies there. A dotted Host leaves DEV_DOOR itself.
+ */
+export function doorOrigin(configured: string, host: string | null): string {
+  if (configured !== DEV_DOOR) return configured;
+  return host !== null && /^[a-z0-9-]+(:\d+)?$/.test(host) ? `https://${host}` : configured;
+}
+
 /** The origins a ceremony may come from: the door's, and an Android app's. */
 export function ceremonyOrigins(
   configured: string,
@@ -449,7 +461,7 @@ function coreFor(opts: AuthHandlerOptions) {
     db: authDb,
     secret: JWT_SECRET,
     rpId: () => rpId,
-    origin: (req) => ceremonyOrigin(configured, req.headers.get("host")),
+    origin: (req) => doorOrigin(configured, req.headers.get("host")),
     ceremonyOrigins: (req) => ceremonyOrigins(configured, req.headers.get("host"), android),
     providers: opts.providers ?? OIDC_PROVIDERS,
     nativeSchemes: opts.nativeSchemes !== undefined ? nativeSchemesFrom(opts.nativeSchemes) : NATIVE_SCHEMES,

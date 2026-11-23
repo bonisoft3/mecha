@@ -17,6 +17,7 @@ import {
   androidOrigins,
   ceremonyOrigin,
   ceremonyOrigins,
+  doorOrigin,
   createHandler,
   handler,
   issueUserToken,
@@ -1339,6 +1340,18 @@ Deno.test("a configured origin is exact, and only localhost stands for the dev d
   assert(ceremonyOrigin("https://localhost:*", null).endsWith("*"));
 });
 
+// A stack's own browser reaches the dev door as https://caddy:8443; with the
+// ceremony's localhost-only origin standing in for the door's, every guest's
+// adoption there answered 403 "another origin" and acceptance never settled.
+Deno.test("the dev door's origin is the forwarded Host's, a container's name included, never a dotted one", () => {
+  assertEquals(doorOrigin("https://app.example", "caddy:8443"), "https://app.example");
+  assertEquals(doorOrigin("https://localhost:*", "localhost:54321"), "https://localhost:54321");
+  assertEquals(doorOrigin("https://localhost:*", "caddy:8443"), "https://caddy:8443");
+  assert(doorOrigin("https://localhost:*", "evil.example:8443") !== "https://evil.example:8443");
+  assert(doorOrigin("https://localhost:*", null).endsWith("*"));
+  assert(ceremonyOrigin("https://localhost:*", "caddy:8443") !== "https://caddy:8443");
+});
+
 /** A provider's sign-in, hinted at a guest or not. */
 const signInAs = (p: Profile, guest: string | null = null) => links.userFor(p, guest) as Promise<User>;
 
@@ -1918,6 +1931,10 @@ Deno.test({
     const adopted = await handler(atDoor("/auth/session/adopt", {}, door, kept.token, undefined, `https://${door}`));
     assertEquals([adopted.status, Boolean(cookies(adopted)[SESSION_COOKIE])], [200, true]);
     assertEquals((await handler(atDoor("/auth/session/adopt", {}, door, kept.token, cookies(adopted), `https://${door}`))).status, 409);
+    const inStack = await (await handler(atDoor("/auth/guest", { cookie: false }, "caddy:8443", undefined, undefined, "https://caddy:8443"))).json();
+    const there = await handler(atDoor("/auth/session/adopt", {}, "caddy:8443", inStack.token, undefined, "https://caddy:8443"));
+    assertEquals([there.status, Boolean(cookies(there)[SESSION_COOKIE])], [200, true]);
+    assertEquals((await handler(atDoor("/auth/session/adopt", {}, "caddy:8443", inStack.token, undefined, "https://evil.test"))).status, 403);
   },
 });
 

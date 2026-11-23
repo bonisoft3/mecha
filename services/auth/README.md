@@ -173,7 +173,10 @@ in for a token, never replace this browser's session.
   earlier release kept in a tab's sessionStorage (`guest: true`, no `acr`).
 - `POST /auth/signout` clears every cookie.
 
-Each is refused (403) from another origin.
+Each is refused (403) from another origin than the door's: `WEBAUTHN_ORIGIN`
+when configured; behind the dev door, the forwarded Host's when it is
+localhost or a one-label container name such as `caddy`. Passkey ceremonies
+there stay on localhost.
 
 ### Cookie isolation
 

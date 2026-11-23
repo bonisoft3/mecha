@@ -19,6 +19,7 @@ const hatch: EdgeHatch = {
     },
     async fetch(req) {
       const path = new URL(req.url).pathname
+      if (path === '/hatch/cookies') return Response.json({ cookie: req.headers.get('cookie'), authorization: req.headers.get('authorization'), body: await req.text() })
       if (path === '/hatch/served') return Response.json({ served: ++served })
       if (path === '/hatch/swept') return Response.json({ swept })
       if (path === '/hatch/sweep-fails') { sweepFails = !sweepFails; return Response.json({ sweepFails }) }

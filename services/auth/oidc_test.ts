@@ -24,7 +24,7 @@ import {
   type Tickets,
   type User,
 } from "./oidc.ts";
-import { deviceSession, HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
+import { cookieOf, deviceSession, HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
 
 const ORIGIN = "https://app.test";
 const SECRET = "a-test-secret-that-is-at-least-32-chars";
@@ -149,17 +149,17 @@ const BROKERED: Record<string, string> = {
 };
 
 /** The device session over these providers' links: a provider's way alone. */
-const deviceFor = (providers: Record<string, Provider>, links: Links) => {
+const deviceFor = (providers: Record<string, Provider>, links: Links, origin = ORIGIN) => {
   const stands = providerStill(providers, links);
   return deviceSession({
     secret: SECRET,
-    origin: () => ORIGIN,
+    origin: () => origin,
     still: (way, sub) => way.kind === "provider" ? stands(way, sub) : Promise.resolve(null),
-    issue: (u, proof) => signJwt(SECRET, sessionClaims(ORIGIN, u, proof, now() + 60)),
+    issue: (u, proof) => signJwt(SECRET, sessionClaims(origin, u, proof, now() + 60)),
   });
 };
 
-async function setup(env = GOOGLE, links = memory()) {
+async function setup(env = GOOGLE, links = memory(), origin = ORIGIN) {
   const providers = providersFrom((name) => env[name]);
   const issuer = env.OIDC_GOOGLE_ISSUER ?? "https://accounts.google.com";
   const brokered = issuer !== "https://accounts.google.com";
@@ -168,8 +168,8 @@ async function setup(env = GOOGLE, links = memory()) {
       ? { issuer, reachedAt: env.OIDC_GOOGLE_INTERNAL || issuer, alg: "ES256" }
       : { issuer: "https://accounts.google.com", iss: "accounts.google.com", alg: "RS256", secret: "shh" },
   );
-  const device = deviceFor(providers, links);
-  const routes = oidc({ secret: SECRET, origin: () => ORIGIN, providers, links, device, fetcher: idp.fetcher as typeof fetch });
+  const device = deviceFor(providers, links, origin);
+  const routes = oidc({ secret: SECRET, origin: () => origin, providers, links, device, fetcher: idp.fetcher as typeof fetch });
   const serve = async (req: Request) => {
     const res = routes(req) ?? device.route(req);
     assert(res !== null, `${req.method} ${req.url} is not a route`);
@@ -185,12 +185,12 @@ async function begin(serve: (r: Request) => Promise<Response>, ret = "/chapter/8
   const res = await serve(new Request(`${ORIGIN}/auth/oidc/google/start?return=${encodeURIComponent(ret)}`));
   assertEquals(res.status, 303);
   const to = new URL(res.headers.get("location")!);
-  return { to, state: to.searchParams.get("state")!, verifier: jar(res)[STATE_COOKIE], cookie: res.headers.getSetCookie()[0] };
+  return { to, state: to.searchParams.get("state")!, verifier: jar(res)[`${STATE_COOKIE}_google`], cookie: res.headers.getSetCookie()[0] };
 }
 
 const callback = (q: Record<string, string>, verifier: string | null) =>
   new Request(`${ORIGIN}/auth/oidc/google/callback?${new URLSearchParams(q)}`, {
-    headers: verifier === null ? {} : { cookie: `${STATE_COOKIE}=${verifier}` },
+    headers: verifier === null ? {} : { cookie: `${STATE_COOKIE}_google=${verifier}` },
   });
 
 /** A whole sign-in: start, the provider's answer, the callback. */
@@ -217,14 +217,14 @@ Deno.test("Google signs a person in by code and PKCE, and the cookie becomes a n
   assertEquals(to.searchParams.get("code_challenge"), await sha256url(verifier));
   // The provider sees the challenge, never the verifier.
   assert(!to.toString().includes(verifier));
-  assert(cookie.includes("Path=/auth/oidc/google/callback") && cookie.includes("HttpOnly") && cookie.includes("SameSite=Lax") && cookie.includes("Secure"), cookie);
+  assert(cookie.includes("Path=/;") && cookie.includes("HttpOnly") && cookie.includes("SameSite=Lax") && cookie.includes("Secure"), cookie);
 
   const done = await s.serve(callback({ code: s.idp.authorize(to), state }, verifier));
   assertEquals(done.status, 303);
   assertEquals(done.headers.get("location"), "/chapter/8");
   const back = jar(done);
   assertEquals(back[HINT_COOKIE], "1");
-  assertEquals(back[STATE_COOKIE], "");
+  assertEquals(back[`${STATE_COOKIE}_google`], "");
   assertEquals(s.links.users.get("google:https://accounts.google.com:alice-sub")?.name, "Alice");
   // The address as the provider vouched for it, folded for the checkout to start from.
   assertEquals(s.links.users.get("google:https://accounts.google.com:alice-sub")?.email, "alice@example.test");
@@ -422,7 +422,7 @@ async function hintedSignIn(s: Awaited<ReturnType<typeof setup>>, token: string)
   const to = new URL(res.headers.get("location")!);
   // The provider is asked as any reader would be: the guest is the state's, signed.
   assert(!to.toString().includes(token));
-  return await s.serve(callback({ code: s.idp.authorize(to), state: to.searchParams.get("state")! }, jar(res)[STATE_COOKIE]));
+  return await s.serve(callback({ code: s.idp.authorize(to), state: to.searchParams.get("state")! }, jar(res)[`${STATE_COOKIE}_google`]));
 }
 
 const claimsOf = (token: string) => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(token.split(".")[1].replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0))));
@@ -455,7 +455,7 @@ Deno.test("a guest that signs in with a subject another account holds is held, n
   assertEquals(back[SESSION_COOKIE], undefined);
   // The guest's own hint is left as it was.
   assertEquals(back[HINT_COOKIE], undefined);
-  assert(done.headers.getSetCookie().some((c) => c.startsWith(`${HELD_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/auth;")));
+  assert(done.headers.getSetCookie().some((c) => c.startsWith(`${HELD_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/;")));
   const held = new Request(`${ORIGIN}/auth/session`, { method: "POST", headers: { cookie: `${HELD_COOKIE}=${back[HELD_COOKIE]}`, origin: ORIGIN } });
   const asked = await s.serve(held);
   assertEquals(asked.status, 409);
@@ -484,7 +484,7 @@ Deno.test("a guest's start fetched answers where to go, since a page's CSP refus
   assertEquals(res.status, 200);
   const { to } = await res.json();
   assertEquals(new URL(to).searchParams.get("code_challenge_method"), "S256");
-  assert(res.headers.getSetCookie().some((c) => c.startsWith(`${STATE_COOKIE}=`)), "the state cookie binds the callback to this browser");
+  assert(res.headers.getSetCookie().some((c) => c.startsWith(`${STATE_COOKIE}_google=`)), "the state cookie binds the callback to this browser");
 });
 
 Deno.test("a guest's start is refused from another origin, and for a token that is no guest's", async () => {
@@ -565,7 +565,7 @@ Deno.test("Service-Worker-Navigation-Preload and prefetch GETs neither overwrite
     assertEquals(preloadStart.status, 400);
     assertEquals(preloadStart.headers.getSetCookie(), []);
     const preloadCb = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/callback?${new URLSearchParams({ code, state })}`, {
-      headers: { ...headers, cookie: `${STATE_COOKIE}=${verifier}` },
+      headers: { ...headers, cookie: `${STATE_COOKIE}_google=${verifier}` },
     }));
     assertEquals(preloadCb.status, 400);
     assertEquals(preloadCb.headers.getSetCookie(), []);
@@ -858,4 +858,74 @@ Deno.test("the providers a deployment turns on are the ways in it tells the page
   assertEquals(await (await on.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: ["google"] });
   const off = await setup({});
   assertEquals(await (await off.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: [] });
+});
+
+Deno.test("device credentials are host-only on HTTPS and legacy cookies cannot occupy a session", async () => {
+  let live = true;
+  const user = { id: "alice", handle: "alice" };
+  for (const origin of ["https://app.test", "http://localhost"]) {
+    const secure = origin.startsWith("https:");
+    const d = deviceSession({ secret: SECRET, origin: () => origin, still: async () => live ? user : null, issue: async () => "access" });
+    const req = (cookie = "") => new Request(`${origin}/auth/session`, { method: "POST", headers: { cookie } });
+    const name = secure ? SESSION_COOKIE : "mecha_session";
+    const set = await d.signedIn(req(), user.id, { kind: "guest" }, { acr: "0" });
+    const session = set.find((c) => c.startsWith(`${name}=`))!;
+    assert(session);
+    assert(session.includes(secure ? "Path=/;" : "Path=/auth;"));
+    assertEquals(session.includes("; Secure"), secure);
+    assert(!/domain=/i.test(session));
+    const raw = session.split(";")[0];
+    assertEquals(await d.hasSession(req(raw)), true);
+    assertEquals((await d.route(req(raw)))!.status, 200);
+    const wrongName = secure ? "mecha_session" : SESSION_COOKIE;
+    const planted = `${wrongName}=${raw.slice(raw.indexOf("=") + 1)}`;
+    assertEquals(await d.hasSession(req(planted)), false);
+    assertEquals((await d.route(req(planted)))!.status, 401);
+    assertEquals(await d.hasSession(req(`${name}=invalid`)), false);
+    live = false;
+    assertEquals(await d.hasSession(req(raw)), false);
+    live = true;
+    const offer = await d.held(req(), user.id, { kind: "guest" }, { acr: "0" });
+    const heldName = secure ? HELD_COOKIE : "mecha_session_held";
+    assert(offer.cookies[0].startsWith(`${heldName}=`));
+    assert(offer.cookies[0].includes(secure ? "Path=/;" : "Path=/auth;"));
+    assertEquals((await d.route(req(offer.cookies[0].split(";")[0])))!.status, 409);
+    for (const cookie of d.signedOut(req())) assert(cookie.includes("Max-Age=0"));
+  }
+});
+
+Deno.test("HTTPS provider state ignores an otherwise valid verifier under the old cookie name", async () => {
+  const s = await setup();
+  const start = await begin(s.serve);
+  assert(start.cookie.startsWith(`${STATE_COOKIE}_google=`));
+  assert(start.cookie.includes("Path=/;") && start.cookie.includes("; Secure") && !/domain=/i.test(start.cookie));
+  const code = s.idp.authorize(start.to);
+  const res = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/callback?${new URLSearchParams({ code, state: start.state })}`, {
+    headers: { cookie: `mecha_oidc_state=${start.verifier}` },
+  }));
+  assertEquals(res.status, 400);
+});
+
+Deno.test("HTTP development completes provider sign-in with callback-scoped state and unprefixed session cookies", async () => {
+  const origin = "http://localhost";
+  const s = await setup(GOOGLE, memory(), origin);
+  const start = await s.serve(new Request(`${origin}/auth/oidc/google/start`));
+  const to = new URL(start.headers.get("location")!);
+  const stateCookie = start.headers.getSetCookie()[0];
+  assert(stateCookie.startsWith("mecha_oidc_state="));
+  assert(stateCookie.includes("Path=/auth/oidc/google/callback;") && !stateCookie.includes("; Secure"));
+  const res = await s.serve(new Request(`${origin}/auth/oidc/google/callback?${new URLSearchParams({ code: s.idp.authorize(to), state: to.searchParams.get("state")! })}`, {
+    headers: { cookie: stateCookie.split(";")[0] },
+  }));
+  assertEquals(res.status, 303);
+  assert(res.headers.getSetCookie().some(cookie => cookie.startsWith("mecha_session=") && cookie.includes("Path=/auth;")));
+  assert(res.headers.getSetCookie().every(cookie => !cookie.startsWith("__Host-")));
+});
+
+Deno.test("cookie names preserve non-HTTP whitespace instead of manufacturing a host prefix", () => {
+  for (const space of ["\u00a0", "\v", "\f"]) {
+    const req = new Request(`${ORIGIN}/auth/session`, { headers: { cookie: `${space}${SESSION_COOKIE}=planted; ${SESSION_COOKIE}=own` } });
+    assertEquals(cookieOf(req, SESSION_COOKIE), "own");
+  }
+  assertEquals(cookieOf(new Request(ORIGIN, { headers: { cookie: `other=1; \t${SESSION_COOKIE}=own` } }), SESSION_COOKIE), "own");
 });

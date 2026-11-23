@@ -35,7 +35,7 @@ import { isSession, verifyJwt } from '../../../services/auth/jwt.ts'
 import { PUBLIC_WHERE } from '../../../services/auth/where.ts'
 import { isGuest } from '../../../services/auth/claims.ts'
 import type { EdgeEnv } from './object.ts'
-import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
+import { blobKeyOf, SIGNAL_MAX_BYTES, withoutAuthCookies } from './door.ts'
 import { pokeCluster } from './clock.ts'
 
 const SHAPE_TTL_S = 300
@@ -116,6 +116,7 @@ async function forwardRead(object: () => DurableObjectStub, req: Request): Promi
 
 export const edgeWorker = {
   async fetch(req: Request, env: EdgeEnv, ctx: ExecutionContext): Promise<Response> {
+    req = withoutAuthCookies(req)
     if (!env.JWT_SECRET) throw new Error('JWT_SECRET is not set')
     if (!env.IMPORT_TOKEN) throw new Error('IMPORT_TOKEN is not set')
     const url = new URL(req.url)

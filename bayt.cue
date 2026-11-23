@@ -304,7 +304,7 @@ _mecha: bayt.#project & _where & {
 		"airlock-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts tsbifrost.ts"}).out & {
 			let _airlock = ["deno.json", "deno.lock", "main.ts", "airlock.ts", "handler.ts", "cage.ts", "reentry.ts", "read.ts", "blobs.ts", "multipart.ts", "seal.ts", "seal-tables.ts", "pdf.ts", "xlsx.ts", "tsbifrost.ts", "ai-models.ts", "white-background.ts", "package.json", "dapr.yaml"]
 			let _compute = ["compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "workers.ts", "wasm-select.ts", "query-stages.ts"]
-			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}]])
+			srcs: globs: list.Concat([[for f in _airlock {"services/airlock/\(f)"}], [for f in _compute {"services/compute/\(f)"}], ["packages/compute-snapshot/src/json.ts"]])
 			cmd: "deno-install": (deno.#containerCmd & {
 				priority: -2
 				do:       "deno install --frozen"
@@ -315,6 +315,7 @@ _mecha: bayt.#project & _where & {
 				copy: [
 					{srcs: [for f in _airlock {"services/airlock/\(f)"}], dst: "/app/airlock/"},
 					{srcs: [for f in _compute {"services/compute/\(f)"}], dst: "/app/compute/"},
+					{srcs: ["packages/compute-snapshot/src/json.ts"], dst: "/packages/compute-snapshot/src/"},
 				]
 			}
 		}

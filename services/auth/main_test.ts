@@ -1083,7 +1083,7 @@ Deno.test({
     assertEquals(res.status, 200);
     await res.body?.cancel();
     const jar = cookies(res);
-    assert(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/auth;")));
+    assert(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`) && c.includes("HttpOnly") && c.includes("Path=/;")));
     assertEquals(jar[HINT_COOKIE], "1");
     const again = await handler(atDoor("/auth/session", {}, door, undefined, jar));
     assertEquals(again.status, 200);
@@ -1876,6 +1876,26 @@ Deno.test({
     assertEquals(merge.gone, true);
 
     await sql`DROP TABLE owned_fav, owned_deck`;
+  },
+});
+
+Deno.test({
+  name: "guest adoption ignores legacy and invalid cookies but preserves a valid device session",
+  ...opts,
+  async fn() {
+    const origin = `https://${door}`;
+    const minted = await handler(atDoor("/auth/guest", { cookie: false }, door, undefined, undefined, origin));
+    const { token } = await minted.json();
+    const own = cookies(await handler(atDoor("/auth/guest", {}, door, undefined, undefined, origin)));
+    for (const planted of [{ mecha_session: own[SESSION_COOKIE] }, { [SESSION_COOKIE]: "invalid" }] as Record<string, string>[]) {
+      const adopted = await handler(atDoor("/auth/session/adopt", {}, door, token, planted, origin));
+      assertEquals(adopted.status, 200);
+      assert(cookies(adopted)[SESSION_COOKIE]);
+      await adopted.body?.cancel();
+    }
+    const refused = await handler(atDoor("/auth/session/adopt", {}, door, token, own, origin));
+    assertEquals(refused.status, 409);
+    await refused.body?.cancel();
   },
 });
 

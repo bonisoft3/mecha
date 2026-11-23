@@ -28,6 +28,14 @@ Deno.test({ name: 'edge hatches transact over private tables, preserve rollback 
     await load(`${tmp}/pgdata`, (route, init) => fetch(at(`/import/${route}`), {
       ...init, headers: { authorization: 'Bearer test-import' },
     }), { log: () => {} })
+    for (const cookie of ['__Host-mecha_session=s; __Host-mecha_session_held=h; __Host-mecha_oidc_state_google=g', 'theme=dark; mecha_session=old; __Host-mecha_session=s; basket=42']) {
+      const res = await fetch(at('/hatch/cookies'), { method: 'POST', headers: { cookie, authorization: 'Bearer hatch-token' }, body: 'hatch input' })
+      assert.equal(res.status, 200)
+      const echoed = await res.json() as { cookie: string | null; authorization: string; body: string }
+      assert.deepEqual(echoed.cookie?.split(';').map(part => part.trim()).filter(Boolean) ?? [], cookie.startsWith('theme') ? ['theme=dark', 'basket=42'] : [])
+      assert.equal(echoed.authorization, 'Bearer hatch-token')
+      assert.equal(echoed.body, 'hatch input')
+    }
     // A hatch's memory holds between requests, or a rate limit never fires.
     const served = async () => ((await (await fetch(at('/hatch/served'))).json()) as { served: number }).served
     assert.deepEqual([await served(), await served()], [1, 2])

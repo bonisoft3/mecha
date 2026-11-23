@@ -550,7 +550,7 @@ Deno.test({
       assert.equal(authorizeUrl.origin + authorizeUrl.pathname, `${issuer}/authorize`)
       assert.equal(authorizeUrl.searchParams.get('client_id'), origin)
       const stateCookie = startRes.headers.get('set-cookie')!.split(';')[0]
-      assert.ok(stateCookie.startsWith(`${STATE_COOKIE}=`))
+      assert.ok(stateCookie.startsWith(`${STATE_COOKIE}_google=`))
       const code = crypto.randomUUID()
       codes.set(code, {
         client: authorizeUrl.searchParams.get('client_id')!,

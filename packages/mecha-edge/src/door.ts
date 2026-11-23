@@ -10,3 +10,16 @@ export function blobKeyOf(segment: string): string | null {
     throw e
   }
 }
+
+/** Auth cookies span the host; unrelated upstreams must not receive them. */
+export function withoutAuthCookies(req: Request): Request {
+  if (new URL(req.url).pathname.startsWith('/auth/')) return req
+  const cookie = req.headers.get('cookie')
+  if (cookie === null) return req
+  const filtered = cookie.replace(/(^|;)[ \t]*(__Host-)?mecha_(session(_held)?|oidc_state(_[A-Za-z0-9_-]+)?)=[^;]*/g, '')
+  if (filtered === cookie) return req
+  const headers = new Headers(req.headers)
+  if (filtered) headers.set('cookie', filtered)
+  else headers.delete('cookie')
+  return new Request(req, { headers })
+}

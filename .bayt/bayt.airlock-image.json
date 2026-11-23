@@ -53,6 +53,16 @@
         "link": true,
         "parents": false,
         "exclude": []
+      },
+      {
+        "from": null,
+        "srcs": [
+          "packages/compute-snapshot/src/json.ts"
+        ],
+        "dst": "/packages/compute-snapshot/src/",
+        "link": true,
+        "parents": false,
+        "exclude": []
       }
     ],
     "add": [],
@@ -99,7 +109,8 @@
       "services/compute/language.ts",
       "services/compute/workers.ts",
       "services/compute/wasm-select.ts",
-      "services/compute/query-stages.ts"
+      "services/compute/query-stages.ts",
+      "packages/compute-snapshot/src/json.ts"
     ],
     "exclude": []
   },
@@ -213,7 +224,8 @@
           "services/compute/language.ts",
           "services/compute/workers.ts",
           "services/compute/wasm-select.ts",
-          "services/compute/query-stages.ts"
+          "services/compute/query-stages.ts",
+          "packages/compute-snapshot/src/json.ts"
         ],
         "exclude": []
       },
@@ -274,7 +286,8 @@
           "services/compute/language.ts",
           "services/compute/workers.ts",
           "services/compute/wasm-select.ts",
-          "services/compute/query-stages.ts"
+          "services/compute/query-stages.ts",
+          "packages/compute-snapshot/src/json.ts"
         ],
         "exclude": [],
         "defaultGlobs": null,
@@ -326,7 +339,8 @@
           "services/compute/language.ts",
           "services/compute/workers.ts",
           "services/compute/wasm-select.ts",
-          "services/compute/query-stages.ts"
+          "services/compute/query-stages.ts",
+          "packages/compute-snapshot/src/json.ts"
         ],
         "exclude": [],
         "defaultGlobs": null,

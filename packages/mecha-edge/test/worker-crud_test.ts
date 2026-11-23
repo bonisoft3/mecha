@@ -186,3 +186,26 @@ Deno.test('worker /crud/ cache: guests share public-only reads, isolate private 
     else Reflect.deleteProperty(globalThis, 'caches')
   }
 })
+
+Deno.test('the edge door keeps auth cookies on auth routes and removes them before asset and database dispatch', async () => {
+  const savedCaches = Object.getOwnPropertyDescriptor(globalThis, 'caches')
+  Object.defineProperty(globalThis, 'caches', { configurable: true, value: { default: {} } })
+  const echo = { fetch: async (req: Request) => Response.json({ cookie: req.headers.get('cookie') }) }
+  const env = {
+    JWT_SECRET: 'test-secret', IMPORT_TOKEN: 'import-secret', CF_VERSION_METADATA: { id: 'v1' },
+    CLUSTER: { idFromName: () => 'cluster', get: () => echo }, ASSETS: echo,
+  } as unknown as EdgeEnv
+  const cookie = 'theme=dark; __Host-mecha_session=s; __Host-mecha_session_held=h; __Host-mecha_oidc_state_google=g; basket=42; mecha_session_hint=1'
+  try {
+    for (const path of ['/auth/session', '/crud/note', '/asset.js']) {
+      const res = await edgeWorker.fetch(new Request(`https://app.example${path}`, { headers: { cookie } }), env, { waitUntil() {} } as unknown as ExecutionContext)
+      assert.equal(res.status, 200)
+      const result = await res.json() as { cookie: string }
+      const expected = path.startsWith('/auth/') ? cookie.split(';').map(part => part.trim()) : ['theme=dark', 'basket=42', 'mecha_session_hint=1']
+      assert.deepEqual(result.cookie.split(';').map(part => part.trim()).filter(Boolean), expected)
+    }
+  } finally {
+    if (savedCaches) Object.defineProperty(globalThis, 'caches', savedCaches)
+    else Reflect.deleteProperty(globalThis, 'caches')
+  }
+})

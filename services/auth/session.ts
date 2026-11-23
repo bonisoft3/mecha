@@ -17,8 +17,8 @@
 import { type Proof, proofClaims, proofOf } from "./claims.ts";
 import { randomToken, signJwt, verifyJwt } from "./jwt.ts";
 
-export const SESSION_COOKIE = "mecha_session";
-export const HELD_COOKIE = "mecha_session_held";
+export const SESSION_COOKIE = "__Host-mecha_session";
+export const HELD_COOKIE = "__Host-mecha_session_held";
 export const HINT_COOKIE = "mecha_session_hint";
 const PATH = "/auth";
 const SESSION_TTL_S = 30 * 24 * 3600;
@@ -52,6 +52,7 @@ export type Device = {
   held: (req: Request, sub: string, way: Way, proof: Proof) => Promise<Offer>;
   /** The cookies that leave this device with no session and nothing held. */
   signedOut: (req: Request) => string[];
+  hasSession: (req: Request) => Promise<boolean>;
   /** The routes under /auth/session and /auth/signout, or null for any other. */
   route: (req: Request) => Promise<Response> | null;
 };
@@ -60,7 +61,7 @@ const now = () => Math.floor(Date.now() / 1000);
 
 export function cookieOf(req: Request, name: string): string | null {
   for (const part of (req.headers.get("cookie") ?? "").split(";")) {
-    const [k, ...v] = part.trim().split("=");
+    const [k, ...v] = part.replace(/^[ \t]+|[ \t]+$/g, "").split("=");
     if (k === name) return v.join("=");
   }
   return null;
@@ -74,9 +75,12 @@ const reply = (status: number, body: unknown, cookies: string[] = []) => {
 const refuse = (status: number, error: string) => reply(status, { error });
 
 export function deviceSession(cfg: DeviceConfig): Device {
-  const secure = (req: Request) => cfg.origin(req).startsWith("https://") ? "; Secure" : "";
+  const https = (req: Request) => cfg.origin(req).startsWith("https://");
+  const secure = (req: Request) => https(req) ? "; Secure" : "";
+  const nameOf = (req: Request, name: string) => https(req) ? name : name.replace(/^__Host-/, "");
+  const read = (req: Request, name: string) => cookieOf(req, nameOf(req, name));
   const cookie = (req: Request, name: string, value: string, age: number) =>
-    `${name}=${value}; Path=${PATH}; HttpOnly; SameSite=Lax${secure(req)}; Max-Age=${age}`;
+    `${nameOf(req, name)}=${value}; Path=${https(req) ? "/" : PATH}; HttpOnly; SameSite=Lax${secure(req)}; Max-Age=${age}`;
   const hint = (req: Request, age: number) => `${HINT_COOKIE}=${age > 0 ? "1" : ""}; Path=/; SameSite=Lax${secure(req)}; Max-Age=${age}`;
   // A cross-site POST carries no Lax cookie but still receives one, so the
   // Origin a browser sends is checked besides.
@@ -131,9 +135,9 @@ export function deviceSession(cfg: DeviceConfig): Device {
   // The cookie as this tab's session. An account held for the reader comes
   // first, since the device's own session is what it would leave.
   async function session(req: Request): Promise<Response> {
-    const taken = await standing(cookieOf(req, HELD_COOKIE), "device-held");
+    const taken = await standing(read(req, HELD_COOKIE), "device-held");
     if (taken !== null) return offered(taken.user, taken.offer);
-    const own = await standing(cookieOf(req, SESSION_COOKIE), "device-session");
+    const own = await standing(read(req, SESSION_COOKIE), "device-session");
     if (own !== null) return await answer(own.user, own.proof);
     return refuse(401, "not signed in");
   }
@@ -141,7 +145,7 @@ export function deviceSession(cfg: DeviceConfig): Device {
   /** The offer this choice names, or the answer to give instead: nothing
    * held, or a newer offer for the tab to show. */
   async function chosen(req: Request) {
-    const taken = await standing(cookieOf(req, HELD_COOKIE), "device-held");
+    const taken = await standing(read(req, HELD_COOKIE), "device-held");
     if (taken === null) return refuse(401, "nothing held");
     let named: unknown = null;
     try {
@@ -165,6 +169,7 @@ export function deviceSession(cfg: DeviceConfig): Device {
   }
 
   return {
+    hasSession: async (req) => await standing(read(req, SESSION_COOKIE), "device-session") !== null,
     signedIn,
     held,
     signedOut: (req) => cleared(req, [SESSION_COOKIE, HELD_COOKIE]),

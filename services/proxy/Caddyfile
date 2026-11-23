@@ -4,6 +4,9 @@
 }
 
 :{$PORT:8080} {
+	# Host-prefixed auth cookies use Path=/; only auth receives those credentials.
+	@withoutAuthCookies not path /auth/*
+	request_header @withoutAuthCookies Cookie "(^|;)[ \t]*(__Host-)?mecha_(session(_held)?|oidc_state(_[A-Za-z0-9_-]+)?)=[^;]*" ""
 	handle /crud/* {
 		uri strip_prefix /crud
 		# Idempotent inserts by default — duplicate POSTs with the same

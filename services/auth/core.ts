@@ -14,7 +14,7 @@ import { GUEST_ACR, guestProof, isGuest, passkeyProof, type Person, type Proof, 
 import { guestHandle, nameHandle, nameOf } from "./handles.ts";
 import { encodeBase64Url, randomToken, sha256url, signJwt, STACK_ISSUER, verifyJwt } from "./jwt.ts";
 import { type Links, oidc, type Profile, type Provider, providerStill, type Tickets } from "./oidc.ts";
-import { cookieOf, deviceSession, SESSION_COOKIE, type User, type Way } from "./session.ts";
+import { deviceSession, type User, type Way } from "./session.ts";
 
 export type Row = Record<string, unknown>;
 /** One statement and the rows it returns (a write's, by RETURNING). */
@@ -591,7 +591,7 @@ export function authCore(cfg: AuthCoreConfig) {
   async function adopt(req: Request): Promise<Response> {
     const origin = req.headers.get("origin");
     if (origin !== null && origin !== cfg.origin(req)) return jsonError(403, "another origin");
-    if (cookieOf(req, SESSION_COOKIE)) return jsonError(409, "a session is here");
+    if (await device.hasSession(req)) return jsonError(409, "a session is here");
     const subject = await subjectOf(req);
     if (subject === "refused" || subject.claims === null) return jsonError(401, "invalid token");
     const claims = subject.claims;

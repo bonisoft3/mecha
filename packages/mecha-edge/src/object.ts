@@ -29,7 +29,7 @@ import type { ClaimedRun, DispatchedRun, RunAnswer } from './dispatch.ts'
 import { hatchAt, type EdgeHatch } from './hatches.ts'
 import { verifyJwt } from '../../../services/auth/jwt.ts'
 import { providersFrom } from '../../../services/auth/oidc.ts'
-import { blobKeyOf, SIGNAL_MAX_BYTES } from './door.ts'
+import { blobKeyOf, SIGNAL_MAX_BYTES, withoutAuthCookies } from './door.ts'
 import { applyScripts, ChangedScript, NoLedger, OutOfOrderScript, type Script, UnrunnableScript } from '../../pglite-workerd/scripts.ts'
 import { snapshotAdmission, type PublicSnapshot } from './public-snapshot.ts'
 import type { BatchMachine, Computation, Output } from '../../compute-snapshot/src/index.ts'
@@ -629,6 +629,7 @@ export function edgeObject({ assets, tables, schema, storageFormat, machines = {
     }
 
     override async fetch(req: Request): Promise<Response> {
+      req = withoutAuthCookies(req)
       const path = new URL(req.url).pathname
       // Asked by the Worker once it holds an answer that ends this object. Ended from in here, on a
       // timer, the answer could be lost: a migration that landed once read as refused.

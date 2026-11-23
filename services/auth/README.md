@@ -128,8 +128,7 @@ a page the door serves:
 - `GET /auth/oidc/<provider>/start?return=<path>` sends the browser to the
   provider's authorization endpoint with a signed `state`, a nonce and the
   PKCE challenge. A guest starts by `POST` from this origin with its token as
-  the form's `id_token_hint` and `return`, so the token is in no URL; the verifier stays in an HttpOnly cookie scoped to the
-  callback, and the state carries only its hash. Speculative `GET`s
+  the form's `id_token_hint` and `return`, so the token is in no URL; the verifier stays in an HttpOnly provider-state cookie, and the state carries only its hash. Speculative `GET`s
   (`Service-Worker-Navigation-Preload` and `prefetch`/`preview`) are refused on
   both `start` and `callback` without touching cookies or spending a code.
 - `GET /auth/oidc/<provider>/callback` redeems the code at the provider's token
@@ -148,8 +147,8 @@ a page the door serves:
 ## Device session
 
 A browser holds one account (`session.ts`): every sign-in — a passkey's, a
-provider's, a guest's mint — leaves an HttpOnly `mecha_session` cookie on
-`/auth` and a readable `mecha_session_hint`. The cookie is never renewed, so
+provider's, a guest's mint — leaves an HttpOnly `__Host-mecha_session` cookie on
+`/` and a readable `mecha_session_hint`. The cookie is never renewed, so
 it lasts 30 days from the sign-in that set it, and it names the way the
 account came in, which must still stand when it is taken up: the passkey still
 the account's, the provider's link still there, the guest still a guest. Only
@@ -161,7 +160,7 @@ in for a token, never replace this browser's session.
   redirect cannot write and a bearer outlives by a week at most. 401 when no
   way stands.
 - An account a sign-in found while another is the device's is held in an
-  HttpOnly `mecha_session_held` cookie for five minutes, which `/session`
+  HttpOnly `__Host-mecha_session_held` cookie for five minutes, which `/session`
   answers first, 409 `{"error": "login_required", user: {handle, name?}, offer}`.
   `POST /auth/session/switch {offer}` makes it the device's session;
   `POST /auth/session/stay {offer}` lets it go. Each names the offer it
@@ -175,6 +174,23 @@ in for a token, never replace this browser's session.
 - `POST /auth/signout` clears every cookie.
 
 Each is refused (403) from another origin.
+
+### Cookie isolation
+
+HTTPS device-session, held-offer and provider-state cookies use `__Host-` names,
+`Secure`, `Path=/`, and no `Domain`, preventing sibling subdomains from planting
+credentials. Provider state names include the provider because their paths coincide.
+Plain HTTP development uses unprefixed names on the auth paths. The readable
+`mecha_session_hint` is not a credential. Doors strip these credential cookies
+from non-auth requests while preserving unrelated application cookies.
+
+HTTPS does not accept the former unprefixed cookies. Signed-in users must
+authenticate again once existing access credentials stop working. A guest with
+a valid stored bearer can restore its device cookie through session adoption.
+A guest whose only
+credential was the old cookie cannot recover that guest identity through it;
+its stored data is not deleted. There is no compatibility switch.
+
 
 ## Provider settings
 - `POST /auth/oidc/session` serves a native host: when `/start` ran with

@@ -1,4 +1,5 @@
 import type { Computation, Queryable, SnapshotIdentity } from './index.ts';
+import { losslessJson } from './json.ts';
 
 const schema = 'compute_snapshot_private';
 const q = (name: string) => `"${name.replaceAll('"', '""')}"`;
@@ -39,13 +40,7 @@ export async function stageOutput(tx: Queryable, identity: SnapshotIdentity, spe
     !Number.isSafeInteger(ordinal) || ordinal < 0 || !Array.isArray(rows) || !rows.length || rows.length > 128) {
     throw new Error('invalid output chunk');
   }
-  const body = JSON.stringify(rows, (_key, value) => {
-    if (value === undefined || typeof value === 'bigint' || typeof value === 'function' || typeof value === 'symbol' ||
-      typeof value === 'number' && (!Number.isFinite(value) || Number.isInteger(value) && !Number.isSafeInteger(value))) {
-      throw new Error('output chunk requires finite lossless JSON');
-    }
-    return value;
-  });
+  const body = losslessJson(rows);
   const bytes = new TextEncoder().encode(body);
   if (bytes.length > OUTPUT_CHUNK_BYTES) throw new Error('output chunk exceeds byte limit');
   const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(n => n.toString(16).padStart(2, '0')).join('');

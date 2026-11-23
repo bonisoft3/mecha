@@ -1,4 +1,5 @@
 import { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from './chunk-limits.ts';
+import { losslessJson as json } from './json.ts';
 export { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from './chunk-limits.ts';
 import { initializeOutputs, collectOutputs, stageOutput, sealOutput as sealStagedOutput, publishOutput, type OutputSeal } from './staged-publication.ts';
 import { type SinkWrites, validateSinkWrites } from './sink-writes.ts';
@@ -757,18 +758,6 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
     },
     async stop() { stopped = true; if (running) await running; },
   };
-}
-
-function json(value: unknown): string {
-  const visit = (v: unknown): void => {
-    if (v === null || typeof v === 'string' || typeof v === 'boolean') return;
-    if (typeof v === 'number' && Number.isFinite(v) && (!Number.isInteger(v) || Number.isSafeInteger(v))) return;
-    if (Array.isArray(v)) { v.forEach(visit); return; }
-    if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) { Object.values(v).forEach(visit); return; }
-    throw new Error('compute output requires finite lossless JSON values');
-  };
-  visit(value);
-  return JSON.stringify(value);
 }
 
 async function publish(tx: Queryable, spec: Computation, output: Output) {

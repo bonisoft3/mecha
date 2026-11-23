@@ -3,6 +3,7 @@ import { types, typedSql, type TypeTable, type TypeField } from '../../services/
 import { planReplicaTable, snapshotStatements, type ReplicaWatermark } from '../../services/compute/snapshot-data.ts'
 import { normalizeSelect } from '../../services/compute/wasm-select.ts'
 import type { Snapshot, Output } from '../compute-snapshot/src/index.ts'
+import { parseLossless, strictJson as json } from '../compute-snapshot/src/json.ts'
 
 export interface BrowserProgram {
   compiled: object
@@ -26,11 +27,6 @@ export interface BrowserCompute {
 }
 const bytes = (value: string) => Uint8Array.from(atob(value), (c) => c.charCodeAt(0))
 const objectUrl = async (value: string, type: string) => URL.createObjectURL(new Blob([await new Response(new Blob([bytes(value)]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()], { type }))
-const json = (value: unknown) => JSON.stringify(value, (_key, v) => {
-  if (v === undefined || typeof v === 'bigint' || typeof v === 'function' || typeof v === 'symbol' ||
-    (typeof v === 'number' && !Number.isFinite(v))) throw new TypeError('computation returned a non-JSON value')
-  return v
-})
 function ask(worker: Worker, message: unknown): Promise<Record<string, any>> {
   return new Promise((resolve, reject) => {
     worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
@@ -118,10 +114,7 @@ export async function browserCompute(config: BrowserCompute) {
         const fields = p.spec.queryTypes?.[name]
         const query = fields ? typedSql(bound!.canonicalType, sql, fields) : sql
         const rows = (await conn.query(`SELECT to_json(r)::VARCHAR AS value FROM (${query}) r`)).toArray().map((row: any) => {
-          const value = JSON.parse(row.value, (_key: string, v: unknown) => {
-            if (typeof v === 'number' && Number.isInteger(v) && !Number.isSafeInteger(v)) throw new Error('untyped query integer exceeds exact JSON range')
-            return v
-          })
+          const value = parseLossless(row.value) as Record<string, unknown>
           return fields ? bound!.normalizeRow(fields, value, 'duckdb') : value
         })
         inputs[name] = rows

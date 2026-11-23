@@ -3,6 +3,7 @@ import type { SnapshotChunk, SnapshotIdentity, SnapshotManifest, SnapshotTableWa
 import { snapshotStatements, snapshotWalStatements } from '../../../services/compute/snapshot-data.ts'
 import { bindBoundary, typedSql } from '../../../services/compute/portable-contract.ts'
 import { validateQuerySql } from './query-sql.ts'
+import { parseLossless } from '../../compute-snapshot/src/json.ts'
 import { validateQueryStages } from '../../../services/compute/query-stages.ts'
 import { strictJson, type SnapshotProgram } from './snapshot-program.ts'
 
@@ -340,10 +341,7 @@ export class PagedQuery {
       const fields = program.spec.queryTypes?.[name]
       const boundary = fields ? bindBoundary({ fields, types: program.spec.types! }) : undefined
       const rows = next === after ? [] : conn.query(`SELECT value FROM ${relation} WHERE sequence>${after} AND sequence<=${next} ORDER BY sequence`).toArray().map(row => {
-        const value = JSON.parse(String(row.value), (_key, v) => {
-          if (typeof v === 'number' && Number.isInteger(v) && !Number.isSafeInteger(v)) throw new Error('untyped query integer exceeds exact JSON range')
-          return v
-        })
+        const value = parseLossless(String(row.value)) as Record<string, unknown>
         return boundary ? boundary.rows([value], 'duckdb')[0] : value
       })
       return { after, next, rows, done: !conn.query(`SELECT 1 FROM ${relation} WHERE sequence>${next} LIMIT 1`).toArray().length }

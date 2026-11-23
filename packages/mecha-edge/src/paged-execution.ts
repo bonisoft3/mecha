@@ -1,6 +1,7 @@
 import { EXECUTION_QUERY_BYTES, EXECUTION_QUERY_ROWS, EXECUTION_BYTES, EXECUTION_OUTPUT_BYTES, EXECUTION_OUTPUT_ROWS, scratchStatement, type ExecutionQueryPage } from '../../compute-snapshot/src/bounded.ts'
 export { EXECUTION_QUERY_BYTES, EXECUTION_QUERY_ROWS, EXECUTION_BYTES, EXECUTION_OUTPUT_BYTES, EXECUTION_OUTPUT_ROWS, scratchStatement, type ExecutionQueryPage } from '../../compute-snapshot/src/bounded.ts'
 import { validateQuerySql } from './query-sql.ts'
+import { losslessJson as json, parseLossless } from '../../compute-snapshot/src/json.ts'
 export interface ExecutionConnection {
   query(sql: string): { toArray(): Record<string, unknown>[] }
   prepare(sql: string): { query(...values: string[]): { toArray(): Record<string, unknown>[] }; close(): void }
@@ -17,27 +18,6 @@ export interface ExecutionStep {
 export interface ExecutionOutput { after: number; next: number; done: boolean; rows: Record<string, unknown>[] }
 const schema = 'duckdb_private'
 const utf8 = new TextEncoder()
-
-function json(value: unknown): string {
-  const visit = (item: unknown): void => {
-    if (item === null || typeof item === 'string' || typeof item === 'boolean') return
-    if (typeof item === 'number' && Number.isFinite(item) && (!Number.isInteger(item) || Number.isSafeInteger(item))) return
-    if (Array.isArray(item)) { item.forEach(visit); return }
-    if (item && typeof item === 'object' && Object.getPrototypeOf(item) === Object.prototype) { Object.values(item).forEach(visit); return }
-    throw new Error('execution requires finite lossless JSON')
-  }
-  visit(value)
-  return JSON.stringify(value)
-}
-
-function parse(value: unknown): unknown {
-  return JSON.parse(String(value), (_key, item) => {
-    if (typeof item === 'number' && (!Number.isFinite(item) || Number.isInteger(item) && !Number.isSafeInteger(item))) {
-      throw new Error('execution query requires finite lossless JSON')
-    }
-    return item
-  })
-}
 
 /** One capture's numerical checkpoints and unpublished output remain in DuckDB. */
 export class PagedExecution {
@@ -97,7 +77,7 @@ export class PagedExecution {
     if (rows.length !== 1) throw new Error('execution state is missing')
     const revision = Number(rows[0].revision)
     if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('invalid execution revision')
-    return { revision, checkpoint: rows[0].checkpoint === null ? null : parse(rows[0].checkpoint), done: rows[0].done === true }
+    return { revision, checkpoint: rows[0].checkpoint === null ? null : parseLossless(String(rows[0].checkpoint)), done: rows[0].done === true }
   }
 
   state(): ExecutionState { return this.atomic(conn => this.current(conn), true) }
@@ -110,7 +90,7 @@ export class PagedExecution {
         SELECT COALESCE(sum(octet_length(encode(value))+1),0)+1 AS bytes FROM execution_rows
       ) SELECT CASE WHEN execution_size.bytes>${EXECUTION_BYTES} THEN error('execution query exceeds byte limit')
         ELSE execution_rows.value END AS value FROM execution_rows CROSS JOIN execution_size`)
-      .map(row => parse(row.value) as Record<string, unknown>), true)
+      .map(row => parseLossless(String(row.value)) as Record<string, unknown>), true)
   }
 
   queryPage(sql: string, orderBy: string, revision: number, after = -1): ExecutionQueryPage {
@@ -151,7 +131,7 @@ export class PagedExecution {
       }
       const rows = count ? this.parameter(conn, `SELECT to_json(r)::VARCHAR AS value FROM (${sql}) r
         WHERE ${key}>${after} AND ${key}<=${next} ORDER BY ${key}`)
-        .map(row => parse(row.value) as Record<string, unknown>) : []
+        .map(row => parseLossless(String(row.value)) as Record<string, unknown>) : []
       if (rows.length !== count) throw new Error('execution query page changed')
       let previous = after
       for (const row of rows) {
@@ -286,7 +266,7 @@ export class PagedExecution {
       }
       const rows = next === after ? [] : this.parameter(conn, `SELECT value FROM ${schema}.output_rows
         WHERE sink=? AND position>CAST(? AS BIGINT) AND position<=CAST(? AS BIGINT) ORDER BY position`, sink, String(after), String(next))
-        .map(row => parse(row.value) as Record<string, unknown>)
+        .map(row => parseLossless(String(row.value)) as Record<string, unknown>)
       const more = this.parameter(conn, `SELECT 1 FROM ${schema}.output_rows WHERE sink=? AND position>CAST(? AS BIGINT) LIMIT 1`, sink, String(next))
       return { after, next, done: !more.length, rows }
     }, true)

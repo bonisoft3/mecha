@@ -35,21 +35,7 @@ export const jobKey = (version: string, job: Job): Promise<string> => {
 
 const NONE = { type: "module", deno: { permissions: "none" } } as const;
 
-/** The JSON text of `value`, refusing what JSON would silently change:
- * a non-finite number, undefined, a bigint, a function, a symbol. */
-export function strictJson(value: unknown, sortKeys = false): string {
-  return JSON.stringify(value, function (key, v) {
-    const held = (this as Record<string, unknown>)[key];
-    if (typeof held === "number" && !Number.isFinite(held)) throw new TypeError(`${key}: ${held} is no JSON number`);
-    if (held === undefined || typeof held === "bigint" || typeof held === "function" || typeof held === "symbol") {
-      throw new TypeError(`${key}: a ${typeof held} is no JSON value`);
-    }
-    if (sortKeys && typeof v === "object" && v !== null && !Array.isArray(v)) {
-      return Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]));
-    }
-    return v;
-  });
-}
+export { strictJson } from "../../packages/compute-snapshot/src/json.ts";
 
 function reply(worker: Worker, message: unknown): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {

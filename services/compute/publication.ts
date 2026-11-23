@@ -5,6 +5,10 @@ import {
   type SinkWrites,
   validateSinkWrites,
 } from "../../packages/compute-snapshot/src/sink-writes.ts";
+import {
+  applyPublication,
+  checkSinkColumns,
+} from "../../packages/compute-snapshot/src/publication.ts";
 
 type Row = Record<string, unknown>;
 export type Publication = {
@@ -303,6 +307,11 @@ export async function stagePages(
         if (columns && JSON.stringify(columns) !== JSON.stringify(names)) {
           throw new Error(`${table} rows differ in columns`);
         }
+        if (!columns) {
+          await checkSinkColumns({
+            query: async (sql, params) => ({ rows: (await client.query(sql, params)).rows }),
+          }, table, names);
+        }
         columns = names;
         const fields = spec.sinkTypes?.[table];
         const normalized = fields
@@ -335,48 +344,22 @@ async function applyStagedPages(
   spec: Publication,
   staged: StagedPages,
 ): Promise<Summary> {
-  const summary: Summary = Object.fromEntries(
-    spec.to.map((table) => [
-      table,
-      { rows: staged.rows[table] ?? 0, upserted: 0, deleted: 0 },
-    ]),
+  const applied = await applyPublication(
+    {
+      query: async (sql, params) => {
+        const result = await client.query(sql, params);
+        return { rows: result.rows, affectedRows: result.rowCount ?? 0 };
+      },
+    },
+    spec,
+    Object.fromEntries(spec.to.map((table) => {
+      const { name, columns } = staged.stages.get(table)!;
+      return [table, { relation: `pg_temp.${identifier(name)}`, fields: columns ?? [] }];
+    })),
   );
-  for (const table of spec.to) {
-    const { name, columns } = staged.stages.get(table)!;
-    const stage = `pg_temp.${identifier(name)}`;
-    if (columns) {
-      const list = columns.map(identifier).join(", ");
-      const rest = columns.filter((column) => column !== "id");
-      const changes = rest.map((column) =>
-        `${identifier(column)} = EXCLUDED.${identifier(column)}`
-      ).join(", ");
-      const existing = rest.map((column) => `sink.${identifier(column)}`).join(
-        ", ",
-      );
-      const incoming = rest.map((column) => `EXCLUDED.${identifier(column)}`)
-        .join(", ");
-      const conflict = rest.length
-        ? `DO UPDATE SET ${changes} WHERE to_jsonb(ROW(${existing})) IS DISTINCT FROM to_jsonb(ROW(${incoming}))`
-        : "DO NOTHING";
-      const result = await client.query(
-        `INSERT INTO public.${identifier(table)} AS sink (${list}) SELECT ${list} FROM ${stage} WHERE true ON CONFLICT (id) ${conflict}`,
-      );
-      summary[table].upserted = result.rowCount!;
-    }
-  }
-  for (const table of spec.to) {
-    if (spec.sinkWrites?.[table] !== "upsert") {
-      const stage = `pg_temp.${identifier(staged.stages.get(table)!.name)}`;
-      const result = await client.query(
-        `DELETE FROM public.${identifier(table)} AS sink WHERE NOT EXISTS (SELECT FROM ${stage} AS retained WHERE sink.id = retained.id)`,
-      );
-      summary[table].deleted = result.rowCount!;
-    }
-  }
-  if (spec.onComplete) {
-    await client.query(`SELECT public.${identifier(spec.onComplete)}()`);
-  }
-  return summary;
+  return Object.fromEntries(
+    spec.to.map((table) => [table, { rows: staged.rows[table] ?? 0, ...applied[table] }]),
+  );
 }
 
 /** Caller owns the transaction and must roll it back if publication fails. */

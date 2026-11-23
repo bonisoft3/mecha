@@ -629,8 +629,8 @@ Deno.test("bounded default conversion rejects unsafe integer carriers and preser
 			const runtime = await BoundedRuntime.create(config);
 			await assertRejects(
 				() => runtime.capture(),
-				RangeError,
-				"exact integers",
+				Error,
+				"is not finite lossless JSON",
 			);
 		}
 		const config = options(directory);

@@ -1,12 +1,6 @@
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import {
-  type DuckDBConnection,
-  DuckDBInstance,
-  LIST,
-  listValue,
-  VARCHAR,
-} from "npm:@duckdb/node-api@1.5.6-r.1";
+import { DuckDBInstance } from "npm:@duckdb/node-api@1.5.6-r.1";
 import {
   EXTENSIONS,
   readerOf,
@@ -28,6 +22,12 @@ import {
   type ExecutionDatabase,
   PagedExecution,
 } from "../../packages/compute-snapshot/src/execution.ts";
+import {
+  appendCapture,
+  captureDigest,
+  captureQuery,
+  captureText,
+} from "../../packages/compute-snapshot/src/capture.ts";
 
 export const MAX_STEP_WASM_JOBS = 64;
 
@@ -65,21 +65,6 @@ const parse = (value: unknown): Row => {
   return row;
 };
 const replicaLocks = new Map<string, Promise<void>>();
-
-// A captured relation's rows, stored as the exact text a digest hashes: bound
-// as a list, so no row is encoded a second time.
-async function appendRows(
-  con: DuckDBConnection,
-  target: string,
-  offset: number,
-  texts: string[],
-) {
-  await con.run(
-    `INSERT INTO ${target} SELECT CAST($1 AS BIGINT)+i,l[i] FROM (SELECT $2 AS l) s,range(1,len(s.l)+1) r(i)`,
-    [offset, listValue(texts)],
-    { 2: LIST(VARCHAR) },
-  );
-}
 
 async function withReplicaLock<T>(
   key: string,
@@ -591,74 +576,33 @@ export class BoundedRuntime {
           await con.run("DETACH pg");
         }
       }
-      for (const [name, original] of Object.entries(this.options.queries)) {
-        digest.update(`${name}\0`);
-        const plan = this.options.queryStages?.[name];
-        for (const stage of plan?.stages ?? []) {
-          await con.run(`CREATE TABLE ${quote(stage.name)} AS ${stage.sql}`);
-        }
-        const sql = plan?.sql ?? original;
-        const target = `duckstream_private.${quote(`result_${name}`)}`;
-        const fields = this.options.spec.queryTypes?.[name];
-        const prepared = await con.prepare(sql);
-        let position = "__duckstream_position";
-        try {
-          const columns = new Set(
-            Array.from(
-              { length: prepared.columnCount },
-              (_, index) => prepared.columnName(index),
-            ),
-          );
-          while (columns.has(position)) position += "_";
-        } finally {
-          prepared.destroySync();
-        }
-        const ordinal = quote(position);
-        await con.run(
-          `CREATE TABLE duckstream_private.raw_input AS SELECT row_number() OVER ()::BIGINT AS ${ordinal},r.* FROM (${sql}) r`,
-        );
-        await con.run(`CREATE TABLE ${target}(sequence BIGINT,value VARCHAR)`);
-        const oversized = await readerOf(con).query(
-          "SELECT 1 AS oversized FROM duckstream_private.raw_input r WHERE octet_length(encode(to_json(r)::VARCHAR))>1048576 LIMIT 1",
-        );
-        if (oversized.length) throw new Error("capture row exceeds byte limit");
-        let offset = 0;
-        await con.run("BEGIN");
-        for (;;) {
-          const [page] = await readerOf(con).query(
-            `SELECT count(*)::INTEGER AS n FROM (
-              SELECT ${ordinal},sum(octet_length(encode(to_json(r)::VARCHAR))) OVER (ORDER BY ${ordinal}) AS size
-              FROM duckstream_private.raw_input r
-              WHERE ${ordinal}>${offset} AND ${ordinal}<=${offset + 4096}
-            ) WHERE size<=524288 OR ${ordinal}=${offset + 1}`,
-          );
-          const rows = await readerOf(con).query(
-            `SELECT * EXCLUDE (${ordinal}) FROM duckstream_private.raw_input
-             WHERE ${ordinal}>${offset} AND ${ordinal}<=${offset + Number(page.n)}
-             ORDER BY ${ordinal}`,
+      const execution = await executionDatabase(held.db).connect();
+      try {
+        for (const [name, original] of Object.entries(this.options.queries)) {
+          digest.update(`${name}\0`);
+          const plan = this.options.queryStages?.[name];
+          for (const stage of plan?.stages ?? []) {
+            await con.run(`CREATE TABLE ${quote(stage.name)} AS ${stage.sql}`);
+          }
+          const target = `duckstream_private.${quote(`result_${name}`)}`;
+          const fields = this.options.spec.queryTypes?.[name];
+          await con.run(`CREATE TABLE ${target}(sequence BIGINT,value VARCHAR)`);
+          await execution.query("BEGIN");
+          await captureQuery(
+            execution,
+            target,
+            plan?.sql ?? original,
             fields ? { fields, types: this.options.spec.types! } : undefined,
           );
-          if (!rows.length) break;
-          const texts = rows.map((row) => strictJson(row));
-          if (texts.reduce((n, text) => n + bytes(text) + 1, 1) > 2 * 1024 * 1024) {
-            throw new Error("capture page exceeds byte limit");
-          }
-          await appendRows(con, target, offset, texts);
-          offset += rows.length;
-        }
-        await con.run("COMMIT");
-        const hashes = await con.stream(`SELECT sha256(value) AS hash FROM ${target} ORDER BY hash`);
-        for await (const chunk of hashes) {
-          for (const hash of chunk.getColumnValues(0)) {
-            digest.update(String(hash));
-            digest.update("\n");
+          await execution.query("COMMIT");
+          await captureDigest(execution, target, (line) => digest.update(line));
+          digest.update("\0");
+          for (const stage of plan?.stages ?? []) {
+            await con.run(`DROP TABLE ${quote(stage.name)}`);
           }
         }
-        digest.update("\0");
-        await con.run("DROP TABLE duckstream_private.raw_input");
-        for (const stage of plan?.stages ?? []) {
-          await con.run(`DROP TABLE ${quote(stage.name)}`);
-        }
+      } finally {
+        execution.close();
       }
       await con.run("CHECKPOINT");
     } catch (error) {
@@ -701,38 +645,19 @@ export class BoundedRuntime {
       for (const name of Object.keys(this.options.queries)) {
         const target = `duckstream_private.${quote(`result_${name}`)}`;
         await con.run(`CREATE TABLE ${target}(sequence BIGINT,value VARCHAR)`);
-        let offset = 0;
-        await con.run("BEGIN");
-        for await (const batch of batchesOf(name)) {
-          if (batch.length === 0) continue;
-          let pending: string[] = [];
-          let pendingBytes = 2;
-          const flushPending = async () => {
-            if (!pending.length) return;
-            await appendRows(con, target, offset, pending);
-            offset += pending.length;
-            pending = [];
-            pendingBytes = 2;
-          };
-          for (const row of batch) {
-            const encoded = strictJson(row);
-            const rowBytes = bytes(encoded);
-            if (rowBytes > 1048576) {
-              throw new Error("capture row exceeds byte limit");
-            }
-            if (
-              pending.length > 0 &&
-              (pending.length >= 2048 ||
-                pendingBytes + rowBytes + 1 > 2 * 1024 * 1024)
-            ) {
-              await flushPending();
-            }
-            pending.push(encoded);
-            pendingBytes += rowBytes + 1;
+        const execution = await executionDatabase(held.db).connect();
+        try {
+          let offset = 0;
+          await execution.query("BEGIN");
+          for await (const batch of batchesOf(name)) {
+            const texts = batch.map(captureText);
+            await appendCapture(execution, target, offset, texts);
+            offset += texts.length;
           }
-          await flushPending();
+          await execution.query("COMMIT");
+        } finally {
+          execution.close();
         }
-        await con.run("COMMIT");
       }
       await con.run("CHECKPOINT");
     } catch (error) {

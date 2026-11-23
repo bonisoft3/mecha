@@ -636,10 +636,31 @@ pgTest(
   },
 );
 
+// The server sent every staged row through INSERT ... ON CONFLICT, locking each
+// unchanged row and firing its insert triggers on every publication; Cloudflare
+// left an equal row untouched, and both do now.
+pgTest("paged publication leaves a row equal to the stored one untouched", async () => {
+  await using db = await fixture(`
+    CREATE TABLE a (id text PRIMARY KEY, value integer, stamped integer NOT NULL DEFAULT 0);
+    CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.stamped := NEW.stamped + 1; RETURN NEW; END $$;
+    CREATE TRIGGER stamp BEFORE INSERT ON a FOR EACH ROW EXECUTE FUNCTION stamp();
+    INSERT INTO a (id, value) VALUES ('x', 1);
+    GRANT ALL ON a TO service;`);
+  const before = (await db.client.query("SELECT xmin::text, xmax::text, ctid::text, stamped FROM a")).rows;
+  await db.client.query("BEGIN");
+  const summary = await publishPages(db.client, { name: "unchanged", to: ["a"] }, async function* () {
+    yield [{ id: "x", value: 1 }];
+  }, { role: "service" });
+  await db.client.query("COMMIT");
+  assertEquals(summary, { a: { rows: 1, upserted: 0, deleted: 0 } });
+  assertEquals((await db.client.query("SELECT xmin::text, xmax::text, ctid::text, stamped FROM a")).rows, before);
+});
+
 pgTest("paged publication stages bounded pages atomically", async () => {
   await using db = await fixture(`
-    CREATE TABLE a (id uuid PRIMARY KEY, value integer);
+    CREATE TABLE a (id uuid PRIMARY KEY, value integer, scope_id text);
     CREATE TABLE b (id text PRIMARY KEY, value integer);
+    CREATE TABLE c (id text PRIMARY KEY, needed integer NOT NULL);
     CREATE TABLE history (n integer);
     INSERT INTO a VALUES ('00000000-0000-0000-0000-000000000001', 1);
     INSERT INTO b VALUES ('old', 5);
@@ -672,6 +693,10 @@ pgTest("paged publication stages bounded pages atomically", async () => {
   // not wrap the DatabaseError in an AggregateError.
   await assertRejects(() => run({ a: [[{ id: one, value: 3 }], [{ id: `{${one}}`, value: 4 }]], b: [] }), pg.DatabaseError);
   await assertRejects(() => run({ a: [[{ id: one, value: 1 }], [{ id: two }]], b: [] }), Error, 'rows differ in columns');
+  // Cloudflare's column contract, shared since one publication core: a page names
+  // only writable columns and every required one.
+  await assertRejects(() => run({ a: [[{ id: one, value: 1, scope_id: 'x' }]], b: [] }), Error, 'a: invalid output columns');
+  await assertRejects(() => run({ c: [[{ id: 'x' }]] }, { name: 'paged', to: ['c'] }), Error, 'c: invalid output columns');
   await assertRejects(() => run({ a: [Array.from({ length: 129 }, (_, i) => ({ id: String(i), value: i }))], b: [] }), Error, 'exceeds its bound');
   await assertRejects(() => run({ a: [[{ id: one, value: 9 }]], b: [[{ id: 'new', value: 3 }]] }, { ...spec, onComplete: 'fail_complete' }), pg.DatabaseError, 'hook failed');
   const staged = await stagePages(db.client, spec, async function* (sink) {

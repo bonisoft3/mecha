@@ -17,18 +17,18 @@ Deno.test('query stages resume after a failed stage and reclaim intermediates on
   const manifest = { id: 'capture', name: 'total', version: 'v1', revision: 1, tables: {} }
   let query = new PagedQuery(host(db), [program])
   query.initialize(manifest)
-  assert.deepEqual(query.materialize('total'), { done: false })
+  assert.deepEqual(await query.materialize('total'), { done: false })
   assert.deepEqual(query.progress().queries, [])
-  assert.throws(() => query.materialize('total'), /retry stage/)
+  await assert.rejects(() => query.materialize('total'), /retry stage/)
   const update = db.connect()
   assert.equal(update.query('SELECT count(*)::INTEGER AS n FROM __duckstream_total_0').toArray()[0].n, 1)
   update.query('UPDATE control SET fail=false')
   update.close()
   query = new PagedQuery(host(db), [program])
-  assert.deepEqual(query.materialize('total'), { done: false })
-  assert.deepEqual(query.materialize('total'), { done: true })
+  assert.deepEqual(await query.materialize('total'), { done: false })
+  assert.deepEqual(await query.materialize('total'), { done: true })
   assert.deepEqual(query.read('total').rows, [{ value: 2 }])
-  assert.deepEqual(query.materialize('total'), { done: true })
+  assert.deepEqual(await query.materialize('total'), { done: true })
   const check = db.connect()
   assert.equal(check.query("SELECT count(*)::INTEGER AS n FROM duckdb_tables() WHERE table_name LIKE '__duckstream_total_%'").toArray()[0].n, 0)
   check.close()
@@ -42,7 +42,7 @@ Deno.test('a staged query cannot commit transaction control through its SQL', as
     spec: { name: 'q', file: 'q.js', to: ['sink'] } }
   const query = new PagedQuery(host(db), [program])
   query.initialize({ id: 'q', name: 'q', version: 'v', revision: 1, tables: {} })
-  assert.throws(() => query.materialize('q'), /requires one SELECT statement/)
+  await assert.rejects(() => query.materialize('q'), /requires one SELECT statement/)
   const check = db.connect()
   assert.equal(check.query("SELECT count(*)::INTEGER AS n FROM duckdb_tables() WHERE table_name='__duckstream_q_0'").toArray()[0].n, 0)
   check.close()
@@ -59,7 +59,7 @@ Deno.test('dynamic SQL cannot hide sequence writes in physical stages or scratch
     spec: { name: 'q', file: 'q.js', to: ['sink'] } }
   const query = new PagedQuery(host(db), [program])
   query.initialize({ id: 'q', name: 'q', version: 'v', revision: 1, tables: {} })
-  assert.throws(() => query.materialize('q'), /query function is not permitted/)
+  await assert.rejects(() => query.materialize('q'), /query function is not permitted/)
   await assert.rejects(() => execution.commit(0, { checkpoint: null, writes: {}, statements: [`CREATE TABLE hidden AS ${sql}`], done: false }), /query function is not permitted/)
   await assert.rejects(() => execution.commit(0, { checkpoint: null, writes: {}, statements: [`CREATE TABLE escaped(n) AS ${sql}`], done: false }), /unsupported execution scratch statement/)
   const check = db.connect()
@@ -102,7 +102,7 @@ Deno.test('source ingestion accepts 1024 rows atomically in 32-row inserts, pres
     assert.equal(sizes.length, 32)
     await assert.rejects(() => query.append({ ...chunk, rows: rows.map((r,i) => i ? r : { value: 'different' }) }), /replay differs/)
     await query.append({ ...identity, table: 'source', after: 1024, next: 1152, done: true, rows: Array.from({ length: 128 }, (_, i) => ({ value: String(1024+i) })) })
-    query.materialize('rows')
+    await query.materialize('rows')
     assert.equal(query.read('rows').rows.length, 128)
     assert.deepEqual(query.progress().sources, [{ name: 'source', position: 1152 }])
   } finally { db.reset() }
@@ -215,7 +215,7 @@ Deno.test('PGlite transition-table WAL and LSN fence drive incremental DuckDB WA
       machine,
       execute: async (snapshot) => {
         seenWals.push(snapshot.wal)
-        const { inputs } = snapshotQuery(wrapped, [program], snapshot)
+        const { inputs } = await snapshotQuery(wrapped, [program], snapshot)
         return { standings: inputs.summary as Record<string, unknown>[] }
       },
     })

@@ -1,13 +1,14 @@
-import { EXECUTION_QUERY_BYTES, EXECUTION_QUERY_ROWS, EXECUTION_BYTES, EXECUTION_OUTPUT_BYTES, EXECUTION_OUTPUT_ROWS, scratchStatement, validateQueryAst, type ExecutionQueryPage } from './bounded.ts'
+import { EXECUTION_QUERY_BYTES, EXECUTION_QUERY_ROWS, EXECUTION_BYTES, EXECUTION_OUTPUT_BYTES, EXECUTION_OUTPUT_ROWS, scratchStatement, type ExecutionQueryPage } from './bounded.ts'
+import { validateQuerySql } from './capture.ts'
 import { losslessJson as json, parseLossless } from './json.ts'
 
 type Row = Record<string, unknown>
 /** What a host's DuckDB offers the core: workerd and duckdb-wasm wrap a synchronous binding, node-api is asynchronous. */
-export interface ExecutionStatement { query(...values: string[]): Promise<Row[]>; close(): void }
+export interface ExecutionStatement { query(...values: string[]): Promise<Row[]>; close(): void | Promise<void> }
 export interface ExecutionConnection {
   query(sql: string): Promise<Row[]>
   prepare(sql: string): Promise<ExecutionStatement>
-  close(): void
+  close(): void | Promise<void>
 }
 export interface ExecutionDatabase { connect(): Promise<ExecutionConnection> }
 export interface ExecutionState { revision: number; checkpoint: unknown | null; done: boolean }
@@ -24,12 +25,7 @@ const utf8 = new TextEncoder()
 async function parameter(conn: ExecutionConnection, sql: string, ...values: string[]) {
   const statement = await conn.prepare(sql)
   try { return await statement.query(...values) }
-  finally { statement.close() }
-}
-
-/** Parse before binding: dynamic SQL can hide nontransactional sequence writes. */
-async function validateQuerySql(conn: ExecutionConnection, sql: string) {
-  validateQueryAst(JSON.parse(String((await parameter(conn, 'SELECT json_serialize_sql(CAST(? AS VARCHAR)) AS ast', sql))[0].ast)))
+  finally { await statement.close() }
 }
 
 /** A computation's step loop, the same on every host: one capture's numerical checkpoints and unpublished output remain in DuckDB. */
@@ -82,7 +78,7 @@ export class PagedExecution {
         catch (rollback) { throw new AggregateError([error, rollback], 'execution and rollback failed') }
       }
       throw error
-    } finally { conn.close() }
+    } finally { await conn.close() }
   }
 
   private async current(conn: ExecutionConnection): Promise<ExecutionState> {
@@ -201,7 +197,7 @@ export class PagedExecution {
           prepared.push(await conn.prepare(statement.sql))
         }
         for (const statement of prepared) await statement.query()
-      } finally { for (const statement of prepared) statement.close() }
+      } finally { for (const statement of prepared) await statement.close() }
       for (const statement of scratch) {
         if (statement.operation === 'CREATE TABLE') await parameter(conn, `INSERT INTO ${schema}.scratch_tables VALUES(?)`, statement.name)
         else if (statement.operation === 'DROP TABLE') await parameter(conn, `DELETE FROM ${schema}.scratch_tables WHERE name=?`, statement.name)
@@ -226,7 +222,7 @@ export class PagedExecution {
             }
             if (batch.length) await statement.query(sink, `[${batch.join(',')}]`)
           }
-        } finally { statement.close() }
+        } finally { await statement.close() }
         await conn.query(`MERGE INTO ${schema}.output_rows AS target USING execution_incoming AS incoming
           ON target.sink=incoming.sink AND target.id=incoming.id
           WHEN MATCHED THEN UPDATE SET value=incoming.value
@@ -245,7 +241,7 @@ export class PagedExecution {
     // Committed append buffers must become evictable before the next step.
     const conn = await this.db.connect()
     try { await conn.query('CHECKPOINT') }
-    finally { conn.close() }
+    finally { await conn.close() }
     return state
   }
 

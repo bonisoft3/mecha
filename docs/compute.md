@@ -115,6 +115,30 @@ schema refusal, replay and compatibility with untyped numerical queries.
 exercises source values, native DuckDB conversion and typed sink publication in
 a disposable database.
 
+## One compute core
+
+A DuckDB-evaluated computation runs the same code on the server, on Cloudflare
+and in a page; a host supplies only its DuckDB connection, its storage and its
+transport. [[../packages/compute-snapshot/src/execution.ts]] is the step loop,
+[[../packages/compute-snapshot/src/capture.ts]] the capture and digest,
+[[../packages/compute-snapshot/src/publication.ts]] the publication apply and
+[[../packages/compute-snapshot/src/json.ts]] the JSON rules values cross by.
+node-api, workerd's DuckDB and duckdb-wasm each adapt to one asynchronous
+connection; `services/compute/execution-conformance_test.ts` drives the same
+execution and capture through two of them and requires the same answers.
+
+- A captured row is DuckDB's JSON of the row, completed by the query's type
+  boundary; a top-level `JSON` column arrives as its text. Capture refuses an
+  integer literal no double holds exactly and a row over 1 MiB.
+- Publication follows ids. A staged page names `id`, only columns a computation
+  may write (not `scope_id`, `txid` or a generated column) and every required
+  one; applying it leaves a row equal to the stored one untouched (no lock or
+  trigger), deletes what a replacing sink no longer holds and then runs
+  `onComplete`. A host stages pages its own way and
+  applies them under its own authority.
+- Pages run `plan`/`finish` computations only; they capture inputs through the
+  core and normalize typed sinks with `postgresRows`, as the server does.
+
 ## Bounded native snapshots
 
 In `duckdb-snapshot` mode, a computation with `steps` uses the same bounded
@@ -132,7 +156,10 @@ incrementally from one repeatable-read PostgreSQL transaction: either waiting on
 deltas (`'T'`, `'D'`, `'I'`) recorded in `compute.wal` up to `compute.source.wal_seq`
 when the visible WAL count matches the watermark. Unchanged source tables are
 reused without rescanning PostgreSQL. Capture then attaches `replica.duckdb`
-read-only and materializes query results in an immutable DuckDB file. The batch
+read-only and materializes query results in an immutable DuckDB file through
+the capture Cloudflare uses, [[../packages/compute-snapshot/src/capture.ts]]:
+DuckDB renders each row once, the type boundary completes it in bounded pages,
+and its canonical text is what steps read and the digest hashes. The batch
 ledger retains its identity, not the full relation as JSON. Generated SQL stages
 execute in DuckDB. Numerical steps run Cloudflare's step loop,
 [[../packages/compute-snapshot/src/execution.ts]], in a separate DuckDB file.

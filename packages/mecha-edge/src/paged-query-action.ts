@@ -41,7 +41,7 @@ export async function pagedQueryAction(db: SyncDatabase, programs: readonly Snap
     }
     case 'materialize': {
       if (typeof request.query !== 'string') throw new Error('missing query name')
-      const result = queries.materialize(request.query)
+      const result = await queries.materialize(request.query)
       return { materialized: result.done ? request.query : null, done: result.done }
     }
     case 'read': {

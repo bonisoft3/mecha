@@ -1,18 +1,14 @@
-import { bindBoundary, typedSql } from '../../../services/compute/portable-contract.ts'
+import { capturedRows } from '../../compute-snapshot/src/capture.ts'
 import { planReplicaTable, snapshotStatements, type ReplicaWatermark, type Snapshot } from '../../../services/compute/snapshot-data.ts'
 import { identity, programFor, type SnapshotProgram } from './snapshot-program.ts'
+import { executionConnection, type SyncConnection } from './execution-host.ts'
 
-interface Connection {
-  query(sql: string): { toArray(): Record<string, unknown>[] }
-  prepare(sql: string): { query(...values: string[]): unknown; close(): void }
-  close(): void
-}
-export interface QueryDatabase { connect(): Connection }
+export interface QueryDatabase { connect(): SyncConnection }
 
 const replicas = new WeakMap<QueryDatabase, Map<string, ReplicaWatermark>>()
 
 /** The database is scratch space; only the coordinator owns publication authority. */
-export function snapshotQuery(db: QueryDatabase, programs: readonly SnapshotProgram[], snapshot: Snapshot) {
+export async function snapshotQuery(db: QueryDatabase, programs: readonly SnapshotProgram[], snapshot: Snapshot) {
   const program = programFor(programs, snapshot)
   const statements = snapshotStatements(snapshot.tables, program.reads, program.spec.types)
   const conn = db.connect()
@@ -75,16 +71,7 @@ export function snapshotQuery(db: QueryDatabase, programs: readonly SnapshotProg
     const inputs: Record<string, unknown[]> = {}
     for (const [name, sql] of Object.entries(program.queries)) {
       const fields = program.spec.queryTypes?.[name]
-      const boundary = fields ? bindBoundary({ fields, types: program.spec.types! }) : undefined
-      if (boundary) boundary.columns(conn.query(`DESCRIBE (${sql})`).toArray().map(row => String(row.column_name)))
-      const query = boundary ? typedSql(boundary.bound.canonicalType, sql, fields!) : sql
-      inputs[name] = conn.query(`SELECT to_json(r)::VARCHAR AS value FROM (${query}) r`).toArray().map(row => {
-        const value = JSON.parse(row.value as string, (_key, v) => {
-          if (typeof v === 'number' && Number.isInteger(v) && !Number.isSafeInteger(v)) throw new Error('untyped query integer exceeds exact JSON range')
-          return v
-        })
-        return boundary ? boundary.rows([value], 'duckdb')[0] : value
-      })
+      inputs[name] = await capturedRows(executionConnection(conn), sql, fields ? { fields, types: program.spec.types! } : undefined)
     }
     return { ...identity(snapshot), inputs }
   } finally {

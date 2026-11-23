@@ -1,9 +1,11 @@
 import * as duckdb from 'npm:@duckdb/duckdb-wasm@1.33.1-dev57.0/dist/duckdb-browser.mjs'
-import { types, typedSql, type TypeTable, type TypeField } from '../../services/compute/portable-contract.ts'
+import { postgresRows, type TypeTable, type TypeField } from '../../services/compute/portable-contract.ts'
 import { planReplicaTable, snapshotStatements, type ReplicaWatermark } from '../../services/compute/snapshot-data.ts'
 import { normalizeSelect } from '../../services/compute/wasm-select.ts'
 import type { Snapshot, Output } from '../compute-snapshot/src/index.ts'
-import { parseLossless, strictJson as json } from '../compute-snapshot/src/json.ts'
+import { strictJson as json } from '../compute-snapshot/src/json.ts'
+import { capturedRows } from '../compute-snapshot/src/capture.ts'
+import type { ExecutionConnection } from '../compute-snapshot/src/execution.ts'
 
 export interface BrowserProgram {
   compiled: object
@@ -27,6 +29,16 @@ export interface BrowserCompute {
 }
 const bytes = (value: string) => Uint8Array.from(atob(value), (c) => c.charCodeAt(0))
 const objectUrl = async (value: string, type: string) => URL.createObjectURL(new Blob([await new Response(new Blob([bytes(value)]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()], { type }))
+function executionConnection(conn: duckdb.AsyncDuckDBConnection): ExecutionConnection {
+  return {
+    query: async (sql) => (await conn.query(sql)).toArray(),
+    prepare: async (sql) => {
+      const statement = await conn.prepare(sql)
+      return { query: async (...values) => (await statement.query(...values)).toArray(), close: () => statement.close() }
+    },
+    close: () => conn.close(),
+  }
+}
 function ask(worker: Worker, message: unknown): Promise<Record<string, any>> {
   return new Promise((resolve, reject) => {
     worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
@@ -108,16 +120,10 @@ export async function browserCompute(config: BrowserCompute) {
       for (const name of p.reads) {
         await conn.query(`CREATE TEMP VIEW "${name}" AS SELECT * FROM "duckpipe_replica"."${name}"`)
       }
-      const bound = p.spec.types ? types(p.spec.types) : undefined
       const inputs: Record<string, unknown[]> = {}
       for (const [name, sql] of Object.entries(p.queries)) {
         const fields = p.spec.queryTypes?.[name]
-        const query = fields ? typedSql(bound!.canonicalType, sql, fields) : sql
-        const rows = (await conn.query(`SELECT to_json(r)::VARCHAR AS value FROM (${query}) r`)).toArray().map((row: any) => {
-          const value = parseLossless(row.value) as Record<string, unknown>
-          return fields ? bound!.normalizeRow(fields, value, 'duckdb') : value
-        })
-        inputs[name] = rows
+        inputs[name] = await capturedRows(executionConnection(conn), sql, fields ? { fields, types: p.spec.types! } : undefined)
       }
       const admitted = await ask(cage, { source: p.compiled, file: p.spec.file, endowments: p.spec.endowments ?? [] })
       if (json(admitted.reads) !== json(p.reads) || json(admitted.queries) !== json(p.queries)) throw new Error('packaged computation admission changed')
@@ -145,13 +151,7 @@ export async function browserCompute(config: BrowserCompute) {
       json(out)
       if (!out || Object.keys(out).sort().join() !== [...p.spec.to].sort().join()) throw new Error('computation output sinks differ from the declaration')
       for (const [table, fields] of Object.entries(p.spec.sinkTypes ?? {})) {
-        out[table] = out[table].map((row: Record<string, unknown>) => {
-          const normalized = bound!.normalizeRow(fields, row, 'canonical')
-          for (const field of fields) if (field.type === 'bytes' && normalized[field.name] !== null) {
-            normalized[field.name] = '\\x' + [...bytes(normalized[field.name] as string)].map((b) => b.toString(16).padStart(2, '0')).join('')
-          }
-          return normalized
-        })
+        out[table] = postgresRows({ fields, types: p.spec.types! }, out[table])
       }
       return out
     } finally {

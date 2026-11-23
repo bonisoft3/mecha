@@ -281,7 +281,7 @@ _mecha: bayt.#project & _where & {
 		"compute-image": _image & (deno.#cache & {entrypoints: "main.ts cage.ts job.ts step-worker.ts", frozen: false}).out & {
 			let _files = ["deno.json", "deno.lock", "main.ts", "risingwave.ts", "portable.ts", "portable-contract.ts", "batches.ts", "batches.sql", "batch-machine.sql", "migrate-durex.ts", "publication.ts", "native-runtime.ts", "native-readiness.ts", "bounded-runtime.ts", "step-cage.ts", "step-worker.ts", "native-risingwave.ts", "native-cleanup.ts", "native-sources.ts", "deltas.ts", "workers.ts", "query-stages.ts", "cage.ts", "compartment.ts", "realm.ts", "crypto.ts", "cheerio.ts", "endowments.ts", "language.ts", "job.ts", "wasm-select.ts", "job-cache.ts", "job-cache.sql", "wasi.ts", "install.ts", "events.yaml"]
 			// endowments.ts imports the Pdf and Xlsx endowments from its sibling, the airlock.
-			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/airlock/pdf.ts", "services/airlock/xlsx.ts", "services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts", "packages/compute-snapshot/src/bounded.ts", "packages/compute-snapshot/src/execution.ts", "packages/compute-snapshot/src/json.ts"]])
+			srcs: globs: list.Concat([[for f in _files {"services/compute/\(f)"}], ["services/airlock/pdf.ts", "services/airlock/xlsx.ts", "services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts", "packages/client/src/types.ts", "packages/lake/src/lake-types.ts", "packages/compute-snapshot/src/sink-writes.ts", "packages/compute-snapshot/src/bounded.ts", "packages/compute-snapshot/src/boundary.ts", "packages/compute-snapshot/src/capture.ts", "packages/compute-snapshot/src/execution.ts", "packages/compute-snapshot/src/json.ts", "packages/compute-snapshot/src/publication.ts"]])
 			cmd: "duckdb": (deno.#duckdbContainerCmd & {
 				do: "deno run --allow-ffi --allow-read --allow-write --allow-net --allow-env --allow-sys=homedir install.ts"
 			}).out
@@ -294,7 +294,7 @@ _mecha: bayt.#project & _where & {
 					{srcs: ["services/durex/work.ts", "services/durex/work.sql", "services/durex/migrate.ts"], dst: "/durex/"},
 					{srcs: ["packages/client/src/types.ts"], dst: "/packages/client/src/"},
 					{srcs: ["packages/lake/src/lake-types.ts"], dst: "/packages/lake/src/"},
-					{srcs: ["packages/compute-snapshot/src/sink-writes.ts", "packages/compute-snapshot/src/bounded.ts", "packages/compute-snapshot/src/execution.ts", "packages/compute-snapshot/src/json.ts"], dst: "/packages/compute-snapshot/src/"},
+					{srcs: ["packages/compute-snapshot/src/sink-writes.ts", "packages/compute-snapshot/src/bounded.ts", "packages/compute-snapshot/src/boundary.ts", "packages/compute-snapshot/src/capture.ts", "packages/compute-snapshot/src/execution.ts", "packages/compute-snapshot/src/json.ts", "packages/compute-snapshot/src/publication.ts"], dst: "/packages/compute-snapshot/src/"},
 				]
 				cmd: ["run", "--unstable-worker-options", "--allow-ffi", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "--allow-sys", "/app/main.ts"]
 			}

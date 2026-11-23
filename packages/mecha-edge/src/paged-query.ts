@@ -1,8 +1,9 @@
 import { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from '../../compute-snapshot/src/chunk-limits.ts'
 import type { SnapshotChunk, SnapshotIdentity, SnapshotManifest, SnapshotTableWal } from '../../compute-snapshot/src/index.ts'
 import { snapshotStatements, snapshotWalStatements } from '../../../services/compute/snapshot-data.ts'
-import { bindBoundary, typedSql } from '../../../services/compute/portable-contract.ts'
-import { validateQuerySql } from './query-sql.ts'
+import { captureQuery, validateQuerySql } from '../../compute-snapshot/src/capture.ts'
+import type { ExecutionConnection } from '../../compute-snapshot/src/execution.ts'
+import { executionConnection } from './execution-host.ts'
 import { parseLossless } from '../../compute-snapshot/src/json.ts'
 import { validateQueryStages } from '../../../services/compute/query-stages.ts'
 import { strictJson, type SnapshotProgram } from './snapshot-program.ts'
@@ -30,6 +31,25 @@ export class PagedQuery {
       conn.query('BEGIN')
       began = true
       const value = fn(conn)
+      conn.query('COMMIT')
+      began = false
+      return value
+    } catch (error) {
+      if (began) {
+        try { conn.query('ROLLBACK') }
+        catch (rollback) { throw new AggregateError([error, rollback], `${String(error)}; rollback failed: ${String(rollback)}`) }
+      }
+      throw error
+    } finally { conn.close() }
+  }
+
+  private async atomicAsync<T>(fn: (conn: Connection, core: ExecutionConnection) => Promise<T>): Promise<T> {
+    const conn = this.db.connect()
+    let began = false
+    try {
+      conn.query('BEGIN')
+      began = true
+      const value = await fn(conn, executionConnection(conn))
       conn.query('COMMIT')
       began = false
       return value
@@ -275,12 +295,12 @@ export class PagedQuery {
     return { cleared: true }
   }
 
-  materialize(name: string) {
+  async materialize(name: string) {
     // COMMIT retains append buffers that cannot make room for the query's joins.
     const checkpoint = this.db.connect()
     try { checkpoint.query('CHECKPOINT') }
     finally { checkpoint.close() }
-    const result = this.atomic(conn => {
+    const result = await this.atomicAsync(async (conn, core) => {
       const manifest = this.saved(conn)
       const program = this.program(manifest)
       if (!Object.hasOwn(program.queries, name)) throw new Error('undeclared query')
@@ -296,20 +316,16 @@ export class PagedQuery {
         if (!Number.isSafeInteger(next) || next < 0 || next > plan.stages.length) throw new Error('invalid query stage cursor')
         if (next < plan.stages.length) {
           const stage = plan.stages[next]
-          validateQuerySql(conn, stage.sql)
+          await validateQuerySql(core, stage.sql)
           this.parameter(conn, `CREATE TABLE main.${q(stage.name)} AS ${stage.sql}`)
           this.parameter(conn, `INSERT INTO ${privateSchema}.metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, `stage:${name}`, String(next + 1))
           return { done: false }
         }
       }
-      const sql = plan?.sql ?? program.queries[name]
-      validateQuerySql(conn, sql)
       const fields = program.spec.queryTypes?.[name]
-      const boundary = fields ? bindBoundary({ fields, types: program.spec.types! }) : undefined
-      if (boundary) boundary.columns(this.parameter(conn, `DESCRIBE (${sql})`).map(row => String(row.column_name)))
-      const typed = boundary ? typedSql(boundary.bound.canonicalType, sql, fields!) : sql
-      conn.query(`CREATE TABLE ${privateSchema}.${q(`result_${name}`)}(sequence BIGINT,value VARCHAR USING COMPRESSION UNCOMPRESSED)`)
-      this.parameter(conn, `INSERT INTO ${privateSchema}.${q(`result_${name}`)} SELECT row_number() OVER () AS sequence,to_json(r)::VARCHAR AS value FROM (${typed}) r`)
+      const target = `${privateSchema}.${q(`result_${name}`)}`
+      conn.query(`CREATE TABLE ${target}(sequence BIGINT,value VARCHAR USING COMPRESSION UNCOMPRESSED)`)
+      await captureQuery(core, target, plan?.sql ?? program.queries[name], fields ? { fields, types: program.spec.types! } : undefined)
       for (const stage of plan?.stages ?? []) conn.query(`DROP TABLE main.${q(stage.name)}`)
       this.parameter(conn, `DELETE FROM ${privateSchema}.metadata WHERE key=?`, `stage:${name}`)
       this.parameter(conn, `INSERT INTO ${privateSchema}.metadata VALUES(?,'true')`, `query:${name}`)
@@ -338,12 +354,8 @@ export class PagedQuery {
         bytes += Number(row.bytes) + (next > after ? 1 : 0)
         next = Number(row.cursor)
       }
-      const fields = program.spec.queryTypes?.[name]
-      const boundary = fields ? bindBoundary({ fields, types: program.spec.types! }) : undefined
-      const rows = next === after ? [] : conn.query(`SELECT value FROM ${relation} WHERE sequence>${after} AND sequence<=${next} ORDER BY sequence`).toArray().map(row => {
-        const value = parseLossless(String(row.value)) as Record<string, unknown>
-        return boundary ? boundary.rows([value], 'duckdb')[0] : value
-      })
+      const rows = next === after ? [] : conn.query(`SELECT value FROM ${relation} WHERE sequence>${after} AND sequence<=${next} ORDER BY sequence`).toArray()
+        .map(row => parseLossless(String(row.value)) as Record<string, unknown>)
       return { after, next, rows, done: !conn.query(`SELECT 1 FROM ${relation} WHERE sequence>${next} LIMIT 1`).toArray().length }
     })
   }

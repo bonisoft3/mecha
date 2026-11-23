@@ -1,5 +1,6 @@
 import type { Computation, Queryable, SnapshotIdentity } from './index.ts';
 import { losslessJson } from './json.ts';
+import { applyPublication, checkSinkColumns } from './publication.ts';
 
 const schema = 'compute_snapshot_private';
 const q = (name: string) => `"${name.replaceAll('"', '""')}"`;
@@ -51,13 +52,7 @@ export async function stageOutput(tx: Queryable, identity: SnapshotIdentity, spe
     return;
   }
   const fields = Object.keys(rows[0]).sort();
-  const physical = (await tx.query<{ name: string; generated: boolean; required: boolean }>(`SELECT attname AS name,
-    (attgenerated<>'' OR attidentity<>'') AS generated,
-    (attnotnull AND NOT atthasdef AND attgenerated='' AND attidentity='') AS required
-    FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped`, [target(sink)])).rows;
-  const allowed = new Set(physical.filter(c => !c.generated && !['scope_id', 'txid'].includes(c.name)).map(c => c.name));
-  if (!fields.includes('id') || fields.some(f => !allowed.has(f)) ||
-    physical.some(c => c.required && allowed.has(c.name) && !fields.includes(c.name))) throw new Error('invalid output columns');
+  await checkSinkColumns(tx, sink, fields);
   for (const row of rows) {
     if (!row || typeof row !== 'object' || Array.isArray(row) || typeof row.id !== 'string' ||
       JSON.stringify(Object.keys(row).sort()) !== JSON.stringify(fields)) throw new Error('invalid output row');
@@ -115,25 +110,7 @@ export async function publishOutput(tx: Queryable, identity: SnapshotIdentity, s
     FROM unnest(ARRAY['role','request.jwt.claims','app.scopes']) AS name`)).rows;
   await tx.exec(`GRANT USAGE ON SCHEMA ${schema} TO service;
     SELECT set_config('request.jwt.claims','{"role":"service"}',true); SELECT set_config('app.scopes','',true); SET LOCAL ROLE service;`);
-  for (const sink of spec.to) {
-    const stage = saved.find(row => row.sink === sink)!;
-    if (!stage.fields.length) continue;
-    const rest = stage.fields.filter(field => field !== 'id');
-    const conflict = rest.length ? `DO UPDATE SET ${rest.map(f => `${q(f)}=EXCLUDED.${q(f)}`).join(',')}
-      WHERE to_jsonb(ROW(${rest.map(f => `sink.${q(f)}`).join(',')})) IS DISTINCT FROM to_jsonb(ROW(${rest.map(f => `EXCLUDED.${q(f)}`).join(',')}))` : 'DO NOTHING';
-    const unchanged = rest.length ? `AND to_jsonb(ROW(${rest.map(f => `existing.${q(f)}`).join(',')}))
-      IS NOT DISTINCT FROM to_jsonb(ROW(${rest.map(f => `incoming.${q(f)}`).join(',')}))` : '';
-    await tx.exec(`INSERT INTO ${target(sink)} AS sink (${stage.fields.map(q).join(',')})
-      SELECT ${stage.fields.map(f => `incoming.${q(f)}`).join(',')} FROM ${schema}.${q(stage.relation)} incoming
-      WHERE NOT EXISTS (SELECT 1 FROM ${target(sink)} existing WHERE existing.id=incoming.id ${unchanged})
-      ON CONFLICT(id) ${conflict}`);
-  }
-  for (const sink of spec.to) {
-    const stage = saved.find(row => row.sink === sink)!;
-    if (spec.sinkWrites?.[sink] === 'upsert') continue;
-    await tx.exec(`DELETE FROM ${target(sink)} AS sink WHERE NOT EXISTS
-      (SELECT 1 FROM ${schema}.${q(stage.relation)} incoming WHERE incoming.id=sink.id)`);
-  }
-  if (spec.onComplete) await tx.query(`SELECT public.${q(spec.onComplete)}()`);
+  await applyPublication(tx, spec, Object.fromEntries(saved.map(stage =>
+    [stage.sink, { relation: `${schema}.${q(stage.relation)}`, fields: stage.fields }])));
   for (const setting of previous) await tx.query('SELECT set_config($1,$2,true)', [setting.name, setting.value ?? '']);
 }

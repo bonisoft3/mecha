@@ -2,15 +2,13 @@
 type: decision
 title: One compute core
 description: Runs a computation's capture, step loop, publication and digest from one sans-IO core on the server, on Cloudflare and in the browser, each host supplying only its DuckDB connection, its storage and its transport.
-status: accepted
+status: built
 ---
 
 # One compute core
 
-**Status: accepted, 22 November 2026.** Stages 1 and 2 are built: one
-`strictJson` and one step loop, [[../../packages/compute-snapshot/src/execution.ts]],
-checked across hosts by `services/compute/execution-conformance_test.ts`.
-Stages 3–5 are not; each updates this line as it lands.
+**Status: built 22 November 2026.** The contract is
+[[../compute#One compute core|compute's]].
 
 ## The problem
 

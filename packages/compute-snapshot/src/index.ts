@@ -3,6 +3,7 @@ import { losslessJson as json } from './json.ts';
 export { CAPTURE_CHUNK_ROWS, CAPTURE_CHUNK_BYTES } from './chunk-limits.ts';
 import { initializeOutputs, collectOutputs, stageOutput, sealOutput as sealStagedOutput, publishOutput, type OutputSeal } from './staged-publication.ts';
 import { type SinkWrites, validateSinkWrites } from './sink-writes.ts';
+import { applyPublication, stageWhole } from './publication.ts';
 export type { OutputSeal } from './staged-publication.ts';
 
 export interface Queryable {
@@ -763,41 +764,21 @@ export async function createSnapshotCoordinator(config: CoordinatorConfig): Prom
 async function publish(tx: Queryable, spec: Computation, output: Output) {
   if (!output || typeof output !== 'object' || Array.isArray(output) ||
     JSON.stringify(Object.keys(output).sort()) !== JSON.stringify([...spec.to].sort())) throw new Error(`compute ${spec.name} returned different sinks`);
-  const encoded = new Map<string, { rows: string; fields: string[] }>();
   for (const sink of spec.to) {
     const rows = output[sink];
     if (!Array.isArray(rows)) throw new Error(`compute ${sink} needs rows`);
-    const physical = await columns(tx, sink);
-    const allowed = new Set(physical.filter(c => !c.generated && c.name !== 'scope_id' && c.name !== 'txid').map(c => c.name));
     const fields = rows.length ? Object.keys(rows[0]).sort() : [];
     const ids = new Set<string>();
     for (const row of rows) {
       if (!row || typeof row !== 'object' || Array.isArray(row) || typeof row.id !== 'string' || ids.has(row.id)) throw new Error(`compute ${sink} requires unique text ids`);
       ids.add(row.id);
       if (JSON.stringify(Object.keys(row).sort()) !== JSON.stringify(fields)) throw new Error(`compute ${sink} rows differ in columns`);
-      for (const field of fields) if (!allowed.has(field)) throw new Error(`compute cannot write ${sink}.${field}`);
-      for (const field of physical) if (field.required && allowed.has(field.name) && !fields.includes(field.name)) throw new Error(`compute missing ${sink}.${field.name}`);
     }
-    encoded.set(sink, { rows: json(rows), fields });
+    json(rows);
   }
+  const { staged } = await stageWhole(tx, spec, output);
   const previous = await tx.query<{ name: string; value: string | null }>(`SELECT name,current_setting(name,true) AS value FROM unnest(ARRAY['role','request.jwt.claims','app.scopes']) AS name`);
   await tx.exec(`SELECT set_config('request.jwt.claims','{"role":"service"}',true); SELECT set_config('app.scopes','',true); SET LOCAL ROLE service;`);
-  for (const sink of spec.to) {
-    const { rows, fields } = encoded.get(sink)!;
-    if (fields.length) {
-      const rest = fields.filter(f => f !== 'id');
-      const conflicts = rest.length ? `DO UPDATE SET ${rest.map(f => `${q(f)}=EXCLUDED.${q(f)}`).join(',')}
-        WHERE to_jsonb(ROW(${rest.map(f => `sink.${q(f)}`).join(',')})) IS DISTINCT FROM to_jsonb(ROW(${rest.map(f => `EXCLUDED.${q(f)}`).join(',')}))` : 'DO NOTHING';
-      await tx.query(`INSERT INTO ${table(sink)} AS sink (${fields.map(q).join(',')})
-        SELECT ${fields.map(q).join(',')} FROM json_populate_recordset(NULL::${table(sink)},$1::json)
-        ON CONFLICT(id) ${conflicts}`, [rows]);
-    }
-  }
-  for (const sink of spec.to) {
-    if (spec.sinkWrites?.[sink] === 'upsert') continue;
-    await tx.query(`DELETE FROM ${table(sink)} AS sink WHERE NOT EXISTS
-      (SELECT 1 FROM json_populate_recordset(NULL::${table(sink)},$1::json) AS incoming WHERE incoming.id=sink.id)`, [encoded.get(sink)!.rows]);
-  }
-  if (spec.onComplete) await tx.query(`SELECT public.${q(spec.onComplete)}()`);
+  await applyPublication(tx, spec, staged);
   for (const setting of previous.rows) await tx.query('SELECT set_config($1,$2,true)', [setting.name, setting.value ?? '']);
 }

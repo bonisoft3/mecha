@@ -130,12 +130,14 @@ execution and capture through two of them and requires the same answers.
 - A captured row is DuckDB's JSON of the row, completed by the query's type
   boundary; a top-level `JSON` column arrives as its text. Capture refuses an
   integer literal no double holds exactly and a row over 1 MiB.
-- Publication follows ids. A staged page names `id`, only columns a computation
-  may write (not `scope_id`, `txid` or a generated column) and every required
-  one; applying it leaves a row equal to the stored one untouched (no lock or
-  trigger), deletes what a replacing sink no longer holds and then runs
-  `onComplete`. A host stages pages its own way and
-  applies them under its own authority.
+- Publication follows ids, whether an output arrives in pages, whole or as a
+  delta. Its rows name `id`, only columns a computation may write (not
+  `scope_id`, `txid` or a generated column) and every required one, and no key
+  twice once PostgreSQL has typed it. Applying them leaves a row equal to the
+  stored one untouched (no lock or trigger), deletes what a replacing sink no
+  longer holds or exactly the ids a delta removes, and then runs `onComplete`.
+  A host stages pages its own way; an output held whole is staged by the core.
+  Each host applies under its own authority.
 - Pages run `plan`/`finish` computations only; they capture inputs through the
   core and normalize typed sinks with `postgresRows`, as the server does.
 

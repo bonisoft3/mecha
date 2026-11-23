@@ -1,10 +1,11 @@
-import { PagedExecution, type ExecutionDatabase } from './paged-execution.ts'
+import { PagedExecution } from '../../compute-snapshot/src/execution.ts'
+import { executionDatabase, type SyncDatabase } from './execution-host.ts'
 import { PagedQuery } from './paged-query.ts'
 import { outputFor, type SnapshotProgram } from './snapshot-program.ts'
 import { pagedProgram, type PagedRequest } from './paged-transport.ts'
 
 
-export async function pagedQueryAction(db: ExecutionDatabase, programs: readonly SnapshotProgram[], request: PagedRequest) {
+export async function pagedQueryAction(db: SyncDatabase, programs: readonly SnapshotProgram[], request: PagedRequest) {
   const program = pagedProgram(programs, request.capture)
   const queries = new PagedQuery(db, programs)
   if (request.action === 'cleanup') {
@@ -21,10 +22,10 @@ export async function pagedQueryAction(db: ExecutionDatabase, programs: readonly
   for (const field of ['id', 'name', 'version', 'revision'] as const) {
     if (progress.manifest[field] !== request.capture.identity[field]) throw new Error('compute object belongs to another capture')
   }
-  const execution = new PagedExecution(db, program.spec.to)
+  const execution = await PagedExecution.open(executionDatabase(db), program.spec.to)
   switch (request.action) {
     case 'initialize':
-    case 'status': return { ...progress, declaredQueries: Object.keys(program.queries), sinks: program.spec.to, execution: execution.state() }
+    case 'status': return { ...progress, declaredQueries: Object.keys(program.queries), sinks: program.spec.to, execution: await execution.state() }
     case 'append': {
       if (!request.chunk) throw new Error('missing capture chunk')
       await queries.append(request.chunk)

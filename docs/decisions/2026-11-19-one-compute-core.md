@@ -7,7 +7,10 @@ status: accepted
 
 # One compute core
 
-**Status: accepted, 22 November 2026.** Nothing below is built yet; each stage updates this line as it lands.
+**Status: accepted, 22 November 2026.** Stages 1 and 2 are built: one
+`strictJson` and one step loop, [[../../packages/compute-snapshot/src/execution.ts]],
+checked across hosts by `services/compute/execution-conformance_test.ts`.
+Stages 3–5 are not; each updates this line as it lands.
 
 ## The problem
 

@@ -134,9 +134,11 @@ when the visible WAL count matches the watermark. Unchanged source tables are
 reused without rescanning PostgreSQL. Capture then attaches `replica.duckdb`
 read-only and materializes query results in an immutable DuckDB file. The batch
 ledger retains its identity, not the full relation as JSON. Generated SQL stages
-execute in DuckDB. Numerical steps read bounded pages, run WASM, and accumulate
-outputs in a separate DuckDB file. Outputs are sorted once for publication; pages
-read bounded ordinal ranges instead of repeatedly sorting the remaining output.
+execute in DuckDB. Numerical steps run Cloudflare's step loop,
+[[../packages/compute-snapshot/src/execution.ts]], in a separate DuckDB file.
+Its final commit numbers each sink's rows by id, so publication follows ids
+whichever step wrote a row; pages read bounded ordinal ranges instead of
+repeatedly sorting the remaining output.
 PostgreSQL stages those output pages into session-scoped temporary tables before
 entering the `SERIALIZABLE` coordinator lock transaction, then applies all
 sinks, the completion hook, and the batch receipt in one transaction. A failed
@@ -144,12 +146,12 @@ publication retains the original input file for replay; a process restart can
 repeat numerical work but cannot silently recapture newer source rows.
 
 Bounded means bounded transfers, not a smaller application window or incremental
-maintenance. Query pages are limited to 4,096 rows and 1 MiB; publication pages
-to 128 rows and 256 KiB. Each DuckDB instance uses one execution thread with a 512 MiB engine budget
+maintenance. Step queries share Cloudflare's 8 MiB limit; WASM query pages are
+limited to 4,096 rows and 1 MiB; publication pages to 128 rows and 256 KiB. Each DuckDB instance uses one execution thread with a 512 MiB engine budget
 and can spill to disk. This is not a cap on total service memory: concurrent captures,
 workers and a numerical WASM job have their own allocations. Native execution
-replays steps from the retained capture after interruption; it does not persist
-each step's checkpoint as the Cloudflare executor does. Worker SQL cannot access
+commits each step's checkpoint as Cloudflare does, but discards an interrupted
+output file and replays its steps from the retained capture. Worker SQL cannot access
 host files or the network through DuckDB.
 
 `COMPUTE_STATE_DIR` follows the same persistence boundary as `PGDATA`: neither
@@ -218,6 +220,9 @@ A revision compare-and-set
 commits each step's scratch SQL, output upserts and checkpoint together, then
 checkpoints DuckDB so committed append buffers can be evicted. Replaying a
 committed step returns its current state without repeating its writes.
+Checkpoints, rows and query results cross as finite JSON; reading one back
+refuses an integer literal its double neither prints back as nor holds
+exactly, such as the int64 2^53+1.
 `wasmFromQuery(name, input, {path, sql, orderBy}, select?)` fills an existing empty array
 inside a small input envelope from an ordered SQL relation, and both `wasm` and
 `wasmFromQuery` accept an optional `select` field list to retain only needed

@@ -21,11 +21,13 @@ import { type StagedQueries } from "./query-stages.ts";
 import { StepCage } from "./step-cage.ts";
 import {
   encodeWasmQueryInput,
-  scratchStatement,
-  validateQueryAst,
   WASM_QUERY_INPUT_BYTES,
   type WasmQueryInput,
 } from "../../packages/compute-snapshot/src/bounded.ts";
+import {
+  type ExecutionDatabase,
+  PagedExecution,
+} from "../../packages/compute-snapshot/src/execution.ts";
 
 export const MAX_STEP_WASM_JOBS = 64;
 
@@ -119,12 +121,29 @@ async function database(path: string, readonly = false) {
   };
 }
 
-async function validateQuery(con: DuckDBConnection, sql: string) {
-  const result = await con.runAndReadAll(
-    "SELECT json_serialize_sql(CAST(? AS VARCHAR)) AS ast",
-    [sql],
-  );
-  validateQueryAst(JSON.parse(String(result.getRowObjects()[0].ast)));
+/** The core's connection over node-api: each opens in UTC, as the capture's did. */
+export function executionDatabase(db: DuckDBInstance): ExecutionDatabase {
+  return {
+    async connect() {
+      const con = await db.connect();
+      await con.run("SET TimeZone='UTC'");
+      return {
+        query: async (sql) => (await con.runAndReadAll(sql)).getRowObjects(),
+        async prepare(sql) {
+          const statement = await con.prepare(sql);
+          return {
+            async query(...values) {
+              statement.clearBindings();
+              values.forEach((value, i) => statement.bindVarchar(i + 1, value));
+              return (await statement.runAndReadAll()).getRowObjects();
+            },
+            close: () => statement.destroySync(),
+          };
+        },
+        close: () => con.closeSync(),
+      };
+    },
+  };
 }
 
 /** Retained captures outlive processes; calculations own separate disposable databases. */
@@ -735,22 +754,6 @@ export class BoundedRuntime {
       await removeOwned(file);
     }
   }
-  private async query(con: DuckDBConnection, sql: string): Promise<Row[]> {
-    await validateQuery(con, sql);
-    const rows = await readerOf(con).query(
-      `WITH execution_page AS MATERIALIZED (SELECT * FROM (${sql}) r LIMIT 4097)
-       SELECT * FROM execution_page WHERE (
-         SELECT CASE WHEN count(*)>4096 OR
-           coalesce(sum(octet_length(encode(to_json(r)::VARCHAR))),0)+count(*)+2>1048576
-         THEN error('execution query exceeds page limit') ELSE true END
-         FROM execution_page r
-       )`,
-    );
-    if (bytes(strictJson(rows)) > 1024 * 1024) {
-      throw new Error("execution query exceeds page limit");
-    }
-    return rows;
-  }
   async calculate(capture: BoundedCapture): Promise<BoundedOutput> {
     const input = this.path(capture, "capture");
     await Deno.stat(input);
@@ -764,8 +767,6 @@ export class BoundedRuntime {
         endowments: this.options.spec.endowments ?? [],
       })
       : null;
-    const owned = new Set<string>();
-    const fields = new Map<string, string>();
     const allowed = new Set(this.options.spec.wasm.map(stem));
     const workerConcurrency = Math.max(1, this.options.runner.concurrency ?? 1);
     const maxJobs = MAX_STEP_WASM_JOBS;
@@ -808,20 +809,20 @@ export class BoundedRuntime {
           }`,
         );
       }
-      await con.run("CREATE SEQUENCE duckstream_private.output_seq");
-      await con.run(
-        "CREATE TABLE duckstream_private.outputs(seq BIGINT DEFAULT nextval('duckstream_private.output_seq'),sink VARCHAR,id VARCHAR,value VARCHAR)",
+      const execution = await PagedExecution.open(
+        executionDatabase(held.db),
+        this.options.spec.to,
       );
-      let checkpoint: unknown = null;
-      let steps = 0;
       for (;;) {
+        const { revision, checkpoint, done } = await execution.state();
+        if (done) break;
         jobs = 0;
         const step = cage
           ? await cage.advance({
             seed: this.seed,
             concurrency: workerConcurrency,
             maxJobs,
-            query: (sql: string) => withDb(() => this.query(con, sql)),
+            query: (sql: string) => withDb(() => execution.query(sql)),
             wasm: (
               name: string,
               value: unknown,
@@ -836,36 +837,10 @@ export class BoundedRuntime {
               const encoded = await encodeWasmQueryInput(
                 value,
                 query,
-                async (after) => {
-                  const rows = await withDb(() =>
-                    this.query(
-                      con,
-                      `SELECT unnest(p.item) FROM (
-                        SELECT struct_pack(*COLUMNS(*)) AS item,
-                          sum(octet_length(encode(to_json(struct_pack(*COLUMNS(*)))::VARCHAR))+1)
-                          OVER (ORDER BY r.${quote(query.orderBy)} ROWS UNBOUNDED PRECEDING) AS total
-                        FROM (SELECT * FROM (${query.sql}) r WHERE ${
-                        quote(query.orderBy)
-                      } > ${after} ORDER BY ${quote(query.orderBy)} LIMIT 4096) r
-                      ) p WHERE CASE WHEN p.total>1048574 AND
-                        p.total=octet_length(encode(to_json(p.item)::VARCHAR))+1
-                        THEN error('execution query row exceeds page limit')
-                        ELSE p.total<=1048574 END ORDER BY p.item.${quote(query.orderBy)}`,
-                    )
-                  );
-                  let next = after;
-                  const values = rows.map((row) => {
-                    const position = row[query.orderBy];
-                    if (
-                      !Number.isSafeInteger(position) || Number(position) <= next
-                    ) throw new Error("invalid WASM query order");
-                    next = Number(position);
-                    const result = { ...row };
-                    delete result[query.orderBy];
-                    return result;
-                  });
-                  return { after, next, done: rows.length === 0, rows: values };
-                },
+                (after) =>
+                  withDb(() =>
+                    execution.queryPage(query.sql, query.orderBy, revision, after)
+                  ),
               );
               return wasm(name, new TextDecoder().decode(encoded), select);
             },
@@ -879,118 +854,17 @@ export class BoundedRuntime {
               inputs[name] = result.getRowObjects().map((row) => parse(row.value));
             }
             const writes = await this.options.computation!.calculate(inputs);
-            if (!writes || typeof writes !== "object" || Array.isArray(writes)) {
-              throw new Error("invalid execution step");
-            }
-            return {
-              done: true,
-              checkpoint: null,
-              writes: writes as Record<string, Row[]>,
-            } as {
-              done: boolean;
-              checkpoint: unknown;
-              writes: Record<string, Row[]>;
-              statements?: string[];
-            };
+            return { done: true, checkpoint: null, writes: writes as Record<string, Row[]> };
           })();
-        if (bytes(strictJson(step)) > 8 * 1024 * 1024) {
-          throw new Error("execution step exceeds byte limit");
-        }
-        if (
-          !step || typeof step.done !== "boolean" || !step.writes ||
-          Array.isArray(step.writes)
-        ) throw new Error("invalid execution step");
-        await con.run("BEGIN");
-        const statements = (step.statements ?? []).map(scratchStatement);
-        const prepared: Awaited<ReturnType<DuckDBConnection["prepare"]>>[] = [];
-        try {
-          for (const statement of statements) {
-            if (
-              statement.operation !== "CREATE TABLE" &&
-              !owned.has(statement.name)
-            ) throw new Error("execution statement does not own scratch table");
-            if (statement.select) await validateQuery(con, statement.select);
-            prepared.push(await con.prepare(statement.sql));
-          }
-          for (const statement of prepared) await statement.run();
-        } finally {
-          for (const statement of prepared) statement.destroySync();
-        }
-        for (const statement of statements) {
-          if (statement.operation === "CREATE TABLE") owned.add(statement.name);
-          if (statement.operation === "DROP TABLE") {
-            owned.delete(statement.name);
-          }
-        }
-        for (const [sink, rows] of Object.entries(step.writes)) {
-          if (!this.options.spec.to.includes(sink) || !Array.isArray(rows)) {
-            throw new Error("undeclared execution sink or invalid rows");
-          }
-          const ids = new Set<string>();
-          const values: [string, string][] = [];
-          for (const row of rows) {
-            if (
-              !row || typeof row !== "object" || Array.isArray(row) ||
-              typeof row.id !== "string" || ids.has(row.id)
-            ) throw new Error("invalid execution output row");
-            ids.add(row.id);
-            const columns = JSON.stringify(Object.keys(row).sort());
-            if (fields.has(sink) && fields.get(sink) !== columns) {
-              throw new Error("execution output columns differ");
-            }
-            fields.set(sink, columns);
-            const json = strictJson(row);
-            if (bytes(json) + 2 > 256 * 1024) {
-              throw new Error("execution output row exceeds byte limit");
-            }
-            values.push([row.id, json]);
-          }
-          if (values.length) {
-            await con.run(
-              "INSERT INTO duckstream_private.outputs(sink,id,value) SELECT ?,json_extract_string(value,'$[0]'),json_extract_string(value,'$[1]') FROM json_each(CAST(? AS JSON))",
-              [sink, strictJson(values)],
-            );
-          }
-        }
-        await con.run("COMMIT");
-        if (
-          statements.some((s) => s.operation === "CREATE TABLE") ||
-          ++steps % 64 === 0
-        ) {
-          await con.run("CHECKPOINT");
-        }
-        checkpoint = step.checkpoint;
-        if (step.done) break;
+        await execution.commit(revision, step);
       }
+      await execution.dropScratch();
       for (const name of Object.keys(this.options.queries)) {
         await con.run(
-          `DROP VIEW IF EXISTS duckstream_private.${quote(`result_${name}`)}`,
+          `DROP VIEW duckstream_private.${quote(`result_${name}`)}`,
         );
       }
       await con.run("DETACH captured");
-      for (const name of owned) {
-        await con.run(`DROP TABLE IF EXISTS ${quote(name)}`);
-      }
-      await con.run("CHECKPOINT");
-      await con.run(
-        "CREATE TABLE duckstream_private.publication(sink VARCHAR,ordinal BIGINT,value VARCHAR)",
-      );
-      for (const sink of this.options.spec.to) {
-        await con.run(
-          "DELETE FROM duckstream_private.outputs WHERE sink=? AND seq NOT IN (SELECT max(seq) FROM duckstream_private.outputs WHERE sink=? GROUP BY id)",
-          [sink, sink],
-        );
-        await con.run(
-          "INSERT INTO duckstream_private.publication SELECT ?,row_number() OVER () AS ordinal,value FROM (SELECT value FROM duckstream_private.outputs WHERE sink=? ORDER BY id)",
-          [sink, sink],
-        );
-        await con.run("DELETE FROM duckstream_private.outputs WHERE sink=?", [
-          sink,
-        ]);
-        await con.run("CHECKPOINT");
-      }
-      await con.run("DROP TABLE duckstream_private.outputs");
-      await con.run("DROP SEQUENCE duckstream_private.output_seq");
       await con.run("CHECKPOINT");
       completed = true;
       return output;
@@ -1025,40 +899,19 @@ export class BoundedRuntime {
   }
   async *pages(output: BoundedOutput, sink: string): AsyncGenerator<Row[]> {
     this.path(output.capture, "capture");
-    if (!this.options.spec.to.includes(sink)) {
-      throw new Error("undeclared output sink");
-    }
     const path = this.path(output, "output");
     await Deno.stat(path);
     const held = await database(path, true);
     try {
-      let after = 0;
-      for (;;) {
-        const result = await held.con.runAndReadAll(
-          "SELECT ordinal,value FROM duckstream_private.publication WHERE sink=? AND ordinal>? AND ordinal<=? ORDER BY ordinal",
-          [sink, after, after + 4096],
-        );
-        const rows = result.getRowObjects();
-        if (!rows.length) break;
-        const page: Row[] = [];
-        let size = 2;
-        for (const row of rows) {
-          const value = String(row.value);
-          if (bytes(value) + 2 > 256 * 1024) {
-            throw new Error("execution output row exceeds byte limit");
-          }
-          if (
-            page.length &&
-            (page.length >= 128 || size + bytes(value) + 1 > 256 * 1024)
-          ) {
-            yield page.splice(0);
-            size = 2;
-          }
-          page.push(parse(value));
-          size += bytes(value) + 1;
-          after = Number(row.ordinal);
-        }
-        if (page.length) yield page;
+      const execution = await PagedExecution.open(
+        executionDatabase(held.db),
+        this.options.spec.to,
+      );
+      for (let after = 0;;) {
+        const page = await execution.output(sink, after);
+        if (page.rows.length) yield page.rows;
+        if (page.done) break;
+        after = page.next;
       }
     } finally {
       held.close();

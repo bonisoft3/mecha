@@ -120,7 +120,7 @@ so the filesystem sync callback has no separate buffer to flush.
 Durable Object in a separate request without closing DuckDB, and verifies the
 row after a new object instance reopens the database and replays its WAL.
 The test checks that the instance changed and that a nonempty WAL existed
-before the abort. It also exercises [[../../mecha-edge/src/paged-execution.ts]]:
+before the abort. It also exercises [[../../compute-snapshot/src/execution.ts]]:
 commit revision one, abort, recover and commit an update/MERGE at revision two,
 retry that commit, abort again, and verify final output and SQL scratch state.
 `COMMIT` durability does not require an added checkpoint.

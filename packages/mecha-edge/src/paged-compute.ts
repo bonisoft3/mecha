@@ -1,11 +1,11 @@
-import { encodeWasmQueryInput, type WasmQueryInput } from '../../compute-snapshot/src/bounded.ts'
+import { encodeWasmQueryInput, EXECUTION_BYTES, type ExecutionQueryPage, type WasmQueryInput } from '../../compute-snapshot/src/bounded.ts'
 export { encodeWasmQueryInput, WASM_QUERY_INPUT_BYTES, type WasmQueryInput } from '../../compute-snapshot/src/bounded.ts'
 import { StaticCage, type StaticFactory } from '../../../services/compute/static-cage.ts'
 import { normalizeSelect, projectOutput } from '../../../services/compute/wasm-select.ts'
 import { runWasm } from '../../../services/compute/wasi.ts'
 import type { ComputeService } from './compute.ts'
 import type { ComputeCapture } from './compute.ts'
-import { EXECUTION_BYTES, type ExecutionState, type ExecutionStep, type ExecutionQueryPage } from './paged-execution.ts'
+import type { ExecutionState, ExecutionStep } from '../../compute-snapshot/src/execution.ts'
 import { strictJson, type SnapshotProgram } from './snapshot-program.ts'
 import { pagedRequest, pagedProgram } from './paged-transport.ts'
 

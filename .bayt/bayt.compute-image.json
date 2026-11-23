@@ -101,6 +101,7 @@
         "srcs": [
           "packages/compute-snapshot/src/sink-writes.ts",
           "packages/compute-snapshot/src/bounded.ts",
+          "packages/compute-snapshot/src/execution.ts",
           "packages/compute-snapshot/src/json.ts"
         ],
         "dst": "/packages/compute-snapshot/src/",
@@ -181,6 +182,7 @@
       "packages/lake/src/lake-types.ts",
       "packages/compute-snapshot/src/sink-writes.ts",
       "packages/compute-snapshot/src/bounded.ts",
+      "packages/compute-snapshot/src/execution.ts",
       "packages/compute-snapshot/src/json.ts"
     ],
     "exclude": []
@@ -313,6 +315,7 @@
           "packages/lake/src/lake-types.ts",
           "packages/compute-snapshot/src/sink-writes.ts",
           "packages/compute-snapshot/src/bounded.ts",
+          "packages/compute-snapshot/src/execution.ts",
           "packages/compute-snapshot/src/json.ts"
         ],
         "exclude": []
@@ -392,6 +395,7 @@
           "packages/lake/src/lake-types.ts",
           "packages/compute-snapshot/src/sink-writes.ts",
           "packages/compute-snapshot/src/bounded.ts",
+          "packages/compute-snapshot/src/execution.ts",
           "packages/compute-snapshot/src/json.ts"
         ],
         "exclude": [],
@@ -462,6 +466,7 @@
           "packages/lake/src/lake-types.ts",
           "packages/compute-snapshot/src/sink-writes.ts",
           "packages/compute-snapshot/src/bounded.ts",
+          "packages/compute-snapshot/src/execution.ts",
           "packages/compute-snapshot/src/json.ts"
         ],
         "exclude": [],

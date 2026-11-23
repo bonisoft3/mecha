@@ -1,6 +1,7 @@
 import { withComputeTimeout, type ComputeService } from './compute.ts'
 import type { ComputeCapture } from './compute.ts'
-import { EXECUTION_BYTES, type ExecutionStep } from './paged-execution.ts'
+import { EXECUTION_BYTES } from '../../compute-snapshot/src/bounded.ts'
+import type { ExecutionStep } from '../../compute-snapshot/src/execution.ts'
 import type { SnapshotChunk, SnapshotIdentity, SnapshotManifest, SnapshotTableWal } from '../../compute-snapshot/src/index.ts'
 import { strictJson, type SnapshotProgram } from './snapshot-program.ts'
 

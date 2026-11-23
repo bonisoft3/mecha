@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import * as duckdb from 'npm:@duckdb/duckdb-wasm@1.33.1-dev57.0/dist/duckdb-node-blocking.cjs'
-import type { ExecutionDatabase } from '../src/paged-execution.ts'
+import { executionDatabase, type SyncDatabase } from '../src/execution-host.ts'
 
 const wasm = fileURLToPath(import.meta.resolve('npm:@duckdb/duckdb-wasm@1.33.1-dev57.0/dist/duckdb-eh.wasm'))
 export async function fixture() {
@@ -11,4 +11,5 @@ export async function fixture() {
   connection.close()
   return db
 }
-export const host = (db: Awaited<ReturnType<typeof fixture>>) => db as unknown as ExecutionDatabase
+export const host = (db: Awaited<ReturnType<typeof fixture>>) => db as unknown as SyncDatabase
+export const asyncHost = (db: Awaited<ReturnType<typeof fixture>>) => executionDatabase(host(db))

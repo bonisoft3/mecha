@@ -13,12 +13,18 @@ Deno.test('strict JSON refuses what JSON cannot hold, before and after toJSON', 
   assert.throws(() => strictJson(undefined), /no JSON value/)
 })
 
-Deno.test('lossless JSON keeps only plain data whose numbers round-trip', () => {
-  assert.equal(losslessJson({ a: [1, 2.5, 'x', null, false], b: { c: Number.MAX_SAFE_INTEGER } }), '{"a":[1,2.5,"x",null,false],"b":{"c":9007199254740991}}')
-  for (const bad of [{ n: 2 ** 53 }, { n: NaN }, { d: new Date(0) }, { m: new Map() }, { u: undefined }]) {
+// A double past 2^53 is still a value a sink keeps (1e30 is a native DOUBLE),
+// and JSON prints it as its shortest round-tripping decimal, not its exact
+// integer (1000000000000000100 is ...128). Reading refuses only a literal its
+// double prints back differently, an int64 that lost precision.
+Deno.test('lossless JSON keeps finite plain data and refuses integer literals no double holds', () => {
+  assert.equal(losslessJson({ a: [1, 2.5, 'x', null, false], b: { c: 2 ** 53, d: 1e30 } }), '{"a":[1,2.5,"x",null,false],"b":{"c":9007199254740992,"d":1e+30}}')
+  for (const bad of [{ n: NaN }, { n: Infinity }, { d: new Date(0) }, { m: new Map() }, { u: undefined }]) {
     assert.throws(() => losslessJson(bad), /finite lossless JSON/)
   }
-  assert.throws(() => losslessJson({ rows: [{ id: 9007199254740993 }] }), /value\.rows\[0\]\.id is not finite lossless JSON/)
-  assert.deepEqual(parseLossless('{"a":[1,2.5]}'), { a: [1, 2.5] })
-  for (const bad of ['9007199254740993', '{"n":1e999}']) assert.throws(() => parseLossless(bad), /finite lossless JSON/)
+  assert.throws(() => losslessJson({ rows: [{ id: NaN }] }), /value\.rows\[0\]\.id is not finite lossless JSON/)
+  assert.deepEqual(parseLossless('{"a":[1,2.5,1e30,9007199254740992]}'), { a: [1, 2.5, 1e30, 2 ** 53] })
+  for (const n of [1000000000000000100, -1e20, 2 ** 70]) assert.equal(parseLossless(losslessJson(n)), n)
+  assert.equal(parseLossless('1180591620717411303424'), 2 ** 70)
+  for (const bad of ['9007199254740993', '{"n":-9007199254740995}', '{"n":1e999}']) assert.throws(() => parseLossless(bad), /finite lossless JSON/)
 })

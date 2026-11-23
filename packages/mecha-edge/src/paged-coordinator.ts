@@ -1,7 +1,7 @@
 import type { SnapshotChunk, SnapshotIdentity, SnapshotManifest, SnapshotTableWal } from '../../compute-snapshot/src/index.ts'
 import { computeFailureKey, type ComputeCapture } from './compute.ts'
 import type { ComputeService } from './compute.ts'
-import type { ExecutionOutput, ExecutionState } from './paged-execution.ts'
+import type { ExecutionOutput, ExecutionState } from '../../compute-snapshot/src/execution.ts'
 import { pagedRequest } from './paged-transport.ts'
 import { strictJson } from './snapshot-program.ts'
 

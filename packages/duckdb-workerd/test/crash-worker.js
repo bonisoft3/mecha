@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
-import { PagedExecution } from '../../mecha-edge/src/paged-execution.ts'
+import { PagedExecution } from '../../compute-snapshot/src/execution.ts'
+import { executionDatabase } from '../../mecha-edge/src/execution-host.ts'
 import { createDuckDB } from '../.build/duckdb/runtime.js'
 
 export class CrashFixture extends DurableObject {
@@ -33,23 +34,23 @@ export class CrashFixture extends DurableObject {
       } finally { connection.close() }
     }
     if (action.startsWith('execution-')) {
-      const execution = new PagedExecution(this.db, ['sink'])
-      if (action === 'execution-first') execution.commit(0, {
+      const execution = await PagedExecution.open(executionDatabase(this.db), ['sink'])
+      if (action === 'execution-first') await execution.commit(0, {
         checkpoint: { phase: 1 }, writes: { sink: [{ id: 'one', value: 1 }] },
         statements: ['CREATE TABLE scratch AS SELECT 1 AS value'], done: false,
       })
-      const before = execution.state()
+      const before = await execution.state()
       let duplicate
       if (action === 'execution-second') {
         const step = { checkpoint: null, writes: { sink: [{ id: 'one', value: 2 }, { id: 'two', value: 3 }] },
           statements: ['INSERT INTO scratch VALUES (2)'], done: true }
-        execution.commit(1, step)
-        duplicate = execution.commit(1, step)
+        await execution.commit(1, step)
+        duplicate = await execution.commit(1, step)
       }
-      const state = execution.state()
+      const state = await execution.state()
       return Response.json({ instance: this.instance, before, state, duplicate,
-        ...(state.done ? { output: execution.output('sink'), manifest: execution.manifest(),
-          scratch: execution.query('SELECT sum(value)::INTEGER AS value FROM scratch') } : {}) })
+        ...(state.done ? { output: await execution.output('sink'), manifest: await execution.manifest(),
+          scratch: await execution.query('SELECT sum(value)::INTEGER AS value FROM scratch') } : {}) })
     }
     const connection = this.db.connect()
     try {

@@ -224,34 +224,13 @@ Deno.test("bounded query limits fail before returning an oversized relation", as
 	try {
 		const config = options(directory);
 		config.source =
-			`export const reads=[];export const queries={};export const finish=()=>({});export async function plan(host){await host.query('SELECT * FROM range(4097)');return {checkpoint:null,writes:{},done:true}}`;
+			`export const reads=[];export const queries={};export const finish=()=>({});export async function plan(host){await host.query("SELECT repeat('x',1024) AS x FROM range(8192)");return {checkpoint:null,writes:{},done:true}}`;
 		const runtime = await BoundedRuntime.create(config);
 		const capture = await runtime.capture();
 		await assertRejects(
 			() => runtime.calculate(capture),
 			Error,
-			"execution query exceeds page limit",
-		);
-	} finally {
-		await Deno.remove(directory, { recursive: true });
-	}
-});
-Deno.test("bounded query checks the same relation it returns", async () => {
-	const directory = await Deno.makeTempDir();
-	try {
-		const config = options(directory);
-		const sql =
-			"SELECT i FROM range(CASE WHEN contains(current_query(), 'AS'||chr(32)||'size') THEN 1 ELSE 4097 END) t(i)";
-		config.source =
-			`export const reads=[];export const queries={};export const finish=()=>({});export async function plan(host){await host.query(${
-				JSON.stringify(sql)
-			});return {checkpoint:null,writes:{},done:true}}`;
-		const runtime = await BoundedRuntime.create(config);
-		const capture = await runtime.capture();
-		await assertRejects(
-			() => runtime.calculate(capture),
-			Error,
-			"execution query exceeds page limit",
+			"execution query exceeds byte limit",
 		);
 	} finally {
 		await Deno.remove(directory, { recursive: true });
@@ -387,7 +366,7 @@ export async function plan(host){
 		await assertRejects(
 			() => runtime.calculate(capture),
 			Error,
-			"execution query row exceeds page limit",
+			"execution query row exceeds page byte limit",
 		);
 	} finally {
 		await Deno.remove(directory, { recursive: true });

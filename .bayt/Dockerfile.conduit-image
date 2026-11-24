@@ -2,7 +2,7 @@
 FROM ghcr.io/conduitio/conduit:v0.20.4@sha256:0301dff5cce57e2e5edf128c1e0d85c7852d5e54e93c7498215bf1969447cdc4 AS conduit-image
 WORKDIR /app
 ARG TARGETARCH
-RUN mkdir -p /app/connectors && ARCH=$(case "${TARGETARCH}" in arm64) echo "arm64" ;; *) echo "x86_64" ;; esac) && wget -qO- "https://github.com/conduitio-labs/conduit-connector-http/releases/download/v0.4.0/conduit-connector-http_0.4.0_Linux_${ARCH}.tar.gz" | tar -xzf - -C /app/connectors conduit-connector-http && chmod +x /app/connectors/conduit-connector-http && apk add --no-cache gettext
+RUN mkdir -p /app/connectors && ARCH=$(case "${TARGETARCH}" in arm64) echo "arm64" ;; *) echo "x86_64" ;; esac) && wget -qO- "https://github.com/conduitio-labs/conduit-connector-http/releases/download/v0.4.0/conduit-connector-http_0.4.0_Linux_${ARCH}.tar.gz" | tar -xzf - -C /app/connectors conduit-connector-http && chmod +x /app/connectors/conduit-connector-http && apk add --no-cache gettext postgresql-client curl
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.conduit-image.json ./.bayt/
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS conduit-image_bayt_ctxs

@@ -55,8 +55,8 @@ export const READ_TIMEOUT_MS = 20_000;
  * Deno's node:http sent a timed-out GET a second time and got's timeout never
  * fired (measured, Deno 2.9.7, got 16.2.0). */
 const AGENT = { http: new http.Agent({ keepAlive: false }) };
-/** Answers stored, and the largest stored; past it, or of no stated
- * Content-Length, an answer is not kept. */
+/** Answers stored, and the largest stored; enforced up front when
+ * Content-Length is sent and in ReadCache.#set for chunked streams. */
 const CACHE_ENTRIES = 1_000;
 const CACHE_BYTES = 1 << 20;
 /** What the stored answers come to together: the least recently used go
@@ -193,11 +193,13 @@ export class ReadCache {
   #bytes = 0;
   #partitions = new QuickLRU<string, Store>({ maxSize: CACHE_ENTRIES });
   readonly #entries: number;
+  readonly #entryBytes: number;
   readonly #totalBytes: number;
 
-  constructor(bounds: { entries?: number; bytes?: number } = {}) {
+  constructor(bounds: { entries?: number; bytes?: number; entryBytes?: number } = {}) {
     this.#entries = bounds.entries ?? CACHE_ENTRIES;
     this.#totalBytes = bounds.bytes ?? CACHE_TOTAL_BYTES;
+    this.#entryBytes = Math.min(this.#totalBytes, bounds.entryBytes ?? CACHE_BYTES);
   }
 
   #get(k: string): unknown {
@@ -215,7 +217,7 @@ export class ReadCache {
   #set(k: string, value: unknown, ttl?: number) {
     this.#delete(k);
     const size = sizeOf(value);
-    if (size > this.#totalBytes) return;
+    if (size > this.#entryBytes || size > this.#totalBytes) return;
     this.#answers.set(k, { value, size, ...(ttl === undefined ? {} : { expires: Date.now() + ttl }) });
     this.#bytes += size;
     for (const [first] of this.#answers) {
@@ -294,10 +296,11 @@ export async function get(name: string, read: Read, values: Record<string, unkno
       // freshness is applied before the cache judges the answer storable.
       beforeCache: [(response) => {
         freshened(response.headers, response.statusCode ?? 0, read.cacheControl);
-        // Only a body whose size is known before it is read: a chunked one
-        // could be any size.
-        const length = Number(response.headers["content-length"]);
-        if (!Number.isInteger(length) || length > CACHE_BYTES) return false;
+        const rawLength = response.headers["content-length"];
+        if (rawLength !== undefined) {
+          const length = Number(rawLength);
+          if (!Number.isInteger(length) || length > CACHE_BYTES) return false;
+        }
       }],
     },
     retry: { ...RETRY, ...read.got?.retry, methods: ["GET"] },

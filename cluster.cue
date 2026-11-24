@@ -38,6 +38,7 @@ _tenancySql:    _ @embed(file="services/database/rls/rls.sql", type=text)
 #TenancySql:    _tenancySql
 _computeEvents: _ @embed(file="services/compute/events.yaml", type=text)
 _cdcTrace:      _ @embed(file="services/transform/cdc-trace.yaml", type=text)
+_durableRetry:  _ @embed(file="services/transform/durable-retry.yaml", type=text)
 _redisStreams:  _ @embed(file="services/mesh/dapr/components/redis-streams.yaml", type=text)
 _tsbifrostTs:   _ @embed(file="services/airlock/tsbifrost.ts", type=text)
 _envSecretStore: """
@@ -139,6 +140,7 @@ _machineTimersSql: _ @embed(file="services/ticker/machine-timers.sql", type=text
 	"-c", "wal_level=logical",
 	"-c", "max_replication_slots=128",
 	"-c", "max_wal_senders=128",
+	"-c", "max_slot_wal_keep_size=1GB",
 	"-c", "fsync=off",
 	"-c", "synchronous_commit=off",
 	"-c", "full_page_writes=off",
@@ -352,7 +354,7 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 #DuckdbExtensionsMarker: ".installed-v1.5.6"
 
 // The glibc Redis binaries also run in the Debian release appliance.
-#RedisImage: "redis:8.2.11-bookworm@sha256:b0b01167ff47bc3868e56a967895a26be4230891a1f42a78ab61cdd227accc8d"
+#RedisImage: "redis:8.4.8-trixie@sha256:90cb779e1f814f1123532293f7a7a18a6a48bdc01aa0a9d54ce9f3d61b71018f"
 
 // The PostgreSQL the database image runs.
 #PostgresImage: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
@@ -568,7 +570,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		reconcile: [=~"^[a-z][a-z0-9_]*$"]: string & !=""
 		// Materialized JSON, one <name>.json per vetted pgroll value, relative to the app.
 		pgrollDir?: string & !=""
-		pipelines:  [...{name: string, file: string, group?: string}]
+		// `replay`: the stream reads a redelivered record at /<name>/replay,
+		// which durable retry sends back there.
+		pipelines: [...{name: string, file: string, group?: string, replay?: true}]
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
@@ -1481,12 +1485,13 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					expose: redis: {port: 6379, env: "REDIS_PORT"}
 					entrypoint: {
 						shell:      "nu"
-						do:         "exec redis-server --port ($env.REDIS_PORT? | default '6379') --save '' --appendonly no"
+						do:         "exec redis-server --port ($env.REDIS_PORT? | default '6379') --save '' --appendonly no --maxmemory ($env.REDIS_MAXMEMORY? | default '256mb') --maxmemory-policy noeviction"
 						dockerfile: null
 					}
 					dockerfile: {
-						from: name: #RedisImage
+						from:    name: #RedisImage
 						workdir: "/data"
+						cmd:     ["sh", "-c", "exec redis-server --save '' --appendonly no --maxmemory \"${REDIS_MAXMEMORY:-256mb}\" --maxmemory-policy noeviction"]
 						healthcheck: {
 							test:         ["CMD-SHELL", "redis-cli ping | grep PONG"]
 							interval:     "5s"
@@ -1523,7 +1528,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					}
 					entrypoint: {
 						shell:      "nu"
-						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'mesh-events-($nu.pid)-(random int 1000..9999)'); mkdir $dir; let mdir = (if (($env.MECHA_MESH_DIR? | default '') != '') { $env.MECHA_MESH_DIR } else if ('services/mesh/dapr/components/resiliency.yaml' | path exists) { 'services/mesh' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/mesh') }); cp -f ($mdir | path join 'dapr/components/resiliency.yaml') ($dir | path join 'resiliency.yaml'); cp -f ($mdir | path join 'dapr/components/redis-streams.yaml') ($dir | path join 'redis-streams.yaml'); exec daprd --app-id mechaed --dapr-listen-addresses 127.0.0.1 --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path $dir --app-channel-address 127.0.0.1 --app-port $env.CADDY_PORT --dapr-http-port $env.DAPR_HTTP_PORT --dapr-grpc-port 0 --dapr-internal-grpc-port $env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0 --log-level info --enable-api-logging"
+						do:         "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'mesh-events-($nu.pid)-(random int 1000..9999)'); mkdir $dir; let mdir = (if (($env.MECHA_MESH_DIR? | default '') != '') { $env.MECHA_MESH_DIR } else if ('services/mesh/dapr/components/resiliency.yaml' | path exists) { 'services/mesh' } else { ((^mise where github:bonisoft3/mecha | str trim) | path join 'services/mesh') }); cp -f ($mdir | path join 'dapr/components/resiliency.yaml') ($dir | path join 'resiliency.yaml'); cp -f ($mdir | path join 'dapr/components/redis-streams.yaml') ($dir | path join 'redis-streams.yaml'); if (($env.MESH_SUBSCRIPTIONS_DIR? | default '') != '') { ls ($env.MESH_SUBSCRIPTIONS_DIR | path join '*.yaml' | into glob) | each {|f| cp -f $f.name $dir } | ignore }; exec daprd --app-id mechaed --dapr-listen-addresses 127.0.0.1 --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path $dir --app-channel-address 127.0.0.1 --app-port ($env.MESH_APP_PORT? | default $env.CADDY_PORT) --dapr-http-port $env.DAPR_HTTP_PORT --dapr-grpc-port 0 --dapr-internal-grpc-port $env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0 --log-level info --enable-api-logging"
 						dockerfile: null
 						env: REDIS_HOST: {peer: "redis", port: "redis"}
 						after: {caddy: "started", redis: "started"}
@@ -1549,7 +1554,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					expose: http:                {port: 8080, env: "CONDUIT_API_HTTP_ADDRESS_PORT"}
 					entrypoint: {
 						shell: "nu"
-						do:    "let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'conduit-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'pipelines') ($dir | path join 'connectors'); let conn = (which conduit-connector-http | first | get path); cp -f $conn ($dir | path join 'connectors' ($conn | path basename)); open --raw '\(X.meta.conduitTemplate)' | str replace -a '${DATABASE_URL}' $env.DATABASE_URL | str replace -a '${MESH_EVENTS_URL}' $env.MESH_EVENTS_URL | save -f ($dir | path join 'pipelines/cdc-to-bus.yaml'); exec conduit run --db.type inmemory --pipelines.path ($dir | path join 'pipelines') --connectors.path ($dir | path join 'connectors') --api.http.address $\"127.0.0.1:($env.CONDUIT_API_HTTP_ADDRESS_PORT)\" --api.grpc.address '127.0.0.1:0'"
+						do:    #"let base = ($env.BAYT_LOCAL_WORK_DIR? | default $nu.temp-dir); let dir = ($base | path join $'conduit-($nu.pid)-(random int 1000..9999)'); mkdir ($dir | path join 'pipelines') ($dir | path join 'connectors'); let conn = (which conduit-connector-http | first | get path); cp -f $conn ($dir | path join 'connectors' ($conn | path basename)); let cfg = ($dir | path join 'pipelines/cdc-to-bus.yaml'); open --raw '\#(X.meta.conduitTemplate)' | str replace -a '${DATABASE_URL}' $env.DATABASE_URL | str replace -a '${MESH_EVENTS_URL}' $env.MESH_EVENTS_URL | save -f $cfg; let raw = (open --raw $cfg); let slot = ($raw | parse -r 'logrepl\.slotName:\s*"?(?<name>[a-zA-Z0-9_]+)"?' | get -o 0.name | default ''); let pub = ($raw | parse -r 'logrepl\.publicationName:\s*"?(?<name>[a-zA-Z0-9_]+)"?' | get -o 0.name | default ''); if $slot != '' { if $pub == '' { error make { msg: $'conduit: slot ($slot) has no logrepl.publicationName' } }; let state = ("SELECT COALESCE((SELECT '1' FROM pg_replication_slots WHERE slot_name = :'slot' AND wal_status = 'lost'), '0') || ',' || COALESCE((SELECT '1' FROM pg_publication WHERE pubname = :'pub' AND obj_description(oid, 'pg_publication') = 'slot_reset_pending'), '0');" | ^psql $env.DATABASE_URL -XAt -v ON_ERROR_STOP=1 -v $'slot=($slot)' -v $'pub=($pub)' | str trim); if $state != '0,0' { print -e $'conduit: slot ($slot) recovery needed (($state)); recreating slot and signalling readers to rebuild'; mut ready = false; for _ in 1..30 { if (try { http get $'($env.MESH_EVENTS_URL)/v1.0/healthz/outbound'; true } catch { false }) { $ready = true; break }; sleep 1sec }; if not $ready { error make { msg: $'conduit: mesh-events at ($env.MESH_EVENTS_URL) not ready' } }; (["COMMENT ON PUBLICATION :\"pub\" IS 'slot_reset_pending';" "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = :'slot' AND wal_status = 'lost';" "SELECT pg_create_logical_replication_slot(:'slot', 'pgoutput') WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = :'slot');"] | str join (char nl)) | ^psql $env.DATABASE_URL -X -v ON_ERROR_STOP=1 -v $'slot=($slot)' -v $'pub=($pub)'; http post --content-type text/plain $'($env.MESH_EVENTS_URL)/v1.0/publish/redis-streams/cdc-events' '{"__table":"slot_reset"}'; "COMMENT ON PUBLICATION :\"pub\" IS NULL;" | ^psql $env.DATABASE_URL -X -v ON_ERROR_STOP=1 -v $'pub=($pub)' } }; exec conduit run --db.type inmemory --pipelines.path ($dir | path join 'pipelines') --connectors.path ($dir | path join 'connectors') --api.http.address $"127.0.0.1:($env.CONDUIT_API_HTTP_ADDRESS_PORT)" --api.grpc.address '127.0.0.1:0'"#
 						env: {
 							DATABASE_URL:    databaseUrlEnv
 							MESH_EVENTS_URL: {peer: "mesh-events", port: "http", prefix: "http://"}
@@ -1568,7 +1573,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						// so the rendered file is the only pipeline conduit finds and
 						// every start of the container can render it again.
 						copy: [{srcs: [X.meta.conduitTemplate], dst: "/conduit/cdc-to-bus.yaml.tmpl"}]
-						cmd:  ["sh", "-c", "mkdir -p /conduit/pipelines && envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml && exec /app/conduit run"]
+						cmd: ["sh", "-c", "set -eu; mkdir -p /conduit/pipelines; envsubst < /conduit/cdc-to-bus.yaml.tmpl > /conduit/pipelines/cdc-to-bus.yaml; slot=$(sed -nE 's/.*logrepl\\.slotName:[[:space:]]*\"?([a-zA-Z0-9_]+)\"?.*/\\1/p' /conduit/pipelines/cdc-to-bus.yaml | head -n 1); pub=$(sed -nE 's/.*logrepl\\.publicationName:[[:space:]]*\"?([a-zA-Z0-9_]+)\"?.*/\\1/p' /conduit/pipelines/cdc-to-bus.yaml | head -n 1); if [ -n \"$slot\" ]; then [ -n \"$pub\" ] || { echo \"conduit: slot $slot has no logrepl.publicationName\" >&2; exit 1; }; state=$(printf '%s\\n' \"SELECT COALESCE((SELECT '1' FROM pg_replication_slots WHERE slot_name = :'slot' AND wal_status = 'lost'), '0') || ',' || COALESCE((SELECT '1' FROM pg_publication WHERE pubname = :'pub' AND obj_description(oid, 'pg_publication') = 'slot_reset_pending'), '0');\" | psql \"$DATABASE_URL\" -XAt -v ON_ERROR_STOP=1 -v slot=\"$slot\" -v pub=\"$pub\"); if [ \"$state\" != \"0,0\" ]; then echo \"conduit: slot $slot recovery needed ($state); recreating slot and signalling readers to rebuild\" >&2; i=0; until curl -fsS \"$MESH_EVENTS_URL/v1.0/healthz/outbound\" >/dev/null; do i=$((i + 1)); [ \"$i\" -lt 30 ] || { echo \"conduit: mesh-events at $MESH_EVENTS_URL not ready\" >&2; exit 1; }; sleep 1; done; printf '%s\\n' \"COMMENT ON PUBLICATION :\\\"pub\\\" IS 'slot_reset_pending';\" \"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = :'slot' AND wal_status = 'lost';\" \"SELECT pg_create_logical_replication_slot(:'slot', 'pgoutput') WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = :'slot');\" | psql \"$DATABASE_URL\" -X -v ON_ERROR_STOP=1 -v slot=\"$slot\" -v pub=\"$pub\"; curl -fsS -H 'Content-Type: text/plain' --data '{\"__table\":\"slot_reset\"}' \"$MESH_EVENTS_URL/v1.0/publish/redis-streams/cdc-events\"; printf '%s\\n' \"COMMENT ON PUBLICATION :\\\"pub\\\" IS NULL;\" | psql \"$DATABASE_URL\" -X -v ON_ERROR_STOP=1 -v pub=\"$pub\"; fi; fi; exec /app/conduit run"]
 					}
 					compose: {
 						develop: watch: [{action: "sync+restart", path: "../\(X.meta.conduitTemplate)", target: "/conduit/cdc-to-bus.yaml.tmpl"}]
@@ -1674,7 +1679,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 					entrypoint: {
 						shell: "nu"
 						do: strings.Join(list.Concat([
-							["let mecha = (if ('services/transform/cdc-trace.yaml' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) }); let tdir = (if (($env.MECHA_TRANSFORM_DIR? | default '') != '') { $env.MECHA_TRANSFORM_DIR } else { ($mecha | path join 'services/transform') }); let cdir = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else { ($mecha | path join 'services/compute') }); exec redpanda-connect streams --set 'http.enabled=false' --no-api -r ($tdir | path join 'cdc-trace.yaml')"],
+							["let mecha = (if ('services/transform/cdc-trace.yaml' | path exists) { $env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) }); let tdir = (if (($env.MECHA_TRANSFORM_DIR? | default '') != '') { $env.MECHA_TRANSFORM_DIR } else { ($mecha | path join 'services/transform') }); let cdir = (if (($env.COMPUTE_APP_DIR? | default '') != '') { $env.COMPUTE_APP_DIR } else { ($mecha | path join 'services/compute') }); exec redpanda-connect streams --set ('http.enabled=' + ((($env.CDC_REPLAY_PORT? | default '') != '') | into string)) --set ('http.address=127.0.0.1:' + ($env.CDC_REPLAY_PORT? | default '0')) --no-api -r ($tdir | path join 'cdc-trace.yaml') ($tdir | path join 'durable-retry.yaml')"],
 							[for p in X.state.pipelines {"'\(p.file)'"}],
 							[if len(X.state.computations) > 0 {"($cdir | path join 'events.yaml')"}],
 						]), " ")
@@ -1701,9 +1706,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						copy: [for p in X.state.pipelines {srcs: [p.file], dst: "/pipelines/\(p.name).yaml"}]
 						epilogue: list.Concat([
 							["COPY <<'CDCTRACE' /cdc-trace.yaml\n\(_cdcTrace)\nCDCTRACE"],
+							["COPY <<'DURABLERETRY' /durable-retry.yaml\n\(_durableRetry)\nDURABLERETRY"],
 							[if len(X.state.computations) > 0 {"COPY <<'COMPUTE' /compute-events.yaml\n\(_computeEvents)\nCOMPUTE"}],
 						])
-						cmd: list.Concat([["streams", "--no-api", "-r", "/cdc-trace.yaml"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"/compute-events.yaml"}]])
+						cmd: list.Concat([["streams", "--no-api", "-r", "/cdc-trace.yaml", "/durable-retry.yaml"], [for p in X.state.pipelines {"/pipelines/\(p.name).yaml"}], [if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"/compute-events.yaml"}]])
 					}
 					compose: {
 						restart: "on-failure"

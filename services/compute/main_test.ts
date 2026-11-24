@@ -99,6 +99,25 @@ Deno.test("invalidation acknowledgment waits for the acceptance callback", async
   assertEquals((await response).status, 204);
 });
 
+Deno.test("null tables invalidates every computation", async () => {
+  const calls: (string[] | undefined)[] = [];
+  const handle = handler({
+    refresh: (tables) => {
+      calls.push(tables);
+      return Promise.resolve(true);
+    },
+  }, "secret");
+  const response = await handle(
+    new Request("http://compute/invalidate", {
+      method: "POST",
+      headers: { authorization: "Bearer secret" },
+      body: JSON.stringify({ tables: null }),
+    }),
+  );
+  assertEquals(response.status, 204);
+  assertEquals(calls, [undefined]);
+});
+
 Deno.test("invalidation refusal remains unacknowledged", async () => {
   const handle = handler({ refresh: () => Promise.resolve(false) }, undefined);
   assertEquals(

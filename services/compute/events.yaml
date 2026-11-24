@@ -1,14 +1,22 @@
 input:
-  redis_streams:
-    url: ${REDIS_URL}
-    streams: [cdc-events]
-    body_key: data
-    consumer_group: ${COMPUTE_GROUP}
-    client_id: compute
-    start_from_oldest: true
-    auto_replay_nacks: true
-    # A backlog is read in large steps so one batch below drains much of it.
-    limit: 1000
+  broker:
+    inputs:
+      - redis_streams:
+          url: ${REDIS_URL}
+          streams: [cdc-events]
+          body_key: data
+          consumer_group: ${COMPUTE_GROUP}
+          client_id: compute
+          start_from_oldest: true
+          auto_replay_nacks: true
+          # A backlog is read in large steps so one batch below drains much of it.
+          limit: 1000
+      # A change the bus lost while Redis restarted, the group was retired, or
+      # the slot reset was never heard; the start invalidates every computation.
+      - generate:
+          count: 1
+          interval: ""
+          mapping: 'root = {"wake": "start"}'
   # The transform's -r cdc-trace.yaml consumes the transaction markers and
   # stamps each row's @traceparent.
   processors:
@@ -19,8 +27,14 @@ pipeline:
   threads: 1
   processors:
     - mapping: |
-        let table = this.data.parse_json().__table
-        root.tables = [if $table.type() == "string" && $table != "" { $table } else { throw("CDC event has no table") }]
+        let table = if this.exists("wake") { null } else { this.data.parse_json().__table }
+        root.tables = if this.exists("wake") {
+          null
+        } else if $table.type() == "string" && $table != "" {
+          [$table]
+        } else {
+          throw("CDC event has no table")
+        }
         root.trace = @traceparent.or("")
 output:
   switch:
@@ -50,7 +64,8 @@ output:
                 - archive:
                     format: json_array
                 - resource: cdc_trace_batch
-                - mapping: root.tables = this.map_each(m -> m.tables).flatten().unique()
+                - mapping: |
+                    root.tables = if this.any(m -> m.tables == null) { null } else { this.map_each(m -> m.tables).flatten().unique() }
             outputs:
               - fallback:
                   - retry:

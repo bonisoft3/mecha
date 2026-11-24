@@ -1,0 +1,45 @@
+# Durable retry's start, a stream of its own beside the readers'. Each group
+# under durable retry (CDC_RETRY_GROUPS) moves its dead letters back to its
+# retry stream once, so the release that fixes a poison record also redrives
+# it, and the bus's state is logged where an operator reads the transform:
+# per group, what was redriven, what is pending and how far it lags.
+input:
+  generate:
+    count: 1
+    interval: ""
+    mapping: 'root = {}'
+pipeline:
+  processors:
+    - mapping: 'root = if env("CDC_RETRY_GROUPS").or("[]") == "[]" { deleted() } else { this }'
+    - redis_script:
+        url: ${REDIS_URL}
+        keys_mapping: 'root = ["cdc-events"]'
+        args_mapping: 'root = env("CDC_RETRY_GROUPS").parse_json()'
+        script: |
+          local state = {}
+          if redis.call('EXISTS', KEYS[1]) == 1 then
+            for _, group in ipairs(redis.call('XINFO', 'GROUPS', KEYS[1])) do
+              local fields = {}
+              for i = 1, #group, 2 do fields[group[i]] = group[i + 1] end
+              state[fields['name']] = fields
+            end
+          end
+          local report = {}
+          for _, group in ipairs(ARGV) do
+            local dead = group .. '-dead'
+            local entries = redis.call('XRANGE', dead, '-', '+')
+            for _, entry in ipairs(entries) do
+              redis.call('XADD', group .. '-retry', '*', unpack(entry[2]))
+            end
+            redis.call('DEL', dead)
+            local fields = state[group] or {}
+            report[group] = {redriven = #entries, pending = fields['pending'] or 0, lag = fields['lag'] or cjson.null}
+          end
+          return cjson.encode(report)
+    - catch:
+        - crash: 'durable retry redrive failed: ${! error() }'
+    - log:
+        level: INFO
+        message: 'durable retry at start: ${! content() }'
+output:
+  drop: {}

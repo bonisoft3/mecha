@@ -234,7 +234,7 @@ _mecha: bayt.#project & _where & {
 		"mesh-image": _image & {
 			srcs: globs: ["services/mesh/dapr/components/*.yaml", "services/mesh/entrypoint.sh"]
 			dockerfile: {
-				from: name: "daprio/daprd:1.16.1@sha256:b977660c4503fe9872b0a94a33067df0dfe0a84878dc054acd8caff82a8c4125"
+				from: name: "daprio/daprd:1.17.20@sha256:75c322ad017a0efe4bdfeabdef6b509171087ed8734fd754c2ef70f4b3293921"
 				// The entrypoint's interpreter: daprd's image ships no shell.
 				copy: [
 					{from: {name: _busybox}, srcs: ["/bin/busybox"], dst: "/busybox"},
@@ -251,7 +251,7 @@ _mecha: bayt.#project & _where & {
 				workdir: "/app"
 				preamble: [
 					"ARG TARGETARCH",
-					"RUN mkdir -p /app/connectors && ARCH=$(case \"${TARGETARCH}\" in arm64) echo \"arm64\" ;; *) echo \"x86_64\" ;; esac) && wget -qO- \"https://github.com/conduitio-labs/conduit-connector-http/releases/download/v0.4.0/conduit-connector-http_0.4.0_Linux_${ARCH}.tar.gz\" | tar -xzf - -C /app/connectors conduit-connector-http && chmod +x /app/connectors/conduit-connector-http && apk add --no-cache gettext",
+					"RUN mkdir -p /app/connectors && ARCH=$(case \"${TARGETARCH}\" in arm64) echo \"arm64\" ;; *) echo \"x86_64\" ;; esac) && wget -qO- \"https://github.com/conduitio-labs/conduit-connector-http/releases/download/v0.4.0/conduit-connector-http_0.4.0_Linux_${ARCH}.tar.gz\" | tar -xzf - -C /app/connectors conduit-connector-http && chmod +x /app/connectors/conduit-connector-http && apk add --no-cache gettext postgresql-client curl",
 				]
 			}
 		}

@@ -4,7 +4,7 @@
     "preamble": [],
     "preambleCopyContexts": [],
     "from": {
-      "name": "daprio/daprd:1.16.1@sha256:b977660c4503fe9872b0a94a33067df0dfe0a84878dc054acd8caff82a8c4125"
+      "name": "daprio/daprd:1.17.20@sha256:75c322ad017a0efe4bdfeabdef6b509171087ed8734fd754c2ef70f4b3293921"
     },
     "copy": [
       {

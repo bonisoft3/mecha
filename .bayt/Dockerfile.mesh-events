@@ -29,12 +29,13 @@ spec:
       value: "mecha"
     - name: enableTLS
       value: "false"
+    # Only durable retry subscribes through Dapr. Its resiliency policy
+    # (resiliency.yaml) owns the attempts and keeps a record pending for up to
+    # twenty minutes, which redelivery after this timeout would duplicate.
     - name: processingTimeout
-      value: "30s"
+      value: "1h"
     - name: redeliverInterval
-      value: "5s"
-    - name: maxRetries
-      value: "5"
+      value: "1m"
     - name: concurrency
       value: "1"
 auth:

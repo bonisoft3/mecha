@@ -223,7 +223,7 @@ by writing the row whose state invokes it, and sees the answer land in that row.
   5 s a request. `READ_TIMEOUT_MS`, 20 s, bounds a read whole. got follows no redirect.
 - The cache is RFC 9111's, in this process's memory, shared by every row's read: a
   thousand answers holding 64 MiB together at most, the least recently used dropped
-  first, none over 1 MiB and none without a `Content-Length`, each exact path
+  first, none over 1 MiB (checked up front when `Content-Length` is sent, and at store time for chunked streams), each exact path
   in a partition of its own (got's key is the URL as normalize-url rewrites it, with no
   `utm_` parameter and a space as `+`), so a credential is never part of a key. The
   cache does not know where an endpoint leads, so a process does not outlive its

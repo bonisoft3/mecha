@@ -4,14 +4,14 @@ import { serve } from "./main.ts";
 // Transport probes control acceptance; durable storage is tested in batches_test.ts.
 function receiver(reads: string[], accept: () => void | Promise<void>) {
   return {
-    async refresh(tables: string[] = []) {
-      if (tables.some((table) => reads.includes(table))) await accept();
+    async refresh(tables?: string[]) {
+      if (tables === undefined || tables.some((table) => reads.includes(table))) await accept();
       return true;
     },
   };
 }
 
-const REDIS = "redis:8.2.11-bookworm@sha256:b0b01167ff47bc3868e56a967895a26be4230891a1f42a78ab61cdd227accc8d";
+const REDIS = "redis:8.4.8-trixie@sha256:90cb779e1f814f1123532293f7a7a18a6a48bdc01aa0a9d54ce9f3d61b71018f";
 const text = (b: Uint8Array) => new TextDecoder().decode(b).trim();
 async function command(cmd: string, ...args: string[]) {
   const r = await new Deno.Command(cmd, {
@@ -329,7 +329,7 @@ for (const refusedOnce of [false, true]) {
 Deno.test("Redis delivery joins transaction markers into the invalidation's traceparent", async () => {
   const container = await redis();
   const cli = (...args: string[]) => command("docker", "exec", container, "redis-cli", "--json", ...args);
-  const seen: { tables: string[]; traceparent: string | null }[] = [];
+  const seen: { tables: string[] | null; traceparent: string | null }[] = [];
   const server = Deno.serve({ port: 0, hostname: "127.0.0.1", onListen() {} }, async (req) => {
     seen.push({ tables: (await req.json()).tables, traceparent: req.headers.get("traceparent") });
     return new Response(null, { status: 204 });
@@ -362,19 +362,21 @@ Deno.test("Redis delivery joins transaction markers into the invalidation's trac
       stdout: "null",
       stderr: "null",
     }).spawn();
+    await until(() => seen.length === 1);
     // The rows a delete reaches the bus as carry their last writer's txid.
     await at(marker(10, T1), event({ __table: "source", txid: 10 }), event({ __table: "derived_input", txid: 3 }));
-    await until(() => seen.length === 1);
-    await at(marker(11, ""), event({ __table: "source", txid: 11 }));
     await until(() => seen.length === 2);
+    await at(marker(11, ""), event({ __table: "source", txid: 11 }));
+    await until(() => seen.length === 3);
     await at(
       marker(12, T1),
       event({ __table: "source", txid: 12 }),
       marker(13, T2),
       event({ __table: "source", txid: 13 }),
     );
-    await until(() => seen.length === 3);
+    await until(() => seen.length === 4);
     assertEquals(seen, [
+      { tables: null, traceparent: null },
       { tables: ["source", "derived_input"], traceparent: T1 },
       { tables: ["source"], traceparent: null },
       { tables: ["source"], traceparent: T1 },

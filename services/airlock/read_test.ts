@@ -145,7 +145,7 @@ Deno.test("Vary is honoured: an answer that varies on everything is never reused
   }
 });
 
-Deno.test("the declared freshness stands in for a sink that sends none, only where a cache may give one, and a body of unstated length is not kept", async () => {
+Deno.test("the declared freshness stands in for a sink that sends none, only where a cache may give one, and a body past the entry bound is not kept", async () => {
   const s = sink((req) => {
     const p = sinkPathOf(req);
     if (p === "/plain") return Response.json({ n: 1 });
@@ -153,6 +153,11 @@ Deno.test("the declared freshness stands in for a sink that sends none, only whe
     if (p === "/own") return Response.json({ n: 1 }, { headers: { "cache-control": "no-cache" } });
     if (p === "/chunked") {
       const body = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"n":1}')); c.close(); } });
+      return new Response(body, { headers: { "content-type": "application/json", "cache-control": "max-age=60" } });
+    }
+    if (p === "/chunked-large") {
+      const payload = new TextEncoder().encode(JSON.stringify({ pad: "x".repeat(1_100_000) }));
+      const body = new ReadableStream({ start(c) { c.enqueue(payload); c.close(); } });
       return new Response(body, { headers: { "content-type": "application/json", "cache-control": "max-age=60" } });
     }
     return Response.json({ n: 1 }, { status: 500 });
@@ -168,9 +173,11 @@ Deno.test("the declared freshness stands in for a sink that sends none, only whe
       assertEquals((await get("rate", at(p), {}, reach)).fromCache, false, p);
       assertEquals(a.headers["cache-control"] === "max-age=60", false, p);
     }
-    // A body of unstated length is never kept: it could be any size.
+    // Chunked responses (e.g. Dapr 1.17 service invocation) cache within the 1 MiB bound and skip past it.
     await get("rate", at("/chunked"), {}, reach);
-    assertEquals((await get("rate", at("/chunked"), {}, reach)).fromCache, false);
+    assertEquals((await get("rate", at("/chunked"), {}, reach)).fromCache, true);
+    await get("rate", at("/chunked-large"), {}, reach);
+    assertEquals((await get("rate", at("/chunked-large"), {}, reach)).fromCache, false);
   } finally {
     await s.close();
   }

@@ -4,7 +4,7 @@ WORKDIR /monorepo/libraries/mecha
 COPY services/transform/passthrough.yaml /pipelines/passthrough.yaml
 COPY --parents services/transform/passthrough.yaml ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.transform.json ./.bayt/
-CMD ["streams", "--no-api", "-r", "/cdc-trace.yaml", "/pipelines/passthrough.yaml"]
+CMD ["streams", "--no-api", "-r", "/cdc-trace.yaml", "/durable-retry.yaml", "/pipelines/passthrough.yaml"]
 COPY <<'CDCTRACE' /cdc-trace.yaml
 # The change feed's transaction trace, joined onto every row: shared by every
 # stream reading cdc-events through the transform's `-r`, since streams mode
@@ -30,33 +30,141 @@ cache_resources:
       # and only has to outlast the longest transaction's rows (the default
       # is 5m).
       default_ttl: 24h
+  - label: cdc_epoch
+    memory:
+      # The epoch each reader's group had when this process first read it,
+      # kept for the process's life.
+      default_ttl: 876000h
+  - label: cdc_sweep
+    memory:
+      # A pipeline's aggregate, read once for the rows its start sweeps.
+      default_ttl: 1h
 
 processor_resources:
   # Redis Streams delivers single-message batches. Missing declared readers
-  # hold the stream intact while their groups are still being registered.
+  # hold the stream intact while their groups are still being registered. A
+  # reader under durable retry (CDC_RETRY_GROUPS) also hands its crash loops to
+  # its retry stream: a record that kills the process leaves no copy in memory,
+  # only a delivery count that grows with every restart. A declared group past
+  # CDC_GROUP_BUDGET (lag + pending entries) is destroyed and its epoch deleted
+  # so trimming proceeds and its reader restarts to sweep on return.
+  #
+  # Every group has an epoch in Redis, set when the guard first sees it. A
+  # Redis that lost its data, a group retired past its budget, or a slot_reset
+  # marker from Conduit clears epochs and stops readers so their restart
+  # rebuilds from the current rows.
   - label: cdc_stream_trim
     branch:
-      request_map: 'root = if batch_index() == 0 && @redis_stream.or("") != "" { "" } else { deleted() }'
+      request_map: |
+        let reset = this.catch({}).data.or("").catch("").parse_json().catch({}).__table.or("") == "slot_reset"
+        let wake = @redis_stream.or("") == "" && env("CDC_GROUPS").or("") != "" && (@cdc_via.or("") == "wake" || this.catch({}).wake.or("") == "start")
+        root = if @redis_stream.or("") != "" && (batch_index() == 0 || $reset) { if $reset { @redis_stream } else { "" } } else if $wake && batch_index() == 0 && @cdc_consumer.or("") != "" { "wake" } else { deleted() }
       processors:
         - redis_script:
             url: ${REDIS_URL}
             keys_mapping: 'root = ["cdc-events"]'
-            args_mapping: 'root = env("CDC_GROUPS").parse_json()'
+            args_mapping: 'root = [@cdc_consumer.or(""), env("CDC_RETRY_GROUPS").or("[]"), env("CDC_MAX_DELIVERIES").or("5"), env("CDC_GROUP_BUDGET").or("100000"), content().string()].concat(env("CDC_GROUPS").parse_json())'
             script: |
               #!lua flags=allow-oom
-              if #ARGV == 0 then return redis.error_reply('CDC_GROUPS must name the stream readers') end
-              local present = {}
+              if #ARGV <= 5 then return redis.error_reply('CDC_GROUPS must name the stream readers') end
+              local consumer, max, budget, reset_id = ARGV[1], tonumber(ARGV[3]), tonumber(ARGV[4]), ARGV[5]
+              if not budget or budget <= 0 then return redis.error_reply('CDC_GROUP_BUDGET must be positive') end
+              if reset_id == 'wake' then
+                if consumer ~= '' and redis.call('EXISTS', 'cdc-retired:' .. consumer) == 1 then
+                  if redis.call('EXISTS', KEYS[1]) == 1 then
+                    redis.call('XGROUP', 'DESTROY', KEYS[1], consumer)
+                  end
+                  redis.call('XGROUP', 'CREATE', KEYS[1], consumer, '$', 'MKSTREAM')
+                  redis.call('DEL', 'cdc-retired:' .. consumer)
+                  redis.call('DEL', 'cdc-epoch:' .. consumer)
+                end
+                return ''
+              end
+              local groups = {}
               for _, group in ipairs(redis.call('XINFO', 'GROUPS', KEYS[1])) do
-                for i = 1, #group, 2 do
-                  if group[i] == 'name' then present[group[i + 1]] = true end
+                local fields = {}
+                for i = 1, #group, 2 do fields[group[i]] = group[i + 1] end
+                groups[fields['name']] = fields
+              end
+              if reset_id ~= '' and consumer ~= '' and redis.call('GET', 'cdc-reset:' .. consumer) ~= reset_id then
+                for i = 6, #ARGV do
+                  redis.call('SET', 'cdc-reset:' .. ARGV[i], reset_id)
+                  redis.call('DEL', 'cdc-epoch:' .. ARGV[i])
+                end
+                if groups[consumer] then redis.call('XACK', KEYS[1], consumer, reset_id) end
+                return 'reset'
+              end
+              local retired_self = false
+              for i = 6, #ARGV do
+                local name = ARGV[i]
+                local fields = groups[name]
+                if fields then
+                  local behind = (tonumber(fields['pending']) or 0) + (tonumber(fields['lag']) or 0)
+                  if redis.call('EXISTS', 'cdc-retired:' .. name) == 1 then
+                    if behind > budget then
+                      redis.call('XGROUP', 'DESTROY', KEYS[1], name)
+                      redis.call('XGROUP', 'CREATE', KEYS[1], name, '$', 'MKSTREAM')
+                      redis.call('DEL', 'cdc-epoch:' .. name)
+                      redis.call('DEL', 'cdc-retired:' .. name)
+                      groups[name] = {pending = 0, lag = 0}
+                      if name == consumer then retired_self = true end
+                    else
+                      redis.call('DEL', 'cdc-retired:' .. name)
+                    end
+                  elseif behind > budget then
+                    redis.call('XGROUP', 'DESTROY', KEYS[1], name)
+                    redis.call('DEL', 'cdc-epoch:' .. name)
+                    redis.call('SET', 'cdc-retired:' .. name, '1')
+                    groups[name] = nil
+                  end
                 end
               end
-              for _, name in ipairs(ARGV) do
-                if not present[name] then return 0 end
+              local epoch = ''
+              if consumer ~= '' and not retired_self then
+                local now = redis.call('TIME')
+                redis.call('SET', 'cdc-epoch:' .. consumer, now[1] .. '.' .. now[2], 'NX')
+                epoch = redis.call('GET', 'cdc-epoch:' .. consumer)
               end
-              return redis.call('XTRIM', KEYS[1], 'MAXLEN', '~', 10000, 'LIMIT', 1000, 'ACKED')
+              for _, group in ipairs(cjson.decode(ARGV[2])) do
+                if group == consumer and groups[group] and not retired_self then
+                  for _, p in ipairs(redis.call('XPENDING', KEYS[1], group, '-', '+', 100)) do
+                    if p[4] > max then
+                      local entry = redis.call('XRANGE', KEYS[1], p[1], p[1])[1]
+                      if entry then redis.call('XADD', group .. '-retry', '*', unpack(entry[2])) end
+                      redis.call('XACK', KEYS[1], group, p[1])
+                    end
+                  end
+                  redis.call('XTRIM', group .. '-retry', 'MAXLEN', '~', 10000, 'LIMIT', 1000, 'ACKED')
+                end
+              end
+              local complete = true
+              for i = 6, #ARGV do
+                if not groups[ARGV[i]] and redis.call('EXISTS', 'cdc-retired:' .. ARGV[i]) == 0 then complete = false end
+              end
+              if complete then redis.call('XTRIM', KEYS[1], 'MAXLEN', '~', 10000, 'LIMIT', 1000, 'ACKED') end
+              if retired_self then return 'retired' end
+              return epoch
         - catch:
             - crash: 'CDC stream trimming failed: ${! error() }'
+        - switch:
+            - check: 'this.catch("") == "reset"'
+              processors:
+                - crash: 'the bus slot was lost for ${! @cdc_consumer }: restarting to rebuild'
+            - check: 'this.catch("") == "retired"'
+              processors:
+                - crash: 'the retired group ${! @cdc_consumer } was advanced to the stream tail: restarting to rebuild'
+            - check: 'this.catch("") != ""'
+              processors:
+                - mapping: 'meta cdc_epoch = content().string()'
+                - cached:
+                    cache: cdc_epoch
+                    key: '${! @cdc_consumer.or("") }'
+                    processors:
+                      - mapping: 'root = @cdc_epoch'
+                - switch:
+                    - check: '@cdc_epoch != "" && content().string() != @cdc_epoch'
+                      processors:
+                        - crash: 'the bus lost what ${! @cdc_consumer } had not read (its epoch is ${! @cdc_epoch }, not ${! content() }): restarting to rebuild'
 
   - label: cdc_trace_join
     # A batch runs each processor over every message before the next, so a
@@ -82,6 +190,9 @@ processor_resources:
                       key: ${! @cdc_consumer }
                       value: ${! content() }
                   - mapping: root = deleted()
+          - check: this.catch({}).data.or("").catch("").parse_json().catch({}).__table.or("") == "slot_reset"
+            processors:
+              - mapping: root = deleted()
           - processors:
               - branch:
                   request_map: root = ""
@@ -104,6 +215,54 @@ processor_resources:
       meta traceparent = if $traces.length() > 0 { $traces.index(0) } else { deleted() }
 
 CDCTRACE
+COPY <<'DURABLERETRY' /durable-retry.yaml
+# Durable retry's start, a stream of its own beside the readers'. Each group
+# under durable retry (CDC_RETRY_GROUPS) moves its dead letters back to its
+# retry stream once, so the release that fixes a poison record also redrives
+# it, and the bus's state is logged where an operator reads the transform:
+# per group, what was redriven, what is pending and how far it lags.
+input:
+  generate:
+    count: 1
+    interval: ""
+    mapping: 'root = {}'
+pipeline:
+  processors:
+    - mapping: 'root = if env("CDC_RETRY_GROUPS").or("[]") == "[]" { deleted() } else { this }'
+    - redis_script:
+        url: ${REDIS_URL}
+        keys_mapping: 'root = ["cdc-events"]'
+        args_mapping: 'root = env("CDC_RETRY_GROUPS").parse_json()'
+        script: |
+          local state = {}
+          if redis.call('EXISTS', KEYS[1]) == 1 then
+            for _, group in ipairs(redis.call('XINFO', 'GROUPS', KEYS[1])) do
+              local fields = {}
+              for i = 1, #group, 2 do fields[group[i]] = group[i + 1] end
+              state[fields['name']] = fields
+            end
+          end
+          local report = {}
+          for _, group in ipairs(ARGV) do
+            local dead = group .. '-dead'
+            local entries = redis.call('XRANGE', dead, '-', '+')
+            for _, entry in ipairs(entries) do
+              redis.call('XADD', group .. '-retry', '*', unpack(entry[2]))
+            end
+            redis.call('DEL', dead)
+            local fields = state[group] or {}
+            report[group] = {redriven = #entries, pending = fields['pending'] or 0, lag = fields['lag'] or cjson.null}
+          end
+          return cjson.encode(report)
+    - catch:
+        - crash: 'durable retry redrive failed: ${! error() }'
+    - log:
+        level: INFO
+        message: 'durable retry at start: ${! content() }'
+output:
+  drop: {}
+
+DURABLERETRY
 
 FROM busybox:musl@sha256:03db190ed4c1ceb1c55d179a0940e2d71d42130636a780272629735893292223 AS transform_ctxs
 WORKDIR /monorepo/libraries/mecha

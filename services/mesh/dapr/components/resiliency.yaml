@@ -9,6 +9,14 @@ spec:
         policy: exponential
         maxInterval: 15s
         maxRetries: -1
+      # Durable retry's redeliveries, only where a release subscribes to a
+      # group's retry stream: about twenty minutes of backoff before the record
+      # is dead-lettered, inside redis-streams.yaml's processingTimeout.
+      redeliver:
+        policy: exponential
+        initialInterval: 1s
+        maxInterval: 5m
+        maxRetries: 12
     circuitBreakers:
       default-breaker:
         maxRequests: 20
@@ -20,3 +28,5 @@ spec:
         outbound:
           retry: publish
           circuitBreaker: default-breaker
+        inbound:
+          retry: redeliver

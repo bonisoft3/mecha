@@ -23,7 +23,7 @@ import { generateSealKey, seal as sealValue, sealKeys, sealLabel } from "./seal.
 import { SEAL_TABLES_SQL } from "./seal-tables.ts";
 
 const POSTGRES = "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8";
-const DAPRD = "daprio/daprd:1.16.1@sha256:b977660c4503fe9872b0a94a33067df0dfe0a84878dc054acd8caff82a8c4125";
+const DAPRD = "daprio/daprd:1.17.20@sha256:75c322ad017a0efe4bdfeabdef6b509171087ed8734fd754c2ef70f4b3293921";
 const CURL = "curlimages/curl:8.5.0@sha256:08e466006f0860e54fc299378de998935333e0e130a15f6f98482e9f8dab3058";
 
 async function run(cmd: string, args: string[], cwd?: string): Promise<string> {
@@ -787,8 +787,7 @@ Deno.test({ name: "a read crosses the mesh with HTTP's caching intact", sanitize
     const rate: Read = { request: { method: "GET", path: "/v1/rates/{currency}{?day}" }, invoke: READS.priced.invoke, cacheControl: "max-age=60", got: { retry: { limit: 0 } } };
 
     const first = await get("rate", rate, { currency: "USD", day: "2026-11-16" }, reach);
-    // daprd adds Origin to Vary; a read sends none, so it varies nothing.
-    assertEquals([first.status, first.headers["cache-control"], first.headers["etag"], first.headers["vary"]], [200, "public, max-age=1", '"r1"', "Origin, Authorization"]);
+    assertEquals([first.status, first.headers["cache-control"], first.headers["etag"], first.headers["vary"]], [200, "public, max-age=1", '"r1"', "Authorization"]);
     assertEquals(asked[0], { path: "/v1/rates/USD?day=2026-11-16", authorization: "Bearer rate-key", ifNoneMatch: null });
     assertEquals((await get("rate", rate, { currency: "USD", day: "2026-11-16" }, reach)).fromCache, true);
     assertEquals(asked.length, 1);

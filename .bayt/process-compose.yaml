@@ -28,7 +28,7 @@ processes:
     - nu
     - -c
     - |-
-      if ('/docker-entrypoint-initdb.d' | path exists) { exec docker-entrypoint.sh postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200 }
+      if ('/docker-entrypoint-initdb.d' | path exists) { exec docker-entrypoint.sh postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c max_slot_wal_keep_size=1GB -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200 }
       let mecha = (if (($$env.PRONTO_INITDB_SRC_DIR? | default '') != '') { $$env.PRONTO_INITDB_SRC_DIR } else if ('services/database/rls/rls.sql' | path exists) { $$env.PWD } else { (^mise where github:bonisoft3/mecha | str trim) })
       let initdb = (($$env.BAYT_LOCAL_WORK_DIR? | default $$nu.temp-dir) | path join 'initdb.d')
       rm -rf $$initdb; mkdir $$initdb
@@ -36,7 +36,7 @@ processes:
       cp -f ($$mecha | path join 'services/database/role_passwords.sh') ($$initdb | path join '899_role_passwords.sh')
       cp -f ($$mecha | path join 'services/ticker/schedule.sql') ($$initdb | path join '800_schedule.sql')
       open .bayt/bayt.database.json | get dockerfile.copy.0.srcs | each {|s| cp -f $$s ($$initdb | path join ($$s | path basename)) } | ignore
-      exec nu ($$mecha | path join 'services/database/entrypoint.nu') $$initdb postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200
+      exec nu ($$mecha | path join 'services/database/entrypoint.nu') $$initdb postgres -c session_preload_libraries=pg_ivm -c wal_level=logical -c max_replication_slots=128 -c max_wal_senders=128 -c max_slot_wal_keep_size=1GB -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c shared_buffers=32MB -c max_connections=200
     availability:
       exit_on_skipped: true
     environment:
@@ -257,7 +257,8 @@ processes:
     - -c
     - >-
       exec redis-server --port ($$env.REDIS_PORT? | default '6379') --save ''
-      --appendonly no
+      --appendonly no --maxmemory ($$env.REDIS_MAXMEMORY? | default '256mb')
+      --maxmemory-policy noeviction
     availability:
       exit_on_skipped: true
     environment:
@@ -292,12 +293,14 @@ processes:
       'services/mesh' } else { ((^mise where github:bonisoft3/mecha | str trim) | path
       join 'services/mesh') }); cp -f ($$mdir | path join
       'dapr/components/resiliency.yaml') ($$dir | path join 'resiliency.yaml'); cp -f ($$mdir | path join
-      'dapr/components/redis-streams.yaml') ($$dir | path join 'redis-streams.yaml'); exec daprd
-      --app-id mechaed --dapr-listen-addresses 127.0.0.1
-      --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path $$dir --app-channel-address 127.0.0.1 --app-port
-      $$env.CADDY_PORT --dapr-http-port $$env.DAPR_HTTP_PORT --dapr-grpc-port 0
-      --dapr-internal-grpc-port $$env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0
-      --log-level info --enable-api-logging
+      'dapr/components/redis-streams.yaml') ($$dir | path join 'redis-streams.yaml'); if
+      (($$env.MESH_SUBSCRIPTIONS_DIR? | default '') != '') { ls ($$env.MESH_SUBSCRIPTIONS_DIR |
+      path join '*.yaml' | into glob) | each {|f| cp -f $$f.name $$dir } | ignore };
+      exec daprd --app-id mechaed --dapr-listen-addresses 127.0.0.1
+      --dapr-internal-grpc-listen-address 127.0.0.1 --resources-path $$dir --app-channel-address 127.0.0.1
+      --app-port ($$env.MESH_APP_PORT? | default $$env.CADDY_PORT) --dapr-http-port
+      $$env.DAPR_HTTP_PORT --dapr-grpc-port 0 --dapr-internal-grpc-port
+      $$env.DAPR_INTERNAL_GRPC_PORT --metrics-port 0 --profile-port 0 --log-level info --enable-api-logging
     availability:
       exit_on_skipped: true
       restart: on_failure
@@ -332,18 +335,7 @@ processes:
     - --
     - nu
     - -c
-    - >-
-      let base = ($$env.BAYT_LOCAL_WORK_DIR? | default $$nu.temp-dir); let dir =
-      ($$base | path join $$'conduit-($$nu.pid)-(random int 1000..9999)'); mkdir ($$dir |
-      path join 'pipelines') ($$dir | path join 'connectors'); let conn = (which
-      conduit-connector-http | first | get path); cp -f $$conn ($$dir | path join 'connectors'
-      ($$conn | path basename)); open --raw 'services/cdc/pipelines/cdc-to-dapr.yaml'
-      | str replace -a '$${DATABASE_URL}' $$env.DATABASE_URL | str replace -a
-      '$${MESH_EVENTS_URL}' $$env.MESH_EVENTS_URL | save -f ($$dir | path join
-      'pipelines/cdc-to-bus.yaml'); exec conduit run --db.type inmemory --pipelines.path ($$dir | path
-      join 'pipelines') --connectors.path ($$dir | path join 'connectors')
-      --api.http.address $$"127.0.0.1:($$env.CONDUIT_API_HTTP_ADDRESS_PORT)" --api.grpc.address
-      '127.0.0.1:0'
+    - "let base = ($$env.BAYT_LOCAL_WORK_DIR? | default $$nu.temp-dir); let dir = ($$base | path join $$'conduit-($$nu.pid)-(random int 1000..9999)'); mkdir ($$dir | path join 'pipelines') ($$dir | path join 'connectors'); let conn = (which conduit-connector-http | first | get path); cp -f $$conn ($$dir | path join 'connectors' ($$conn | path basename)); let cfg = ($$dir | path join 'pipelines/cdc-to-bus.yaml'); open --raw 'services/cdc/pipelines/cdc-to-dapr.yaml' | str replace -a '$${DATABASE_URL}' $$env.DATABASE_URL | str replace -a '$${MESH_EVENTS_URL}' $$env.MESH_EVENTS_URL | save -f $$cfg; let raw = (open --raw $$cfg); let slot = ($$raw | parse -r 'logrepl\\\\.slotName:\\\\s*\"?(?<name>[a-zA-Z0-9_]+)\"?' | get -o 0.name | default ''); let pub = ($$raw | parse -r 'logrepl\\\\.publicationName:\\\\s*\"?(?<name>[a-zA-Z0-9_]+)\"?' | get -o 0.name | default ''); if $$slot != '' { if $$pub == '' { error make { msg: $$'conduit: slot ($$slot) has no logrepl.publicationName' } }; let state = (\"SELECT COALESCE((SELECT '1' FROM pg_replication_slots WHERE slot_name = :'slot' AND wal_status = 'lost'), '0') || ',' || COALESCE((SELECT '1' FROM pg_publication WHERE pubname = :'pub' AND obj_description(oid, 'pg_publication') = 'slot_reset_pending'), '0');\" | ^psql $$env.DATABASE_URL -XAt -v ON_ERROR_STOP=1 -v $$'slot=($$slot)' -v $$'pub=($$pub)' | str trim); if $$state != '0,0' { print -e $$'conduit: slot ($$slot) recovery needed (($$state)); recreating slot and signalling readers to rebuild'; mut ready = false; for _ in 1..30 { if (try { http get $$'($$env.MESH_EVENTS_URL)/v1.0/healthz/outbound'; true } catch { false }) { $$ready = true; break }; sleep 1sec }; if not $$ready { error make { msg: $$'conduit: mesh-events at ($$env.MESH_EVENTS_URL) not ready' } }; ([\"COMMENT ON PUBLICATION :\\\\\"pub\\\\\" IS 'slot_reset_pending';\" \"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = :'slot' AND wal_status = 'lost';\" \"SELECT pg_create_logical_replication_slot(:'slot', 'pgoutput') WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = :'slot');\"] | str join (char nl)) | ^psql $$env.DATABASE_URL -X -v ON_ERROR_STOP=1 -v $$'slot=($$slot)' -v $$'pub=($$pub)'; http post --content-type text/plain $$'($$env.MESH_EVENTS_URL)/v1.0/publish/redis-streams/cdc-events' '{\"__table\":\"slot_reset\"}'; \"COMMENT ON PUBLICATION :\\\\\"pub\\\\\" IS NULL;\" | ^psql $$env.DATABASE_URL -X -v ON_ERROR_STOP=1 -v $$'pub=($$pub)' } }; exec conduit run --db.type inmemory --pipelines.path ($$dir | path join 'pipelines') --connectors.path ($$dir | path join 'connectors') --api.http.address $$\"127.0.0.1:($$env.CONDUIT_API_HTTP_ADDRESS_PORT)\" --api.grpc.address '127.0.0.1:0'"
     availability:
       exit_on_skipped: true
       restart: on_failure
@@ -445,8 +437,10 @@ processes:
       (($$env.MECHA_TRANSFORM_DIR? | default '') != '') { $$env.MECHA_TRANSFORM_DIR } else
       { ($$mecha | path join 'services/transform') }); let cdir = (if
       (($$env.COMPUTE_APP_DIR? | default '') != '') { $$env.COMPUTE_APP_DIR } else { ($$mecha | path
-      join 'services/compute') }); exec redpanda-connect streams --set
-      'http.enabled=false' --no-api -r ($$tdir | path join 'cdc-trace.yaml')
+      join 'services/compute') }); exec redpanda-connect streams --set ('http.enabled=' +
+      ((($$env.CDC_REPLAY_PORT? | default '') != '') | into string)) --set
+      ('http.address=127.0.0.1:' + ($$env.CDC_REPLAY_PORT? | default '0')) --no-api -r ($$tdir |
+      path join 'cdc-trace.yaml') ($$tdir | path join 'durable-retry.yaml')
       'services/transform/passthrough.yaml'
     availability:
       exit_on_skipped: true

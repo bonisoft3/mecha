@@ -30,9 +30,14 @@
     "preamble": [],
     "preambleCopyContexts": [],
     "from": {
-      "name": "redis:8.2.11-bookworm@sha256:b0b01167ff47bc3868e56a967895a26be4230891a1f42a78ab61cdd227accc8d"
+      "name": "redis:8.4.8-trixie@sha256:90cb779e1f814f1123532293f7a7a18a6a48bdc01aa0a9d54ce9f3d61b71018f"
     },
     "workdir": "/data",
+    "cmd": [
+      "sh",
+      "-c",
+      "exec redis-server --save '' --appendonly no --maxmemory \"${REDIS_MAXMEMORY:-256mb}\" --maxmemory-policy noeviction"
+    ],
     "healthcheck": {
       "test": [
         "CMD-SHELL",
@@ -51,11 +56,10 @@
     "copy": [],
     "expose": [],
     "entrypoint": null,
-    "incremental": false,
-    "cmd": null
+    "incremental": false
   },
   "entrypoint": {
-    "do": "exec redis-server --port ($env.REDIS_PORT? | default '6379') --save '' --appendonly no",
+    "do": "exec redis-server --port ($env.REDIS_PORT? | default '6379') --save '' --appendonly no --maxmemory ($env.REDIS_MAXMEMORY? | default '256mb') --maxmemory-policy noeviction",
     "dockerfile": null,
     "shell": "nu",
     "env": {},

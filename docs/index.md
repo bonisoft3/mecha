@@ -42,5 +42,6 @@
 
 # Archive
 
+* [The bounded bus](archive/2026-11-18-bounded-bus.md) - decision, built: Keeps the Conduit → Dapr → Redis change bus and closes what native trimming left open — Redis that survives a restart, a poison record parked instead of retried forever, every derivation rebuilt from current rows, and a budget past which a stalled group or a slot is reset and rebuilt.
 * [One compute core](archive/2026-11-19-one-compute-core.md) - decision, built: Runs a computation's capture, step loop, publication and digest from one sans-IO core on the server, on Cloudflare and in the browser, each host supplying only its DuckDB connection, its storage and its transport.
 * [The edge airlock's dispatcher Worker](archive/2026-11-06-edge-airlock-dispatcher.md) - decision, built: Runs Cloudflare effects in a queue-consuming Worker apart from the Durable Object holding the database, which claims, leases and settles them, so rendering and commits never wait on an effect's network.

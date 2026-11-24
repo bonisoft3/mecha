@@ -14,7 +14,7 @@ COPY --from=ghcr.io/xataio/pgroll:v0.16.3@sha256:aca5425285691ed78079196c1629de0
 COPY --chmod=755 services/migrate/migrate.sh /migrate.sh
 COPY --parents services/database/rls/rls.sql services/database/role_passwords.sh services/ticker/schedule.sql services/durex/graphile.sql services/airlock/airlock.sql services/airlock/job_key.sql services/migrate/migrate.sh ./
 COPY .bayt/Taskfile.yml .bayt/Taskfile.bayt.yml .bayt/bayt.database-image.json ./.bayt/
-CMD ["postgres", "-c", "session_preload_libraries=pg_ivm", "-c", "wal_level=logical", "-c", "max_replication_slots=128", "-c", "max_wal_senders=128", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
+CMD ["postgres", "-c", "session_preload_libraries=pg_ivm", "-c", "wal_level=logical", "-c", "max_replication_slots=128", "-c", "max_wal_senders=128", "-c", "max_slot_wal_keep_size=1GB", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off", "-c", "shared_buffers=32MB", "-c", "max_connections=200"]
 RUN for step in /usr/share/mecha/initdb/*.sh; do bash -n "$step"; done
 RUN cat /usr/share/mecha/initdb/800_schedule.sql /usr/share/mecha/initdb/012_airlock.sql > /tmp/airlock.sql && mv /tmp/airlock.sql /usr/share/mecha/initdb/012_airlock.sql
 RUN rm /var/lib/postgresql/data && install -d -o postgres -g postgres /var/lib/postgresql/data

@@ -657,14 +657,19 @@ export function handler(service: { refresh(tables?: string[]): Promise<boolean> 
       jwt !== undefined && req.headers.get("authorization") !== `Bearer ${jwt}`
     ) return new Response(null, { status: 401 });
     const body = await req.json();
-    if (
-      !isRow(body) || !Array.isArray(body.tables) ||
-      !body.tables.every((t) => typeof t === "string" && IDENTIFIER.test(t))
+    let tables: string[] | undefined;
+    if (isRow(body) && body.tables === null) {
+      tables = undefined;
+    } else if (
+      isRow(body) && Array.isArray(body.tables) &&
+      body.tables.every((t) => typeof t === "string" && IDENTIFIER.test(t))
     ) {
-      throw new Error("invalidation requires {tables: SQL identifiers[]}");
+      tables = body.tables;
+    } else {
+      throw new Error("invalidation requires {tables: SQL identifiers[] | null}");
     }
     return new Response(null, {
-      status: await service.refresh(body.tables) ? 204 : 503,
+      status: await service.refresh(tables) ? 204 : 503,
     });
   };
 }

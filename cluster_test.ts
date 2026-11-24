@@ -93,6 +93,7 @@ Deno.test("a computation alone gets a durable CDC consumer without a clock", asy
     "--no-api",
     "-r",
     "/cdc-trace.yaml",
+    "/durable-retry.yaml",
     "/compute-events.yaml",
   ]);
   assert.equal(
@@ -108,8 +109,9 @@ Deno.test("a computation alone gets a durable CDC consumer without a clock", asy
   assert.equal(got.value.launch.compose.depends_on.compute.condition, "service_healthy");
   assert.deepEqual(got.value.compute.compose.healthcheck.test, ["CMD", "portcheck", "--port", "9997"]);
   assert.match(got.value.transform.dockerfile.epilogue[0], /label: cdc_trace_join/);
+  assert.match(got.value.transform.dockerfile.epilogue[1], /durable retry at start/);
   assert.match(
-    got.value.transform.dockerfile.epilogue[1],
+    got.value.transform.dockerfile.epilogue[2],
     /client_id: compute/,
   );
   assert.equal(
@@ -849,7 +851,8 @@ Deno.test("RisingWave deployment selects its pinned internal service and ships t
     assert.equal(JSON.parse(compute.compose.environment.COMPUTATIONS)[0].risingwave, "/app/computations/analytics.risingwave.json");
     assert.ok(compute.srcs.globs.includes("duckstream/risingwave.json"));
     assert.ok(compute.dockerfile.copy.some((copy: { srcs: string[]; dst: string }) => copy.srcs[0] === "duckstream/risingwave.json" && copy.dst === "/app/computations/analytics.risingwave.json"));
-    assert.match(transform.dockerfile.epilogue[1], /client_id: compute/);
+    assert.match(transform.dockerfile.epilogue[1], /durable retry at start/);
+    assert.match(transform.dockerfile.epilogue[2], /client_id: compute/);
     if (duckstreamEngine === "risingwave") {
       assert.equal(risingwave.dockerfile.from.name, "risingwavelabs/risingwave:v3.1.1@sha256:b869358fa704250d25045d3575145ca59cfb67a558a08fa4f8fd375874c24d63");
       assert.deepEqual(risingwave.dockerfile.cmd, ["single_node"]);
@@ -857,13 +860,13 @@ Deno.test("RisingWave deployment selects its pinned internal service and ships t
       assert.equal(risingwave.compose.ports, undefined);
       assert.equal(compute.compose.depends_on.risingwave.condition, "service_healthy");
       assert.equal(compute.compose.environment.RISINGWAVE_URL, "http://risingwave:4566");
-      assert.deepEqual(transform.dockerfile.cmd, ["streams", "--no-api", "-r", "/cdc-trace.yaml"]);
+      assert.deepEqual(transform.dockerfile.cmd, ["streams", "--no-api", "-r", "/cdc-trace.yaml", "/durable-retry.yaml"]);
       assert.equal(transform.compose.environment.COMPUTE_GROUP, undefined);
     } else {
       assert.equal(risingwave, undefined);
       assert.equal(compute.compose.depends_on.risingwave, undefined);
       assert.equal(compute.compose.environment.RISINGWAVE_URL, undefined);
-      assert.deepEqual(transform.dockerfile.cmd, ["streams", "--no-api", "-r", "/cdc-trace.yaml", "/compute-events.yaml"]);
+      assert.deepEqual(transform.dockerfile.cmd, ["streams", "--no-api", "-r", "/cdc-trace.yaml", "/durable-retry.yaml", "/compute-events.yaml"]);
       assert.equal(transform.compose.environment.COMPUTE_GROUP, "t-compute");
     }
   }
@@ -934,4 +937,23 @@ Deno.test("a bridge's appliance build keeps its own dependencies, without the st
   assert.equal(got.ok, true, got.stderr);
   assert.deepEqual(got.value["crawler-appliance"].deps, [":support:outs"]);
   assert.equal(got.value["crawler-appliance"].compose.manual, true);
+});
+
+Deno.test("bus budgets cap PostgreSQL slots, configure Redis noeviction, and recreate lost slots", async () => {
+  const args = await evaluated("#PostgresArgs");
+  assert.equal(args.ok, true, args.stderr);
+  assert.ok(args.value.includes("max_slot_wal_keep_size=1GB"), JSON.stringify(args.value));
+  const got = await exported({ pipelines: [{ name: "p", file: "p.yaml" }] }, "surface.targets");
+  assert.equal(got.ok, true, got.stderr);
+  const t = got.value;
+  assert.match(t.redis.entrypoint.do, /--maxmemory .* --maxmemory-policy noeviction/);
+  assert.match(t.redis.dockerfile.cmd.join(" "), /--maxmemory .* --maxmemory-policy noeviction/);
+  assert.match(t.conduit.entrypoint.do, /wal_status = 'lost'/);
+  assert.match(t.conduit.entrypoint.do, /slot_reset/);
+  assert.match(t.conduit.entrypoint.do, /slot_reset_pending/);
+  assert.match(t.conduit.entrypoint.do, /COMMENT ON PUBLICATION/);
+  assert.match(t.conduit.dockerfile.cmd.join(" "), /wal_status = 'lost'/);
+  assert.match(t.conduit.dockerfile.cmd.join(" "), /slot_reset/);
+  assert.match(t.conduit.dockerfile.cmd.join(" "), /slot_reset_pending/);
+  assert.match(t.conduit.dockerfile.cmd.join(" "), /COMMENT ON PUBLICATION/);
 });

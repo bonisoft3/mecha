@@ -1010,6 +1010,8 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							POSTGRES_DB:            "${POSTGRES_DB:-\(X.meta.app)}"
 							ELECTRIC_PASSWORD:      electricPassword
 							AUTHENTICATOR_PASSWORD: authenticatorPassword
+							// App initdb guards need the configured HMAC secret inside containers.
+							PGRST_JWT_SECRET: jwtSecret
 							// ORDER BY on text reaches a reader, so it sorts the way a
 							// dictionary does, not by byte: bytes put every accent past all
 							// of ASCII and split the alphabet by case, so "ana" follows "Zoe".

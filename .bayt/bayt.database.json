@@ -9,6 +9,7 @@
       "POSTGRES_DB": "${POSTGRES_DB:-mecha}",
       "ELECTRIC_PASSWORD": "${ELECTRIC_PASSWORD:-dev-electric-password}",
       "AUTHENTICATOR_PASSWORD": "${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}",
+      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "POSTGRES_INITDB_ARGS": "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
     },
     "ports": [
@@ -186,6 +187,7 @@
       "POSTGRES_DB": "${POSTGRES_DB:-mecha}",
       "ELECTRIC_PASSWORD": "${ELECTRIC_PASSWORD:-dev-electric-password}",
       "AUTHENTICATOR_PASSWORD": "${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}",
+      "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}",
       "POSTGRES_INITDB_ARGS": "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
     },
     "after": {},

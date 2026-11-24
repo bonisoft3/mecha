@@ -43,6 +43,7 @@ processes:
     - AUTHENTICATOR_PASSWORD=${AUTHENTICATOR_PASSWORD:-dev-authenticator-password}
     - ELECTRIC_PASSWORD=${ELECTRIC_PASSWORD:-dev-electric-password}
     - PGPORT=${DATABASE_PG_PORT:-17726}
+    - PGRST_JWT_SECRET=${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}
     - POSTGRES_DB=${POSTGRES_DB:-mecha}
     - >-
       POSTGRES_INITDB_ARGS=--no-sync --encoding=UTF8 --auth=trust

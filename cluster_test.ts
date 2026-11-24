@@ -625,6 +625,21 @@ Deno.test("electric's password reaches the role and its URL from one variable", 
   );
 });
 
+Deno.test("initdb guards receive the HMAC secret independently of CRUD verification mode", async () => {
+  const secret = "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}";
+  const cases: [Partial<State>, Record<string, unknown>, string | undefined][] = [
+    [{ schedules: ["tick"] }, { server: true }, secret],
+    [{}, { server: true }, undefined],
+    [{}, { server: true, issuers: true }, "${PGRST_JWKS:-" + secret + "}"],
+  ];
+  for (const [state, capabilities, crudKey] of cases) {
+    const got = await exported(state, "surface.targets", capabilities);
+    assert.equal(got.ok, true, got.stderr);
+    assert.equal(got.value.database.compose.environment.PGRST_JWT_SECRET, secret);
+    assert.equal(got.value.crud.compose.environment.PGRST_JWT_SECRET, crudKey);
+  }
+});
+
 Deno.test("a caller step on the electric password's digits is refused", async () => {
   const got = await exported({ migrations: ["m/899_late.sql"] }, "surface.targets.database", { server: true });
   assert.equal(got.ok, false);

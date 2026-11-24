@@ -11,7 +11,7 @@ function receiver(reads: string[], accept: () => void | Promise<void>) {
   };
 }
 
-const REDIS = "redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933";
+const REDIS = "redis:8.2.11-bookworm@sha256:b0b01167ff47bc3868e56a967895a26be4230891a1f42a78ab61cdd227accc8d";
 const text = (b: Uint8Array) => new TextDecoder().decode(b).trim();
 async function command(cmd: string, ...args: string[]) {
   const r = await new Deno.Command(cmd, {
@@ -100,7 +100,7 @@ Deno.test("Redis acknowledgment waits for acceptance, recovers on consumer repla
         ],
         cwd: new URL(".", import.meta.url),
         env: {
-          REDIS_URL: `redis://127.0.0.1:${port}`,
+          REDIS_URL: `redis://127.0.0.1:${port}`, CDC_GROUPS: '["compute-test"]',
           COMPUTE_GROUP: "compute-test",
           SERVICE_JWT: "test-token",
         },
@@ -208,7 +208,7 @@ Deno.test("Redis delivery crashes once a refused invalidation outlasts its retri
           "events.yaml",
         ],
         cwd: new URL(".", import.meta.url),
-        env: { REDIS_URL: `redis://127.0.0.1:${port}`, COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
+        env: { REDIS_URL: `redis://127.0.0.1:${port}`, CDC_GROUPS: '["compute-test"]', COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
         stdout: "piped",
         stderr: "piped",
         signal,
@@ -286,7 +286,7 @@ for (const refusedOnce of [false, true]) {
           "events.yaml",
         ],
         cwd: new URL(".", import.meta.url),
-        env: { REDIS_URL: `redis://127.0.0.1:${port}`, COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
+        env: { REDIS_URL: `redis://127.0.0.1:${port}`, CDC_GROUPS: '["compute-test"]', COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
         stdout: "null",
         stderr: "null",
       }).spawn();
@@ -358,7 +358,7 @@ Deno.test("Redis delivery joins transaction markers into the invalidation's trac
         "events.yaml",
       ],
       cwd: new URL(".", import.meta.url),
-      env: { REDIS_URL: `redis://127.0.0.1:${port}`, COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
+      env: { REDIS_URL: `redis://127.0.0.1:${port}`, CDC_GROUPS: '["compute-test"]', COMPUTE_GROUP: "compute-test", SERVICE_JWT: "test-token" },
       stdout: "null",
       stderr: "null",
     }).spawn();

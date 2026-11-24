@@ -13,6 +13,7 @@ input:
   # stamps each row's @traceparent.
   processors:
     - mutation: meta cdc_consumer = env("COMPUTE_GROUP")
+    - resource: cdc_stream_trim
     - resource: cdc_trace_join
 pipeline:
   threads: 1

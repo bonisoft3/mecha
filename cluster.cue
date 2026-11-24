@@ -298,6 +298,7 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 		container: BR.isolate
 		port:      #BridgePort
 	}
+
 	// The release targets the container is deployed on. On any other, the
 	// airlock settles the effect failed without calling it
 	// (services/airlock/README.md#a-bridge-not-deployed). `cloudflare` ships
@@ -349,6 +350,9 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 // The marker compute's start leaves beside DuckDB's extensions once it has
 // installed them, so a later start installs none.
 #DuckdbExtensionsMarker: ".installed-v1.5.6"
+
+// The glibc Redis binaries also run in the Debian release appliance.
+#RedisImage: "redis:8.2.11-bookworm@sha256:b0b01167ff47bc3868e56a967895a26be4230891a1f42a78ab61cdd227accc8d"
 
 // The PostgreSQL the database image runs.
 #PostgresImage: "postgres:18-trixie@sha256:073e7c8b84e2197f94c8083634640ab37105effe1bc853ca4d5fbece3219b0e8"
@@ -440,6 +444,7 @@ _jobKeySql: _ @embed(file="services/airlock/job_key.sql", type=text)
 	// endpoint is written to.
 	name: =~#EffectName & !="blobs" & !="wall" & !="resiliency"
 	{origin: #Origin} | {bridge: =~#EffectName} | {ai: #AiModality, tier: *"cheap" | #AiBackendTier}
+
 	// A read is an HTTP GET whose answer is its outcome: no handler
 	// (services/airlock/read.ts).
 	read: *false | bool
@@ -545,6 +550,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 
 #Cluster: {
 	let X = self
+	_cdcPipelineGroups: [for p in X.state.pipelines if p.group != _|_ {p.group}]
+	_cdcGroups: list.SortStrings(list.Concat([
+		X._cdcPipelineGroups,
+		[if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {"\(X.meta.app)-compute"}],
+	]))
 	state: {
 		duckstreamEngine: *"risingwave" | "duckdb-snapshot"
 		migrations:       [...string] & list.UniqueItems()
@@ -558,7 +568,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		reconcile: [=~"^[a-z][a-z0-9_]*$"]: string & !=""
 		// Materialized JSON, one <name>.json per vetted pgroll value, relative to the app.
 		pgrollDir?: string & !=""
-		pipelines:  [...{name: string, file: string}]
+		pipelines:  [...{name: string, file: string, group?: string}]
 		// Numeric programs over the lake (services/compute/main.ts states the
 		// contract): a module each, the tables it alone writes (`to`),
 		// and the wasm modules its jobs call, shipped by their file names.
@@ -701,6 +711,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		if issuers {
 			server: true
 		}
+
 		// The roles a program declares for those issuers' tokens, which crud
 		// tells the floor at every request (PGRST_APP_SETTINGS_TOKEN_ROLES):
 		// a role registered in the database and not here acts for no token.
@@ -1178,16 +1189,17 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							// role switch: it sets app.scopes, which the tenancy floor reads.
 							// Without it current_scopes() is empty and every floored table is
 							// invisible -- the floor fails closed, so this is not optional.
-							PGRST_DB_PRE_REQUEST:    "public.app_pre_request"
+							PGRST_DB_PRE_REQUEST: "public.app_pre_request"
 							// The declared token roles, the deployment's and no client's:
 							// PostgREST sets app.settings.* itself in every request.
 							PGRST_APP_SETTINGS_TOKEN_ROLES: strings.Join(X.capabilities.tokenRoles, ",")
-							PGRST_SERVER_HOST:       "*"
-							PGRST_SERVER_PORT:       {port: "http", part: "port"}
-							PGRST_ADMIN_SERVER_PORT: {port: "admin", part: "port"}
+							PGRST_SERVER_HOST:              "*"
+							PGRST_SERVER_PORT:              {port: "http", part: "port"}
+							PGRST_ADMIN_SERVER_PORT:        {port: "admin", part: "port"}
 							if X._serviceToken && !X.capabilities.issuers {
 								PGRST_JWT_SECRET: jwtSecret
 							}
+
 							// The key set, else the stack's own secret alone; and an
 							// audience, which PostgREST holds a token naming one to.
 							if X.capabilities.issuers {
@@ -1471,7 +1483,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						dockerfile: null
 					}
 					dockerfile: {
-						from: name: "redis:7.4.1-alpine@sha256:59b6e694653476de2c992937ebe1c64182af4728e54bb49e9b7a6c26614d8933"
+						from: name: #RedisImage
 						workdir: "/data"
 						healthcheck: {
 							test:         ["CMD-SHELL", "redis-cli ping | grep PONG"]
@@ -1653,6 +1665,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							env: {
 								COMPUTE_URL:   {peer: "compute", port: "tcp", prefix: "http://"}
 								COMPUTE_GROUP: "\(X.meta.app)-compute"
+								CDC_GROUPS:    json.Marshal(list.SortStrings(list.Concat([X._cdcPipelineGroups, ["\(X.meta.app)-compute"]])))
 							}
 						}
 					}
@@ -1666,8 +1679,9 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						env: {
 							// Straight to PostgREST: the proxy's client-facing Prefer
 							// injection would clobber the pipelines' merge-duplicates upserts.
-							CRUD_URL:  {peer: "crud", port: "http", prefix: "http://"}
-							REDIS_URL: {peer: "redis", port: "redis", prefix: "redis://"}
+							CRUD_URL:   {peer: "crud", port: "http", prefix: "http://"}
+							REDIS_URL:  {peer: "redis", port: "redis", prefix: "redis://"}
+							CDC_GROUPS: json.Marshal(X._cdcGroups)
 							if len(X.state.computations) > 0 && X.state.duckstreamEngine == "duckdb-snapshot" {COMPUTE_GROUP: "\(X.meta.app)-compute"}
 							if X.capabilities.auth {
 								SERVICE_JWT: "${SERVICE_JWT:-\(_devServiceJwt)}"
@@ -2432,6 +2446,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for b in R.cluster.state.bridges if b.instance_type != _|_ if b.isolate != _|_ {
 			("\(b.container)-appliance"): error("bridge \(b.name) sets instance_type, which sizes a Cloudflare Container, but an isolate runs as a Worker there")
 		}
+
 		// Bridges share a container on its one port; on cloudflare a container
 		// is one bridge's, since each bridge is a class with a container of its
 		// own, and two would build two containers from one image.
@@ -2449,6 +2464,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		for b in R.cluster.state.bridges for t in ["cloudflare", "k8s"] if list.Contains(b.targets, t) if R._live[b.container].compose != _|_ if R._live[b.container].compose.command != _|_ || R._live[b.container].compose.entrypoint != _|_ {
 			("\(b.container)-appliance"): error("bridge \(b.name) names \(t) but its container \(b.container) sets compose.command or compose.entrypoint, which only compose runs: state the process in dockerfile.entrypoint or dockerfile.cmd")
 		}
+
 		// Nor do they give the process what else only the compose service
 		// states: its directory, user, files, mounts, privileges, devices,
 		// GPUs and resources, or kernel settings; one stated empty or false

@@ -24,6 +24,32 @@ cache_resources:
       default_ttl: 24h
 
 processor_resources:
+  # Redis Streams delivers single-message batches. Missing declared readers
+  # hold the stream intact while their groups are still being registered.
+  - label: cdc_stream_trim
+    branch:
+      request_map: 'root = if batch_index() == 0 && @redis_stream.or("") != "" { "" } else { deleted() }'
+      processors:
+        - redis_script:
+            url: ${REDIS_URL}
+            keys_mapping: 'root = ["cdc-events"]'
+            args_mapping: 'root = env("CDC_GROUPS").parse_json()'
+            script: |
+              #!lua flags=allow-oom
+              if #ARGV == 0 then return redis.error_reply('CDC_GROUPS must name the stream readers') end
+              local present = {}
+              for _, group in ipairs(redis.call('XINFO', 'GROUPS', KEYS[1])) do
+                for i = 1, #group, 2 do
+                  if group[i] == 'name' then present[group[i + 1]] = true end
+                end
+              end
+              for _, name in ipairs(ARGV) do
+                if not present[name] then return 0 end
+              end
+              return redis.call('XTRIM', KEYS[1], 'MAXLEN', '~', 10000, 'LIMIT', 1000, 'ACKED')
+        - catch:
+            - crash: 'CDC stream trimming failed: ${! error() }'
+
   - label: cdc_trace_join
     # A batch runs each processor over every message before the next, so a
     # marker mid-batch would reach the rows after it only once the batch had

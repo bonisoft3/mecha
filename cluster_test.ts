@@ -825,6 +825,10 @@ Deno.test("RisingWave deployment selects its pinned internal service and ships t
     const got = await exported({ duckstreamEngine, computations: [{ name: "analytics", file: "duckstream/program.js", risingwave: "duckstream/risingwave.json", to: ["metric"], wasm: [] }] }, "surface.targets");
     assert.equal(got.ok, true, got.stderr);
     const { compute, risingwave, transform } = got.value;
+    assert.equal(compute.entrypoint.env.DUCKSTREAM_ENGINE, "${DUCKSTREAM_ENGINE:-duckdb-snapshot}");
+    assert.match(transform.entrypoint.do, /\$cdir \| path join 'events.yaml'/);
+    assert.deepEqual(JSON.parse(transform["process-compose"].env.CDC_GROUPS), ["t-compute"]);
+    assert.deepEqual(JSON.parse(transform.entrypoint.env.CDC_GROUPS), duckstreamEngine === "risingwave" ? [] : ["t-compute"]);
     assert.equal(compute.compose.volumes, undefined);
     assert.equal(compute.compose.environment.DUCKSTREAM_ENGINE, "${DUCKSTREAM_ENGINE:-" + duckstreamEngine + "}");
     assert.equal(JSON.parse(compute.compose.environment.COMPUTATIONS)[0].risingwave, "/app/computations/analytics.risingwave.json");

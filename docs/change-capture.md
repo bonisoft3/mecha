@@ -193,3 +193,29 @@ docker compose exec libraries_mecha-mesh-events /busybox wget -qO- --post-data='
   would need Kafka.
 - **Deduplicating in the pipeline** with a seen-set: a second store holding
   what the primary key already makes unique.
+
+## Redis stream retention
+
+The native cluster pins Redis 8.2.11 by image digest. Compose runs that image;
+the Debian release appliance copies its glibc server and CLI binaries.
+Existing transform inputs call Redis's
+`XTRIM cdc-events MAXLEN ~ 10000 LIMIT 1000 ACKED` once per incoming batch
+(one event per reader with the Redis Streams input). Redis removes only entries read and acknowledged by every existing group;
+pending and unread entries can keep the stream above 10,000 entries. Trimming
+is approximate and bounded per call. With no new batches, the remaining tail
+stays in Redis. No retention process runs separately. Mecha’s standalone demonstration does
+not opt into trimming: its optional Kafka fan-out starts outside the transform
+reader manifest and must retain the backlog until it registers.
+
+The shared input resource atomically checks the declared `CDC_GROUPS` before
+issuing the native command. Until every declared reader has registered, it
+leaves the stream intact. Synthetic startup wakes do not trim. A Redis error
+stops the transform instead of acknowledging a failed batch. Raw CDC pipelines
+must call `cdc_stream_trim` alongside their input processors.
+
+The manifest is a startup guard, not a whitelist: unknown and obsolete groups
+also constrain Redis's native trimming. After permanently removing a reader,
+stop that reader and explicitly retire its group with `XGROUP DESTROY`; do not
+delete groups belonging to running consumers. A new reader on an already
+trimmed stream needs a snapshot or recount to establish its initial state.
+Upgrade the Redis server before starting transforms that use `ACKED`.

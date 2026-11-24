@@ -101,7 +101,7 @@ _stack: cluster.#Cluster & {
 		// stack runs the migrate target; services/migrate/migrate_test.ts
 		// boots it against volumes of every age.
 		pgroll: "01_hello_mood": operations: [{add_column: {table: "Hello", column: {name: "mood", type: "text", nullable: true}}}]
-		pipelines: [{name: "passthrough", file: "services/transform/passthrough.yaml"}]
+		pipelines: [{name: "passthrough", file: "services/transform/passthrough.yaml", group: "rpk-transform"}]
 		// Any name: the cluster only asks whether a schedule exists, and the
 		// ticker and clock are part of what this stack exercises.
 		schedules: ["tick"]

@@ -111,7 +111,7 @@ what runs:
 | component | single machine | AWS | Azure | GCP |
 |---|---|---|---|---|
 | PostgreSQL | `postgres:18` | RDS, Aurora, Neon | Azure Database for PostgreSQL, Neon | Cloud SQL, AlloyDB, Neon |
-| the bus | Redis Streams on `redis:7.4` | SNS with SQS, ElastiCache | Service Bus, Azure Managed Redis | Pub/Sub, Memorystore |
+| the bus | Redis Streams on `redis:8.2.11` | SNS with SQS, ElastiCache | Service Bus, Azure Managed Redis | Pub/Sub, Memorystore |
 | Kafka broker | Redpanda | MSK | Event Hubs | Managed Service for Apache Kafka |
 | object storage | rclone-s3 over the local filesystem | S3 | Blob Storage through rclone-s3 | GCS through rclone-s3 |
 | stream processing | Arroyo | Managed Service for Apache Flink | Stream Analytics | Dataflow |

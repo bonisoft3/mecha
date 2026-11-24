@@ -453,6 +453,7 @@ processes:
       backoff_seconds: 1
       max_restarts: 15
     environment:
+    - CDC_GROUPS=["rpk-transform"]
     - CRUD_URL=http://127.0.0.1:${CRUD_HTTP_PORT:-31050}
     - REDIS_URL=redis://127.0.0.1:${REDIS_REDIS_PORT:-16525}
     - >-

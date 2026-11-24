@@ -12,6 +12,7 @@ import { GUEST_ACR, sessionClaims } from "./claims.ts";
 import {
   type ConsumedTicket,
   discovery,
+  type Config,
   type Links,
   type NativeTicket,
   oidc,
@@ -20,10 +21,12 @@ import {
   providerStill,
   safeReturn,
   sha256url,
+  NONCE_COOKIE,
   STATE_COOKIE,
   type Tickets,
   type User,
 } from "./oidc.ts";
+import { publicAddress, publicHttps } from "./atproto.ts";
 import { cookieOf, deviceSession, HELD_COOKIE, HINT_COOKIE, SESSION_COOKIE } from "./session.ts";
 
 const ORIGIN = "https://app.test";
@@ -108,6 +111,10 @@ async function provider(p: { issuer: string; reachedAt?: string; alg: Alg; clien
     breakKeys() {
       keysDown = true;
     },
+    /** An ID token as the provider's own button hands it to the page. */
+    async mint(client: string, nonce: string, claims: Record<string, unknown> = {}) {
+      return await sign(p.alg, signer.key, signer.kid, { iss: p.iss ?? p.issuer, aud: client, sub: "alice-sub", name: "Alice", email: "Alice@Example.test", email_verified: true, nonce, exp: now() + 300, ...claims });
+    },
   };
 }
 
@@ -130,8 +137,17 @@ function memory(): Links & { users: Map<string, User & { name: string | null; em
       users.set(key, u);
       return Promise.resolve({ id: u.id, handle: u.handle, name: u.name, email: u.email });
     },
-    handleOf(provider, issuer, id) {
-      const hit = [...users.entries()].find(([k, u]) => u.id === id && k.startsWith(`${provider}:${issuer}:`));
+    addTo(p, owner) {
+      const key = `${p.provider}:${p.issuer}:${p.sub}`;
+      const held = users.get(key);
+      if (held) return Promise.resolve(held.id === owner ? "added" : "taken");
+      if ([...users.entries()].some(([k, u]) => u.id === owner && k.startsWith(`${p.provider}:${p.issuer}:`))) return Promise.resolve("held");
+      const handle = [...users.values()].find((u) => u.id === owner)?.handle ?? guests.get(owner) ?? `h-${owner}`;
+      users.set(key, { id: owner, handle, name: p.name, email: p.email });
+      return Promise.resolve("added");
+    },
+    handleOf(provider, issuer, sub, id) {
+      const hit = [...users.entries()].find(([k, u]) => u.id === id && k === `${provider}:${issuer}:${sub}`);
       return Promise.resolve(hit ? { handle: hit[1].handle, name: hit[1].name, email: hit[1].email } : null);
     },
   };
@@ -159,7 +175,7 @@ const deviceFor = (providers: Record<string, Provider>, links: Links, origin = O
   });
 };
 
-async function setup(env = GOOGLE, links = memory(), origin = ORIGIN) {
+async function setup(env = GOOGLE, links = memory(), origin = ORIGIN, adding?: Config["adding"]) {
   const providers = providersFrom((name) => env[name]);
   const issuer = env.OIDC_GOOGLE_ISSUER ?? "https://accounts.google.com";
   const brokered = issuer !== "https://accounts.google.com";
@@ -169,7 +185,7 @@ async function setup(env = GOOGLE, links = memory(), origin = ORIGIN) {
       : { issuer: "https://accounts.google.com", iss: "accounts.google.com", alg: "RS256", secret: "shh" },
   );
   const device = deviceFor(providers, links, origin);
-  const routes = oidc({ secret: SECRET, origin: () => origin, providers, links, device, fetcher: idp.fetcher as typeof fetch });
+  const routes = oidc({ secret: SECRET, origin: () => origin, providers, links, device, fetcher: idp.fetcher as typeof fetch, adding });
   const serve = async (req: Request) => {
     const res = routes(req) ?? device.route(req);
     assert(res !== null, `${req.method} ${req.url} is not a route`);
@@ -526,6 +542,8 @@ Deno.test("a provider is configured by name, and refused at startup when it cann
     [{ ...GOOGLE, OIDC_GOOGLE_ISSUER: "http://id.test" }, "is not https"],
     [{ ...GOOGLE, OIDC_GOOGLE_AUTHORIZE_PARAMS: "redirect_uri=https://evil.test" }, "sets redirect_uri"],
     [{ OIDC_PROVIDERS: "Google", OIDC_GOOGLE_CLIENT_ID: "c" }, "not a lowercase word"],
+    [{ ...GOOGLE, OIDC_GOOGLE_CREDENTIAL: "yes" }, "not true"],
+    [{ OIDC_PROVIDERS: "google", OIDC_GOOGLE_CLIENT_ID: "origin", OIDC_GOOGLE_CREDENTIAL: "true" }, "a registered client"],
   ] as const) {
     assertThrows(() => from(vars), Error, why);
   }
@@ -590,6 +608,7 @@ function memoryTickets() {
         userId: hit.userId,
         provider: hit.provider,
         issuer: hit.issuer,
+        sub: hit.sub,
         codeChallenge: hit.codeChallenge,
         proof: hit.proof,
         held: hit.held,
@@ -631,8 +650,11 @@ async function setupNative(schemes: readonly string[] = ["snapcards", "snapcards
       users.set(key, u);
       return Promise.resolve({ id: u.id, handle: u.handle, name: u.name, email: u.email });
     },
-    handleOf(prov, issuer, id) {
-      const hit = [...users.entries()].find(([k, u]) => u.id === id && k.startsWith(`${prov}:${issuer}:`));
+    addTo() {
+      throw new Error("a native start adds no way");
+    },
+    handleOf(prov, issuer, sub, id) {
+      const hit = [...users.entries()].find(([k, u]) => u.id === id && k === `${prov}:${issuer}:${sub}`);
       return Promise.resolve(hit ? { handle: hit[1].handle, name: hit[1].name, email: hit[1].email } : null);
     },
   };
@@ -855,9 +877,378 @@ Deno.test("guest promotion on OIDC start validates unlinked guest tokens and pre
 
 Deno.test("the providers a deployment turns on are the ways in it tells the page, and none where it turns on none", async () => {
   const on = await setup();
-  assertEquals(await (await on.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: ["google"] });
+  assertEquals(await (await on.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: ["google"], credential: {} });
   const off = await setup({});
-  assertEquals(await (await off.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: [] });
+  assertEquals(await (await off.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: [], credential: {} });
+});
+
+// Google's own button (Identity Services, FedCM where the browser has it)
+// hands the page an ID token for the client registered to the page's origins.
+const CREDENTIAL: Record<string, string> = { OIDC_PROVIDERS: "google", OIDC_GOOGLE_CLIENT_ID: "client-123", OIDC_GOOGLE_CREDENTIAL: "true" };
+
+async function credentialSignIn(s: Awaited<ReturnType<typeof setup>>, bend: { claims?: Record<string, unknown>; nonce?: (asked: string) => string; cookie?: (c: string, nonce: string) => string | Promise<string>; origin?: string; hint?: string; add?: boolean } = {}) {
+  const asked = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/nonce${bend.add ? "?add" : ""}`));
+  assertEquals(asked.status, 200);
+  const { nonce } = await asked.json();
+  const cookie = jar(asked)[`${NONCE_COOKIE}_google`];
+  const token = await s.idp.mint("client-123", bend.nonce ? bend.nonce(nonce) : nonce, bend.claims);
+  const form = new URLSearchParams({ credential: token, ...(bend.hint ? { id_token_hint: bend.hint } : {}), ...(bend.add ? { add: "" } : {}) });
+  return await s.serve(new Request(`${ORIGIN}/auth/oidc/google/credential`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", origin: bend.origin ?? ORIGIN, cookie: `${NONCE_COOKIE}_google=${bend.cookie ? await bend.cookie(cookie, nonce) : cookie}` },
+    body: form,
+  }));
+}
+
+Deno.test("a provider's button signs a person in by the ID token it hands the page, bound to the nonce this browser asked", async () => {
+  const s = await setup(CREDENTIAL);
+  assertEquals(await (await s.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: ["google"], credential: { google: "client-123" } });
+  const done = await credentialSignIn(s);
+  assertEquals(done.status, 200);
+  const back = jar(done);
+  assertEquals(back[`${NONCE_COOKIE}_google`], "");
+  const session = await s.serve(exchange(back[SESSION_COOKIE]));
+  assertEquals((await session.json()).user.name, "Alice");
+  // A provider signing in by its button has no redirect to begin.
+  assertEquals(s.routes(new Request(`${ORIGIN}/auth/oidc/google/start`)), null);
+});
+
+Deno.test("a credential is refused unless it carries this browser's nonce, for this client, from this origin", async () => {
+  const cases: [string, Parameters<typeof credentialSignIn>[1], number][] = [
+    // A lapsed or replaced nonce is the page's to ask anew.
+    ["another browser's nonce", { nonce: () => "someone-elses" }, 409],
+    ["no nonce asked here", { cookie: () => "" }, 409],
+    // Regression: the cookie held the nonce's hash, which anyone holding the
+    // token (and so its nonce) could compute and send.
+    ["a token alone, its nonce in the cookie's place", { cookie: (_, nonce) => nonce }, 409],
+    ["a token alone, its nonce's hash in the cookie's place", { cookie: (_, nonce) => sha256url(nonce) }, 409],
+    ["another client's token", { claims: { aud: "client-999" } }, 401],
+    ["an expired token", { claims: { exp: now() - 1 } }, 401],
+    ["another origin", { origin: "https://evil.test" }, 403],
+  ];
+  for (const [why, bend, status] of cases) {
+    const s = await setup(CREDENTIAL);
+    assertEquals((await credentialSignIn(s, bend)).status, status, why);
+    assertEquals(s.links.users.size, 0, why);
+  }
+});
+
+Deno.test("a provider signing in by redirect offers no credential route", async () => {
+  const s = await setup();
+  assertEquals(await (await s.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: ["google"], credential: {} });
+  assertEquals(s.routes(new Request(`${ORIGIN}/auth/oidc/google/nonce`)), null);
+});
+
+// Regression: Google's script assigns markup no Trusted Types policy vouches
+// for, and the app's page refused it, so the button never drew.
+Deno.test("the provider's button is the auth service's own page, under a policy that admits Google's script and no other", async () => {
+  const s = await setup(CREDENTIAL);
+  const page = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=pt-BR`));
+  assertEquals(page.status, 200);
+  const policy = page.headers.get("content-security-policy") ?? "";
+  assert(policy.includes("script-src 'self' https://accounts.google.com/gsi/client"), policy);
+  assert(policy.includes("frame-ancestors 'self'"), "only the app's own pages frame it");
+  assert(!policy.includes("require-trusted-types-for"), "Google's script needs the markup sinks the app's page withholds");
+  const html = await page.text();
+  assert(html.includes('data-client="client-123"') && html.includes('data-locale="pt-BR"'), html);
+  const script = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button.js`));
+  assertEquals(script.headers.get("content-type"), "text/javascript; charset=utf-8");
+  const js = await script.text();
+  for (const step of ["/oidc/${provider}/nonce", "/oidc/${provider}/credential", "top.location.reload()", "google.accounts.id.prompt()"]) assert(js.includes(step), step);
+  // A hint is no URL's to carry.
+  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=<script>`))).status, 200);
+  assert(!(await (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=x"><script>`))).text()).includes("<script>a"), "a locale is a tag or nothing");
+  const redirect = await setup();
+  assertEquals(redirect.routes(new Request(`${ORIGIN}/auth/oidc/google/button`)), null);
+});
+
+/** An AT Protocol authorization server in memory, with the DID directory, the
+ * account's server and the AppView it is resolved through: the requests it
+ * was pushed, and the code it answers each with. */
+function atprotoServer(bend: { sub?: string; tokenStatus?: number } = {}) {
+  const entry = "https://bsky.social";
+  const did = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
+  const pushed = new Map<string, URLSearchParams>();
+  const codes = new Map<string, URLSearchParams>();
+  const fetcher = async (input: Request | URL | string, init?: RequestInit) => {
+    const req = new Request(input, init);
+    const url = new URL(req.url);
+    const at = `${req.method} ${url.origin}${decodeURIComponent(url.pathname)}`;
+    const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
+    switch (at) {
+      case `GET ${entry}/.well-known/oauth-protected-resource`:
+      case "GET https://pds.test/.well-known/oauth-protected-resource":
+        return json({ resource: url.origin, authorization_servers: [entry] });
+      case `GET ${entry}/.well-known/oauth-authorization-server`:
+      case "GET https://elsewhere.test/.well-known/oauth-authorization-server": {
+        const issuer = url.origin;
+        return json({
+          issuer,
+          authorization_endpoint: `${issuer}/oauth/authorize`,
+          token_endpoint: `${issuer}/oauth/token`,
+          pushed_authorization_request_endpoint: `${issuer}/oauth/par`,
+          require_pushed_authorization_requests: true,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          code_challenge_methods_supported: ["S256"],
+          token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+          token_endpoint_auth_signing_alg_values_supported: ["ES256"],
+          dpop_signing_alg_values_supported: ["ES256"],
+          scopes_supported: ["atproto"],
+          authorization_response_iss_parameter_supported: true,
+          client_id_metadata_document_supported: true,
+        });
+      }
+      case `POST ${entry}/oauth/par`: {
+        assert(req.headers.has("dpop"), "a pushed request is DPoP-bound");
+        const form = new URLSearchParams(await req.text());
+        const uri = `urn:ietf:params:oauth:request_uri:${pushed.size}`;
+        pushed.set(uri, form);
+        return json({ request_uri: uri, expires_in: 60 }, 201);
+      }
+      case `POST ${entry}/oauth/token`: {
+        const form = new URLSearchParams(await req.text());
+        const asked = codes.get(form.get("code") ?? "");
+        if (bend.tokenStatus) return json({ error: bend.tokenStatus === 429 ? "slow_down" : "invalid_grant" }, bend.tokenStatus);
+        if (!asked || (await sha256url(form.get("code_verifier") ?? "")) !== asked.get("code_challenge") || form.get("client_id") !== asked.get("client_id")) {
+          return json({ error: "invalid_grant" }, 400);
+        }
+        return json({ access_token: "at", token_type: "DPoP", sub: bend.sub ?? did, scope: "atproto", expires_in: 300 });
+      }
+      case `GET https://plc.directory/${did}`:
+        return json({
+          "@context": ["https://www.w3.org/ns/did/v1"],
+          id: did,
+          alsoKnownAs: ["at://alice.test"],
+          service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://pds.test" }],
+        });
+      // An account another authorization server holds.
+      case "GET https://plc.directory/did:plc:mallorymallorymallory234":
+        return json({
+          "@context": ["https://www.w3.org/ns/did/v1"],
+          id: "did:plc:mallorymallorymallory234",
+          alsoKnownAs: ["at://mallory.test"],
+          service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://elsewhere.test" }],
+        });
+      case "GET https://elsewhere.test/.well-known/oauth-protected-resource":
+        return json({ resource: url.origin, authorization_servers: ["https://elsewhere.test"] });
+      // An account whose server's public-looking name answers an inside address.
+      case "GET https://plc.directory/did:plc:rebindrebindrebindrebind":
+        return json({
+          "@context": ["https://www.w3.org/ns/did/v1"],
+          id: "did:plc:rebindrebindrebindrebind",
+          alsoKnownAs: ["at://rebind.test"],
+          service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://rebind.test" }],
+        });
+      // An account whose document sends this service inside its own network.
+      case "GET https://plc.directory/did:plc:insideinsideinsideinsid2":
+        return json({
+          "@context": ["https://www.w3.org/ns/did/v1"],
+          id: "did:plc:insideinsideinsideinsid2",
+          alsoKnownAs: ["at://inside.test"],
+          service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://metadata.google.internal" }],
+        });
+      case "GET https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle":
+        return json({ did });
+      case "GET https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile":
+        assertEquals(url.searchParams.get("actor"), did);
+        return json({ did, handle: "alice.test", displayName: "Alice", avatar: "https://cdn.test/alice.jpg" });
+    }
+    throw new Error(`the test's AT Protocol has no ${at}`);
+  };
+  /** The person signs in at the server: the code it sends the browser back with. */
+  const answer = (to: URL) => {
+    const form = pushed.get(to.searchParams.get("request_uri") ?? "")!;
+    const code = `code-${codes.size}`;
+    codes.set(code, form);
+    return { code, state: form.get("state")!, iss: entry };
+  };
+  return { fetcher, answer, pushed };
+}
+
+const BLUESKY: Record<string, string> = { OIDC_PROVIDERS: "bluesky" };
+
+async function setupBluesky(server = atprotoServer(), links = memory()) {
+  const providers = providersFrom((name) => BLUESKY[name]);
+  const device = deviceFor(providers, links);
+  // Every name is public but rebind.test, which answers an inside address.
+  const addresses = (host: string) => Promise.resolve([host === "rebind.test" ? "10.0.0.5" : "93.184.216.34"]);
+  const routes = oidc({ secret: SECRET, origin: () => ORIGIN, providers, links, device, fetcher: server.fetcher as typeof fetch, addresses });
+  const serve = async (req: Request) => {
+    const res = routes(req) ?? device.route(req);
+    assert(res !== null, `${req.method} ${req.url} is not a route`);
+    return await res;
+  };
+  return { server, links, serve };
+}
+
+Deno.test("Bluesky signs a person in by AT Protocol's OAuth as the DID their server vouches for, named as the AppView shows them", async () => {
+  const s = await setupBluesky();
+  const metadata = await (await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/client-metadata.json`))).json();
+  assertEquals(metadata.client_id, `${ORIGIN}/auth/oidc/bluesky/client-metadata.json`);
+  assertEquals(metadata.redirect_uris, [`${ORIGIN}/auth/oidc/bluesky/callback`]);
+  assertEquals(metadata.token_endpoint_auth_method, "none", "a public client: the app holds no secret");
+  const started = await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start?return=${encodeURIComponent("/chapter/8")}`));
+  assertEquals(started.status, 303);
+  const to = new URL(started.headers.get("location")!);
+  assertEquals(`${to.origin}${to.pathname}`, "https://bsky.social/oauth/authorize");
+  const pushed = s.server.pushed.get(to.searchParams.get("request_uri")!)!;
+  assertEquals(pushed.get("client_id"), metadata.client_id);
+  assertEquals(pushed.get("scope"), "atproto", "it asks who the person is, and nothing of their repository");
+  const state = jar(started)[`${STATE_COOKIE}_bluesky`];
+  const done = await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/callback?${new URLSearchParams(s.server.answer(to))}`, { headers: { cookie: `${STATE_COOKIE}_bluesky=${state}` } }));
+  assertEquals(done.status, 303, await done.clone().text());
+  assertEquals(done.headers.get("location"), "/chapter/8");
+  const back = jar(done);
+  assertEquals(back[`${STATE_COOKIE}_bluesky`], "");
+  const session = await (await s.serve(exchange(back[SESSION_COOKIE]))).json();
+  assertEquals(session.user.name, "Alice");
+  assert(s.links.users.has("bluesky:atproto:did:plc:ewvi7nxzyoun6zhxrhs64oiz"), "the link is the DID's, whichever server holds the account");
+});
+
+Deno.test("a Bluesky sign-in is refused without this browser's state, or when the server refuses the code", async () => {
+  for (const [why, server, cookie, status] of [
+    ["another browser", atprotoServer(), (_: string) => "", 400],
+    ["a forged state", atprotoServer(), (_: string) => "x.y.z.w.v", 400],
+    ["the code refused", atprotoServer({ tokenStatus: 400 }), (c: string) => c, 401],
+    // The server vouches only for the accounts it holds.
+    ["a DID another server holds", atprotoServer({ sub: "did:plc:mallorymallorymallory234" }), (c: string) => c, 401],
+  ] as const) {
+    const s = await setupBluesky(server);
+    const started = await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start`));
+    const to = new URL(started.headers.get("location")!);
+    const res = await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/callback?${new URLSearchParams(s.server.answer(to))}`, { headers: { cookie: `${STATE_COOKIE}_bluesky=${cookie(jar(started)[`${STATE_COOKIE}_bluesky`])}` } }));
+    assertEquals(res.status, status, `${why}: ${await res.clone().text()}`);
+    assertEquals(s.links.users.size, 0, why);
+  }
+});
+
+// Regression: what a person publishes chose where this service fetched, with
+// its whole network reachable.
+Deno.test("a Bluesky sign-in reaches only public https addresses, whatever a DID document names", async () => {
+  const s = await setupBluesky(atprotoServer({ sub: "did:plc:insideinsideinsideinsid2" }));
+  const started = await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start`));
+  const to = new URL(started.headers.get("location")!);
+  const back = new Request(`${ORIGIN}/auth/oidc/bluesky/callback?${new URLSearchParams(s.server.answer(to))}`, { headers: { cookie: `${STATE_COOKIE}_bluesky=${jar(started)[`${STATE_COOKIE}_bluesky`]}` } });
+  const failed = await assertRejects(() => s.serve(back));
+  const causes: string[] = [];
+  for (let e: unknown = failed; e instanceof Error; e = e.cause) causes.push(e.message);
+  assert(causes.some((m) => m.includes("https://metadata.google.internal/.well-known/oauth-protected-resource, which is no public https address")), causes.join(" <- "));
+  // Regression: a public-looking name was trusted whatever address it named.
+  const rebound = await setupBluesky(atprotoServer({ sub: "did:plc:rebindrebindrebindrebind" }));
+  const again = await rebound.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start`));
+  const sent = new URL(again.headers.get("location")!);
+  const back2 = new Request(`${ORIGIN}/auth/oidc/bluesky/callback?${new URLSearchParams(rebound.server.answer(sent))}`, { headers: { cookie: `${STATE_COOKIE}_bluesky=${jar(again)[`${STATE_COOKIE}_bluesky`]}` } });
+  const failed2 = await assertRejects(() => rebound.serve(back2));
+  const causes2: string[] = [];
+  for (let e: unknown = failed2; e instanceof Error; e = e.cause) causes2.push(e.message);
+  assert(causes2.some((m) => m.includes("https://rebind.test/.well-known/oauth-protected-resource, which is no public https address")), causes2.join(" <- "));
+  assertEquals(rebound.links.users.size, 0);
+  assertEquals(s.links.users.size, 0);
+  // A start names no server of the person's: the entryway is the only way in.
+  const named = await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start?handle=${encodeURIComponent("https://10.0.0.1")}`));
+  assertEquals(new URL(named.headers.get("location")!).origin, "https://bsky.social");
+  // A return address too long for the state cookie is refused before the provider.
+  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start?return=/${"a".repeat(3000)}`))).status, 400);
+});
+
+Deno.test("an address inside a network is none AT Protocol reaches", () => {
+  for (const inside of ["10.1.2.3", "127.0.0.1", "169.254.169.254", "172.16.0.1", "172.31.255.255", "192.168.1.1", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"]) {
+    assert(!publicAddress(inside), inside);
+  }
+  for (const outside of ["93.184.216.34", "172.32.0.1", "2606:4700::1111"]) assert(publicAddress(outside), outside);
+  assert(!publicHttps(new URL("https://metadata.google.internal./x")), "a trailing dot is the same name");
+});
+
+Deno.test("a Bluesky server unavailable or slowing sign-ins down is no refusal of the person: it fails loudly", async () => {
+  const s = await setupBluesky(atprotoServer({ tokenStatus: 429 }));
+  const started = await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start`));
+  const to = new URL(started.headers.get("location")!);
+  const back = new Request(`${ORIGIN}/auth/oidc/bluesky/callback?${new URLSearchParams(s.server.answer(to))}`, { headers: { cookie: `${STATE_COOKIE}_bluesky=${jar(started)[`${STATE_COOKIE}_bluesky`]}` } });
+  await assertRejects(() => s.serve(back));
+  await assertRejects(() => s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/callback?error=temporarily_unavailable`)), Error, "unavailable");
+  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/callback?error=access_denied`))).status, 401);
+});
+
+Deno.test("Bluesky names no client, issuer or secret of a deployment's, and offers no native sign-in", async () => {
+  assertThrows(() => providersFrom((n) => ({ ...BLUESKY, OIDC_BLUESKY_CLIENT_ID: "abc" })[n]), Error, "whose client is the origin");
+  assertThrows(() => providersFrom((n) => ({ ...BLUESKY, OIDC_BLUESKY_ISSUER: "https://x.test" })[n]), Error, "means nothing");
+  assertThrows(() => providersFrom((n) => ({ ...BLUESKY, OIDC_BLUESKY_ENTRYWAY: "http://x.test" })[n]), Error, "is not https on 443");
+  assertThrows(() => providersFrom((n) => ({ ...BLUESKY, OIDC_BLUESKY_ENTRYWAY: "https://x.test:8443" })[n]), Error, "is not https on 443");
+  const s = await setupBluesky();
+  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/bluesky/start?return=native&scheme=snapcards`))).status, 400);
+  assertEquals(await (await s.serve(new Request(`${ORIGIN}/auth/oidc`))).json(), { providers: ["bluesky"], credential: {} });
+});
+
+// Adding a way: the account is the device's own session's (core.ts's
+// `adding`), never one the request names.
+let current = "acct-1";
+const owned = (owner: string): Config["adding"] => () =>
+  Promise.resolve({ owner: owner === "*" ? current : owner, way: { kind: "passkey", credential: "c1" }, since: now() });
+
+Deno.test("a provider's button adds its subject to the device's account, signing no one in, and leaves one another account holds", async () => {
+  const s = await setup(CREDENTIAL, memory(), ORIGIN, owned("acct-1"));
+  const added = await credentialSignIn(s, { add: true });
+  assertEquals([added.status, await added.json()], [200, { added: true }]);
+  assertEquals(jar(added)[SESSION_COOKIE], undefined);
+  assertEquals([...s.links.users.values()].map((u) => u.id), ["acct-1"]);
+  const other = await setup(CREDENTIAL, s.links, ORIGIN, owned("acct-2"));
+  const taken = await credentialSignIn(other, { add: true });
+  assertEquals([taken.status, await taken.json()], [409, { error: "taken" }]);
+  // A session not recent enough to add is handed no nonce to add with.
+  const stale = await setup(CREDENTIAL, memory(), ORIGIN, () => Promise.resolve(new Response(null, { status: 401 })));
+  assertEquals((await stale.serve(new Request(`${ORIGIN}/auth/oidc/google/nonce?add`))).status, 401);
+});
+
+Deno.test("a redirect adds its subject to the account the start was for, while this device is still signed in to it", async () => {
+  const s = await setup(GOOGLE, memory(), ORIGIN, owned("acct-1"));
+  const started = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start`, {
+    method: "POST",
+    headers: { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ return: "/chapter/8#top", add: "" }),
+  }));
+  assertEquals(started.status, 303);
+  const to = new URL(started.headers.get("location")!);
+  const done = await s.serve(callback({ code: s.idp.authorize(to), state: to.searchParams.get("state")! }, jar(started)[`${STATE_COOKIE}_google`]));
+  assertEquals([done.status, done.headers.get("location")], [303, "/chapter/8#ways=added"]);
+  assertEquals(jar(done)[SESSION_COOKIE], undefined);
+  assertEquals([...s.links.users.values()].map((u) => u.id), ["acct-1"]);
+  const moved = await setup(GOOGLE, s.links, ORIGIN, owned("acct-2"));
+  const again = await moved.serve(new Request(`${ORIGIN}/auth/oidc/google/start`, {
+    method: "POST",
+    headers: { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ return: "/", add: "" }),
+  }));
+  const back = new URL(again.headers.get("location")!);
+  const taken = await moved.serve(callback({ code: moved.idp.authorize(back), state: back.searchParams.get("state")! }, jar(again)[`${STATE_COOKIE}_google`]));
+  assertEquals(taken.headers.get("location"), "/#ways=taken");
+});
+
+Deno.test("a nonce asked to add a way adds only to the account it was asked for, and signs no one in", async () => {
+  const s = await setup(CREDENTIAL, memory(), ORIGIN, owned("*"));
+  const credential = async (form: Record<string, string>, nonceQuery: string) => {
+    const asked = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/nonce${nonceQuery}`));
+    const { nonce } = await asked.json();
+    return { nonce, cookie: jar(asked)[`${NONCE_COOKIE}_google`], post: async (token: string, cookie: string) =>
+      await s.serve(new Request(`${ORIGIN}/auth/oidc/google/credential`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", origin: ORIGIN, cookie: `${NONCE_COOKIE}_google=${cookie}` },
+        body: new URLSearchParams({ credential: token, ...form }),
+      })) };
+  };
+  // The device signs in to another account while the chooser is open.
+  current = "acct-1";
+  const forA = await credential({ add: "" }, "?add");
+  current = "acct-2";
+  const swapped = await forA.post(await s.idp.mint("client-123", forA.nonce), forA.cookie);
+  assertEquals(swapped.status, 409);
+  assertEquals(s.links.users.size, 0);
+  // A nonce asked to sign in adds nothing, and one asked to add signs no one in.
+  const signing = await credential({}, "");
+  assertEquals((await signing.post(await s.idp.mint("client-123", signing.nonce), signing.cookie)).status, 200);
+  const adding = await credential({}, "?add");
+  assertEquals((await adding.post(await s.idp.mint("client-123", adding.nonce, { sub: "bob-sub" }), adding.cookie)).status, 409);
+  current = "acct-1";
 });
 
 Deno.test("device credentials are host-only on HTTPS and legacy cookies cannot occupy a session", async () => {

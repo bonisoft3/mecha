@@ -13,7 +13,7 @@ import {
 import { GUEST_ACR, guestProof, isGuest, passkeyProof, type Person, type Proof, proofOf, sessionClaims } from "./claims.ts";
 import { guestHandle, nameHandle, nameOf } from "./handles.ts";
 import { encodeBase64Url, randomToken, sha256url, signJwt, STACK_ISSUER, verifyJwt } from "./jwt.ts";
-import { type Links, oidc, type Profile, type Provider, providerStill, type Tickets } from "./oidc.ts";
+import { type Authority, type Links, oidc, type Profile, type Provider, providerStill, type Tickets } from "./oidc.ts";
 import { deviceSession, type User, type Way } from "./session.ts";
 
 export type Row = Record<string, unknown>;
@@ -43,6 +43,11 @@ export type AuthCoreConfig = {
 const USER_TOKEN_TTL_S = 7 * 24 * 3600;
 export const REFRESH_TOKEN_TTL_S = 90 * 24 * 3600;
 const STATE_TTL_S = 300;
+/** How recent the sign-in that adds or removes a way stands: NIST's
+ * reauthentication before binding an authenticator, the step-up default. */
+export const RECENT_S = 600;
+/** Not now puts asking to set up recovery off a day, then two, four, … 2^6. */
+const LATER_MAX_EXP = 6;
 const NAME_EMPTY = "a name needs a letter or a digit";
 
 const enc = new TextEncoder();
@@ -89,6 +94,20 @@ async function namedByProvider(q: Query, id: string, called: string): Promise<vo
        and not exists (select 1 from app_user where handle = $1)`,
     [named, id, guestHandle(id)],
   );
+}
+
+/** The account's ways taken in hand, and whether the sign-in that authorized
+ * a change to them is still recent and its way still signs it in: a way
+ * removed, or a deadline passed while the change waited, changes nothing. */
+async function authorizedBy(q: Query, id: string, { way, since }: Authority): Promise<boolean> {
+  await q("select pg_advisory_xact_lock(hashtext($1))", [`mecha auth: ways ${id}`]);
+  if (since === null || since < Math.floor(Date.now() / 1000) - RECENT_S) return false;
+  const rows = way.kind === "passkey"
+    ? await q("select 1 from mecha_auth.webauthn_credential where id = $1 and user_id = $2::uuid", [way.credential, id])
+    : way.kind === "provider"
+    ? await q("select 1 from mecha_auth.identity_link where provider = $1 and issuer = $2 and sub = $3 and user_id = $4::uuid", [way.provider, way.issuer, way.sub, id])
+    : [];
+  return rows.length === 1;
 }
 
 /** A challenge spent: the first answer to it signs in, any other is a replay. */
@@ -191,18 +210,40 @@ export function authCore(cfg: AuthCoreConfig) {
         throw new Error("could not allocate identity");
       });
     },
-    async handleOf(provider: string, issuer: string, id: string) {
+    addTo(p: Profile, owner: string, by: Authority) {
+      return db.tx(async (q) => {
+        await q("select pg_advisory_xact_lock(hashtext($1))", [JSON.stringify([p.provider, p.issuer, p.sub])]);
+        if (!(await authorizedBy(q, owner, by))) return "revoked";
+        const [link] = await q(
+          `update mecha_auth.identity_link set name = $1, picture = $2, email = $3
+             where provider = $4 and issuer = $5 and sub = $6 returning user_id`,
+          [p.name, p.picture, p.email, p.provider, p.issuer, p.sub],
+        );
+        if (link) return link.user_id === owner ? "added" : "taken";
+        // One link per provider: a session's way names the provider, not the
+        // subject, so a second would outlive the first's removal.
+        const [held] = await q("select 1 from mecha_auth.identity_link where provider = $1 and issuer = $2 and user_id = $3::uuid", [p.provider, p.issuer, owner]);
+        if (held) return "held";
+        await q(
+          `insert into mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture, email)
+             values ($1, $2, $3, $4::uuid, $5, $6, $7)`,
+          [p.provider, p.issuer, p.sub, owner, p.name, p.picture, p.email],
+        );
+        return "added";
+      });
+    },
+    async handleOf(provider: string, issuer: string, sub: string, id: string) {
       return await db.tx(async (q) => {
         const [l] = await q(
-          "select name from mecha_auth.identity_link where user_id = $1::uuid and provider = $2 and issuer = $3",
-          [id, provider, issuer],
+          "select name from mecha_auth.identity_link where user_id = $1::uuid and provider = $2 and issuer = $3 and sub = $4",
+          [id, provider, issuer, sub],
         );
         if (l?.name) await namedByProvider(q, id, l.name as string);
         const [u] = await q(
           `select u.handle, l.name, l.email from app_user u
-             join mecha_auth.identity_link l on l.user_id = u.id and l.provider = $2 and l.issuer = $3
+             join mecha_auth.identity_link l on l.user_id = u.id and l.provider = $2 and l.issuer = $3 and l.sub = $4
              where u.id = $1::uuid`,
-          [id, provider, issuer],
+          [id, provider, issuer, sub],
         );
         return u ? { handle: u.handle as string, name: (u.name as string | null) ?? null, email: (u.email as string | null) ?? null } : null;
       });
@@ -231,6 +272,186 @@ export function authCore(cfg: AuthCoreConfig) {
   }
 
   const device = deviceSession({ secret, origin: cfg.origin, still, issue: (user, proof) => issueUserToken(user, proof) });
+
+  // --- Ways in: an account's, added and removed while signed in -----------
+  //
+  // On the strength of this device's own session, never a bearer token, which
+  // outlives its sign-out: the cookie, from the door's own origin, of an
+  // account (a guest's ways are signing in), and for a change one signed in
+  // within RECENT_S, so a session left open is no way to add a way in.
+
+  type Owner = { user: User; way: Way; since: number | null };
+  async function owner(req: Request, recent: boolean): Promise<Owner | Response> {
+    const origin = req.headers.get("origin");
+    if (origin !== null && origin !== cfg.origin(req)) return jsonError(403, "another origin");
+    const own = await device.current(req);
+    if (own === null) return jsonError(401, "not signed in");
+    if (own.way.kind === "guest") return jsonError(403, "a guest's ways in are signing in");
+    if (recent && (own.since === null || own.since < now() - RECENT_S)) {
+      return json(401, { error: "insufficient_user_authentication", max_age: RECENT_S });
+    }
+    return own;
+  }
+
+  type Listed =
+    | { kind: "passkey"; id: string; added: string | null }
+    | { kind: "provider"; provider: string; issuer: string; sub: string; name: string | null; email: string | null; added: string };
+  async function waysOf(q: Query, id: string): Promise<Listed[]> {
+    const passkeys = await q("select id, created_at from mecha_auth.webauthn_credential where user_id = $1::uuid order by created_at nulls first, id", [id]);
+    const providers = await q(
+      "select provider, issuer, sub, name, email, created_at from mecha_auth.identity_link where user_id = $1::uuid order by created_at, provider",
+      [id],
+    );
+    const at = (t: unknown) => t === null ? null : new Date(t as string).toISOString();
+    return [
+      ...passkeys.map((r) => ({ kind: "passkey" as const, id: r.id as string, added: at(r.created_at) })),
+      ...providers.map((r) => ({
+        kind: "provider" as const,
+        provider: r.provider as string,
+        issuer: r.issuer as string,
+        sub: r.sub as string,
+        name: (r.name as string | null) ?? null,
+        email: (r.email as string | null) ?? null,
+        added: at(r.created_at)!,
+      })),
+    ];
+  }
+  const isWay = (listed: Listed, way: Way) =>
+    listed.kind === "passkey" ? way.kind === "passkey" && way.credential === listed.id
+    : way.kind === "provider" && way.provider === listed.provider && way.issuer === listed.issuer && way.sub === listed.sub;
+
+  /** The account's ways in, which one this device came in by, whether a
+   * change needs a sign-in first, and whether to ask to set up recovery: an
+   * account whose one way in is all it has, that had an external effect
+   * before this sign-in, unless Not now put the question off. */
+  async function ways(req: Request): Promise<Response> {
+    const own = await owner(req, false);
+    if (own instanceof Response) return own;
+    const listed = await db.tx((q) => waysOf(q, own.user.id));
+    // A provider this deployment no longer signs in by is no way back in.
+    const usable = listed.filter((w) => w.kind === "passkey" || cfg.providers[w.provider]?.issuer === w.issuer);
+    const [r] = await db.query(
+      `select effected_at < to_timestamp($2) and (ask_after is null or ask_after <= now()) as ask
+         from mecha_auth.account_recovery where user_id = $1::uuid`,
+      [own.user.id, own.since ?? 0],
+    );
+    return json(200, {
+      ways: listed.map((w) => ({ ...w, current: isWay(w, own.way) })),
+      recent: own.since !== null && own.since >= now() - RECENT_S,
+      recovery: usable.length < 2 && own.since !== null && r?.ask === true,
+    });
+  }
+
+  /** A way removed while another stays, never the one this device came in
+   * by: signing in by another removes it. Every session that came in by it
+   * ends at its next exchange (still). */
+  async function removeWay(req: Request): Promise<Response> {
+    const own = await owner(req, true);
+    if (own instanceof Response) return own;
+    const body = await readBody(req);
+    if (!body) return jsonError(400, "invalid json body");
+    const outcome = await db.tx(async (q) => {
+      if (!(await authorizedBy(q, own.user.id, own))) return "revoked";
+      const listed = await waysOf(q, own.user.id);
+      const target = listed.find((w) =>
+        w.kind === "passkey" ? body.kind === "passkey" && body.id === w.id
+        : body.kind === "provider" && body.provider === w.provider && body.issuer === w.issuer && body.sub === w.sub
+      );
+      if (target === undefined) return "none";
+      if (isWay(target, own.way)) return "current";
+      if (listed.length < 2) return "last";
+      if (target.kind === "passkey") await q("delete from mecha_auth.webauthn_credential where id = $1 and user_id = $2::uuid", [target.id, own.user.id]);
+      else {
+        await q(
+          "delete from mecha_auth.identity_link where provider = $1 and issuer = $2 and sub = $3 and user_id = $4::uuid",
+          [target.provider, target.issuer, target.sub, own.user.id],
+        );
+      }
+      return "removed";
+    });
+    if (outcome === "revoked") return jsonError(401, "not signed in");
+    if (outcome === "none") return jsonError(404, "no such way in");
+    if (outcome === "current") return jsonError(409, "the way this device signed in by");
+    if (outcome === "last") return jsonError(409, "the last way in");
+    return json(200, { removed: true });
+  }
+
+  /** Not now: asked again after a day, two, four, … up to LATER_MAX_DAYS. */
+  async function later(req: Request): Promise<Response> {
+    const own = await owner(req, false);
+    if (own instanceof Response) return own;
+    await db.query(
+      `update mecha_auth.account_recovery set declines = declines + 1,
+         ask_after = now() + make_interval(days => power(2, least(declines, $2))::int)
+         where user_id = $1::uuid`,
+      [own.user.id, LATER_MAX_EXP],
+    );
+    return json(200, { later: true });
+  }
+
+  /** A passkey's creation options for the account, its own passkeys
+   * excluded so an authenticator holding one makes no second. */
+  async function addPasskeyStart(req: Request): Promise<Response> {
+    const own = await owner(req, true);
+    if (own instanceof Response) return own;
+    const held = await db.query("select id from mecha_auth.webauthn_credential where user_id = $1::uuid", [own.user.id]);
+    const rpId = cfg.rpId(req);
+    const options = await generateRegistrationOptions({
+      rpName: rpId,
+      rpID: rpId,
+      userName: nameOf(own.user.handle),
+      userDisplayName: nameOf(own.user.handle),
+      userID: enc.encode(own.user.id),
+      excludeCredentials: held.map((r) => ({ id: r.id as string })),
+      authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+    });
+    const state = await sign({ purpose: "add-passkey", userId: own.user.id, challenge: options.challenge, exp: now() + STATE_TTL_S });
+    return json(200, { ...options, state });
+  }
+
+  async function addPasskeyVerify(req: Request): Promise<Response> {
+    const own = await owner(req, true);
+    if (own instanceof Response) return own;
+    const body = await readBody(req);
+    if (!body) return jsonError(400, "invalid json body");
+    const st = await readState(body, "add-passkey");
+    if (!st) return jsonError(401, "invalid state");
+    if (st.userId !== own.user.id) return jsonError(409, "this device signed in to another account since");
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        // deno-lint-ignore no-explicit-any
+        response: body.response as any,
+        expectedChallenge: st.challenge as string,
+        expectedOrigin: cfg.ceremonyOrigins(req),
+        expectedRPID: cfg.rpId(req),
+        requireUserVerification: false,
+      });
+    } catch {
+      return jsonError(401, "registration verification failed");
+    }
+    if (!verification.verified || !verification.registrationInfo) return jsonError(401, "registration verification failed");
+    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+    const made = await db.tx(async (q) => {
+      if (!(await spend(q, st.challenge as string, st.exp as number))) return "replayed";
+      if (!(await authorizedBy(q, own.user.id, own))) return "revoked";
+      await q(
+        "insert into mecha_auth.webauthn_credential (id, user_id, public_key, counter) values ($1, $2::uuid, $3::bytea, $4)",
+        [credentialID, own.user.id, credentialPublicKey, counter],
+      );
+      return "made";
+    });
+    if (made === "replayed") return jsonError(401, "registration verification failed");
+    if (made === "revoked") return jsonError(401, "not signed in");
+    return json(200, { added: true, passkey: passkeyOf(req, own.user.id) });
+  }
+
+  /** The account a provider's way is added to, and the way that authorizes
+   * it (oidc.ts). */
+  async function adding(req: Request): Promise<{ owner: string } & Authority | Response> {
+    const own = await owner(req, true);
+    return own instanceof Response ? own : { owner: own.user.id, way: own.way, since: own.since };
+  }
 
   // --- Refresh tokens: a native host's renewal ----------------------------
   //
@@ -294,8 +515,8 @@ export function authCore(cfg: AuthCoreConfig) {
     if (who === null) return jsonError(401, "invalid refresh token");
     const [link] = rotated.way.kind === "provider"
       ? await db.query(
-        "select name, email from mecha_auth.identity_link where user_id = $1::uuid and provider = $2 and issuer = $3",
-        [rotated.sub, rotated.way.provider, rotated.way.issuer],
+        "select name, email from mecha_auth.identity_link where user_id = $1::uuid and provider = $2 and issuer = $3 and sub = $4",
+        [rotated.sub, rotated.way.provider, rotated.way.issuer, rotated.way.sub],
       )
       : [];
     const user: Person = {
@@ -616,23 +837,24 @@ export function authCore(cfg: AuthCoreConfig) {
       await db.tx(async (q) => {
         await q("delete from mecha_auth.auth_native_ticket where expires_at <= now()");
         await q(
-          `insert into mecha_auth.auth_native_ticket (id, user_id, provider, issuer, code_challenge, proof, held, expires_at)
-             values ($1, $2::uuid, $3, $4, $5, $6::text::jsonb, $7, now() + make_interval(secs => $8))`,
-          [t.id, t.userId, t.provider, t.issuer, t.codeChallenge, JSON.stringify(t.proof), t.held, t.ttlSeconds],
+          `insert into mecha_auth.auth_native_ticket (id, user_id, provider, issuer, sub, code_challenge, proof, held, expires_at)
+             values ($1, $2::uuid, $3, $4, $5, $6, $7::text::jsonb, $8, now() + make_interval(secs => $9))`,
+          [t.id, t.userId, t.provider, t.issuer, t.sub, t.codeChallenge, JSON.stringify(t.proof), t.held, t.ttlSeconds],
         );
       });
     },
     async consume(id) {
       const [row] = await db.query(
         `delete from mecha_auth.auth_native_ticket where id = $1 and expires_at > now()
-           returning user_id, provider, issuer, code_challenge, proof, held`,
+           returning user_id, provider, issuer, sub, code_challenge, proof, held`,
         [id],
       );
-      if (!row || row.proof === null) return null;
+      if (!row || row.proof === null || row.sub === null) return null;
       return {
         userId: row.user_id as string,
         provider: row.provider as string,
         issuer: row.issuer as string,
+        sub: row.sub as string,
         codeChallenge: row.code_challenge as string,
         proof: row.proof as Proof,
         held: row.held as boolean,
@@ -650,6 +872,7 @@ export function authCore(cfg: AuthCoreConfig) {
     tickets,
     nativeSchemes: cfg.nativeSchemes,
     fetcher: cfg.fetcher,
+    adding,
   });
 
   const routes: Record<string, (req: Request) => Promise<Response>> = {
@@ -663,6 +886,11 @@ export function authCore(cfg: AuthCoreConfig) {
     "POST /auth/session/adopt": adopt,
     "DELETE /auth/account": deleteAccount,
     "GET /auth/whoami": whoami,
+    "POST /auth/ways": ways,
+    "POST /auth/ways/remove": removeWay,
+    "POST /auth/ways/later": later,
+    "POST /auth/ways/passkey": addPasskeyStart,
+    "POST /auth/ways/passkey/verify": addPasskeyVerify,
   };
 
   return {

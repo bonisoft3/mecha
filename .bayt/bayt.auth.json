@@ -196,6 +196,7 @@
         "globs": [
           "services/auth/deno.json",
           "services/auth/deno.lock",
+          "services/auth/atproto.ts",
           "services/auth/claims.ts",
           "services/auth/core.ts",
           "services/auth/handles.ts",
@@ -223,6 +224,7 @@
             "globs": [
               "services/auth/deno.json",
               "services/auth/deno.lock",
+              "services/auth/atproto.ts",
               "services/auth/claims.ts",
               "services/auth/core.ts",
               "services/auth/handles.ts",

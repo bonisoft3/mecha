@@ -24,7 +24,7 @@ import {
   subsetParams,
 } from "./where.ts";
 import { type Provider, providersFrom } from "./oidc.ts";
-import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, sealAuthTables } from "./schema.ts";
+import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, LINK_PER_PROVIDER, sealAuthTables, STAMP_EFFECTS } from "./schema.ts";
 export { androidOrigins, nativeSchemesFrom, REFRESH_TOKEN_TTL_S, shapeWhere };
 
 function required(name: string): string {
@@ -143,6 +143,8 @@ export async function migrate(): Promise<void> {
         ALTER TABLE mecha_auth.identity_link ADD PRIMARY KEY (provider, issuer, sub);
       END IF;
     END $$`;
+    await tx.unsafe(LINK_PER_PROVIDER);
+    await tx.unsafe(STAMP_EFFECTS);
     await tx.unsafe(sealAuthTables(AUTH_TABLES));
   });
 }

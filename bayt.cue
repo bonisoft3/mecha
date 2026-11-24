@@ -256,12 +256,13 @@ _mecha: bayt.#project & _where & {
 			}
 		}
 		"auth-image": _image & (deno.#cache & {entrypoints: "main.ts", frozen: false}).out & {
-			srcs: globs: ["services/auth/deno.json", "services/auth/deno.lock", "services/auth/claims.ts", "services/auth/core.ts", "services/auth/handles.ts", "services/auth/jwt.ts", "services/auth/main.ts", "services/auth/oidc.ts", "services/auth/schema.ts", "services/auth/session.ts", "services/auth/where.ts"]
+			let _files = [for f in ["deno.json", "deno.lock", "atproto.ts", "claims.ts", "core.ts", "handles.ts", "jwt.ts", "main.ts", "oidc.ts", "schema.ts", "session.ts", "where.ts"] {"services/auth/\(f)"}]
+			srcs: globs: _files
 			dockerfile: {
 				from: name: _deno
 				// deno runs `main.ts` from the working directory.
 				workdir: "/app"
-				copy: [{srcs: ["services/auth/deno.json", "services/auth/deno.lock", "services/auth/claims.ts", "services/auth/core.ts", "services/auth/handles.ts", "services/auth/jwt.ts", "services/auth/main.ts", "services/auth/oidc.ts", "services/auth/schema.ts", "services/auth/session.ts", "services/auth/where.ts"], dst: "/app/"}]
+				copy: [{srcs: _files, dst: "/app/"}]
 				expose: [9999]
 				cmd: ["run", "--allow-net", "--allow-env", "main.ts"]
 			}

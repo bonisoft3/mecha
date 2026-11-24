@@ -19,7 +19,7 @@ import {
 } from '../../../services/auth/jwt.ts'
 import { PUBLIC_WHERE, shapeWhere } from '../../../services/auth/where.ts'
 import type { Provider } from '../../../services/auth/oidc.ts'
-import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, sealAuthTables } from '../../../services/auth/schema.ts'
+import { AUTH_TABLES, EVOLVE_AUTH_TABLES, prepareAuthTables, LINK_PER_PROVIDER, sealAuthTables, STAMP_EFFECTS } from '../../../services/auth/schema.ts'
 import { createDrains, type Drain, type Drains } from '../../mecha-browser/drains.ts'
 import { createShapes } from '../../mecha-browser/shapes.ts'
 import { publicSnapshot, PublicSnapshotCapacity, PUBLIC_SNAPSHOT_LIMIT, type PublicSnapshot } from './public-snapshot.ts'
@@ -148,6 +148,8 @@ export async function createEdgeCluster(cfg: EdgeClusterConfig): Promise<EdgeClu
     await db.transaction(async (tx) => {
       await tx.exec(prepareAuthTables(AUTH_TABLES))
       await tx.exec(EVOLVE_AUTH_TABLES)
+      await tx.exec(LINK_PER_PROVIDER)
+      await tx.exec(STAMP_EFFECTS)
       await tx.exec(sealAuthTables(AUTH_TABLES))
     })
   }

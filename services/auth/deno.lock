@@ -4,6 +4,8 @@
     "jsr:@std/assert@1.0.13": "1.0.13",
     "jsr:@std/encoding@1.0.7": "1.0.7",
     "jsr:@std/internal@^1.0.6": "1.0.14",
+    "npm:@atproto/jwk-webcrypto@0.3.4": "0.3.4",
+    "npm:@atproto/oauth-client@0.9.3": "0.9.3",
     "npm:@simplewebauthn/server@10.0.1": "10.0.1",
     "npm:@types/node@*": "22.15.15",
     "npm:jose@6.2.15": "6.2.15",
@@ -24,6 +26,166 @@
     }
   },
   "npm": {
+    "@atproto-labs/did-resolver@0.3.14": {
+      "integrity": "sha512-Yp9/87LEPguiVtx9SJYO8uZTJmTCT+FBJya8laxezAT+4ChRCRAxgWF9Es28UAigwoJ/SO08kHa2Ynj5D0BLww==",
+      "dependencies": [
+        "@atproto-labs/fetch",
+        "@atproto-labs/pipe",
+        "@atproto-labs/simple-store",
+        "@atproto-labs/simple-store-memory",
+        "@atproto/did",
+        "zod"
+      ]
+    },
+    "@atproto-labs/fetch@0.4.3": {
+      "integrity": "sha512-Da747rqMhHOSbwEBUfpyCpg3kKwhPZNGLNTFBVc/JQ+KTsDmUy64quRwFqXEy+pd8xoaQ0fodaLDHGbD/LNK7Q==",
+      "dependencies": [
+        "@atproto-labs/pipe"
+      ]
+    },
+    "@atproto-labs/handle-resolver@0.4.11": {
+      "integrity": "sha512-K9ogJhLHAewBPAe0pkNTBDKSP+CieilXjvL/iD3+MAIGEp29yVinXMSfiybAoPVT6rBqfukslv3N2apFz0NIGw==",
+      "dependencies": [
+        "@atproto-labs/simple-store",
+        "@atproto-labs/simple-store-memory",
+        "@atproto/did",
+        "zod"
+      ]
+    },
+    "@atproto-labs/identity-resolver@0.4.14": {
+      "integrity": "sha512-N/Ni291K6wCHTpVQ7+Mx4BcuCQpyfV4z4GEXcr3Px7CMZD5Vm8B4oD/m+gTBMR5Ni39tH4v8uIA0b/0t1FrzmA==",
+      "dependencies": [
+        "@atproto-labs/did-resolver",
+        "@atproto-labs/handle-resolver"
+      ]
+    },
+    "@atproto-labs/pipe@0.2.5": {
+      "integrity": "sha512-1R1nYs/nHmBcYa4yzTjk5H/46MF5nZm342Ha9kKQTOMp/fr2Yn67qD1pTXUS7L2Mx8AEf3m7Z/TTxRfnERLc8w=="
+    },
+    "@atproto-labs/simple-store-memory@0.2.7": {
+      "integrity": "sha512-c3SLLf1ztfxdA8ZVtl1Kj47iSRIC/hzPqQHkDm+LOtN3b0znhugn9cIV/Ta6r9JgNBDUYNUAmRXAzRMy1w6JWA==",
+      "dependencies": [
+        "@atproto-labs/simple-store",
+        "lru-cache"
+      ]
+    },
+    "@atproto-labs/simple-store@0.5.2": {
+      "integrity": "sha512-ecARZs4rBFY5OEr2XnsXBEx3IOgd9VGAdjiG0TUWgV6gIBIXbLm8QvMfn345yIZs99DY2q+Jbj0al/Bzuw3yBg=="
+    },
+    "@atproto/common-web@0.5.19": {
+      "integrity": "sha512-m1pu10fXCRnhqG0E7P5QT6IYkKNJ5K6oH6pjZC/iLhLR1z/nbE6UwIN5qDa24HOJTHMN/JjEbEbppVO3wK56hw==",
+      "dependencies": [
+        "@atproto/lex-data",
+        "@atproto/lex-json",
+        "@atproto/syntax",
+        "zod"
+      ]
+    },
+    "@atproto/did@0.5.6": {
+      "integrity": "sha512-8bLfOnaoWBmg9S8naqzk5mG8zYAXfSKT4odB5OHcCAd1o7p6RFb0Rk9WGobEgboKtxP2CIeul6mzI5PUT4v6Gg==",
+      "dependencies": [
+        "zod"
+      ]
+    },
+    "@atproto/jwk-jose@0.2.4": {
+      "integrity": "sha512-gzDoA0JTwnc0ZJOBLM7WX9xFxtynRS2K1Bofb8epzoMWDQvyvfbPcfkdPrKFM7NXCFUVpGpBnsCB8KFPTf1rCg==",
+      "dependencies": [
+        "@atproto/jwk",
+        "jose@5.10.0"
+      ]
+    },
+    "@atproto/jwk-webcrypto@0.3.4": {
+      "integrity": "sha512-UsFIUozqnRecXPo6HgKV4PW4FqYHxX1V3iAe0rRV6Q2RSfYD8V2mZ89pv8NpvJynnaqJArBQ7HZlcg0F4tRYhA==",
+      "dependencies": [
+        "@atproto/jwk",
+        "@atproto/jwk-jose",
+        "zod"
+      ]
+    },
+    "@atproto/jwk@0.7.4": {
+      "integrity": "sha512-tq7TUDmNfe1yDfpRgdGQMJdl9TUlJmREQNCag9yg5w8Evu+TOiFiLgiOCbo7X4ouRPSgd1DpOzXbUa8UyKKMZA==",
+      "dependencies": [
+        "multiformats",
+        "zod"
+      ]
+    },
+    "@atproto/lex-data@0.1.11": {
+      "integrity": "sha512-m4fZaj9tGcGlRdsP9fLr8+UCutv8ahClYNGkrS+29ZGcen9E4336wggUyzq/XTOKo69Qa2FRVG79pareXh7mFQ==",
+      "dependencies": [
+        "multiformats",
+        "tslib",
+        "unicode-segmenter"
+      ]
+    },
+    "@atproto/lex-json@0.1.10": {
+      "integrity": "sha512-U2AAUDhMyti0CC5FOil/XvYdNfF2decPn/L/K2ezfC3fM/rWsXMR11cpV04eM1efwzcQM7ZG/E5SxZO7wVLAQA==",
+      "dependencies": [
+        "@atproto/lex-data",
+        "tslib"
+      ]
+    },
+    "@atproto/lexicon@0.7.21": {
+      "integrity": "sha512-nAQf9YsuevZ48OuBUF2VdadzCkYMWIvg6NRcVlKWAnbA4dibsEZrq1/k8ZfMypoxMeTt+keGJQqZBX2FTNhO1A==",
+      "dependencies": [
+        "@atproto/common-web",
+        "@atproto/syntax",
+        "multiformats",
+        "zod"
+      ]
+    },
+    "@atproto/oauth-client@0.9.3": {
+      "integrity": "sha512-aw702CHLp9OnefcQ+UyeqCSm/C4KoSNezEo8H/FbOODGb+nff9OVyatWuteI52CdNbN54FkYKhFLL+2YFPPbYw==",
+      "dependencies": [
+        "@atproto-labs/did-resolver",
+        "@atproto-labs/fetch",
+        "@atproto-labs/handle-resolver",
+        "@atproto-labs/identity-resolver",
+        "@atproto-labs/simple-store",
+        "@atproto-labs/simple-store-memory",
+        "@atproto/did",
+        "@atproto/jwk",
+        "@atproto/oauth-resolver",
+        "@atproto/oauth-types",
+        "@atproto/xrpc",
+        "core-js",
+        "multiformats",
+        "zod"
+      ]
+    },
+    "@atproto/oauth-resolver@0.0.3": {
+      "integrity": "sha512-XMx9W029Wye8CmQleWMK6Fc67HiuYXdbdHRR/t0ujfzVeZBInJNQg9IO0qA2nMNOkDIrTEMbZwwdY7MU5qCt1Q==",
+      "dependencies": [
+        "@atproto-labs/fetch",
+        "@atproto-labs/identity-resolver",
+        "@atproto-labs/simple-store",
+        "@atproto-labs/simple-store-memory",
+        "@atproto/did",
+        "@atproto/oauth-types",
+        "zod"
+      ]
+    },
+    "@atproto/oauth-types@0.7.7": {
+      "integrity": "sha512-HhY0n6BJtFlxHJTOwT34uf7BiMaEluuwiZqHkamWoFvl+Gk7bPgWhPslr4kX2J/7ryFxhdsKVj1tjWjy0AhjTw==",
+      "dependencies": [
+        "@atproto/did",
+        "@atproto/jwk",
+        "zod"
+      ]
+    },
+    "@atproto/syntax@0.7.9": {
+      "integrity": "sha512-jC4JsFc2MdDS69+AuLdJo2dyI1K4UJiCn5ys77Ml8jxG6YdvcIO86jJW4gmNNALP9+VROBGE5MtbyJlUNm/LHQ==",
+      "dependencies": [
+        "iso-datestring-validator",
+        "tslib"
+      ]
+    },
+    "@atproto/xrpc@0.8.20": {
+      "integrity": "sha512-F3YE7g/poyZ4Q3i9zkx4EXiMzyZU2+x21//UIiDTFnfMbVyFkRbJOQvqWvSBbYWZTmlvwWZNmXmuK4kI9x8RnQ==",
+      "dependencies": [
+        "@atproto/lexicon",
+        "zod"
+      ]
+    },
     "@hexagon/base64@1.1.28": {
       "integrity": "sha512-lhqDEAvWixy3bZ+UOYbPwUbBkwBq5C1LAJ/xPC8Oi+lL54oyakv/npbA0aU2hgCsx/1NUd4IBvV03+aUBWxerw=="
     },
@@ -111,14 +273,30 @@
         "tslib"
       ]
     },
+    "core-js@3.51.0": {
+      "integrity": "sha512-7bDKx/5jm5MxzsXxc93g6Z2+4ZsuT/MddrfRmTDJNAkWsYWHU8EVNEsBiIEWnMAMCHMmRfUEjkuo3jeNBOIHRw==",
+      "scripts": true
+    },
     "cross-fetch@4.1.0": {
       "integrity": "sha512-uKm5PU+MHTootlWEY+mZ4vvXoCn4fLQxT9dSc1sXVMSFkINTJVN8cAQROpwcKm8bJ/c7rgZVIBWzH5T78sNZZw==",
       "dependencies": [
         "node-fetch"
       ]
     },
+    "iso-datestring-validator@2.2.2": {
+      "integrity": "sha512-yLEMkBbLZTlVQqOnQ4FiMujR6T4DEcCb1xizmvXS+OxuhwcbtynoosRzdMA69zZCShCNAbi+gJ71FxZBBXx1SA=="
+    },
+    "jose@5.10.0": {
+      "integrity": "sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg=="
+    },
     "jose@6.2.15": {
       "integrity": "sha512-qdF6ewcZARtef63fJ9AKKZPgxw+t7USH6HLXYcD4CrdmSvDp79rpJSPFEKc90QBeGS63u1KQtN2MZQHC0yDIzA=="
+    },
+    "lru-cache@10.4.3": {
+      "integrity": "sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ=="
+    },
+    "multiformats@13.4.2": {
+      "integrity": "sha512-eh6eHCrRi1+POZ3dA+Dq1C6jhP1GNtr9CRINMb67OKzqW9I5DUuZM/3jLPlzhgpGeiNUlEGEbkCYChXMCc/8DQ=="
     },
     "node-fetch@2.7.0": {
       "integrity": "sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==",
@@ -147,6 +325,9 @@
     "undici-types@6.21.0": {
       "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="
     },
+    "unicode-segmenter@0.14.5": {
+      "integrity": "sha512-jHGmj2LUuqDcX3hqY12Ql+uhUTn8huuxNZGq7GvtF6bSybzH3aFgedYu/KTzQStEgt1Ra2F3HxadNXsNjb3m3g=="
+    },
     "webidl-conversions@3.0.1": {
       "integrity": "sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ=="
     },
@@ -156,10 +337,15 @@
         "tr46",
         "webidl-conversions"
       ]
+    },
+    "zod@3.25.76": {
+      "integrity": "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="
     }
   },
   "workspace": {
     "dependencies": [
+      "npm:@atproto/jwk-webcrypto@0.3.4",
+      "npm:@atproto/oauth-client@0.9.3",
       "npm:@simplewebauthn/server@10.0.1",
       "npm:jose@6.2.15",
       "npm:postgres@3.4.9"

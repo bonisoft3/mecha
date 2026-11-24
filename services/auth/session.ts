@@ -2,7 +2,8 @@
 // whatever way it came in by — a passkey, a provider, a guest's mint — so a
 // tab whose bearer expired, or whose storage was cleared, takes it up again
 // at POST /auth/session without a second ceremony. The cookie is never
-// renewed, so it lasts from the sign-in that set it (`since`); every exchange
+// renewed, so it lasts from the sign-in that set it (`since`), which is also
+// how recent a sign-in adding or removing a way stands on; every exchange
 // asks again whether the way still stands (`still`), so a passkey or a link
 // removed, or a guest promoted, is a session ended. Only a request from the
 // door's own origin is given a cookie: a page elsewhere may still sign in for
@@ -27,7 +28,9 @@ const HELD_TTL_S = 300;
 /** How a session came in, which must still stand for it to be taken up. */
 export type Way =
   | { kind: "passkey"; credential: string }
-  | { kind: "provider"; provider: string; issuer: string }
+  /** The subject too: a link removed and another of the provider added in
+   * its place is no way back for the removed subject's sessions. */
+  | { kind: "provider"; provider: string; issuer: string; sub: string }
   | { kind: "guest" };
 
 /** The person as the app shows them. */
@@ -52,6 +55,9 @@ export type Device = {
   held: (req: Request, sub: string, way: Way, proof: Proof) => Promise<Offer>;
   /** The cookies that leave this device with no session and nothing held. */
   signedOut: (req: Request) => string[];
+  /** This device's own session while its way stands, and when it was signed
+   * in (null for a cookie from before that was kept). */
+  current: (req: Request) => Promise<{ user: User; way: Way; since: number | null } | null>;
   hasSession: (req: Request) => Promise<boolean>;
   /** The routes under /auth/session and /auth/signout, or null for any other. */
   route: (req: Request) => Promise<Response> | null;
@@ -92,7 +98,7 @@ export function deviceSession(cfg: DeviceConfig): Device {
   async function signedIn(req: Request, sub: string, way: Way, proof: Proof): Promise<string[]> {
     if (foreign(req)) return [];
     const exp = now() + SESSION_TTL_S;
-    const claims = { purpose: "device-session", sub, way, ...proofClaims(proof), exp };
+    const claims = { purpose: "device-session", sub, way, since: now(), ...proofClaims(proof), exp };
     return [
       cookie(req, SESSION_COOKIE, await signJwt(cfg.secret, claims), SESSION_TTL_S),
       hint(req, SESSION_TTL_S),
@@ -115,7 +121,13 @@ export function deviceSession(cfg: DeviceConfig): Device {
     if (typeof way !== "object" || way === null) return null;
     const user = await cfg.still(way, c.sub);
     if (user === null) return null;
-    return { user, way, proof: proofOf(c), offer: typeof c.offer === "string" ? c.offer : null };
+    return {
+      user,
+      way,
+      proof: proofOf(c),
+      offer: typeof c.offer === "string" ? c.offer : null,
+      since: typeof c.since === "number" ? c.since : null,
+    };
   }
 
   const answer = async (user: User, proof: Proof, cookies: string[] = []) =>
@@ -173,6 +185,7 @@ export function deviceSession(cfg: DeviceConfig): Device {
     signedIn,
     held,
     signedOut: (req) => cleared(req, [SESSION_COOKIE, HELD_COOKIE]),
+    current: (req) => standing(read(req, SESSION_COOKIE), "device-session"),
     route(req) {
       const path = new URL(req.url).pathname;
       if (req.method !== "POST") return null;

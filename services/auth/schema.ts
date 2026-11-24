@@ -20,7 +20,8 @@ export type AuthTable =
   | "identity_link"
   | "webauthn_challenge"
   | "auth_native_ticket"
-  | "auth_refresh_token";
+  | "auth_refresh_token"
+  | "account_recovery";
 
 export const AUTH_TABLES: AuthTable[] = [
   "webauthn_credential",
@@ -28,6 +29,7 @@ export const AUTH_TABLES: AuthTable[] = [
   "webauthn_challenge",
   "auth_native_ticket",
   "auth_refresh_token",
+  "account_recovery",
 ];
 
 // Only tables that existed in public before mecha_auth keep a compatibility view.
@@ -38,12 +40,13 @@ const columns: Record<AuthTable, string> = {
     id text primary key,
     user_id uuid not null references public.app_user(id) on delete cascade,
     public_key bytea not null,
-    counter bigint not null default 0`,
+    counter bigint not null default 0,
+    created_at timestamptz default now()`,
   identity_link: `
     provider text not null,
     issuer text not null,
     sub text not null,
-    user_id uuid not null unique references public.app_user(id) on delete cascade,
+    user_id uuid not null references public.app_user(id) on delete cascade,
     name text,
     picture text,
     email text,
@@ -59,6 +62,7 @@ const columns: Record<AuthTable, string> = {
     user_id uuid not null references public.app_user(id) on delete cascade,
     provider text not null,
     issuer text not null,
+    sub text,
     code_challenge text not null,
     proof jsonb,
     held boolean not null default false,
@@ -74,20 +78,32 @@ const columns: Record<AuthTable, string> = {
     replaced_by text,
     revoked_at timestamptz,
     created_at timestamptz not null default now()`,
+  // What asking to set up recovery knows of an account: when it first had an
+  // external effect, and how often Not now was answered.
+  account_recovery: `
+    user_id uuid primary key references public.app_user(id) on delete cascade,
+    effected_at timestamptz,
+    declines int not null default 0,
+    ask_after timestamptz`,
 };
 
 const list = (tables: AuthTable[]) => `ARRAY[${tables.map((t) => `'${t}'`).join(", ")}]::text[]`;
 /** Columns later releases added to tables an earlier one made: a profile's
  * name, picture and address on a link; how a native ticket's or a refresh
- * family's sign-in was made, and which way it came in by. A row from before
- * them says none of it, and renews or redeems nothing. */
+ * family's sign-in was made, and which way (and subject) it came in by; when a passkey was
+ * added. A row from before them says none of it, and renews or redeems
+ * nothing. An account holds a link per provider (LINK_PER_PROVIDER), so the
+ * one-per-account constraint goes. */
 export const EVOLVE_AUTH_TABLES = `
 ALTER TABLE mecha_auth.identity_link ADD COLUMN IF NOT EXISTS name text,
   ADD COLUMN IF NOT EXISTS picture text, ADD COLUMN IF NOT EXISTS email text;
+ALTER TABLE mecha_auth.identity_link DROP CONSTRAINT IF EXISTS identity_link_user_id_key;
+ALTER TABLE mecha_auth.webauthn_credential ADD COLUMN IF NOT EXISTS created_at timestamptz;
+ALTER TABLE mecha_auth.webauthn_credential ALTER COLUMN created_at SET DEFAULT now();
 ALTER TABLE mecha_auth.auth_refresh_token ADD COLUMN IF NOT EXISTS proof jsonb,
   ADD COLUMN IF NOT EXISTS way jsonb;
 ALTER TABLE mecha_auth.auth_native_ticket ADD COLUMN IF NOT EXISTS proof jsonb,
-  ADD COLUMN IF NOT EXISTS held boolean NOT NULL DEFAULT false;`;
+  ADD COLUMN IF NOT EXISTS held boolean NOT NULL DEFAULT false, ADD COLUMN IF NOT EXISTS sub text;`;
 
 /** Makes mecha_auth and the tables in it, moving any an earlier release left in public. */
 export function prepareAuthTables(tables: AuthTable[] = AUTH_TABLES): string {
@@ -123,6 +139,38 @@ ${tables.map((t) => `CREATE TABLE IF NOT EXISTS mecha_auth.${t} (${columns[t]}\n
 -- A guest signing in to an account another holds is held, never merged.
 DROP FUNCTION IF EXISTS mecha_auth.adopt_guest(uuid, uuid);`
 }
+
+/** One link per account and provider: a session's way names its provider,
+ * never a second subject of it, which would outlive the first's removal. Run
+ * once every link names its issuer. */
+export const LINK_PER_PROVIDER =
+  `CREATE UNIQUE INDEX IF NOT EXISTS identity_link_user_provider_idx ON mecha_auth.identity_link (user_id, provider, issuer);`;
+
+/** The account an external effect was asked for, stamped where the airlock
+ * claims it: the ledger's insert runs in the writer's transaction, under the
+ * claims of the request that moved the machine, so a person's write stamps
+ * their account and the service's own moves stamp none. Set up recovery is
+ * asked of an account so stamped (core.ts). A cluster with no ledger has no
+ * external effects to stamp. */
+export const STAMP_EFFECTS = `
+CREATE OR REPLACE FUNCTION mecha_auth.effect_requested() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $stamp$
+DECLARE claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+BEGIN
+  -- A subject naming no account stamps none, and never fails the effect.
+  IF claims->>'role' = 'app_user' AND claims->>'sub' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    INSERT INTO mecha_auth.account_recovery (user_id, effected_at)
+      SELECT u.id, now() FROM public.app_user u WHERE u.id = (claims->>'sub')::uuid
+      ON CONFLICT (user_id) DO UPDATE SET effected_at = coalesce(account_recovery.effected_at, excluded.effected_at);
+  END IF;
+  RETURN NULL;
+END $stamp$;
+DO $stamp$ BEGIN
+  IF to_regclass('airlock.external_effect_ledger') IS NOT NULL THEN
+    CREATE OR REPLACE TRIGGER mecha_auth_effect_requested AFTER INSERT ON airlock.external_effect_ledger
+      FOR EACH ROW EXECUTE FUNCTION mecha_auth.effect_requested();
+  END IF;
+END $stamp$;`;
 
 /**
  * Takes back every privilege anyone but the owner holds on mecha_auth, on the

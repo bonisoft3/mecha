@@ -1221,7 +1221,7 @@ Deno.test({
     // its next session, and keeps one it was renamed to.
     const drawn = (await (await handler(post("/auth/guest", {}))).json()).user;
     await sql`insert into mecha_auth.identity_link (provider, issuer, sub, user_id, name) values ('google', ${alice.issuer}, 'g-drawn', ${drawn.id}, 'Caio Prado')`;
-    assertEquals((await links.handleOf("google", alice.issuer, drawn.id))?.handle, `Caio-Prado-${drawn.handle.slice(-4)}`);
+    assertEquals((await links.handleOf("google", alice.issuer, "g-drawn", drawn.id))?.handle, `Caio-Prado-${drawn.handle.slice(-4)}`);
   },
 });
 
@@ -1386,7 +1386,7 @@ Deno.test({
       name: "Alice B.",
       email: "alice.b@example.test",
     });
-    assertEquals(await links.handleOf("google", alice.issuer, users[0].id), {
+    assertEquals(await links.handleOf("google", alice.issuer, alice.sub, users[0].id), {
       handle: users[0].handle,
       name: "Alice B.",
       email: "alice.b@example.test",
@@ -1403,10 +1403,14 @@ Deno.test({
   ...opts,
   fn: async () => {
     const guest = (await (await handler(post("/auth/guest", {}))).json()).user;
-    assertEquals(await links.handleOf("google", alice.issuer, guest.id), null);
+    assertEquals(await links.handleOf("google", alice.issuer, alice.sub, guest.id), null);
     const u = await signInAs({ ...alice, sub: "g-revoked" });
+    assertEquals((await links.handleOf("google", alice.issuer, "g-revoked", u.id))?.handle, u.handle);
+    // Regression: a way named only its provider, so a link of the provider
+    // put in a removed one's place took the removed subject's sessions back.
     await sql`delete from mecha_auth.identity_link where sub = 'g-revoked'`;
-    assertEquals(await links.handleOf("google", alice.issuer, u.id), null);
+    await sql`insert into mecha_auth.identity_link (provider, issuer, sub, user_id) values ('google', ${alice.issuer}, 'g-replacement', ${u.id})`;
+    assertEquals(await links.handleOf("google", alice.issuer, "g-revoked", u.id), null);
   },
 });
 
@@ -1430,8 +1434,8 @@ Deno.test({
     assertEquals((await signInAs({ ...alice, sub: "pairwise-1", name: null, picture: null, email: null })).id, guest.id);
     const replacement = await signInAs({ ...alice, issuer: "https://broker.test", sub: "pairwise-1" });
     assert(replacement.id !== guest.id);
-    assertEquals(await links.handleOf("google", "https://broker.test", guest.id), null);
-    assertEquals(await links.handleOf("google", alice.issuer, guest.id), { handle: guest.handle, name: null, email: null });
+    assertEquals(await links.handleOf("google", "https://broker.test", "pairwise-1", guest.id), null);
+    assertEquals(await links.handleOf("google", alice.issuer, "pairwise-1", guest.id), { handle: guest.handle, name: null, email: null });
   },
 });
 
@@ -2014,6 +2018,177 @@ Deno.test({
     // Regression: the array-type fetch postgres.js runs on connect timed out
     // under load, its rejection unhandled, and the auth service exited.
     assertEquals(sql.options.fetch_types, false);
+  },
+});
+
+/** A new account at the door, signed in by a passkey, with the cookies the
+ * browser keeps. */
+async function account() {
+  const key = await passkey();
+  const start = await (await handler(atDoor("/auth/register/start", {}, door))).json();
+  const res = await handler(atDoor("/auth/register/verify", { state: start.state, response: key.register(start.challenge, `https://${door}`) }, door));
+  assertEquals(res.status, 200, await res.clone().text());
+  return { user: (await res.json()).user as { id: string; handle: string }, jar: cookies(res), key };
+}
+const ways = async (jar: Record<string, string>) => await (await handler(atDoor("/auth/ways", {}, door, undefined, jar, `https://${door}`))).json();
+const atWays = (path: string, body: unknown, jar: Record<string, string>) => handler(atDoor(`/auth/ways${path}`, body, door, undefined, jar, `https://${door}`));
+/** Another passkey added to the account this jar is signed in to. */
+async function addPasskey(jar: Record<string, string>) {
+  const key = await passkey();
+  const start = await (await atWays("/passkey", {}, jar)).json();
+  const res = await atWays("/passkey/verify", { state: start.state, response: key.register(start.challenge, `https://${door}`) }, jar);
+  return { key, start, res };
+}
+
+Deno.test({
+  name: "an account's ways in: one added on a recent sign-in, and one removed while another stays, never the way this device came in by",
+  ...opts,
+  async fn() {
+    const a = await account();
+    const first = await ways(a.jar);
+    assertEquals(first.ways.map((w: { kind: string; id: string; current: boolean }) => [w.kind, w.id, w.current]), [["passkey", a.key.id, true]]);
+    assertEquals([first.recent, first.recovery], [true, false]);
+    const second = await addPasskey(a.jar);
+    assertEquals(second.res.status, 200, await second.res.clone().text());
+    // An authenticator already holding one of the account's passkeys makes no second.
+    assertEquals(second.start.excludeCredentials.map((c: { id: string }) => c.id), [a.key.id]);
+    assertEquals((await signIn(second.key)).user.id, a.user.id);
+    assertEquals((await ways(a.jar)).ways.length, 2);
+    const current = await atWays("/remove", { kind: "passkey", id: a.key.id }, a.jar);
+    assertEquals([current.status, await current.json()], [409, { error: "the way this device signed in by" }]);
+    const removed = await atWays("/remove", { kind: "passkey", id: second.key.id }, a.jar);
+    assertEquals(removed.status, 200);
+    const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+    const gone = await handler(atDoor("/auth/login/verify", { state: login.state, response: await second.key.login(login.challenge, `https://${door}`, { counter: 2 }) }, door));
+    assertEquals([gone.status, (await gone.json()).unknownCredential], [401, true]);
+    // Another account's way is none of this one's.
+    const b = await account();
+    assertEquals((await atWays("/remove", { kind: "passkey", id: b.key.id }, a.jar)).status, 404);
+  },
+});
+
+Deno.test({
+  name: "the ways change only on this device's own session, signed in within ten minutes: never a guest's, a bearer's, or another origin's",
+  ...opts,
+  async fn() {
+    const a = await account();
+    const now = Math.floor(Date.now() / 1000);
+    const session = (since: number | undefined) =>
+      signJwt({ purpose: "device-session", sub: a.user.id, way: { kind: "passkey", credential: a.key.id }, ...(since === undefined ? {} : { since }), exp: now + 3600 });
+    for (const stale of [await session(now - 601), await session(undefined)]) {
+      const jar = { [SESSION_COOKIE]: stale };
+      assertEquals((await ways(jar)).recent, false);
+      const refused = await atWays("/passkey", {}, jar);
+      assertEquals([refused.status, await refused.json()], [401, { error: "insufficient_user_authentication", max_age: 600 }]);
+      assertEquals((await atWays("/remove", { kind: "passkey", id: a.key.id }, jar)).status, 401);
+    }
+    const token = (await signIn(a.key)).token;
+    assertEquals((await handler(atDoor("/auth/ways/passkey", {}, door, token))).status, 401);
+    assertEquals((await handler(atDoor("/auth/ways/passkey", {}, door, undefined, a.jar, "https://elsewhere.test"))).status, 403);
+    const guest = await handler(atDoor("/auth/guest", {}, door));
+    assertEquals((await atWays("", {}, cookies(guest))).status, 403);
+  },
+});
+
+Deno.test({
+  name: "a provider's subject added to an account signs in to it, and one another account holds stays that account's",
+  ...opts,
+  async fn() {
+    const a = await account();
+    const b = await account();
+    const carol: Profile = { ...alice, sub: `g-carol-${crypto.randomUUID()}`, name: "Carol", email: "carol@example.test" };
+    const byA = { way: { kind: "passkey" as const, credential: a.key.id }, since: Math.floor(Date.now() / 1000) };
+    assertEquals(await links.addTo(carol, a.user.id, byA), "added");
+    assertEquals(await links.addTo(carol, a.user.id, byA), "added");
+    assertEquals(await links.addTo(carol, b.user.id, { way: { kind: "passkey", credential: b.key.id }, since: Math.floor(Date.now() / 1000) }), "taken");
+    // Regression: a session's way names its provider, not the subject, so a
+    // second subject of one provider would outlive the first's removal.
+    assertEquals(await links.addTo({ ...carol, sub: `g-dave-${crypto.randomUUID()}` }, a.user.id, byA), "held");
+    assertEquals((await signInAs(carol)).id, a.user.id);
+    const listed = (await ways(a.jar)).ways;
+    assertEquals(listed.map((w: { kind: string; current: boolean }) => [w.kind, w.current]), [["passkey", true], ["provider", false]]);
+    assertEquals([listed[1].provider, listed[1].email], ["google", "carol@example.test"]);
+    const removed = await atWays("/remove", { kind: "provider", provider: "google", issuer: carol.issuer, sub: carol.sub }, a.jar);
+    assertEquals(removed.status, 200);
+    assert((await signInAs(carol)).id !== a.user.id, "a link removed is no way into the account");
+  },
+});
+
+Deno.test({
+  name: "set up recovery is asked of an account with one way in that had an external effect before this sign-in, until Not now or a second way",
+  ...opts,
+  async fn() {
+    // The airlock's ledger as airlock.sql makes it, which the service stamps
+    // when it finds it at start.
+    await sql`CREATE SCHEMA IF NOT EXISTS airlock`;
+    await sql`CREATE TABLE IF NOT EXISTS airlock.external_effect_ledger (key text primary key, effect text not null, row jsonb not null, input jsonb not null)`;
+    await migrate();
+    const effect = (claims: Record<string, unknown>) =>
+      sql.begin(async (tx) => {
+        await tx`select set_config('request.jwt.claims', ${JSON.stringify(claims)}, true)`;
+        await tx`insert into airlock.external_effect_ledger values (${crypto.randomUUID()}, 'charge', '{}', '{}')`;
+      });
+    const a = await account();
+    await effect({ role: "app_user", sub: a.user.id });
+    // The service's own moves stamp no one.
+    await effect({ role: "service", sub: a.user.id });
+    assertEquals((await ways(a.jar)).recovery, false, "the effect is this sign-in's");
+    await new Promise((r) => setTimeout(r, 1100));
+    const again = await handler(atDoor("/auth/login/start", {}, door));
+    const login = await again.json();
+    const res = await handler(atDoor("/auth/login/verify", { state: login.state, response: await a.key.login(login.challenge, `https://${door}`, { counter: 2 }) }, door));
+    const jar = cookies(res);
+    assertEquals((await ways(jar)).recovery, true);
+    const b = await account();
+    await effect({ role: "service", sub: b.user.id });
+    await new Promise((r) => setTimeout(r, 1100));
+    assertEquals((await ways(b.jar)).recovery, false);
+    assertEquals((await atWays("/later", {}, jar)).status, 200);
+    assertEquals((await ways(jar)).recovery, false);
+    const [later] = await sql`select declines, ask_after - now() > interval '23 hours' as day from mecha_auth.account_recovery where user_id = ${a.user.id}`;
+    assertEquals([later.declines, later.day], [1, true]);
+    await sql`update mecha_auth.account_recovery set ask_after = now() where user_id = ${a.user.id}`;
+    assertEquals((await ways(jar)).recovery, true);
+    assertEquals((await addPasskey(jar)).res.status, 200);
+    assertEquals((await ways(jar)).recovery, false);
+  },
+});
+
+Deno.test({
+  name: "a change to the ways is made only while the way that authorized it stands",
+  ...opts,
+  async fn() {
+    const a = await account();
+    const second = await addPasskey(a.jar);
+    assertEquals(second.res.status, 200);
+    // Signed in by the second passkey, which the first then removes.
+    const login = await (await handler(atDoor("/auth/login/start", {}, door))).json();
+    const bySecond = cookies(await handler(atDoor("/auth/login/verify", { state: login.state, response: await second.key.login(login.challenge, `https://${door}`, { counter: 2 }) }, door)));
+    const start = await (await atWays("/passkey", {}, bySecond)).json();
+    assertEquals((await atWays("/remove", { kind: "passkey", id: second.key.id }, a.jar)).status, 200);
+    const third = await passkey();
+    const late = await atWays("/passkey/verify", { state: start.state, response: third.register(start.challenge, `https://${door}`) }, bySecond);
+    assertEquals(late.status, 401);
+    assertEquals(await links.addTo({ ...alice, sub: `g-late-${crypto.randomUUID()}` }, a.user.id, { way: { kind: "passkey", credential: second.key.id }, since: Math.floor(Date.now() / 1000) }), "revoked");
+    assertEquals((await ways(a.jar)).ways.length, 1);
+    // A change that waited past its sign-in's ten minutes is made by no one.
+    assertEquals(await links.addTo({ ...alice, sub: `g-stale-${crypto.randomUUID()}` }, a.user.id, { way: { kind: "passkey", credential: a.key.id }, since: Math.floor(Date.now() / 1000) - 601 }), "revoked");
+  },
+});
+
+Deno.test({
+  name: "an effect whose subject names no account stamps none and is still claimed, and Not now's wait stops growing",
+  ...opts,
+  async fn() {
+    await sql.begin(async (tx) => {
+      await tx`select set_config('request.jwt.claims', ${JSON.stringify({ role: "app_user", sub: "not-a-uuid" })}, true)`;
+      await tx`insert into airlock.external_effect_ledger values (${crypto.randomUUID()}, 'charge', '{}', '{}')`;
+    });
+    const a = await account();
+    await sql`insert into mecha_auth.account_recovery (user_id, effected_at, declines) values (${a.user.id}, now(), 40)`;
+    assertEquals((await atWays("/later", {}, a.jar)).status, 200);
+    const [r] = await sql`select ask_after - now() < interval '65 days' as capped from mecha_auth.account_recovery where user_id = ${a.user.id}`;
+    assertEquals(r.capped, true);
   },
 });
 

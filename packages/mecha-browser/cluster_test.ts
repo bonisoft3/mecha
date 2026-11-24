@@ -44,6 +44,19 @@ Deno.test('request views boot without shapes while physical server sources still
   }
 })
 
+// Regression: a pages build of an app offering a provider asked this tier which
+// providers it turns on and was answered 404, which the terminal fails on.
+Deno.test('the browser tier turns no sign-in provider on', async () => {
+  const db = await PGlite.create()
+  try {
+    const cluster = await createCluster({ db, sql: [rls, schema], tables: ['flag'], schema: { flag: { durability: 'server' } }, log: console.error, fail: (e) => { throw e } })
+    const offered = await cluster.handle(new Request('http://cluster.local/auth/oidc'))
+    assert.deepEqual([offered.status, await offered.json()], [200, { providers: [], credential: {} }])
+  } finally {
+    await db.close()
+  }
+})
+
 Deno.test('a live view still fails the shape primary-key contract', async () => {
   const db = await PGlite.create()
   try {

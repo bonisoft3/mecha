@@ -643,13 +643,19 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// so it signs in by what needs no one else. A provider signs a person
 		// in, so it presupposes `auth`.
 		signIn: {
-			[!~"^(google|apple)$"]~(K,_): error("signIn.\(K): field not allowed")
+			[!~"^(google|apple|bluesky)$"]~(K,_): error("signIn.\(K): field not allowed")
 			google?: _#SignInProvider & {_name: "google"}
 			apple?:  _#SignInProvider & {_name: "apple"}
+			// AT Protocol's client is the door's origin and its issuer the
+			// person's own server, so Bluesky takes no setting.
+			bluesky?: close({})
 		}
 		_#SignInProvider: {
 			_name: string
-			[!~"^(_name|issuer|internal|client|scope|params)$"]~(K,_): error("signIn.\(_name).\(K): field not allowed")
+			[!~"^(_name|issuer|internal|client|scope|params|credential)$"]~(K,_): error("signIn.\(_name).\(K): field not allowed")
+			// Signs in by the ID token the provider's own button hands the
+			// page, for a client registered to the page's origins.
+			credential?: true
 			issuer?:   string & !="" & !~"[$}]"
 			internal?: string & !="" & !~"[$}]"
 			client?:   string & !="" & !~"[$}]"
@@ -1226,8 +1232,14 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 							ANDROID_APK_KEY_HASHES: "${ANDROID_APK_KEY_HASHES:-}"
 							NATIVE_SCHEMES:         "${NATIVE_SCHEMES:-}"
 							OIDC_PROVIDERS:         "${OIDC_PROVIDERS:-}"
-							for p, d in X.capabilities.signIn {
-								for o, v in {client: "CLIENT_ID", issuer: "ISSUER", internal: "INTERNAL", secret: "CLIENT_SECRET", scope: "SCOPE", params: "AUTHORIZE_PARAMS"} {
+							// Bluesky's entryway and AppView, Bluesky's own unless a
+							// deployment names others.
+							if X.capabilities.signIn.bluesky != _|_ {
+								OIDC_BLUESKY_ENTRYWAY: "${OIDC_BLUESKY_ENTRYWAY:-}"
+								OIDC_BLUESKY_APPVIEW:  "${OIDC_BLUESKY_APPVIEW:-}"
+							}
+							for p, d in X.capabilities.signIn if p != "bluesky" {
+								for o, v in {client: "CLIENT_ID", issuer: "ISSUER", internal: "INTERNAL", secret: "CLIENT_SECRET", scope: "SCOPE", params: "AUTHORIZE_PARAMS", credential: "CREDENTIAL"} {
 									let e = "OIDC_\(strings.ToUpper(p))_\(v)"
 									(e): "${\(e):-\(*d[o] | "")}"
 								}

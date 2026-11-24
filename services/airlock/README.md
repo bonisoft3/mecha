@@ -68,8 +68,9 @@ Environment, all required:
 | `MESH_URL` | The airlock's daprd. |
 | `AIRLOCK_DIR` | The program's `services/airlock/effects.json` and the handlers it names. |
 
-At startup the airlock parses `effects.json` and admits every handler, and it dies on
-one it refuses; `admit.ts <effects.json> <dir>` runs the same admission and exits.
+At startup the airlock parses `effects.json` and admits every handler, one at a time (each admission runs its
+handler in a cage of about 30 MiB), and it dies on one it refuses; `admit.ts <effects.json> <dir>` runs
+the same admission and exits.
 
 ## A handler
 

@@ -2,8 +2,8 @@
 // faked: what the handler may name, what reaches the transport, and what
 // answers are accepted.
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { BreakerOpen, Handler, meshTransport, sinkPath, type Transport } from "./handler.ts";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
+import { admitAll, BreakerOpen, Handler, meshTransport, sinkPath, type Transport } from "./handler.ts";
 import { base64Of, type Effect, encodedBody } from "./reentry.ts";
 import type { BlobStore } from "./blobs.ts";
 
@@ -615,5 +615,102 @@ Deno.test("a part no structured clone carries is a TypeError, rejected, as on th
     assertEquals(rec.calls, []);
   } finally {
     await Deno.remove(path);
+  }
+});
+
+// A manifest of effects named e0, e1, ..., each handler the file `effects/<name>.js`
+// with the source `source(name)`.
+async function admission(count: number, source: (name: string) => string, effectOf: (name: string) => Effect = () => idempotent): Promise<{ manifest: string; dir: string; names: string[] }> {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/effects`);
+  const names = Array.from({ length: count }, (_, i) => `e${i}`);
+  const manifest: Record<string, Effect> = {};
+  for (const name of names) {
+    manifest[name] = { ...effectOf(name), handler: `effects/${name}.js` };
+    await Deno.writeTextFile(`${dir}/effects/${name}.js`, source(name));
+  }
+  await Deno.writeTextFile(`${dir}/effects.json`, JSON.stringify({ effects: manifest }));
+  return { manifest: `${dir}/effects.json`, dir, names };
+}
+
+// What `run` answered or threw, and the Workers there were while it ran: alive
+// now, the most at once, and all constructed.
+async function cages<T>(run: () => Promise<T>): Promise<{ value?: T; error?: unknown; live: number; peak: number; made: number }> {
+  const RealWorker = globalThis.Worker;
+  let live = 0;
+  let peak = 0;
+  let made = 0;
+  globalThis.Worker = class extends RealWorker {
+    #ended = false;
+    constructor(...args: ConstructorParameters<typeof Worker>) {
+      super(...args);
+      made++;
+      peak = Math.max(peak, ++live);
+    }
+    override terminate() {
+      if (!this.#ended) {
+        this.#ended = true;
+        live--;
+      }
+      super.terminate();
+    }
+  };
+  try {
+    const answer: { value?: T; error?: unknown } = {};
+    try {
+      answer.value = await run();
+    } catch (error) {
+      answer.error = error;
+    }
+    return { ...answer, live, peak, made };
+  } finally {
+    globalThis.Worker = RealWorker;
+  }
+}
+
+Deno.test("admitAll admits no more handlers at once than its concurrency", async () => {
+  const { manifest, dir, names } = await admission(6, () => `export const issue = async () => ({ done: 1 });`);
+  try {
+    const one = await cages(() => admitAll(manifest, dir));
+    assertEquals(one.peak, 1);
+    assertEquals(one.live, 0);
+    assertEquals(Object.keys(one.value!.handlers), names);
+    const three = await cages(() => admitAll(manifest, dir, 3));
+    // Only a bound: a peak above 1 is not asserted, it would be flaky.
+    assertEquals(three.peak <= 3, true);
+    assertEquals(three.live, 0);
+    assertEquals(Object.keys(three.value!.handlers), names);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("admitAll fails on the first handler it refuses, in manifest order", async () => {
+  // e1 and e3 are not idempotent and reconcile, yet their files export only issue.
+  const bad = new Set(["e1", "e3"]);
+  const { manifest, dir } = await admission(
+    5,
+    () => `export const issue = async () => ({ done: 1 });`,
+    (name) => (bad.has(name) ? effect : idempotent),
+  );
+  try {
+    const run = await cages(() => admitAll(manifest, dir));
+    assertStringIncludes((run.error as Error).message, "effect e1:");
+    assertEquals(run.live, 0);
+    // Only e0 and e1 were admitted: none starts after the first failure.
+    assertEquals(run.made, 2);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("admitAll refuses a concurrency that is not a positive integer", async () => {
+  const { manifest, dir } = await admission(1, () => `export const issue = async () => ({ done: 1 });`);
+  try {
+    for (const concurrency of [0, -1, 1.5, NaN]) {
+      await assertRejects(() => admitAll(manifest, dir, concurrency), TypeError, "positive integer");
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

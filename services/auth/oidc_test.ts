@@ -912,8 +912,10 @@ Deno.test("a provider's button signs a person in by the ID token it hands the pa
   assertEquals(back[`${NONCE_COOKIE}_google`], "");
   const session = await s.serve(exchange(back[SESSION_COOKIE]));
   assertEquals((await session.json()).user.name, "Alice");
-  // A provider signing in by its button has no redirect to begin.
-  assertEquals(s.routes(new Request(`${ORIGIN}/auth/oidc/google/start`)), null);
+  // A credential provider keeps its redirect route as a fallback.
+  const redirectFallback = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/start`));
+  assertEquals(redirectFallback?.status, 303);
+  assert(redirectFallback?.headers.get("location")?.startsWith("https://accounts.google.com/authorize"), redirectFallback?.headers.get("location") ?? "");
 });
 
 Deno.test("a credential is refused unless it carries this browser's nonce, for this client, from this origin", async () => {
@@ -942,27 +944,37 @@ Deno.test("a provider signing in by redirect offers no credential route", async 
   assertEquals(s.routes(new Request(`${ORIGIN}/auth/oidc/google/nonce`)), null);
 });
 
-// Regression: Google's script assigns markup no Trusted Types policy vouches
-// for, and the app's page refused it, so the button never drew.
-Deno.test("the provider's button is the auth service's own page, under a policy that admits Google's script and no other", async () => {
+// Regression: FedCM runs in the auth service's framed page so the terminal's CSP
+// never admits external provider endpoints, and redirects cleanly when FedCM is unavailable.
+Deno.test("the provider's FedCM frame runs under a strict self-script policy and falls back to redirect", async () => {
   const s = await setup(CREDENTIAL);
-  const page = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=pt-BR`));
+  const page = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?prompt=&label=Google`));
   assertEquals(page.status, 200);
   const policy = page.headers.get("content-security-policy") ?? "";
-  assert(policy.includes("script-src 'self' https://accounts.google.com/gsi/client"), policy);
+  assert(policy.includes("script-src 'self'"), policy);
+  assert(!policy.includes("accounts.google.com/gsi/client"), policy);
+  assert(policy.includes("connect-src 'self' https://accounts.google.com/gsi/"), policy);
   assert(policy.includes("frame-ancestors 'self'"), "only the app's own pages frame it");
-  assert(!policy.includes("require-trusted-types-for"), "Google's script needs the markup sinks the app's page withholds");
   const html = await page.text();
-  assert(html.includes('data-client="client-123"') && html.includes('data-locale="pt-BR"'), html);
-  assert(html.includes('overflow:hidden') && html.includes('iframe{display:block}'), html);
+  assert(html.includes('data-client="client-123"') && html.includes('data-prompt="1"') && html.includes('data-add="0"'), html);
+  assert(html.includes('<button id="go" type="button"></button>'), html);
   const script = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button.js`));
   assertEquals(script.headers.get("content-type"), "text/javascript; charset=utf-8");
   const js = await script.text();
-  for (const step of ["/oidc/${provider}/nonce", "/oidc/${provider}/credential", "top.location.reload()", "google.accounts.id.prompt()"]) assert(js.includes(step), step);
-  assert(!js.includes("Math.max(200,"), js);
-  // A hint is no URL's to carry.
-  assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=<script>`))).status, 200);
-  assert(!(await (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=x"><script>`))).text()).includes("<script>a"), "a locale is a tag or nothing");
+  for (const step of [
+    "https://accounts.google.com/gsi/fedcm.json",
+    "/oidc/${provider}/nonce",
+    "/oidc/${provider}/credential",
+    'allowsFeature?.("identity-credentials-get")',
+    "performance.now()",
+    'mode: "passive"',
+    'mode: "active"',
+    'fallback: "redirect"',
+    "top.location.reload()",
+  ]) assert(js.includes(step), step);
+  // A label is read via URLSearchParams in JS, never interpolated into HTML.
+  const injected = await (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?label=x"><script>`))).text();
+  assert(!injected.includes('"><script>'), "label is never spliced into HTML");
   const redirect = await setup();
   assertEquals(redirect.routes(new Request(`${ORIGIN}/auth/oidc/google/button`)), null);
 });

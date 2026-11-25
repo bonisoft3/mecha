@@ -127,23 +127,25 @@ a page the door serves:
   providers this deployment turns on (`OIDC_PROVIDERS`), the ways in the
   terminal draws (a release turns on its program's, a local stack none), and
   for each signing in by its own button, the client the button asks with.
-- **A provider's own button** (`OIDC_<NAME>_CREDENTIAL=true`, Google's
-  Identity Services, FedCM where the browser has it) signs in on the page,
-  with no redirect: `GET /auth/oidc/<name>/nonce` keeps a random secret in
-  this browser (`__Host-mecha_oidc_nonce_<name>` over HTTPS, as the state cookie is named) and
+- **A provider's FedCM sign-in with redirect fallback** (`OIDC_<NAME>_CREDENTIAL=true`,
+  Google's native Web FedCM): signs in on the page with no redirect when the
+  browser supports FedCM, and falls back to `/auth/oidc/<name>/start` otherwise.
+  `GET /auth/oidc/<name>/nonce` keeps a random secret in this browser
+  (`__Host-mecha_oidc_nonce_<name>` over HTTPS, as the state cookie is named) and
   hands the page its hash as the nonce, and `POST /auth/oidc/<name>/credential`
-  takes the ID token the button handed the page (`credential`, and a guest's
+  takes the ID token FedCM handed the page (`credential`, and a guest's
   `id_token_hint`), checks it for this client and the hash of the cookie's
   secret, and signs the device in as the callback would. A token alone, whose
   nonce anyone holding it reads, signs no one in. A nonce that lapsed or that
   another tab asked over answers 409, for the page to ask anew.
-  `GET /auth/oidc/<name>/button?hl=<lang>` is the page the terminal frames to
-  draw the button, with `prompt` the browser's account chooser in its
-  place, and with `add` the button adding a way ([Ways in](#ways-in)), which
-  tells the page framing it what came of it (`postMessage`, `{way: "added" |
-  "taken" | "insufficient_user_authentication"}`): Google's script, under a policy of its own that admits it, so the
-  app's page never runs it. Its client is one registered to the page's
-  origins, never `origin`, and it has no redirect routes.
+  `GET /auth/oidc/<name>/button` is the page the terminal frames invisibly over
+  its own styled button: with `prompt`, it starts FedCM passive mode in the
+  browser's top-right chooser and switches to FedCM active mode on click; with
+  `add`, it adds a way ([Ways in](#ways-in)) and reports `{way: "added" |
+  "taken" | "insufficient_user_authentication"}` via `postMessage`. When FedCM
+  cannot run, it posts `{fallback: "redirect", provider, add}` so the terminal
+  continues via the OIDC redirect flow. Its client is one registered to the
+  page's origins, never `origin`.
 - **Bluesky** (`OIDC_PROVIDERS` naming `bluesky`, `atproto.ts`) signs in by
   AT Protocol's OAuth through `@atproto/oauth-client`, not OpenID Connect: a
   public client whose id is this origin's

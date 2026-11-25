@@ -471,79 +471,135 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     return new Response(JSON.stringify({ nonce: await nonceOf(secret, own?.owner ?? null) }), { status: 200, headers });
   }
 
-  // Google's script assigns markup no Trusted Types policy vouches for, so it
-  // never runs in the app's page: the panel frames this page, of the same
-  // origin and a policy of its own, whose script draws the button and signs
-  // the device in as the credential route does, then reloads the app.
-  const BUTTON_SCRIPT = "https://accounts.google.com/gsi/client";
+  // Web FedCM asks the provider directly from the auth service's framed page,
+  // under a policy of its own that admits only the provider's FedCM endpoints
+  // and never runs third-party scripts in the app's page.
+  const FEDCM_CONFIG = "https://accounts.google.com/gsi/fedcm.json";
   function credentialButton(req: Request, name: string): Response {
     const q = new URL(req.url).searchParams;
-    const locale = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(q.get("hl") ?? "") ? q.get("hl")! : "";
-    const mode = q.has("prompt") ? "prompt" : q.has("add") ? "add" : "button";
-    const html = `<!doctype html><html data-service="${PREFIX.slice(0, -"/oidc".length)}" data-provider="${name}" data-client="${cfg.providers[name].client}" data-locale="${locale}" data-mode="${mode}"><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;overflow:hidden;background:transparent}#button{display:flex;justify-content:center;overflow:hidden}iframe{display:block}</style></head><body><div id="button"></div><script type="module" src="${PREFIX}/${name}/button.js"></script></body></html>`;
+    const prompt = q.has("prompt") ? "1" : "0";
+    const add = q.has("add") ? "1" : "0";
+    const html = `<!doctype html><html data-service="${PREFIX.slice(0, -"/oidc".length)}" data-provider="${name}" data-client="${cfg.providers[name].client}" data-prompt="${prompt}" data-add="${add}"><head><meta charset="utf-8"><style>html,body,button{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;border:0}button{display:block;cursor:pointer}</style></head><body><button id="go" type="button"></button><script type="module" src="${PREFIX}/${name}/button.js"></script></body></html>`;
     return new Response(html, {
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "content-security-policy": [
           "default-src 'none'",
-          `script-src 'self' ${BUTTON_SCRIPT}`,
-          "style-src 'unsafe-inline' https://accounts.google.com/gsi/style",
-          "frame-src https://accounts.google.com/gsi/",
+          "script-src 'self'",
+          "style-src 'unsafe-inline'",
           "connect-src 'self' https://accounts.google.com/gsi/",
-          "img-src https://*.googleusercontent.com",
           "frame-ancestors 'self'",
           "base-uri 'none'",
         ].join("; "),
       },
     });
   }
-  const BUTTON_JS = `const { service, provider, client, locale, mode } = document.documentElement.dataset;
-await new Promise((resolve, reject) => {
-  const script = document.createElement("script");
-  script.src = "${BUTTON_SCRIPT}";
-  script.addEventListener("load", resolve);
-  script.addEventListener("error", () => reject(new Error("Google Identity Services did not load")));
-  document.head.append(script);
-});
-const asked = await fetch(\`\${service}/oidc/\${provider}/nonce\${mode === "add" ? "?add" : ""}\`, { credentials: "same-origin" });
-// Adding on a sign-in no longer recent, the panel says to sign in again.
-if (!asked.ok && mode === "add") parent.postMessage({ way: "insufficient_user_authentication", provider }, location.origin);
-if (!asked.ok) throw new Error(\`\${asked.status} GET \${service}/oidc/\${provider}/nonce\`);
-const { nonce } = await asked.json();
-google.accounts.id.initialize({
-  client_id: client,
-  nonce,
-  auto_select: false,
-  use_fedcm_for_button: true,
-  use_fedcm_for_prompt: true,
-  callback: async ({ credential }) => {
-    // A guest with work goes with its token, as the panel's redirect would
-    // send it: read now, since another tab may have written since this loaded.
-    const held = JSON.parse(localStorage.getItem("pronto-token") ?? "null");
-    const hint = mode !== "add" && held?.user?.guest && held.committed ? held.token : null;
-    const signed = await fetch(\`\${service}/oidc/\${provider}/credential\`, {
-      method: "POST",
-      credentials: "same-origin",
-      body: new URLSearchParams({ credential, ...(hint === null ? {} : { id_token_hint: hint }), ...(mode === "add" ? { add: "" } : {}) }),
-    });
-    const { error } = signed.ok ? {} : await signed.json();
-    // This browser's nonce lapsed, or another tab asked anew: this page asks
-    // for a fresh one, and the person picks again.
-    if (signed.status === 409 && error !== "taken" && error !== "held") return location.reload();
-    // Adding, the panel framing this page says what came of it.
-    if (mode === "add" && (signed.ok || error === "taken" || error === "held" || error === "insufficient_user_authentication")) {
-      return parent.postMessage({ way: signed.ok ? "added" : error, provider }, location.origin);
-    }
-    if (!signed.ok) throw new Error(\`\${signed.status} POST \${service}/oidc/\${provider}/credential\`);
-    top.location.reload();
-  },
-});
-if (mode === "prompt") google.accounts.id.prompt();
-else {
-  const avail = Math.floor(document.documentElement.clientWidth);
-  google.accounts.id.renderButton(document.getElementById("button"), { type: "standard", theme: "outline", size: "large", text: "continue_with", shape: "pill", ...(avail >= 200 ? { width: Math.min(400, avail) } : {}), ...(locale === "" ? {} : { locale }) });
+  const BUTTON_JS = `const { service, provider, client, prompt, add } = document.documentElement.dataset;
+const go = document.getElementById("go");
+const label = new URLSearchParams(location.search).get("label");
+if (label) go.setAttribute("aria-label", label);
+const FEDCM_CONFIG = "${FEDCM_CONFIG}";
+const providerCfg = (n) => ({ configURL: FEDCM_CONFIG, clientId: client, nonce: n, params: { nonce: n } });
+const fallback = () => parent.postMessage({ fallback: "redirect", provider, add: add === "1" }, location.origin);
+async function askNonce() {
+  const asked = await fetch(\`\${service}/oidc/\${provider}/nonce\${add === "1" ? "?add" : ""}\`, { credentials: "same-origin" });
+  if (!asked.ok && add === "1") {
+    parent.postMessage({ way: "insufficient_user_authentication", provider }, location.origin);
+    return null;
+  }
+  if (!asked.ok) throw new Error(\`\${asked.status} GET \${service}/oidc/\${provider}/nonce\`);
+  return (await asked.json()).nonce;
 }
+async function redeem(credential) {
+  // A guest with work goes with its token, as the panel's redirect would send it.
+  const held = JSON.parse(localStorage.getItem("pronto-token") ?? "null");
+  const hint = add !== "1" && held?.user?.guest && held.committed ? held.token : null;
+  const signed = await fetch(\`\${service}/oidc/\${provider}/credential\`, {
+    method: "POST",
+    credentials: "same-origin",
+    body: new URLSearchParams({ credential, ...(hint === null ? {} : { id_token_hint: hint }), ...(add === "1" ? { add: "" } : {}) }),
+  });
+  const { error } = signed.ok ? {} : await signed.json();
+  if (signed.status === 409 && error !== "taken" && error !== "held") {
+    nonce = await askNonce().catch(() => null);
+    return;
+  }
+  if (add === "1" && (signed.ok || error === "taken" || error === "held" || error === "insufficient_user_authentication")) {
+    parent.postMessage({ way: signed.ok ? "added" : error, provider }, location.origin);
+    return;
+  }
+  if (!signed.ok) throw new Error(\`\${signed.status} POST \${service}/oidc/\${provider}/credential\`);
+  top.location.reload();
+}
+let nonce = null;
+const policy = document.permissionsPolicy ?? document.featurePolicy;
+const policyAllowed = policy?.allowsFeature?.("identity-credentials-get") !== false;
+try {
+  nonce = await askNonce();
+} catch {
+  nonce = null;
+}
+let passiveCtrl = null;
+let passiveDone = Promise.resolve();
+if (nonce !== null && policyAllowed) {
+  parent.postMessage({ ready: true, provider }, location.origin);
+  if (prompt === "1" && "IdentityCredential" in globalThis) {
+    passiveCtrl = new AbortController();
+    passiveDone = navigator.credentials.get({
+      identity: { mode: "passive", providers: [providerCfg(nonce)] },
+      mediation: "optional",
+      signal: passiveCtrl.signal,
+    }).then((cred) => (cred?.token ? redeem(cred.token) : undefined), () => {}).finally(() => {
+      passiveCtrl = null;
+    });
+  }
+}
+let activeInFlight = false;
+go.addEventListener("click", async () => {
+  if (activeInFlight) return;
+  if (nonce === null || !policyAllowed || !("IdentityCredential" in globalThis)) {
+    fallback();
+    return;
+  }
+  activeInFlight = true;
+  const started = performance.now();
+  try {
+    if (passiveCtrl !== null) {
+      passiveCtrl.abort();
+      await passiveDone;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    let cred;
+    try {
+      cred = await navigator.credentials.get({
+        identity: { mode: "active", providers: [providerCfg(nonce)] },
+        mediation: "required",
+      });
+    } catch (err) {
+      if (err?.name === "NotAllowedError" && /only one/i.test(err.message ?? "")) {
+        await new Promise((r) => setTimeout(r, 50));
+        cred = await navigator.credentials.get({
+          identity: { mode: "active", providers: [providerCfg(nonce)] },
+          mediation: "required",
+        });
+      } else {
+        throw err;
+      }
+    }
+    if (cred?.token) await redeem(cred.token);
+  } catch (err) {
+    const cancelled = err?.name === "AbortError" || (
+      err?.name === "NotAllowedError" &&
+      !/permissions?[- ]policy|identity-credentials-get|not allowed to use/i.test(err.message ?? "") &&
+      performance.now() - started >= 150
+    );
+    if (cancelled) return;
+    fallback();
+  } finally {
+    activeInFlight = false;
+  }
+});
 `;
 
   async function credentialSignIn(req: Request, name: string): Promise<Response> {
@@ -877,8 +933,8 @@ else {
       const metadata = clientMetadata(`${origin}${PREFIX}/${m[1]}/client-metadata.json`, callbackOf(origin, m[1]));
       return Promise.resolve(Response.json(metadata, { headers: { "cache-control": "public, max-age=300" } }));
     }
-    // A provider signs in by its button or by redirect, never both.
-    if (["nonce", "credential", "button", "button.js"].includes(m[2]) !== cfg.providers[m[1]].credential) return null;
+    // Credential routes exist only when credential sign-in is on; redirect routes stay available as fallback.
+    if (["nonce", "credential", "button", "button.js"].includes(m[2]) && !cfg.providers[m[1]].credential) return null;
     if (m[2] === "button") return req.method === "GET" ? Promise.resolve(credentialButton(req, m[1])) : null;
     if (m[2] === "button.js") {
       return req.method === "GET" ? Promise.resolve(new Response(BUTTON_JS, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" } })) : null;

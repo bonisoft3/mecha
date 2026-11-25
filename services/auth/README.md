@@ -326,11 +326,11 @@ All auth tables (`webauthn_credential`, `identity_link`, `webauthn_challenge`,
 `auth_native_ticket`, `auth_refresh_token`, `account_recovery`) live in
 `mecha_auth`, which no app role may use.
 
-`identity_link` is `(provider, issuer, sub, user_id, created_at)`, an account
-holding one per provider (a session's way names its provider, not the
-subject), with the
-provider's `name`, `picture` and verified `email` where it gives them, refreshed
-on every sign-in. An app that keeps its people elsewhere copies them with a trigger on
+`identity_link` is `(provider, issuer, sub, user_id, created_at)`, keyed by
+`(provider, issuer, sub)` and indexed on `(issuer, sub)` so providers sharing a
+broker issuer resolve to one account (at most one link per issuer per account),
+with the provider's `name`, `picture` and verified `email` where it gives them,
+refreshed on every sign-in. An app that keeps its people elsewhere copies them with a trigger on
 it, as a reader is made on `webauthn_credential`; the service creates the table
 when it starts, so an app's migration that declares such a trigger declares the
 table as the service does.

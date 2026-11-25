@@ -180,15 +180,18 @@ export function discovery(fetcher: typeof fetch = fetch): (p: Provider) => Promi
   };
 }
 
+// jose's 5s default aborts a cold-starting or key-generating provider.
+export const JWKS_TIMEOUT_MS = 30_000;
+
 /** A provider's key set, fetched again at once for a key id it does not
  * hold, as rotation reaches a running service (jose's remote set). A token
  * names its key. */
-export function keySource(fetcher: typeof fetch = fetch): (jwks: string) => JWTVerifyGetKey {
+export function keySource(fetcher: typeof fetch = fetch, timeoutDuration = JWKS_TIMEOUT_MS): (jwks: string) => JWTVerifyGetKey {
   const held = new Map<string, JWTVerifyGetKey>();
   return (jwks) => {
     let set = held.get(jwks);
     if (set === undefined) {
-      const remote = createRemoteJWKSet(new URL(jwks), { [customFetch]: fetcher, cooldownDuration: 0 });
+      const remote = createRemoteJWKSet(new URL(jwks), { [customFetch]: fetcher, cooldownDuration: 0, timeoutDuration });
       set = (header, token) => {
         if (typeof header.kid !== "string") throw new errors.JWKSNoMatchingKey();
         return remote(header, token);
@@ -477,7 +480,7 @@ export function oidc(cfg: Config): (req: Request) => Promise<Response> | null {
     const q = new URL(req.url).searchParams;
     const locale = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(q.get("hl") ?? "") ? q.get("hl")! : "";
     const mode = q.has("prompt") ? "prompt" : q.has("add") ? "add" : "button";
-    const html = `<!doctype html><html data-service="${PREFIX.slice(0, -"/oidc".length)}" data-provider="${name}" data-client="${cfg.providers[name].client}" data-locale="${locale}" data-mode="${mode}"><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}</style></head><body><div id="button"></div><script type="module" src="${PREFIX}/${name}/button.js"></script></body></html>`;
+    const html = `<!doctype html><html data-service="${PREFIX.slice(0, -"/oidc".length)}" data-provider="${name}" data-client="${cfg.providers[name].client}" data-locale="${locale}" data-mode="${mode}"><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;overflow:hidden;background:transparent}#button{display:flex;justify-content:center;overflow:hidden}iframe{display:block}</style></head><body><div id="button"></div><script type="module" src="${PREFIX}/${name}/button.js"></script></body></html>`;
     return new Response(html, {
       headers: {
         "content-type": "text/html; charset=utf-8",
@@ -537,7 +540,10 @@ google.accounts.id.initialize({
   },
 });
 if (mode === "prompt") google.accounts.id.prompt();
-else google.accounts.id.renderButton(document.getElementById("button"), { type: "standard", theme: "outline", size: "large", text: "continue_with", shape: "pill", width: Math.max(200, Math.min(400, document.documentElement.clientWidth)), ...(locale === "" ? {} : { locale }) });
+else {
+  const avail = Math.floor(document.documentElement.clientWidth);
+  google.accounts.id.renderButton(document.getElementById("button"), { type: "standard", theme: "outline", size: "large", text: "continue_with", shape: "pill", ...(avail >= 200 ? { width: Math.min(400, avail) } : {}), ...(locale === "" ? {} : { locale }) });
+}
 `;
 
   async function credentialSignIn(req: Request, name: string): Promise<Response> {

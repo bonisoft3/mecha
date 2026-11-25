@@ -7,12 +7,15 @@
 // misdirected.
 // deno-lint-ignore no-import-prefix
 import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1.0.13";
+import { errors } from "jose";
 import { encodeBase64Url, nativeSchemesFrom, randomToken, signJwt, STACK_ISSUER } from "./jwt.ts";
 import { GUEST_ACR, sessionClaims } from "./claims.ts";
 import {
   type ConsumedTicket,
   discovery,
   type Config,
+  JWKS_TIMEOUT_MS,
+  keySource,
   type Links,
   type NativeTicket,
   oidc,
@@ -951,10 +954,12 @@ Deno.test("the provider's button is the auth service's own page, under a policy 
   assert(!policy.includes("require-trusted-types-for"), "Google's script needs the markup sinks the app's page withholds");
   const html = await page.text();
   assert(html.includes('data-client="client-123"') && html.includes('data-locale="pt-BR"'), html);
+  assert(html.includes('overflow:hidden') && html.includes('iframe{display:block}'), html);
   const script = await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button.js`));
   assertEquals(script.headers.get("content-type"), "text/javascript; charset=utf-8");
   const js = await script.text();
   for (const step of ["/oidc/${provider}/nonce", "/oidc/${provider}/credential", "top.location.reload()", "google.accounts.id.prompt()"]) assert(js.includes(step), step);
+  assert(!js.includes("Math.max(200,"), js);
   // A hint is no URL's to carry.
   assertEquals((await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=<script>`))).status, 200);
   assert(!(await (await s.serve(new Request(`${ORIGIN}/auth/oidc/google/button?hl=x"><script>`))).text()).includes("<script>a"), "a locale is a tag or nothing");
@@ -1319,4 +1324,27 @@ Deno.test("cookie names preserve non-HTTP whitespace instead of manufacturing a 
     assertEquals(cookieOf(req, SESSION_COOKIE), "own");
   }
   assertEquals(cookieOf(new Request(ORIGIN, { headers: { cookie: `other=1; \t${SESSION_COOKIE}=own` } }), SESSION_COOKIE), "own");
+});
+
+Deno.test("keySource configures a JWKS timeout past jose's 5s default for cold or key-generating providers", async () => {
+  // Regression: Hydra's first GET /.well-known/jwks.json on Cloud Run took ~6s
+  // while generating its signing key pair, tripping jose's 5s JWKSTimeout.
+  assertEquals(JWKS_TIMEOUT_MS, 30_000);
+  const { publicKey } = await generate("RS256");
+  const jwk = { ...(await crypto.subtle.exportKey("jwk", publicKey)), kid: "k1" };
+  const delayedFetcher = (delayMs: number): typeof fetch => (_input, init) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json({ keys: [jwk] })), delayMs);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(init.signal!.reason);
+      }, { once: true });
+    });
+  const token = { payload: "", protected: "", signature: "" };
+  await assertRejects(
+    async () => await keySource(delayedFetcher(200), 30)("https://jwks.test/jwks")({ alg: "RS256", kid: "k1" }, token),
+    errors.JWKSTimeout,
+  );
+  const resolved = await keySource(delayedFetcher(30), 500)("https://jwks.test/jwks")({ alg: "RS256", kid: "k1" }, token);
+  assert(resolved instanceof CryptoKey);
 });

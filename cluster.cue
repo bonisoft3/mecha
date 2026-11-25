@@ -657,9 +657,11 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 		// so it signs in by what needs no one else. A provider signs a person
 		// in, so it presupposes `auth`.
 		signIn: {
-			[!~"^(google|apple|bluesky)$"]~(K,_): error("signIn.\(K): field not allowed")
+			[!~"^(google|apple|bluesky|email)$"]~(K,_): error("signIn.\(K): field not allowed")
 			google?: _#SignInProvider & {_name: "google"}
 			apple?:  _#SignInProvider & {_name: "apple"}
+			// The Ory broker's: no preset names its issuer, so the program does.
+			email?: _#SignInProvider & {_name: "email", issuer: _, client: _}
 			// AT Protocol's client is the door's origin and its issuer the
 			// person's own server, so Bluesky takes no setting.
 			bluesky?: close({})

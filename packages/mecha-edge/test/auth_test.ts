@@ -910,3 +910,132 @@ Deno.test({
     }
   },
 })
+
+Deno.test({
+  name: 'providers sharing the same broker issuer and subject resolve to one app_user without duplicating identity_link',
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const origin = 'https://test.local'
+    const brokerIssuer = 'https://id.example'
+    const secret = 'edge-auth-secret'
+    const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+    const jwk = { ...(await crypto.subtle.exportKey('jwk', keys.publicKey)), kid: 'k1' }
+    const codes = new Map<string, { client: string; challenge: string; nonce: string }>()
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input)
+      if (url === `${brokerIssuer}/.well-known/openid-configuration`) {
+        return Response.json({
+          issuer: brokerIssuer,
+          authorization_endpoint: `${brokerIssuer}/oauth2/auth`,
+          token_endpoint: `${brokerIssuer}/oauth2/token`,
+          jwks_uri: `${brokerIssuer}/jwks`,
+        })
+      }
+      if (url === `${brokerIssuer}/jwks`) return Response.json({ keys: [jwk] })
+      if (url === `${brokerIssuer}/oauth2/token`) {
+        const form = new URLSearchParams(String(init?.body))
+        const grant = codes.get(form.get('code') ?? '')
+        codes.delete(form.get('code') ?? '')
+        if (!grant || (await sha256url(form.get('code_verifier') ?? '')) !== grant.challenge) {
+          return Response.json({ error: 'invalid_grant' }, { status: 400 })
+        }
+        const b64 = (s: string) => encodeBase64Url(new TextEncoder().encode(s))
+        const head = b64(JSON.stringify({ alg: 'ES256', kid: 'k1', typ: 'JWT' }))
+        const body = b64(JSON.stringify({
+          iss: brokerIssuer,
+          aud: grant.client,
+          sub: 'pairwise-shared-sub',
+          name: 'Ada',
+          email: 'ada@example.test',
+          email_verified: true,
+          nonce: grant.nonce,
+          exp: Math.floor(Date.now() / 1000) + 300,
+        }))
+        const sig = new Uint8Array(
+          await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, new TextEncoder().encode(`${head}.${body}`)),
+        )
+        return Response.json({ id_token: `${head}.${body}.${encodeBase64Url(sig)}` })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }
+
+    const db = await PGlite.create()
+    try {
+      await db.exec(await Deno.readTextFile(new URL('../../../services/database/rls/rls.sql', import.meta.url)))
+      await db.exec(await Deno.readTextFile(new URL('fixture.sql', import.meta.url)))
+      await db.exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;')
+
+      const providers = providersFrom((k) => ({
+        OIDC_PROVIDERS: 'google,email',
+        OIDC_GOOGLE_ISSUER: brokerIssuer,
+        OIDC_GOOGLE_CLIENT_ID: 'client-google',
+        OIDC_EMAIL_ISSUER: brokerIssuer,
+        OIDC_EMAIL_CLIENT_ID: 'client-email',
+      }[k]))
+      const cluster = await createEdgeCluster({
+        db,
+        tables: ['note', 'board'],
+        secret,
+        origin,
+        providers,
+        fetcher,
+        log: () => {},
+        fail: (e) => { throw e },
+      })
+
+      const signInVia = async (provider: 'google' | 'email') => {
+        const start = await cluster.handle(new Request(`${origin}/auth/oidc/${provider}/start?return=%2F`))
+        const authUrl = new URL(start.headers.get('location')!)
+        const stateCookie = start.headers.get('set-cookie')!.split(';')[0]
+        const code = crypto.randomUUID()
+        codes.set(code, {
+          client: authUrl.searchParams.get('client_id')!,
+          challenge: authUrl.searchParams.get('code_challenge')!,
+          nonce: authUrl.searchParams.get('nonce')!,
+        })
+        const cb = await cluster.handle(
+          new Request(`${origin}/auth/oidc/${provider}/callback?code=${code}&state=${encodeURIComponent(authUrl.searchParams.get('state')!)}`, {
+            headers: { cookie: stateCookie },
+          }),
+        )
+        const sessionCookie = cb.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
+        return (await (await cluster.handle(new Request(`${origin}/auth/session`, { method: 'POST', headers: { cookie: sessionCookie } }))).json()) as { user: { id: string } }
+      }
+
+      const viaGoogle = await signInVia('google')
+      const viaEmail = await signInVia('email')
+      assert.equal(viaEmail.user.id, viaGoogle.user.id)
+      const count = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM mecha_auth.identity_link WHERE user_id = $1', [viaGoogle.user.id])
+      assert.equal(count.rows[0].n, 1)
+
+      // Legacy duplicate rows under two provider labels still satisfy authorizedBy (limit 1).
+      await db.query(
+        "INSERT INTO mecha_auth.identity_link (provider, issuer, sub, user_id, name, email) VALUES ('email', $1, $2, $3::uuid, 'Ada', 'ada@example.test')",
+        [brokerIssuer, 'pairwise-shared-sub', viaGoogle.user.id],
+      )
+      const dupStart = await cluster.handle(new Request(`${origin}/auth/oidc/google/start?return=%2F`))
+      const dupAuth = new URL(dupStart.headers.get('location')!)
+      const dupCookie = dupStart.headers.get('set-cookie')!.split(';')[0]
+      const dupCode = crypto.randomUUID()
+      codes.set(dupCode, {
+        client: dupAuth.searchParams.get('client_id')!,
+        challenge: dupAuth.searchParams.get('code_challenge')!,
+        nonce: dupAuth.searchParams.get('nonce')!,
+      })
+      const dupCb = await cluster.handle(
+        new Request(`${origin}/auth/oidc/google/callback?code=${dupCode}&state=${encodeURIComponent(dupAuth.searchParams.get('state')!)}`, {
+          headers: { cookie: dupCookie },
+        }),
+      )
+      const freshDeviceCookie = dupCb.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!.split(';')[0]
+      const addPasskeyStart = await cluster.handle(new Request(`${origin}/auth/ways/passkey`, {
+        method: 'POST',
+        headers: { cookie: freshDeviceCookie, origin },
+      }))
+      assert.equal(addPasskeyStart.status, 200)
+    } finally {
+      await db.close()
+    }
+  },
+})

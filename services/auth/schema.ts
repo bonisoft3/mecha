@@ -140,11 +140,11 @@ ${tables.map((t) => `CREATE TABLE IF NOT EXISTS mecha_auth.${t} (${columns[t]}\n
 DROP FUNCTION IF EXISTS mecha_auth.adopt_guest(uuid, uuid);`
 }
 
-/** One link per account and provider: a session's way names its provider,
- * never a second subject of it, which would outlive the first's removal. Run
- * once every link names its issuer. */
-export const LINK_PER_PROVIDER =
-  `CREATE UNIQUE INDEX IF NOT EXISTS identity_link_user_provider_idx ON mecha_auth.identity_link (user_id, provider, issuer);`;
+/** One link per account and provider (with an index on (issuer, sub) for shared
+ * broker lookups across provider labels). Run once every link names its issuer. */
+export const LINK_PER_PROVIDER = `
+CREATE UNIQUE INDEX IF NOT EXISTS identity_link_user_provider_idx ON mecha_auth.identity_link (user_id, provider, issuer);
+CREATE INDEX IF NOT EXISTS identity_link_issuer_sub_idx ON mecha_auth.identity_link (issuer, sub);`;
 
 /** The account an external effect was asked for, stamped where the airlock
  * claims it: the ledger's insert runs in the writer's transaction, under the

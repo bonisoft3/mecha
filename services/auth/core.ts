@@ -105,7 +105,7 @@ async function authorizedBy(q: Query, id: string, { way, since }: Authority): Pr
   const rows = way.kind === "passkey"
     ? await q("select 1 from mecha_auth.webauthn_credential where id = $1 and user_id = $2::uuid", [way.credential, id])
     : way.kind === "provider"
-    ? await q("select 1 from mecha_auth.identity_link where provider = $1 and issuer = $2 and sub = $3 and user_id = $4::uuid", [way.provider, way.issuer, way.sub, id])
+    ? await q("select 1 from mecha_auth.identity_link where issuer = $1 and sub = $2 and user_id = $3::uuid limit 1", [way.issuer, way.sub, id])
     : [];
   return rows.length === 1;
 }
@@ -156,14 +156,22 @@ export function authCore(cfg: AuthCoreConfig) {
   const links: Links = {
     userFor(p: Profile, guest: string | null) {
       return db.tx(async (q) => {
-        // One sign-in at a time per subject, so two tabs signing in at once
-        // make one person, not two.
-        await q("select pg_advisory_xact_lock(hashtext($1))", [JSON.stringify([p.provider, p.issuer, p.sub])]);
-        const [link] = await q(
-          `update mecha_auth.identity_link set name = $1, picture = $2, email = $3
-             where provider = $4 and issuer = $5 and sub = $6 returning user_id`,
-          [p.name, p.picture, p.email, p.provider, p.issuer, p.sub],
+        // Lock by (issuer, sub) so sibling provider entries sharing an issuer
+        // (e.g. google and email on the same broker) resolve to one person.
+        await q("select pg_advisory_xact_lock(hashtext($1))", [JSON.stringify([p.issuer, p.sub])]);
+        const [existing] = await q(
+          `select provider, user_id from mecha_auth.identity_link
+             where issuer = $1 and sub = $2
+             order by (provider = $3) desc, created_at asc limit 1`,
+          [p.issuer, p.sub, p.provider],
         );
+        const [link] = existing
+          ? await q(
+            `update mecha_auth.identity_link set name = $1, picture = $2, email = $3
+               where provider = $4 and issuer = $5 and sub = $6 returning user_id`,
+            [p.name, p.picture, p.email, existing.provider as string, p.issuer, p.sub],
+          )
+          : [];
         // The name the provider gives, the first name before the whole one.
         const called = p.given ?? p.name ?? "";
         const link_ = async (id: string) =>
@@ -212,17 +220,25 @@ export function authCore(cfg: AuthCoreConfig) {
     },
     addTo(p: Profile, owner: string, by: Authority) {
       return db.tx(async (q) => {
-        await q("select pg_advisory_xact_lock(hashtext($1))", [JSON.stringify([p.provider, p.issuer, p.sub])]);
+        await q("select pg_advisory_xact_lock(hashtext($1))", [JSON.stringify([p.issuer, p.sub])]);
         if (!(await authorizedBy(q, owner, by))) return "revoked";
-        const [link] = await q(
-          `update mecha_auth.identity_link set name = $1, picture = $2, email = $3
-             where provider = $4 and issuer = $5 and sub = $6 returning user_id`,
-          [p.name, p.picture, p.email, p.provider, p.issuer, p.sub],
+        const [existing] = await q(
+          `select provider, user_id from mecha_auth.identity_link
+             where issuer = $1 and sub = $2
+             order by (provider = $3) desc, created_at asc limit 1`,
+          [p.issuer, p.sub, p.provider],
         );
+        const [link] = existing
+          ? await q(
+            `update mecha_auth.identity_link set name = $1, picture = $2, email = $3
+               where provider = $4 and issuer = $5 and sub = $6 returning user_id`,
+            [p.name, p.picture, p.email, existing.provider as string, p.issuer, p.sub],
+          )
+          : [];
         if (link) return link.user_id === owner ? "added" : "taken";
-        // One link per provider: a session's way names the provider, not the
-        // subject, so a second would outlive the first's removal.
-        const [held] = await q("select 1 from mecha_auth.identity_link where provider = $1 and issuer = $2 and user_id = $3::uuid", [p.provider, p.issuer, owner]);
+        // One link per issuer: a second subject from the same issuer would outlive
+        // removing the first, and sibling providers at a shared broker share one sub.
+        const [held] = await q("select 1 from mecha_auth.identity_link where issuer = $1 and user_id = $2::uuid", [p.issuer, owner]);
         if (held) return "held";
         await q(
           `insert into mecha_auth.identity_link (provider, issuer, sub, user_id, name, picture, email)
@@ -235,15 +251,18 @@ export function authCore(cfg: AuthCoreConfig) {
     async handleOf(provider: string, issuer: string, sub: string, id: string) {
       return await db.tx(async (q) => {
         const [l] = await q(
-          "select name from mecha_auth.identity_link where user_id = $1::uuid and provider = $2 and issuer = $3 and sub = $4",
-          [id, provider, issuer, sub],
+          `select name from mecha_auth.identity_link
+             where user_id = $1::uuid and issuer = $2 and sub = $3
+             order by (provider = $4) desc, created_at asc limit 1`,
+          [id, issuer, sub, provider],
         );
         if (l?.name) await namedByProvider(q, id, l.name as string);
         const [u] = await q(
           `select u.handle, l.name, l.email from app_user u
-             join mecha_auth.identity_link l on l.user_id = u.id and l.provider = $2 and l.issuer = $3 and l.sub = $4
-             where u.id = $1::uuid`,
-          [id, provider, issuer, sub],
+             join mecha_auth.identity_link l on l.user_id = u.id and l.issuer = $2 and l.sub = $3
+             where u.id = $1::uuid
+             order by (l.provider = $4) desc, l.created_at asc limit 1`,
+          [id, issuer, sub, provider],
         );
         return u ? { handle: u.handle as string, name: (u.name as string | null) ?? null, email: (u.email as string | null) ?? null } : null;
       });
@@ -318,7 +337,7 @@ export function authCore(cfg: AuthCoreConfig) {
   }
   const isWay = (listed: Listed, way: Way) =>
     listed.kind === "passkey" ? way.kind === "passkey" && way.credential === listed.id
-    : way.kind === "provider" && way.provider === listed.provider && way.issuer === listed.issuer && way.sub === listed.sub;
+    : way.kind === "provider" && way.issuer === listed.issuer && way.sub === listed.sub;
 
   /** The account's ways in, which one this device came in by, whether a
    * change needs a sign-in first, and whether to ask to set up recovery: an
@@ -329,7 +348,7 @@ export function authCore(cfg: AuthCoreConfig) {
     if (own instanceof Response) return own;
     const listed = await db.tx((q) => waysOf(q, own.user.id));
     // A provider this deployment no longer signs in by is no way back in.
-    const usable = listed.filter((w) => w.kind === "passkey" || cfg.providers[w.provider]?.issuer === w.issuer);
+    const usable = listed.filter((w) => w.kind === "passkey" || Object.values(cfg.providers).some((p) => p.issuer === w.issuer));
     const [r] = await db.query(
       `select effected_at < to_timestamp($2) and (ask_after is null or ask_after <= now()) as ask
          from mecha_auth.account_recovery where user_id = $1::uuid`,
@@ -363,8 +382,8 @@ export function authCore(cfg: AuthCoreConfig) {
       if (target.kind === "passkey") await q("delete from mecha_auth.webauthn_credential where id = $1 and user_id = $2::uuid", [target.id, own.user.id]);
       else {
         await q(
-          "delete from mecha_auth.identity_link where provider = $1 and issuer = $2 and sub = $3 and user_id = $4::uuid",
-          [target.provider, target.issuer, target.sub, own.user.id],
+          "delete from mecha_auth.identity_link where issuer = $1 and sub = $2 and user_id = $3::uuid",
+          [target.issuer, target.sub, own.user.id],
         );
       }
       return "removed";
@@ -515,8 +534,10 @@ export function authCore(cfg: AuthCoreConfig) {
     if (who === null) return jsonError(401, "invalid refresh token");
     const [link] = rotated.way.kind === "provider"
       ? await db.query(
-        "select name, email from mecha_auth.identity_link where user_id = $1::uuid and provider = $2 and issuer = $3 and sub = $4",
-        [rotated.sub, rotated.way.provider, rotated.way.issuer, rotated.way.sub],
+        `select name, email from mecha_auth.identity_link
+           where user_id = $1::uuid and issuer = $2 and sub = $3
+           order by (provider = $4) desc, created_at asc limit 1`,
+        [rotated.sub, rotated.way.issuer, rotated.way.sub, rotated.way.provider],
       )
       : [];
     const user: Person = {

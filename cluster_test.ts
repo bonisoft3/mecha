@@ -856,6 +856,7 @@ Deno.test("RisingWave deployment selects its pinned internal service and ships t
     if (duckstreamEngine === "risingwave") {
       assert.equal(risingwave.dockerfile.from.name, "risingwavelabs/risingwave:v3.1.1@sha256:b869358fa704250d25045d3575145ca59cfb67a558a08fa4f8fd375874c24d63");
       assert.deepEqual(risingwave.dockerfile.cmd, ["single_node"]);
+      assert.ok(!risingwave.dockerfile.epilogue.some((line: string) => line.includes("min_sst_retention_time_sec")), "short SST GC grace rejects long-running compactions; retain RisingWave's default");
       assert.deepEqual(risingwave.compose.healthcheck.test, ["CMD", "portcheck", "--port", "4566"]);
       assert.equal(risingwave.compose.ports, undefined);
       assert.equal(compute.compose.depends_on.risingwave.condition, "service_healthy");

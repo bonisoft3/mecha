@@ -531,6 +531,15 @@ Unchanged subsequent starts reuse the same pipeline. Warm attach also verifies
 the subscription exists; a missing subscription requires reconstruction. This is a Mecha runtime
 change, independent of the renderer and its release targets.
 
+RisingWave's metadata and state store must survive process restarts. Persistence
+does not replace its SST garbage-collection safety window: a compaction can write
+files long before it commits them. The generated cluster and Docker appliance
+retain the pinned engine's default `min_sst_retention_time_sec` (six hours).
+Shortening it below a compaction's duration makes the engine reject completed
+output with `RETENTION_TIME_REJECTED` and repeat the work, even without source
+writes. Diagnose this through `storage_level_compact_frequency` and task progress;
+do not treat sustained compaction CPU as evidence of new ingestion.
+
 The singleton coordinator owns the RisingWave schema. An uncheckpointed restart reconstructs source
 state using fresh publications and replication identities, then restores the
 last durably captured baseline into the `captured_<name>` tables.

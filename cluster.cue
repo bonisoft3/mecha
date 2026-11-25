@@ -1741,7 +1741,7 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						dockerfile: {
 							from: name: "risingwavelabs/risingwave:v3.1.1@sha256:b869358fa704250d25045d3575145ca59cfb67a558a08fa4f8fd375874c24d63"
 							epilogue: [
-								"COPY <<'RWCONFIG' /etc/risingwave/risingwave.toml\n[meta]\nmin_sst_retention_time_sec = 300\nfull_gc_interval_sec = 60\nvacuum_interval_sec = 15\ngc_history_retention_time_sec = 0\nclean_all_foreground_jobs_on_recovery = true\n\n[meta.developer]\nactor_cnt_per_worker_parallelism_soft_limit = 1000\nactor_cnt_per_worker_parallelism_hard_limit = 4000\n\n[streaming]\nin_flight_barrier_nums = 256\n\n[streaming.developer]\nenable_snapshot_backfill = false\n\n[storage]\nshared_buffer_min_batch_flush_size_mb = 32\nRWCONFIG",
+								"COPY <<'RWCONFIG' /etc/risingwave/risingwave.toml\n[meta]\nfull_gc_interval_sec = 60\nvacuum_interval_sec = 15\ngc_history_retention_time_sec = 0\nclean_all_foreground_jobs_on_recovery = true\n\n[meta.developer]\nactor_cnt_per_worker_parallelism_soft_limit = 1000\nactor_cnt_per_worker_parallelism_hard_limit = 4000\n\n[streaming]\nin_flight_barrier_nums = 256\n\n[streaming.developer]\nenable_snapshot_backfill = false\n\n[storage]\nshared_buffer_min_batch_flush_size_mb = 32\nRWCONFIG",
 								"ENV RW_SINGLE_NODE_CONFIG_PATH=/etc/risingwave/risingwave.toml",
 							]
 							cmd: ["single_node"]

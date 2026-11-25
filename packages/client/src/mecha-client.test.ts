@@ -858,8 +858,10 @@ describe("a table synced on demand", () => {
     const electric = fakeElectric({ schema: { player_game: schema, other: schema }, rows: { player_game: rows }, xmin: 1 })
     const pending: (() => void)[] = []
     let active = 0, maximum = 0, started = 0, longPolls = 0
+    const priorities: { subset: boolean; live: boolean; priority?: RequestPriority }[] = []
     const fetcher: typeof fetch = async (input, init) => {
       const url = new URL(String(input instanceof Request ? input.url : input))
+      priorities.push({ subset: [...url.searchParams.keys()].some(key => key.startsWith('subset__')), live: url.searchParams.get('live') === 'true', priority: init?.priority })
       if ([...url.searchParams.keys()].some(key => key.startsWith('subset__'))) {
         started++; active++; maximum = Math.max(maximum, active)
         try { await new Promise<void>(resolve => pending.push(resolve)); return await electric.fetcher(input, init) }
@@ -882,6 +884,8 @@ describe("a table synced on demand", () => {
       await until(() => pending.length === 4, 'four active subsets')
       expect(started).toBe(4)
       expect(longPolls).toBeGreaterThan(0)
+      expect(priorities.filter(p => p.live && !p.subset).every(p => p.priority === 'low')).toBe(true)
+      expect(priorities.filter(p => p.subset || !p.live).every(p => p.priority !== 'low')).toBe(true)
       for (let i = 0; i < 400 && (views.some(view => !view.isReady() || view.isLoadingSubset) || pending.length || active); i++) {
         if (pending.length) pending.shift()!()
         await new Promise(resolve => setTimeout(resolve, 5))

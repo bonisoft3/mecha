@@ -128,6 +128,11 @@ transport the only variable:
 | slowest shape | 20,027 ms | 142 ms |
 | a write from that screen | 445 ms | 43 ms |
 
+The client marks background Electric `live=true` polls with low fetch priority,
+including invalidation-only subscriptions. Initial reads and subset requests keep
+their normal priority. This browser scheduling hint does not replace h2 or change
+which data is fetched.
+
 So the cluster publishes one port, `meta.door`, serving h2 over TLS on 8443.
 It binds the host at `${CADDY_TLS_HOST_PORT:-<n>}`, where `<n>` is the app's
 own port, hashed from its repo, project and `discriminator` (bayt's

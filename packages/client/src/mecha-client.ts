@@ -614,7 +614,10 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
   const neverAbort = new AbortController().signal
   const subsetFetch = (input: RequestInfo | URL, init: RequestInit | undefined, lifetime: AbortSignal) => {
     const url = new URL(input instanceof Request ? input.url : String(input), 'https://mecha.invalid')
-    if (![...url.searchParams.keys()].some(key => key.startsWith('subset__'))) return doFetch(input, init)
+    if (![...url.searchParams.keys()].some(key => key.startsWith('subset__'))) {
+      // Waiting for future changes must not compete with the reads needed to paint.
+      return doFetch(input, url.searchParams.get('live') === 'true' ? { ...init, priority: 'low' } : init)
+    }
     const requestSignal = init?.signal ?? (input instanceof Request ? input.signal : neverAbort)
     const signal = AbortSignal.any([requestSignal, lifetime])
     return scheduleSubsetRequest(() => doFetch(input, { ...init, signal }), signal, () => { throw signal.reason ?? new DOMException('Aborted', 'AbortError') })
@@ -1533,7 +1536,7 @@ export function createMechaClient(config: MechaClientConfig): MechaClient {
           // delete only the key.
           params: { table: t.table, where: scoped(shapes.where(t.table)) as any, replica: "full" },
           headers: { Authorization: scoped(shapes.authorization(t.table)) },
-          fetchClient: config.fetcher,
+          fetchClient: (input, init) => subsetFetch(input, init, controller.signal),
           parser: parserOf(t),
           signal: controller.signal,
           onError: (error: any) => {

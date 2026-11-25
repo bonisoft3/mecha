@@ -4,7 +4,7 @@ import { createMechaClient } from "./mecha-client.js"
 let protocolId = 0
 function protocol() {
   const id = ++protocolId
-  const requests: { url: URL; authorization: string | null }[] = []
+  const requests: { url: URL; authorization: string | null; priority?: RequestPriority }[] = []
   const mints: { table: string; authorization: string | null; key?: { column: string; value: string } }[] = []
   const waiting: { answer: (body: unknown, status?: number) => void }[] = []
   let handle = 1
@@ -20,7 +20,7 @@ function protocol() {
       mints.push({ table, authorization, ...(key ? { key } : {}) })
       return Response.json({ token: `shape-${authorization}`, where: key ? `${key.column} = '${key.value}'` : `owner = '${authorization}'`, expires_in: 900 })
     }
-    requests.push({ url, authorization })
+    requests.push({ url, authorization, priority: init?.priority })
     const response = (body: unknown, status = 200) => Response.json(body, { status, headers: {
       "electric-handle": `shape-${id}-${handle}`,
       "electric-offset": `0_${offset}`,
@@ -94,6 +94,8 @@ describe("dependency invalidation", () => {
         await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(i + 2))
         await pending(server)
       }
+      expect(server.requests.filter(r => r.url.searchParams.get("live") === "true").every(r => r.priority === "low")).toBe(true)
+      expect(server.requests[0].priority).toBeUndefined()
       expect(c.collections.tasks.status).toBe("idle")
       expect(c.collections.tasks.size).toBe(0)
       server.ready()

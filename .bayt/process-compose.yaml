@@ -137,6 +137,8 @@ processes:
       period_seconds: 5
       timeout_seconds: 5
       failure_threshold: 36
+    shutdown:
+      timeout_seconds: 10
   auth:
     depends_on:
       database:
@@ -201,6 +203,8 @@ processes:
       period_seconds: 5
       timeout_seconds: 5
       failure_threshold: 32
+    shutdown:
+      timeout_seconds: 10
   electric:
     depends_on:
       database:
@@ -245,6 +249,8 @@ processes:
       period_seconds: 1
       timeout_seconds: 5
       failure_threshold: 60
+    shutdown:
+      timeout_seconds: 10
   redis:
     depends_on:
       "bayt:portcheck":
@@ -271,6 +277,8 @@ processes:
       period_seconds: 5
       timeout_seconds: 3
       failure_threshold: 36
+    shutdown:
+      timeout_seconds: 10
   mesh-events:
     depends_on:
       caddy:
@@ -319,6 +327,8 @@ processes:
       period_seconds: 5
       timeout_seconds: 5
       failure_threshold: 36
+    shutdown:
+      timeout_seconds: 10
   conduit:
     depends_on:
       database:
@@ -354,6 +364,8 @@ processes:
       period_seconds: 5
       timeout_seconds: 5
       failure_threshold: 44
+    shutdown:
+      timeout_seconds: 10
   rclone-s3:
     depends_on:
       "bayt:portcheck":
@@ -382,6 +394,8 @@ processes:
       period_seconds: 1
       timeout_seconds: 5
       failure_threshold: 10
+    shutdown:
+      timeout_seconds: 10
   imgproxy:
     depends_on:
       rclone-s3:
@@ -419,6 +433,8 @@ processes:
       period_seconds: 1
       timeout_seconds: 5
       failure_threshold: 10
+    shutdown:
+      timeout_seconds: 10
   transform:
     depends_on:
       redis:
@@ -548,3 +564,5 @@ processes:
       period_seconds: 1
       timeout_seconds: 5
       failure_threshold: 10
+    shutdown:
+      timeout_seconds: 10

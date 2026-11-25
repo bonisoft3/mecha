@@ -8,7 +8,7 @@
 // is closed, and at boot, which records what came due meanwhile, late where its
 // lateness has passed, as any tier whose clock stopped does. Its bare imports
 // are pinned in cluster.deno.json, which a bundler takes into its own map.
-// Routes: /auth/guest, /auth/shape, /auth/whoami, /auth/oidc, /crud/*, /electric/v1/shape
+// Routes: /auth/guest, /auth/shape, /auth/whoami, /auth/oidc, /auth/session/adopt, /auth/signout, /crud/*, /electric/v1/shape
 // (shapes.ts).
 import type { PGlite } from '@electric-sql/pglite'
 import { createRestHandler } from '@mecha/postgrest-js'
@@ -220,6 +220,8 @@ export async function createCluster(cfg: ClusterConfig): Promise<Cluster> {
       if (req.method === 'GET' && path === '/auth/whoami') return json(200, user)
       // The browser tier turns no provider on: a page signs in as a guest.
       if (req.method === 'GET' && path === '/auth/oidc') return json(200, { providers: [], credential: {} })
+      // Browser-tier sessions live solely in memory with no cookie handoff.
+      if (req.method === 'POST' && (path === '/auth/session/adopt' || path === '/auth/signout')) return new Response(null, { status: 204 })
       if (path.startsWith('/crud/')) return await crud(req)
       if (path === '/electric/v1/shape') return await shapes.serve(req, () => serialize(scopes))
       return json(404, { error: `no route for ${path}` })

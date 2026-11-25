@@ -52,6 +52,8 @@ Deno.test('the browser tier turns no sign-in provider on', async () => {
     const cluster = await createCluster({ db, sql: [rls, schema], tables: ['flag'], schema: { flag: { durability: 'server' } }, log: console.error, fail: (e) => { throw e } })
     const offered = await cluster.handle(new Request('http://cluster.local/auth/oidc'))
     assert.deepEqual([offered.status, await offered.json()], [200, { providers: [], credential: {} }])
+    assert.equal((await cluster.handle(new Request('http://cluster.local/auth/session/adopt', { method: 'POST' }))).status, 204)
+    assert.equal((await cluster.handle(new Request('http://cluster.local/auth/signout', { method: 'POST' }))).status, 204)
   } finally {
     await db.close()
   }

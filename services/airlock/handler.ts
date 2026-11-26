@@ -249,12 +249,35 @@ function exchange(
   });
 }
 
+// Each admission holds a cage of about 30 MiB until it answers, so admitting
+// every handler at once costs the sum of them; one at a time costs one, and
+// startup takes the sum of the admission times instead of the longest.
+const ADMIT_CONCURRENCY = 1;
+
 /** Every effect of the manifest at `manifest`, its handler read under `dir`
- * and admitted: the airlock's startup and pronto's lint both go through here. */
-export async function admitAll(manifest: string, dir: string): Promise<{ effects: Record<string, Effect>; handlers: Record<string, Handler> }> {
+ * and admitted, at most `concurrency` at a time: the airlock's startup and
+ * pronto's lint both go through here. The handlers keep the manifest's order.
+ * Once an admission fails no other starts, those running finish, and the
+ * first failure to happen is the error. */
+export async function admitAll(manifest: string, dir: string, concurrency = ADMIT_CONCURRENCY): Promise<{ effects: Record<string, Effect>; handlers: Record<string, Handler> }> {
+  if (!Number.isInteger(concurrency) || concurrency < 1) throw new TypeError(`admission concurrency must be a positive integer, got ${concurrency}`);
   const effects = parseManifest(await Deno.readTextFile(manifest));
-  const handlers = Object.fromEntries(
-    await Promise.all(Object.entries(effects).map(async ([name, e]) => [name, await Handler.admit(name, `${dir}/${e.handler}`, e)] as const)),
-  );
-  return { effects, handlers };
+  const entries = Object.entries(effects);
+  const admitted: Handler[] = [];
+  let next = 0;
+  let failure: { error: unknown } | undefined;
+  const runner = async () => {
+    while (!failure && next < entries.length) {
+      const i = next++;
+      const [name, e] = entries[i];
+      try {
+        admitted[i] = await Handler.admit(name, `${dir}/${e.handler}`, e);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, runner));
+  if (failure) throw failure.error;
+  return { effects, handlers: Object.fromEntries(entries.map(([name], i) => [name, admitted[i]])) };
 }

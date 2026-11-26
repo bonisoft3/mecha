@@ -1053,7 +1053,10 @@ _devAuthenticatorPassword: "dev-authenticator-password"
 						]
 					}
 					compose: {
-						ports: ["5432"]
+						// Loopback only, on an ephemeral host port: the superuser's
+						// password is the default, so a reachable Docker host must not
+						// serve the database on every interface.
+						ports: ["127.0.0.1::5432"]
 						// One rebuild entry per migration: the list is the consumer's, and
 						// mecha's own stack keeps a fixture outside the migrations directory.
 						develop: watch: [for m in X.state.migrations {action: "rebuild", path: "../\(m)", target: "/docker-entrypoint-initdb.d"}]

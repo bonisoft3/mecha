@@ -13,7 +13,7 @@
       "POSTGRES_INITDB_ARGS": "--no-sync --encoding=UTF8 --auth=trust --locale-provider=icu --icu-locale=und --locale=C"
     },
     "ports": [
-      "5432"
+      "127.0.0.1::5432"
     ],
     "volumes": [],
     "depends_on": {},

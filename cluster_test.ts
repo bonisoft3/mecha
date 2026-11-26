@@ -642,6 +642,12 @@ Deno.test("initdb guards receive the HMAC secret independently of CRUD verificat
   }
 });
 
+Deno.test("the database publishes its port on loopback only", async () => {
+  const got = await exported({}, "surface.targets.database.compose.ports");
+  assert.equal(got.ok, true, got.stderr);
+  assert.deepEqual(got.value, ["127.0.0.1::5432"]);
+});
+
 Deno.test("a caller step on the electric password's digits is refused", async () => {
   const got = await exported({ migrations: ["m/899_late.sql"] }, "surface.targets.database", { server: true });
   assert.equal(got.ok, false);

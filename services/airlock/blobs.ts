@@ -101,12 +101,15 @@ function die(message: string): never {
  */
 export function daprBlobs(mesh: string, url: string): BlobStore {
   return {
-    async put(key, bytes) {
+    async put(key, bytes, type) {
       const res = await fetch(`${mesh}/v1.0/bindings/blobs`, {
         method: "POST",
         signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ operation: "create", data: base64Of(bytes), metadata: { key } }),
+        // Dapr's bindings.aws.s3 reads exact-case "Content-Type" (ignoring
+        // "contentType" / "content-type"); without it aws-sdk-go-v2 uploads as
+        // application/octet-stream and rclone-s3 serves PDFs with that type.
+        body: JSON.stringify({ operation: "create", data: base64Of(bytes), metadata: { key, "Content-Type": type } }),
       });
       const text = await res.text();
       if (res.status !== 200 && res.status !== 204) throw new Error(`binding blobs: daprd answered ${res.status} ${text}`);

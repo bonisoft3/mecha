@@ -1,5 +1,5 @@
 import { assertEquals, assertMatch, assertRejects } from "@std/assert";
-import { type BlobStore, contentBlob, stowed } from "./blobs.ts";
+import { type BlobStore, contentBlob, daprBlobs, stowed } from "./blobs.ts";
 
 const plane = () => {
   const objects = new Map<string, { bytes: Uint8Array; type: string }>();
@@ -84,4 +84,31 @@ Deno.test("bytes that no longer hash to their key stop the run", async () => {
   const key = `${await sha256(new TextEncoder().encode("first"))}.jpg`;
   objects.set(key, { bytes: new TextEncoder().encode("replaced"), type: "image/jpeg" });
   await assertRejects(() => contentBlob(store, key), Error, "its bytes hash to");
+});
+
+// Regression: without exact-case "Content-Type" in bindings.aws.s3 metadata,
+// daprd uploads PDFs as application/octet-stream, which rclone-s3 preserves on GET.
+Deno.test("daprBlobs sends exact-case Content-Type when storing a blob", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: { url: string; init?: RequestInit }[] = [];
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    requests.push({ url: String(input), init });
+    return Promise.resolve(new Response(null, { status: 204 }));
+  }) as typeof fetch;
+  try {
+    const store = daprBlobs("http://airlock-mesh:3500", "/img/insecure/plain/s3://mecha-objects/");
+    const pdf = new TextEncoder().encode("%PDF-1.7");
+    await store.put("effects/a.pdf", pdf, "application/pdf");
+    assertEquals(requests.length, 1);
+    assertEquals(requests[0].url, "http://airlock-mesh:3500/v1.0/bindings/blobs");
+    assertEquals(requests[0].init?.method, "POST");
+    const payload = JSON.parse(String(requests[0].init?.body));
+    assertEquals(payload, {
+      operation: "create",
+      data: btoa("%PDF-1.7"),
+      metadata: { key: "effects/a.pdf", "Content-Type": "application/pdf" },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
